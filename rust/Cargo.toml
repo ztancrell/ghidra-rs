@@ -1,0 +1,6 @@
+[workspace]
+members = ["ghidra-rs"]
+resolver = "2"
+
+[profile.release]
+debug = 1

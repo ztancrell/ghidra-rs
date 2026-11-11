@@ -1,0 +1,10 @@
+[package]
+name = "ghidra-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Headless reverse-engineering core that decodes with Ghidra's compiled SLEIGH specs"
+license = "Apache-2.0"
+
+[dependencies]
+object = { version = "0.36", default-features = false, features = ["read", "std"] }
+flate2 = "1"

@@ -1,0 +1,35 @@
+# ghidra-rs design
+
+## Idea
+
+A fast, headless reverse-engineering core in Rust that lives next to upstream Ghidra.
+It reuses Ghidra's processor specs (SLEIGH) as data and doesn't rewrite Ghidra 1:1.
+It covers load → disassemble → p-code → function/xref analysis, as a CLI and a library,
+so large binaries and batch runs are much faster than Ghidra's Java pipeline.
+
+## Decided
+
+- 2026-11-11: Scope is a headless Rust core, not a full rewrite. No GUI for now.
+- 2026-11-11: Rust code lives in `rust/` (a Cargo workspace). The upstream Java/C++ tree stays as it is.
+- 2026-11-11: Processor support comes from compiled `.sla` files that Ghidra's existing
+  SLEIGH compiler builds. Rust reads `.sla` and doesn't parse `.slaspec`. We start with x86-64.
+- 2026-11-11: Speed claims need a benchmark against Ghidra's `analyzeHeadless` on the same binaries.
+
+## Milestones
+
+1. Load ELF/PE/Mach-O, decode x86-64 via `.sla`, and lift to p-code. A CLI dumps the disassembly and p-code.
+   Done on branch `m1-sleigh-x86` (see `rust/README.md`). Output matches Ghidra's C++ SLEIGH
+   engine exactly (text and p-code) on ls, libcrypto and libLLVM, checked with `rust/tools/sleigh_ref.cc`.
+2. Function discovery, CFG, xrefs, strings, symbols. Benchmark against `analyzeHeadless`.
+   Needs first: context commits (`globalset`) that flow to later addresses, which M1 skips
+   because it decodes every instruction from the default context.
+3. Decompilation: a Rust decompiler, or FFI to the existing C++ decompiler as a stopgap.
+4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
+   Will need the engine parts M1 left out: delay slots, `crossbuild`, `inst_next2`,
+   flowref/flowdest, and context defaults read from the `.pspec` instead of hardcoded.
+
+## Open questions
+
+- Decompiler: rewrite it in Rust, or use FFI to the C++ one first?
+- Should Ghidra's GUI ever be able to use this core (e.g. via a server), or does it stay CLI-only?
+- Project DB format: does it need to read or write Ghidra `.gpr` projects?
