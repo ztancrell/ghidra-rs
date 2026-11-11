@@ -9,9 +9,205 @@ use crate::analysis::{Analysis, Flow, Image};
 use crate::sleigh::{Parse, Sleigh, Varnode};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Write;
-use std::rc::Rc;
+use std::sync::Arc;
 
-type Live = BTreeSet<String>;
+/// A liveness key ("EDX#0", "X87#1", "HEBX/01#") stored inline: no allocation to copy, clone
+/// or drop a set of them. Zero padding makes the derived order the string order, so sets
+/// iterate (and the script reports) exactly as with `String` keys.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Key {
+    b: [u8; 31],
+    n: u8,
+}
+
+impl From<&str> for Key {
+    fn from(s: &str) -> Key {
+        assert!(s.len() <= 31 && !s.contains('\0'), "liveness key too long: {s}");
+        let mut b = [0; 31];
+        b[..s.len()].copy_from_slice(s.as_bytes());
+        Key { b, n: s.len() as u8 }
+    }
+}
+
+impl From<String> for Key {
+    fn from(s: String) -> Key {
+        Key::from(s.as_str())
+    }
+}
+
+impl std::ops::Deref for Key {
+    type Target = str;
+    fn deref(&self) -> &str {
+        // only ever built from a &str
+        unsafe { std::str::from_utf8_unchecked(&self.b[..self.n as usize]) }
+    }
+}
+
+impl std::borrow::Borrow<str> for Key {
+    fn borrow(&self) -> &str {
+        self
+    }
+}
+
+impl std::hash::Hash for Key {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        (**self).hash(h)
+    }
+}
+
+impl std::fmt::Display for Key {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(self)
+    }
+}
+
+/// A set of live keys. `dirty` says it may have changed since the walk last looked it up, so
+/// the walk hashes and copies a set only when it changes, not at every step. Equality and
+/// hashing ignore the flag; every mutation goes through a method below, which sets it.
+struct Live {
+    s: BTreeSet<Key>,
+    dirty: bool,
+}
+
+impl Live {
+    fn new() -> Live {
+        Live { s: BTreeSet::new(), dirty: true }
+    }
+    fn insert(&mut self, k: Key) -> bool {
+        let r = self.s.insert(k);
+        self.dirty |= r;
+        r
+    }
+    fn remove<Q: Ord + ?Sized>(&mut self, k: &Q) -> bool
+    where
+        Key: std::borrow::Borrow<Q>,
+    {
+        let r = self.s.remove(k);
+        self.dirty |= r;
+        r
+    }
+    fn retain(&mut self, f: impl FnMut(&Key) -> bool) {
+        let n = self.s.len();
+        self.s.retain(f);
+        self.dirty |= self.s.len() != n;
+    }
+}
+
+impl std::ops::Deref for Live {
+    type Target = BTreeSet<Key>;
+    fn deref(&self) -> &BTreeSet<Key> {
+        &self.s
+    }
+}
+
+impl Clone for Live {
+    fn clone(&self) -> Live {
+        Live { s: self.s.clone(), dirty: true }
+    }
+}
+
+impl Default for Live {
+    fn default() -> Live {
+        Live::new()
+    }
+}
+
+impl PartialEq for Live {
+    fn eq(&self, o: &Live) -> bool {
+        self.s == o.s
+    }
+}
+
+impl Eq for Live {}
+
+impl std::hash::Hash for Live {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.s.hash(h)
+    }
+}
+
+impl Extend<Key> for Live {
+    fn extend<I: IntoIterator<Item = Key>>(&mut self, it: I) {
+        for k in it {
+            self.insert(k);
+        }
+    }
+}
+
+impl<'k> Extend<&'k Key> for Live {
+    fn extend<I: IntoIterator<Item = &'k Key>>(&mut self, it: I) {
+        self.extend(it.into_iter().copied())
+    }
+}
+
+impl FromIterator<Key> for Live {
+    fn from_iter<I: IntoIterator<Item = Key>>(it: I) -> Live {
+        Live { s: it.into_iter().collect(), dirty: true }
+    }
+}
+
+impl<const N: usize> From<[Key; N]> for Live {
+    fn from(a: [Key; N]) -> Live {
+        a.into_iter().collect()
+    }
+}
+
+impl IntoIterator for Live {
+    type Item = Key;
+    type IntoIter = std::collections::btree_set::IntoIter<Key>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.s.into_iter()
+    }
+}
+
+impl<'k> IntoIterator for &'k Live {
+    type Item = &'k Key;
+    type IntoIter = std::collections::btree_set::Iter<'k, Key>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.s.iter()
+    }
+}
+
+/// FxHash (rustc's hasher): the walks hash a live set per step, and SipHash dominated them.
+/// Only for maps that are looked up, never iterated, so output order cannot depend on it.
+#[derive(Default)]
+struct Fx(u64);
+
+impl std::hash::Hasher for Fx {
+    fn write(&mut self, bytes: &[u8]) {
+        let mut c = bytes.chunks_exact(8);
+        for w in &mut c {
+            self.add(u64::from_le_bytes(w.try_into().unwrap()));
+        }
+        for &b in c.remainder() {
+            self.add(b as u64);
+        }
+    }
+    fn write_u8(&mut self, i: u8) {
+        self.add(i as u64)
+    }
+    fn write_u32(&mut self, i: u32) {
+        self.add(i as u64)
+    }
+    fn write_u64(&mut self, i: u64) {
+        self.add(i)
+    }
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64)
+    }
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+impl Fx {
+    fn add(&mut self, w: u64) {
+        self.0 = (self.0.rotate_left(5) ^ w).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+}
+
+type FxMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<Fx>>;
+type FxSet<K> = HashSet<K, std::hash::BuildHasherDefault<Fx>>;
 
 // Instructions per walk; call depth into callees; levels up through callers of a caller that
 // returns with a clobbered value still live.
@@ -47,7 +243,7 @@ fn hex(a: u32) -> String {
 }
 
 fn join(s: &Live) -> String {
-    s.iter().cloned().collect::<Vec<_>>().join(";")
+    s.iter().map(|k| &**k).collect::<Vec<_>>().join(";")
 }
 
 fn word(s: &str) -> bool {
@@ -66,12 +262,13 @@ fn parse_hex(s: &str) -> Option<u64> {
 /// Ghidra's register table: per register, its bytes as keys of its base register (the
 /// largest register containing it), and the `(offset, size) -> register` map of
 /// `RegisterManager.getRegister(Address, int)`.
+#[derive(Clone)]
 pub struct Regs {
     space: u32,
     names: Vec<String>,
     offs: Vec<u64>,
     bases: Vec<String>,
-    keys: Vec<Vec<String>>,
+    keys: Vec<Vec<Key>>,
     by_name: HashMap<String, usize>,
     size_map: HashMap<(u64, u32), usize>,
 }
@@ -97,7 +294,7 @@ impl Regs {
             r.names.push(name.to_string());
             r.offs.push(off);
             r.bases.push(bname.to_string());
-            r.keys.push((0..size as u64).map(|k| format!("{bname}#{}", off - boff + k)).collect());
+            r.keys.push((0..size as u64).map(|k| Key::from(format!("{bname}#{}", off - boff + k))).collect());
             r.by_name.insert(name.to_string(), i);
         }
         // largest to smallest, so the smallest register of at least that size wins
@@ -122,11 +319,11 @@ impl Regs {
         *self.by_name.get(name).unwrap_or_else(|| panic!("no register {name}"))
     }
 
-    pub fn bytes_of(&self, name: &str) -> &[String] {
+    pub fn bytes_of(&self, name: &str) -> &[Key] {
         &self.keys[self.get(name)]
     }
 
-    pub fn keys(&self, r: usize) -> &[String] {
+    pub fn keys(&self, r: usize) -> &[Key] {
         &self.keys[r]
     }
 
@@ -268,25 +465,25 @@ pub struct Checker<'a> {
     sl: &'a Sleigh,
     regs: Regs,
     parse: Parse,
-    info: HashMap<u32, Rc<Info>>,
-    func_of: HashMap<u32, u32>,
-    refs_to: HashMap<u32, Vec<(u32, RefKind)>>,
+    info: FxMap<u32, Arc<Info>>,
+    func_of: FxMap<u32, u32>,
+    refs_to: FxMap<u32, Vec<(u32, RefKind)>>,
     relocated: HashSet<u32>,
     contracts: HashMap<u32, Vec<String>>,
     output_check: bool,
     output_walk: bool,
     input_walk: bool,
-    callee_memo: HashMap<(bool, bool, u32, Live), Outcome>,
-    never_returned_memo: HashMap<u32, Live>,
-    pushes_float_memo: HashMap<u32, bool>,
+    callee_memo: FxMap<(bool, bool, u32, Live), Outcome>,
+    never_returned_memo: FxMap<u32, Live>,
+    pushes_float_memo: FxMap<u32, bool>,
     input_hits: Vec<(String, [String; 3])>,
-    input_memo: HashMap<(u32, Live), Outcome>,
+    input_memo: FxMap<(u32, Live), Outcome>,
 }
 
 impl<'a> Checker<'a> {
     /// `relocated`: function bodies the wrapper relocated (securom_functions.csv targets).
     pub fn new(img: &'a Image, an: &'a Analysis, sl: &'a Sleigh, relocated: HashSet<u32>) -> Checker<'a> {
-        let mut func_of = HashMap::new();
+        let mut func_of = FxMap::default();
         for (&f, body) in &an.bodies {
             for &a in body {
                 // shared code belongs to the nearest entry at or before it
@@ -302,19 +499,19 @@ impl<'a> Checker<'a> {
             sl,
             regs: Regs::new(sl),
             parse: sl.new_parse(),
-            info: HashMap::new(),
+            info: FxMap::default(),
             func_of,
-            refs_to: HashMap::new(),
+            refs_to: FxMap::default(),
             relocated,
             contracts: HashMap::new(),
             output_check: false,
             output_walk: false,
             input_walk: false,
-            callee_memo: HashMap::new(),
-            never_returned_memo: HashMap::new(),
-            pushes_float_memo: HashMap::new(),
+            callee_memo: FxMap::default(),
+            never_returned_memo: FxMap::default(),
+            pushes_float_memo: FxMap::default(),
             input_hits: Vec::new(),
-            input_memo: HashMap::new(),
+            input_memo: FxMap::default(),
         }
     }
 
@@ -324,7 +521,7 @@ impl<'a> Checker<'a> {
     fn index_refs(&mut self) {
         let an = self.an;
         let wanted = |t: u32| an.funcs.contains(&t) || self.contracts.contains_key(&t);
-        let mut refs: HashMap<u32, Vec<(u32, RefKind)>> = HashMap::new();
+        let mut refs: FxMap<u32, Vec<(u32, RefKind)>> = FxMap::default();
         let mut add = |t: u32, from: u32, k: RefKind| {
             if wanted(t) {
                 let v = refs.entry(t).or_default();
@@ -375,7 +572,7 @@ impl<'a> Checker<'a> {
         self.refs_to.get(&t).cloned().unwrap_or_default()
     }
 
-    fn ins(&mut self, a: u32) -> Option<Rc<Info>> {
+    fn ins(&mut self, a: u32) -> Option<Arc<Info>> {
         if let Some(i) = self.info.get(&a) {
             return Some(i.clone());
         }
@@ -394,7 +591,7 @@ impl<'a> Checker<'a> {
             parse_hex(&d.body)
         };
         let reg0 = self.regs.by_name.get(d.body.as_str()).copied();
-        let info = Rc::new(Info { mnem: d.mnemonic, text, inputs, results, scalar0, reg0 });
+        let info = Arc::new(Info { mnem: d.mnemonic, text, inputs, results, scalar0, reg0 });
         self.info.insert(a, info.clone());
         Some(info)
     }
@@ -457,7 +654,7 @@ impl<'a> Checker<'a> {
         self.an.insns.range(..a).next_back().map(|(&n, _)| n)
     }
 
-    fn keys_of(&self, name: &str) -> Vec<String> {
+    fn keys_of(&self, name: &str) -> Vec<Key> {
         self.regs.bytes_of(name).to_vec()
     }
 
@@ -584,7 +781,7 @@ impl<'a> Checker<'a> {
             // AND r,imm reads only the bytes the mask keeps
             for b in 0..4 {
                 let k = format!("{r}#{b}");
-                if (mask >> (8 * b)) & 0xff != 0 && live.contains(&k) {
+                if (mask >> (8 * b)) & 0xff != 0 && live.contains(k.as_str()) {
                     return Some(k);
                 }
             }
@@ -593,7 +790,7 @@ impl<'a> Checker<'a> {
         for &r in &i.inputs {
             for k in self.regs.keys(r) {
                 if live.contains(k) {
-                    return Some(k.clone());
+                    return Some(k.to_string());
                 }
             }
         }
@@ -616,7 +813,7 @@ impl<'a> Checker<'a> {
     // they stand after the call.
     fn x87_across_call(&mut self, target: Option<u32>, computed: bool, live: &mut Live) -> Live {
         let mut out = Live::new();
-        let keys: Vec<String> = live.iter().filter(|k| base(k) == "X87").cloned().collect();
+        let keys: Vec<Key> = live.iter().filter(|k| base(k) == "X87").cloned().collect();
         for k in keys {
             live.remove(&k);
             if self.output_walk {
@@ -624,7 +821,7 @@ impl<'a> Checker<'a> {
             }
             let d: i64 = k[4..].parse().unwrap();
             let pushes = !computed && target.is_some_and(|t| self.pushes_float(t));
-            out.insert(format!("X87#{}", d + pushes as i64));
+            out.insert(format!("X87#{}", d + pushes as i64).into());
         }
         out
     }
@@ -685,15 +882,15 @@ impl<'a> Checker<'a> {
             }
         }
         let mut moved = Live::new();
-        let keys: Vec<String> = live.iter().filter(|k| base(k) == "X87").cloned().collect();
+        let keys: Vec<Key> = live.iter().filter(|k| base(k) == "X87").cloned().collect();
         for k in keys {
             let d: i64 = k[4..].parse().unwrap();
             if reads.contains(&d) {
-                return Some(k);
+                return Some(k.to_string());
             }
             live.remove(&k);
             if d != overwritten {
-                moved.insert(format!("X87#{}", d + delta));
+                moved.insert(format!("X87#{}", d + delta).into());
             }
         }
         live.extend(moved);
@@ -761,13 +958,28 @@ impl<'a> Checker<'a> {
         let mut o = ok();
         let Some(start) = start else { return o }; // call that does not return
         let mut work: Vec<(u32, Live)> = vec![(start, live0.clone())];
-        let mut seen: HashSet<(u32, Live)> = HashSet::new();
+        // (address, live set) pairs already walked, the set as its number in `ids`
+        let mut seen: FxSet<(u32, u32)> = FxSet::default();
+        let mut ids: FxMap<Live, u32> = FxMap::default();
+        let mut id = 0;
         let mut steps = 0;
         while let Some((at0, live1)) = work.pop() {
             let mut at = Some(at0);
             let mut live = live1;
+            live.dirty = true;
             while let Some(a) = at.filter(|_| !live.is_empty()) {
-                if !seen.insert((a, live.clone())) {
+                if live.dirty {
+                    live.dirty = false;
+                    id = match ids.get(&live) {
+                        Some(&i) => i,
+                        None => {
+                            let i = ids.len() as u32;
+                            ids.insert(live.clone(), i);
+                            i
+                        }
+                    };
+                }
+                if !seen.insert((a, id)) {
                     break;
                 }
                 steps += 1;
@@ -1107,7 +1319,7 @@ impl<'a> Checker<'a> {
             let all = self.eax_bytes();
             out.extend(eax.at_return.into_iter().filter(|k| all.contains(k)));
         }
-        let x87 = self.callee(entry, &Live::from(["X87#0".to_string()]), 1);
+        let x87 = self.callee(entry, &Live::from(["X87#0".into()]), 1);
         if x87.status == "ok" && x87.at_return.contains("X87#0") {
             out.insert("X87#0".into());
         }
@@ -1127,7 +1339,7 @@ impl<'a> Checker<'a> {
         self.pushes_float_memo.insert(entry, false); // recursion
         let (was, was_input) = (self.output_walk, self.input_walk);
         (self.output_walk, self.input_walk) = (false, false);
-        let o = self.walk(Some(entry), &Live::from(["X87#0".to_string()]), 1);
+        let o = self.walk(Some(entry), &Live::from(["X87#0".into()]), 1);
         (self.output_walk, self.input_walk) = (was, was_input);
         let pushes = o.status == "ok" && !o.at_return.is_empty() && !o.at_return.contains("X87#0");
         self.pushes_float_memo.insert(entry, pushes);
@@ -1269,7 +1481,7 @@ impl<'a> Checker<'a> {
         // XMM: the low float only.
         for i in 0..8 {
             live.extend(self.keys_of(&format!("XMM{i}_Da")));
-            live.insert(format!("X87#{i}"));
+            live.insert(format!("X87#{i}").into());
         }
         for k in self.contract_inputs(row) {
             live.remove(&k);
@@ -1305,7 +1517,7 @@ impl<'a> Checker<'a> {
             return false;
         }
         if SAVED.contains(&b.as_str()) {
-            let undefined = live.contains(&format!("{b}#0"));
+            let undefined = live.contains(format!("{b}#0").as_str());
             let h = history(&b, live);
             if let Some(h) = &h {
                 live.remove(h);
@@ -1316,7 +1528,7 @@ impl<'a> Checker<'a> {
             if bits.len() > 8 {
                 bits = bits[bits.len() - 8..].to_string();
             }
-            live.insert(format!("H{b}/{bits}#"));
+            live.insert(format!("H{b}/{bits}#").into());
         }
         true
     }
@@ -1336,7 +1548,7 @@ impl<'a> Checker<'a> {
             live.extend(self.keys_of(&b));
         }
         if bits.len() > 1 {
-            live.insert(format!("H{b}/{}#", &bits[..bits.len() - 1]));
+            live.insert(format!("H{b}/{}#", &bits[..bits.len() - 1]).into());
         }
     }
 
@@ -1361,7 +1573,7 @@ impl<'a> Checker<'a> {
                 && (b'1'..=b'3').contains(&b[4])
                 && ((b[1].is_ascii_uppercase() && b[2] == b'X') || (b"SDB".contains(&b[1]) && b"IP".contains(&b[2])))
         };
-        let whole: Live = live.iter().filter(|k| !(upper(k) && !live.contains(&format!("{}#0", base(k))))).cloned().collect();
+        let whole: Live = live.iter().filter(|k| !(upper(k) && !live.contains(format!("{}#0", base(k)).as_str()))).cloned().collect();
         self.input_read(ins, &whole)
     }
 
@@ -1395,7 +1607,7 @@ impl<'a> Checker<'a> {
             if regs.is_empty() {
                 break;
             }
-            let joined = regs.iter().cloned().collect::<Vec<_>>().join(";");
+            let joined = regs.iter().map(|k| &**k).collect::<Vec<_>>().join(";");
             let v = ["unconcluded".to_string(), joined.clone(), o.where_.clone()];
             match self.input_hits.iter_mut().find(|(k, _)| *k == joined) {
                 Some(e) => e.1 = v,
@@ -1410,7 +1622,7 @@ impl<'a> Checker<'a> {
 
     /// Runs the check of `register_abi.csv` (its text) and writes `abi_callers.csv` rows.
     /// Returns (references checked, output findings, input findings).
-    pub fn run(&mut self, abi_csv: &str, out: &mut dyn Write) -> Result<(usize, usize, usize), String> {
+    pub fn run(&mut self, abi_csv: &str, out: &mut dyn Write, threads: usize) -> Result<(usize, usize, usize), String> {
         // A project without ClearFalseNoReturn stops every walk at 458 calls.
         if self.an.noreturn.contains(&0x0040_1740) && self.an.funcs.contains(&0x0040_1740) {
             return Err("SquareRootFloatX87 is flagged no-return; run ClearFalseNoReturn.java first".into());
@@ -1430,12 +1642,67 @@ impl<'a> Checker<'a> {
         }
         self.index_refs();
         let io = |e: std::io::Error| e.to_string();
-        let (mut total, mut output_findings, mut input_count) = (0, 0, 0);
         writeln!(out, "address,contract,site,status,register,instruction").map_err(io)?;
-        for f in &rows {
-            if f[2] == "extern" {
-                continue; // not replaced: callers need no proof
+        // Contracts are checked on `threads` threads, each with its own checker (and memos),
+        // thread t taking rows t, t+n, ...; the rows are written in file order.
+        let rows: Vec<&Vec<String>> = rows.iter().filter(|f| f[2] != "extern").collect(); // not replaced: callers need no proof
+        let n = threads.clamp(1, rows.len().max(1));
+        let forks: Vec<Checker> = (0..n).map(|_| self.fork()).collect();
+        let mut done: Vec<(Vec<u8>, [usize; 3])> = Vec::new();
+        done.resize_with(rows.len(), Default::default);
+        std::thread::scope(|s| {
+            let rows = &rows;
+            let handles: Vec<_> = forks
+                .into_iter()
+                .enumerate()
+                .map(|(t, mut ck)| {
+                    s.spawn(move || {
+                        (t..rows.len()).step_by(n).map(|i| {
+                            let mut b = Vec::new();
+                            let c = ck.check_row(rows[i], &mut b).unwrap(); // writes to a Vec do not fail
+                            (i, b, c)
+                        }).collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            for h in handles {
+                for (i, b, c) in h.join().unwrap() {
+                    done[i] = (b, c);
+                }
             }
+        });
+        let mut counts = [0; 3];
+        for (b, c) in &done {
+            out.write_all(b).map_err(io)?;
+            (0..3).for_each(|k| counts[k] += c[k]);
+        }
+        Ok((counts[0], counts[1], counts[2]))
+    }
+
+    /// A checker for another thread: the program's indexes, empty caches.
+    fn fork(&self) -> Checker<'a> {
+        Checker {
+            regs: self.regs.clone(),
+            parse: self.sl.new_parse(),
+            info: FxMap::default(),
+            func_of: self.func_of.clone(),
+            refs_to: self.refs_to.clone(),
+            relocated: self.relocated.clone(),
+            contracts: self.contracts.clone(),
+            callee_memo: FxMap::default(),
+            never_returned_memo: FxMap::default(),
+            pushes_float_memo: FxMap::default(),
+            input_hits: Vec::new(),
+            input_memo: FxMap::default(),
+            ..*self
+        }
+    }
+
+    /// One contract's rows: callers' clobbers, then outputs, then inputs. Returns (references
+    /// checked, output findings, input findings).
+    fn check_row(&mut self, f: &[String], out: &mut Vec<u8>) -> std::io::Result<[usize; 3]> {
+        let (mut total, mut output_findings, mut input_count) = (0, 0, 0);
+        {
             let target = parse_hex(&f[0]).unwrap() as u32;
             let contract = format!("{}|{}", f[5], f[6]);
             let mut watch = self.watched(&f[6], &f[5]);
@@ -1455,12 +1722,12 @@ impl<'a> Checker<'a> {
                     let fall = self.flow(from).fall;
                     self.from_site(fall, &watch, 0)
                 };
-                writeln!(out, "{},{contract},{},{},{},{}", f[0], hex(from), o.status, o.reg, o.where_).map_err(io)?;
+                writeln!(out, "{},{contract},{},{},{},{}", f[0], hex(from), o.status, o.reg, o.where_)?;
                 total += 1;
             }
             if refs.is_empty() {
                 let st = if watch.is_empty() { "trivial" } else { "unknown" };
-                writeln!(out, "{},{contract},,{st},,no references", f[0]).map_err(io)?;
+                writeln!(out, "{},{contract},,{st},,no references", f[0])?;
             }
             // Output results: a row per finding, and one saying the check ran.
             self.output_check = true;
@@ -1479,20 +1746,20 @@ impl<'a> Checker<'a> {
                             Some(sign) => o = fail("unknown", &o.reg, &format!("{}; original returns it: {sign}", o.where_)),
                         }
                     }
-                    writeln!(out, "{},{contract},output:{},{},{},{}", f[0], hex(from), o.status, o.reg, o.where_).map_err(io)?;
+                    writeln!(out, "{},{contract},output:{},{},{},{}", f[0], hex(from), o.status, o.reg, o.where_)?;
                     output_findings += 1;
                 }
             }
             (self.output_walk, self.output_check) = (false, false);
-            writeln!(out, "{},{contract},output,ok,{},output check ran", f[0], join(&lost)).map_err(io)?;
+            writeln!(out, "{},{contract},output,ok,{},output check ran", f[0], join(&lost))?;
             for r in self.input_findings(f) {
                 let site = r[2].split(' ').next().unwrap_or("");
-                writeln!(out, "{},{contract},input:{site},{},{},{}", f[0], r[0], r[1], r[2]).map_err(io)?;
+                writeln!(out, "{},{contract},input:{site},{},{},{}", f[0], r[0], r[1], r[2])?;
                 input_count += 1;
             }
-            writeln!(out, "{},{contract},input,ok,,input check ran", f[0]).map_err(io)?;
+            writeln!(out, "{},{contract},input,ok,,input check ran", f[0])?;
         }
-        Ok((total, output_findings, input_count))
+        Ok([total, output_findings, input_count])
     }
 }
 
@@ -1503,9 +1770,9 @@ fn volatile_reg(key: &str) -> bool {
     ["EAX", "ECX", "EDX"].contains(&b) || b.starts_with("XMM") || b.starts_with("YMM") || b.starts_with("ZMM") || flaglike(b)
 }
 
-fn history(b: &str, live: &Live) -> Option<String> {
+fn history(b: &str, live: &Live) -> Option<Key> {
     let p = format!("H{b}/");
-    live.iter().find(|k| k.starts_with(&p)).cloned()
+    live.iter().find(|k| k.starts_with(&p)).copied()
 }
 
 fn reg_of(key: &str) -> &str {

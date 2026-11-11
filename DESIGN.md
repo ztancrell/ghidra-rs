@@ -31,7 +31,7 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    propagation.
 2b. CheckAbiCallers.java (register liveness over p-code), the mercs2 pipeline's per-batch
    check: `ghidra-rs analyze --abi-callers`. On branch `m2b-abi-callers`: 96.5% of the
-   reference rows identical, about 48 s (details and the causes of the rest in `rust/README.md`).
+   reference rows identical, about 13 s on 12 threads (details and the causes of the rest in `rust/README.md`).
 3. Decompilation: a Rust decompiler, or FFI to the existing C++ decompiler as a stopgap.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
