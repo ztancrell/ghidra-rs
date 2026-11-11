@@ -75,6 +75,18 @@ $ ghidra-rs disasm /usr/bin/ls --count 2 --pcode
 Varnodes print as a register name when one matches exactly, `0x5:4` for constants and
 `space[offset]:size` otherwise.
 
+## Speed
+
+Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The
+input was the whole `.text` of `/usr/lib/libLLVM.so.21.1`: 97 MB, 21,830,419 instructions,
+with output sent to `/dev/null`:
+
+| run | time | instructions/s |
+|---|---|---|
+| `ghidra-rs disasm` | 20.7 s | about 1.05 M |
+| `ghidra-rs disasm --pcode` | 82.6 s | about 264 K |
+| C++ `sleigh_ref` (Ghidra's engine, text only) | 19.1 s | about 1.14 M |
+
 ## Limits (Milestone 1)
 
 - One processor: x86-64, with the context defaults from `x86-64.pspec` (64-bit mode).
