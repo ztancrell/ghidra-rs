@@ -53,8 +53,8 @@ Ghidra's "packed" element/attribute encoding (`slaformat.cc`, `PackedDecode` in
 ghidra-rs disasm <binary> [--func <symbol>|--addr <hex>] [--count N] [--pcode] [--sla <file>]
 ```
 
-- `--func`: start at a symbol (static or dynamic; a leading `_` is optional for Mach-O) and,
-  if the symbol has a size, stop at its end.
+- `--func`: start at a symbol (static, dynamic or PE export; a leading `_` is optional for
+  Mach-O) and, if the symbol has a size, stop at its end.
 - `--addr`: start at a virtual address (hex, `0x` optional).
 - Without either, it starts at the entry point.
 - `--count`: maximum number of instructions (default 20, or the whole symbol with `--func`).

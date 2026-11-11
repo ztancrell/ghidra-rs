@@ -43,12 +43,15 @@ fn run() -> Result<(), String> {
     }
     let (start, sym_end) = match (&func, addr) {
         (Some(name), _) => {
+            let matches = |n: &[u8]| n == name.as_bytes() || n.strip_prefix(b"_") == Some(name.as_bytes());
             let sym = file
                 .symbols()
                 .chain(file.dynamic_symbols())
-                .find(|s| s.address() != 0 && s.name().is_ok_and(|n| n == name || n.strip_prefix('_') == Some(name)))
-                .ok_or(format!("{path}: symbol {name} not found"))?;
-            (sym.address(), (sym.size() > 0).then(|| sym.address() + sym.size()))
+                .find(|s| s.address() != 0 && s.name_bytes().is_ok_and(matches))
+                .map(|s| (s.address(), (s.size() > 0).then(|| s.address() + s.size())));
+            // PE exports are not in the symbol tables
+            let export = || file.exports().ok()?.into_iter().find(|x| matches(x.name())).map(|x| (x.address(), None));
+            sym.or_else(export).ok_or(format!("{path}: symbol {name} not found"))?
         }
         (None, Some(a)) => (a, None),
         (None, None) => (file.entry(), None),
