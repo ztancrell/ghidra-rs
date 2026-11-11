@@ -2,12 +2,12 @@
 //! (sleigh.cc, slghsymbol.cc, slghpattern.cc, slghpatexpress.cc, context.cc, semantics.cc).
 //! Logic follows upstream; the class hierarchy is flattened into enums and index arenas.
 //!
-//! Not ported (not needed for x86-64 linear disassembly): delay slots, crossbuild,
-//! inst_next2, flowref/flowdest, and context *commits* (globalset). Each instruction is
-//! decoded from the default context, so context that flows between instructions is lost.
+//! Not ported (x86 does not use them): delay slots, crossbuild, inst_next2 and
+//! flowref/flowdest. Context starts from the `.pspec` defaults; context commits
+//! (globalset) are recorded in the `Parse` and apply to later decodes at their address.
 
 use crate::sla::{self, a, e, Elem, Result};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 const NONE: u32 = u32::MAX;
@@ -40,9 +40,24 @@ pub const OPCODE_NAMES: [&str; 75] = [
     "POPCOUNT", "LZCOUNT", "SPULL",
 ];
 
-// x86-64.pspec <context_set>: the defaults for 64-bit code.
-const X86_64_CONTEXT: [(&str, u32); 4] =
-    [("addrsize", 2), ("opsize", 1), ("rexprefix", 0), ("longMode", 1)];
+/// `<set name=".." val=".."/>` entries of a .pspec `<context_set>`: the context defaults.
+fn pspec_context(text: &str) -> Vec<(String, u32)> {
+    let Some(start) = text.find("<context_set") else { return Vec::new() };
+    let end = text[start..].find("</context_set>").map_or(text.len(), |e| start + e);
+    let attr = |tag: &str, name: &str| {
+        let i = tag.find(&format!("{name}=\""))? + name.len() + 2;
+        Some(tag[i..i + tag[i..].find('"')?].to_string())
+    };
+    text[start..end]
+        .split("<set ")
+        .skip(1)
+        .filter_map(|tag| {
+            let v = attr(tag, "val")?;
+            let v = match v.strip_prefix("0x") { Some(h) => u32::from_str_radix(h, 16).ok()?, None => v.parse().ok()? };
+            Some((attr(tag, "name")?, v))
+        })
+        .collect()
+}
 
 // ---------------------------------------------------------------- model
 
@@ -103,7 +118,7 @@ enum Piece {
 #[derive(Debug)]
 enum CtxChange {
     Op { num: usize, shift: u32, mask: u32, exp: Expr },
-    Commit, // globalset: not applied (see module docs)
+    Commit { sym: usize, num: usize, mask: u32, flow: bool }, // globalset
 }
 
 #[derive(Debug)]
@@ -253,6 +268,9 @@ pub struct Parse {
     pub len: usize,
     ctx: Vec<u32>,
     states: Vec<State>,
+    pending: Vec<(usize, u32, usize, u32, u32, bool)>, // (sym, point, num, mask, value, flow)
+    /// Context changes committed by `globalset`, by address: (word, mask, value, flows).
+    pub changes: BTreeMap<u64, Vec<(usize, u32, u32, bool)>>,
 }
 
 impl Parse {
@@ -491,7 +509,12 @@ fn ctor(el: &Elem) -> Result<Ctor> {
                 mask: k.uint(a::MASK)? as u32,
                 exp: expr(k.kids.first().ok_or("context_op without expression")?)?,
             }),
-            e::COMMIT => c.ctx.push(CtxChange::Commit),
+            e::COMMIT => c.ctx.push(CtxChange::Commit {
+                sym: k.uint(a::ID)? as usize,
+                num: k.int(a::NUMBER)? as usize,
+                mask: k.uint(a::MASK)? as u32,
+                flow: k.boolean(a::FLOW)?,
+            }),
             _ => {
                 let (t, sec) = tpl(k)?;
                 if sec < 0 {
@@ -513,10 +536,21 @@ fn ctor(el: &Elem) -> Result<Ctor> {
 impl Sleigh {
     /// Default location of the x86-64 .sla built by `rust/build-sla.sh`.
     pub fn default_sla_path() -> std::path::PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Ghidra/Processors/x86/data/languages/x86-64.sla")
+        Self::sla_path("x86-64")
     }
 
+    /// Path of `<name>.sla` in Ghidra's x86 language directory (built by `rust/build-sla.sh`).
+    pub fn sla_path(name: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../Ghidra/Processors/x86/data/languages/{name}.sla"))
+    }
+
+    /// Load a `.sla`; context defaults come from the `.pspec` of the same name next to it, if any.
     pub fn load(path: &Path) -> Result<Sleigh> {
+        let pspec = std::fs::read_to_string(path.with_extension("pspec")).unwrap_or_default();
+        Self::load_with_context(path, &pspec_context(&pspec))
+    }
+
+    pub fn load_with_context(path: &Path, context: &[(String, u32)]) -> Result<Sleigh> {
         let root = sla::read_file(path)?;
         if root.id != e::SLEIGH || root.int(a::VERSION)? != 4 {
             return Err(format!("{}: unexpected .sla root/version", path.display()));
@@ -628,8 +662,9 @@ impl Sleigh {
             }
         }
         let mut ctx_default = vec![0u32; words];
-        for (name, val) in X86_64_CONTEXT {
-            if let Some(Sym { kind: Kind::Context { low, high, .. }, .. }) = syms.iter().find(|s| s.name == name) {
+        for (name, val) in context {
+            let val = *val;
+            if let Some(Sym { kind: Kind::Context { low, high, .. }, .. }) = syms.iter().find(|s| s.name == *name) {
                 let num = (*low / 32) as usize;
                 let shift = 31 - high % 32;
                 let mask = ((u32::MAX >> (low % 32 + shift)) << shift) as u32;
@@ -656,8 +691,22 @@ impl Sleigh {
         })
     }
 
+    /// Index of the default code space (`ram` on x86), as used in `Varnode::space`.
+    pub fn code_space(&self) -> u32 {
+        self.code_space
+    }
+
     pub fn new_parse(&self) -> Parse {
-        Parse { buf: [0; 48], addr: 0, naddr: 0, len: 0, ctx: self.ctx_default.clone(), states: Vec::with_capacity(64) }
+        Parse {
+            buf: [0; 48],
+            addr: 0,
+            naddr: 0,
+            len: 0,
+            ctx: self.ctx_default.clone(),
+            states: Vec::with_capacity(64),
+            pending: Vec::new(),
+            changes: BTreeMap::new(),
+        }
     }
 
     fn operand(&self, sym: usize) -> &Operand {
@@ -862,10 +911,17 @@ impl Sleigh {
 
     fn apply_ctx(&self, ct: usize, p: &mut Parse, point: u32) -> Result<()> {
         for c in &self.ctors[ct].ctx {
-            if let CtxChange::Op { num, shift, mask, exp } = c {
-                let v = (self.eval(exp, p, point, p.states[point as usize].offset)? as u32).wrapping_shl(*shift);
-                if let Some(w) = p.ctx.get_mut(*num) {
-                    *w = (*w & !mask) | (mask & v);
+            match *c {
+                CtxChange::Op { num, shift, mask, ref exp } => {
+                    let v = (self.eval(exp, p, point, p.states[point as usize].offset)? as u32).wrapping_shl(shift);
+                    if let Some(w) = p.ctx.get_mut(num) {
+                        *w = (*w & !mask) | (mask & v);
+                    }
+                }
+                // ParserContext::addCommit: the value is taken now, the address after the parse.
+                CtxChange::Commit { sym, num, mask, flow } => {
+                    let value = p.ctx.get(num).copied().unwrap_or(0) & mask;
+                    p.pending.push((sym, point, num, mask, value, flow));
                 }
             }
         }
@@ -881,6 +937,17 @@ impl Sleigh {
         p.naddr = addr;
         p.ctx.clear();
         p.ctx.extend_from_slice(&self.ctx_default);
+        // ponytail: replays every earlier change point, O(changes); fine while specs commit rarely
+        for (&at, list) in p.changes.range(..=addr) {
+            for &(num, mask, value, flow) in list {
+                if flow || at == addr {
+                    if let Some(w) = p.ctx.get_mut(num) {
+                        *w = (*w & !mask) | value;
+                    }
+                }
+            }
+        }
+        p.pending.clear();
         p.states.clear();
         p.states.push(State::new(NONE));
 
@@ -945,6 +1012,12 @@ impl Sleigh {
         p.len = p.states[0].length as usize;
         p.naddr = addr + p.len as u64;
         self.resolve_handles(p)?;
+        // ParserContext::applyCommits
+        for i in 0..p.pending.len() {
+            let (sym, point, num, mask, value, flow) = p.pending[i];
+            let at = self.sym_handle(sym, p, point)?.offset_offset;
+            p.changes.entry(at).or_default().push((num, mask, value, flow));
+        }
         Ok(p.len)
     }
 

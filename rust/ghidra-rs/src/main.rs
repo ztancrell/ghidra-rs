@@ -3,7 +3,8 @@ use object::{Architecture, Object, ObjectSection, ObjectSymbol};
 use std::io::Write;
 use std::path::PathBuf;
 
-const USAGE: &str = "usage: ghidra-rs disasm <binary> [--func <symbol>|--addr <hex>] [--count N] [--pcode] [--sla <file>]";
+const USAGE: &str = "usage: ghidra-rs disasm <binary> [--func <symbol>|--addr <hex>] [--count N] [--pcode] [--sla <file>]
+       ghidra-rs analyze <pe32> [--functions <csv>] [--gaps <csv>] [--seeds <csv> | --functions-from <csv>]... [--sla <file>]";
 
 fn main() {
     if let Err(e) = run() {
@@ -14,6 +15,9 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.len() >= 2 && args[0] == "analyze" {
+        return analyze(&args[1], &args[2..]);
+    }
     if args.len() < 2 || args[0] != "disasm" {
         return Err(USAGE.into());
     }
@@ -38,8 +42,13 @@ fn run() -> Result<(), String> {
 
     let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
     let file = object::File::parse(&*data).map_err(|e| format!("{path}: {e}"))?;
-    if file.architecture() != Architecture::X86_64 {
-        return Err(format!("{path}: only x86-64 is supported (found {:?})", file.architecture()));
+    match file.architecture() {
+        Architecture::X86_64 => {}
+        Architecture::I386 if std::env::var_os("GHIDRA_RS_SLA").is_none() && !args.iter().any(|a| a == "--sla") => {
+            sla = Sleigh::sla_path("x86")
+        }
+        Architecture::I386 => {}
+        a => return Err(format!("{path}: only x86 and x86-64 are supported (found {a:?})")),
     }
     let (start, sym_end) = match (&func, addr) {
         (Some(name), _) => {
@@ -106,6 +115,56 @@ fn run() -> Result<(), String> {
             return Ok(()); // closed pipe
         }
         n += 1;
+    }
+    Ok(())
+}
+
+/// `analyze`: Ghidra-style function discovery on a 32-bit PE, writing the files of the mercs2
+/// scripts ExportFunctions.java (`--functions`) and ExportGaps.java (`--gaps`).
+fn analyze(path: &str, args: &[String]) -> Result<(), String> {
+    use ghidra_rs::{analysis, scripts};
+    let (mut functions, mut gaps, mut seeds, mut exact) = (None, None, Vec::new(), false);
+    let mut sla = std::env::var_os("GHIDRA_RS_SLA").map(PathBuf::from).unwrap_or_else(|| Sleigh::sla_path("x86"));
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        let val = it.next().cloned().ok_or(format!("{flag} needs a value"))?;
+        match flag.as_str() {
+            "--functions" => functions = Some(val),
+            "--gaps" => gaps = Some(val),
+            "--sla" => sla = PathBuf::from(val),
+            // function entries: the first column of each 0x-prefixed line. --seeds adds them
+            // to what discovery finds; --functions-from makes them the whole function set.
+            "--seeds" | "--functions-from" => {
+                exact |= flag == "--functions-from";
+                let text = std::fs::read_to_string(&val).map_err(|e| format!("{val}: {e}"))?;
+                for line in text.lines().filter(|l| l.starts_with("0x")) {
+                    let a = line.split(',').next().unwrap_or("");
+                    seeds.push(u32::from_str_radix(&a[2..], 16).map_err(|e| format!("{val}: {a}: {e}"))?);
+                }
+            }
+            _ => return Err(USAGE.into()),
+        }
+    }
+    let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    let img = analysis::Image::from_pe(&data).map_err(|e| format!("{path}: {e}"))?;
+    let sl = Sleigh::load(&sla)?;
+    let t = std::time::Instant::now();
+    let an = analysis::Analysis::run(&img, &sl, &seeds, exact)?;
+    eprintln!(
+        "analyzed {} instructions, {} functions ({} imports) in {:.1}s",
+        an.insns.len(),
+        an.funcs.len(),
+        img.imports.len(),
+        t.elapsed().as_secs_f64()
+    );
+    let create = |p: &str| std::fs::File::create(p).map(std::io::BufWriter::new).map_err(|e| format!("{p}: {e}"));
+    if let Some(p) = functions {
+        let n = scripts::export_functions(&img, &an, &mut create(&p)?).map_err(|e| e.to_string())?;
+        println!("exported {n} functions");
+    }
+    if let Some(p) = gaps {
+        let (covered, total) = scripts::export_gaps(&img, &an, &mut create(&p)?).map_err(|e| e.to_string())?;
+        println!("function coverage: {covered} / {total} .text bytes");
     }
     Ok(())
 }

@@ -163,6 +163,7 @@ pub mod a {
     pub const CT: u32 = 17;
     pub const MINLEN: u32 = 18;
     pub const BASE: u32 = 19;
+    pub const NUMBER: u32 = 20;
     pub const CONTEXT: u32 = 21;
     pub const SUBSYM: u32 = 23;
     pub const LENGTH: u32 = 26;
@@ -181,6 +182,7 @@ pub mod a {
     pub const DELAY: u32 = 42;
     pub const LOW: u32 = 48;
     pub const HIGH: u32 = 49;
+    pub const FLOW: u32 = 50;
     pub const I: u32 = 52;
     pub const SCOPE: u32 = 13;
     pub const SYMBOLSIZE: u32 = 46;

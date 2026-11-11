@@ -80,10 +80,14 @@ int main(int argc, char **argv) {
   istringstream doc(string("<sleigh>") + argv[1] + "</sleigh>");
   store.registerTag(store.parseDocument(doc)->getRoot());
   trans.initialize(store);
-  context.setVariableDefault("addrsize", 2);
+  // the <context_set> of x86-64.pspec, or of x86.pspec for any other .sla (32-bit)
+  bool x64 = strstr(argv[1], "x86-64") != 0;
+  context.setVariableDefault("addrsize", x64 ? 2 : 1);
   context.setVariableDefault("opsize", 1);
-  context.setVariableDefault("rexprefix", 0);
-  context.setVariableDefault("longMode", 1);
+  if (x64) {
+    context.setVariableDefault("rexprefix", 0);
+    context.setVariableDefault("longMode", 1);
+  }
   AddrSpace *ram = trans.getDefaultCodeSpace();
   uintb a = base, end = base + data.size();
   Line line;
