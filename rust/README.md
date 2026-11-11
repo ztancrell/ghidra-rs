@@ -107,11 +107,12 @@ AuditRecoveredFunctions, FoldSlotFragments, AddRelocatedEntries and ClearFalseNo
 result as input instead:
 
 - `--functions-from <csv>`: use exactly the functions in the first column of the CSV (any
-  `0x`-prefixed address list, e.g. the pipeline's own `build/functions.csv`). Bodies, sizes,
-  xrefs and gaps are still computed by ghidra-rs.
+  `0x`-prefixed address list, e.g. a fresh ExportFunctions file of the analysis project).
+  Bodies, sizes, xrefs and gaps are still computed by ghidra-rs.
 - `--seeds <csv>`: add these entries to what discovery finds.
 
-Replacing the pipeline's export step (mercs2 paths):
+Replacing the pipeline's export step (mercs2 paths; `build/functions.csv` must be the current
+project's function list):
 
 ```sh
 ghidra-rs analyze orig/Mercenaries2.analysis.exe --functions-from build/functions.csv \
@@ -132,27 +133,33 @@ What discovery does, after Ghidra's analyzers:
 - Create Address Tables: runs of 2+ code pointers in data are disassembled, without making
   functions;
 - Shared Return Calls with contiguous functions: an unconditional jump past the next function
-  entry (or before the previous one) makes its target a function; such jumps count as calls
-  for `callees`/`callers`;
-- non-returning functions: known imports (ExitProcess, exit, abort, ...) and functions whose
-  body has no return; calls to them end the flow;
+  entry (or before the previous one) makes its target a function;
+- imports are read from the import directory through the loaded image (the mercs2 image keeps
+  its IAT in `.rdata` and the directory in `.securom`);
+- `callees`/`callers` count, like Ghidra's `getCalledFunctions`: direct CALLs, JMPs to a
+  function entry, `CALL [slot]` through an import slot (one callee per slot) and
+  `CALL [global]` whose initial value is a function entry;
+- non-returning functions: known imports (ExitProcess, exit, abort, ...), functions whose
+  body has no return, and `JMP [slot]` thunks to non-returning imports; calls to them end the
+  flow;
 - REP string instructions fall through (their p-code branches to themselves);
 - data references: direct memory operands, and immediates that point into a non-executable
   section.
 
 ### Match against Ghidra (Mercenaries2.analysis.exe)
 
-Compared on 2026-11-11 with the files the mercs2 pipeline produced with Ghidra (7.4 MB `.text`).
-Column rates are over the functions both sides have.
+Compared on 2026-11-11 (7.4 MB `.text`). The `--functions-from` reference is a fresh
+ExportFunctions/ExportGaps run on the current mercs2 analysis project (37,635 functions, after
+ClearFalseNoReturn and AddRelocatedEntries); the pipeline's `build/functions*.csv` from
+2026-10-14 predate those steps. Column rates are over the functions both sides have.
 
 | run | reference | functions | size | callees | callers | data_refs | gaps rows |
 |---|---|---|---|---|---|---|---|
-| plain discovery | `functions-analysis.csv` (import only, 23,323) | 22,388 common, 935 missing, 365 extra | 95.6% | 81.1% | 88.4% | 76.3% | (no reference) |
-| `--functions-from functions-analysis-recovered.csv` | same file, `gaps-analysis.csv` | 39,782 of 39,785 | 97.6% | 88.7% | 94.7% | 80.8% | 38,974 of 39,773 identical |
-| `--functions-from functions.csv` (folded) | same file, `gaps.csv` | 37,596 of 37,599 | 98.0% | 89.9% | 96.4% | 80.0% | 39,016 of 39,787 identical |
+| plain discovery | `functions-analysis.csv` (import only, 23,323) | 22,388 common, 935 missing, 365 extra | 95.7% | 87.6% | 88.4% | 76.3% | (no reference) |
+| `--functions-from` fresh export | fresh export (functions and gaps) | 37,633 of 37,635 | 99.1% | 94.6% | 97.2% | 80.5% | 39,243 of 39,557 identical (ours: 39,368 rows) |
 
 `name`, `exported`, `vtable_class` and `lua` match on 99.9% or more of the rows; `fid` is
-always 0 (26 rows differ).
+always 0.
 
 Known differences:
 
@@ -160,14 +167,14 @@ Known differences:
 - Indirect calls and memory operands that Ghidra resolves by constant propagation (`CALL EDX`
   after `MOV EDX,[vtable+n]`, `[ESI+n]` with known ESI) are not resolved: fewer `callees` and
   `data_refs`.
-- Ghidra's non-returning heuristics differ: it treats some returning functions as
-  non-returning (e.g. a 15-byte FSQRT wrapper at 0x401740 with 372 callers), which cuts the
-  bodies of their callers short. ghidra-rs keeps those bodies (larger `size`).
+- Ghidra leaves some JMPs to a function entry as jumps (e.g. 0x72cc00 -> 0x4ddaab, a target
+  recovered after auto-analysis); ghidra-rs counts every one as a call, which matches Ghidra
+  on more rows than counting none.
 - Function sets of plain discovery: Ghidra also creates functions from code pointers and
   operand references in some cases; making functions of all such pointers gave more extra
   functions than found ones, so ghidra-rs does not.
-- The 3 functions missing with `--functions-from` (0x434544, 0x475541, 0x98248c) start inside
-  an instruction that ghidra-rs decoded first from another flow (overlapping code); ghidra-rs
+- The 2 functions missing with `--functions-from` (0x475541, 0x98248c) start inside an
+  instruction that ghidra-rs decoded first from another flow (overlapping code); ghidra-rs
   keeps the first decode and drops the entry.
 
 Time on the same machine: ghidra-rs `analyze` takes about 9.5 s wall (8.3 s analysis, one

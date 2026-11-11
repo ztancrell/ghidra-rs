@@ -22,8 +22,7 @@ pub struct Image {
 
 impl Image {
     pub fn from_pe(bytes: &[u8]) -> Result<Image, String> {
-        use object::pe::ImageNtHeaders32;
-        use object::read::pe::{ImageNtHeaders, ImageOptionalHeader, ImageThunkData, Import, PeFile32};
+        use object::read::pe::{ImageNtHeaders, ImageOptionalHeader, PeFile32};
         use object::{LittleEndian as LE, Object};
         let pe = PeFile32::parse(bytes).map_err(|e| e.to_string())?;
         let opt = pe.nt_headers().optional_header();
@@ -43,25 +42,35 @@ impl Image {
         for x in pe.exports().map_err(|e| e.to_string())? {
             img.exports.push((x.address() as u32, String::from_utf8_lossy(x.name()).into_owned()));
         }
-        if let Some(t) = pe.import_table().map_err(|e| e.to_string())? {
-            let mut descs = t.descriptors().map_err(|e| e.to_string())?;
-            while let Ok(Some(d)) = descs.next() {
-                let lib = String::from_utf8_lossy(t.name(d.name.get(LE)).unwrap_or(b"")).to_uppercase();
-                let first = d.first_thunk.get(LE);
-                let orig = d.original_first_thunk.get(LE);
-                let Ok(mut thunks) = t.thunks(if orig != 0 { orig } else { first }) else { continue };
-                let mut i = 0;
-                while let Ok(Some(th)) = thunks.next::<ImageNtHeaders32>() {
-                    let name = match t.import::<ImageNtHeaders32>(th) {
-                        Ok(Import::Name(_, n)) => String::from_utf8_lossy(n).into_owned(),
-                        _ => format!("Ordinal_{}", th.raw() & 0xffff),
-                    };
-                    img.imports.insert(base + first + 4 * i, (lib.clone(), name));
-                    i += 1;
-                }
+        // Import descriptors, read through the loaded image: names and thunks may lie in other
+        // sections than the directory (the mercs2 image keeps its IAT in .rdata and the
+        // directory in .securom), which object's section-bound ImportTable cannot read.
+        let dir = pe.data_directory(object::pe::IMAGE_DIRECTORY_ENTRY_IMPORT).map_or(0, |d| d.virtual_address.get(LE));
+        let mut d = base + dir;
+        while dir != 0 {
+            let f = |i: u32| img.read_u32(d + 4 * i).unwrap_or(0);
+            let (orig, name, first) = (f(0), f(3), f(4));
+            if name == 0 || first == 0 {
+                break;
             }
+            let lib = img.c_string(base + name).to_uppercase();
+            let mut i = 0;
+            loop {
+                let Some(th) = img.read_u32(base + if orig != 0 { orig } else { first } + 4 * i).filter(|&t| t != 0) else { break };
+                let name =
+                    if th & 0x8000_0000 != 0 { format!("Ordinal_{}", th & 0xffff) } else { img.c_string(base + th + 2) };
+                img.imports.insert(base + first + 4 * i, (lib.clone(), name));
+                i += 1;
+            }
+            d += 20;
         }
         Ok(img)
+    }
+
+    pub fn c_string(&self, a: u32) -> String {
+        let Some(s) = self.block_of(a) else { return String::new() };
+        let b = &s.data[(a - s.addr) as usize..];
+        String::from_utf8_lossy(&b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())]).into_owned()
     }
 
     pub fn section(&self, name: &str) -> Option<&Section> {
@@ -274,7 +283,9 @@ impl Analysis {
                 .filter(|(_, b)| {
                     !b.iter().any(|a| {
                         let i = &an.insns[a];
-                        i.flow == Flow::Return || i.flow == Flow::JumpInd && !an.tables.contains_key(a)
+                        // a JMP [slot] thunk to a non-returning import does not return either
+                        i.flow == Flow::Return
+                            || i.flow == Flow::JumpInd && !an.tables.contains_key(a) && !i.slot.is_some_and(|s| an.noreturn.contains(&s))
                             || i.flow == Flow::Jump && i.target.is_some_and(|t| an.funcs.contains(&t) && !an.noreturn.contains(&t))
                     })
                 })
@@ -316,7 +327,12 @@ impl Analysis {
                 6 | 8 => {
                     flow = if op.opc == 6 { Flow::JumpInd } else { Flow::CallInd };
                     // through a direct memory operand: `CALL dword ptr [slot]`
-                    slot = (op.ins[0].space == code).then_some(op.ins[0].offset as u32);
+                    // (CALL copies the slot to a temporary first, since it pushes the return)
+                    let mut v = &op.ins[0];
+                    if let Some(c) = ops.iter().rev().find(|c| c.opc == 1 && c.out.as_ref().is_some_and(|o| o == v)) {
+                        v = &c.ins[0];
+                    }
+                    slot = (v.space == code).then_some(v.offset as u32);
                 }
                 10 => flow = Flow::Return,
                 _ => {}
@@ -500,12 +516,16 @@ impl Analysis {
         self.bodies = bodies;
     }
 
-    /// Is this instruction a call reference to `t` (a CALL, or a JMP to a function entry,
-    /// which Ghidra's Shared Return Calls analyzer turns into a call)?
-    pub fn call_target(&self, i: &Ins) -> Option<u32> {
-        match i.flow {
-            Flow::Call => i.target,
-            Flow::Jump => i.target.filter(|t| self.funcs.contains(t)),
+    /// The function a call references, as Ghidra's `getCalledFunctions` counts it: a direct
+    /// CALL; a JMP to a function entry (Shared Return Calls makes it a call; counting these
+    /// matches Ghidra better than not, though Ghidra leaves some as jumps, e.g. 0x72cc00);
+    /// `CALL [slot]` through an import slot (the slot stands for the external function);
+    /// `CALL [global]` whose initial value is a function entry.
+    pub fn call_target(&self, img: &Image, i: &Ins) -> Option<u32> {
+        match (i.flow, i.slot) {
+            (Flow::Call | Flow::Jump, _) => i.target.filter(|t| self.funcs.contains(t)),
+            (Flow::CallInd, Some(s)) if img.imports.contains_key(&s) => Some(s),
+            (Flow::CallInd, Some(s)) => img.read_u32(s).filter(|t| self.funcs.contains(t)),
             _ => None,
         }
     }
