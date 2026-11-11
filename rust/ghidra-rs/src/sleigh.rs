@@ -1281,6 +1281,21 @@ impl Sleigh {
         Ok(b.ops)
     }
 
+    /// The register table: (name, offset, size) of every varnode symbol in the `register`
+    /// space, and that space's index (as in `Varnode::space`).
+    pub fn registers(&self) -> (u32, Vec<(&str, u64, u32)>) {
+        let reg = self.spaces.iter().position(|s| s.name == "register").map_or(NONE, |i| i as u32);
+        let list = self
+            .syms
+            .iter()
+            .filter_map(|s| match s.kind {
+                Kind::Varnode { space, off, size } if space == reg => Some((s.name.as_str(), off, size)),
+                _ => None,
+            })
+            .collect();
+        (reg, list)
+    }
+
     pub fn fmt_varnode(&self, v: &Varnode) -> String {
         if v.space == CONST_SPACE {
             return format!("{:#x}:{}", v.offset, v.size);

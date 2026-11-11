@@ -162,7 +162,7 @@ pub fn export_functions(img: &Image, an: &Analysis, out: &mut dyn Write) -> std:
         if i.refs.iter().any(|r| lua_strings.contains(r)) {
             lua.insert(f);
         }
-        if let Some(t) = an.call_target(i).filter(|t| an.funcs.contains(t)) {
+        if let Some(t) = an.call_target(img, i) {
             callers.entry(t).or_default().insert(f);
         }
     }
@@ -174,7 +174,7 @@ pub fn export_functions(img: &Image, an: &Analysis, out: &mut dyn Write) -> std:
             continue;
         }
         let callees: HashSet<u32> =
-            body.iter().filter_map(|a| an.call_target(&an.insns[a])).filter(|t| an.funcs.contains(t)).collect();
+            body.iter().filter_map(|a| an.call_target(img, &an.insns[a])).collect();
         let data_refs: usize = body.iter().map(|a| an.insns[a].refs.len()).sum();
         let name = exports.get(&f).map(|s| demangle(s)).unwrap_or_default();
         writeln!(

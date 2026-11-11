@@ -22,8 +22,7 @@ pub struct Image {
 
 impl Image {
     pub fn from_pe(bytes: &[u8]) -> Result<Image, String> {
-        use object::pe::ImageNtHeaders32;
-        use object::read::pe::{ImageNtHeaders, ImageOptionalHeader, ImageThunkData, Import, PeFile32};
+        use object::read::pe::{ImageNtHeaders, ImageOptionalHeader, PeFile32};
         use object::{LittleEndian as LE, Object};
         let pe = PeFile32::parse(bytes).map_err(|e| e.to_string())?;
         let opt = pe.nt_headers().optional_header();
@@ -43,25 +42,35 @@ impl Image {
         for x in pe.exports().map_err(|e| e.to_string())? {
             img.exports.push((x.address() as u32, String::from_utf8_lossy(x.name()).into_owned()));
         }
-        if let Some(t) = pe.import_table().map_err(|e| e.to_string())? {
-            let mut descs = t.descriptors().map_err(|e| e.to_string())?;
-            while let Ok(Some(d)) = descs.next() {
-                let lib = String::from_utf8_lossy(t.name(d.name.get(LE)).unwrap_or(b"")).to_uppercase();
-                let first = d.first_thunk.get(LE);
-                let orig = d.original_first_thunk.get(LE);
-                let Ok(mut thunks) = t.thunks(if orig != 0 { orig } else { first }) else { continue };
-                let mut i = 0;
-                while let Ok(Some(th)) = thunks.next::<ImageNtHeaders32>() {
-                    let name = match t.import::<ImageNtHeaders32>(th) {
-                        Ok(Import::Name(_, n)) => String::from_utf8_lossy(n).into_owned(),
-                        _ => format!("Ordinal_{}", th.raw() & 0xffff),
-                    };
-                    img.imports.insert(base + first + 4 * i, (lib.clone(), name));
-                    i += 1;
-                }
+        // Import descriptors, read through the loaded image: names and thunks may lie in other
+        // sections than the directory (the mercs2 image keeps its IAT in .rdata and the
+        // directory in .securom), which object's section-bound ImportTable cannot read.
+        let dir = pe.data_directory(object::pe::IMAGE_DIRECTORY_ENTRY_IMPORT).map_or(0, |d| d.virtual_address.get(LE));
+        let mut d = base + dir;
+        while dir != 0 {
+            let f = |i: u32| img.read_u32(d + 4 * i).unwrap_or(0);
+            let (orig, name, first) = (f(0), f(3), f(4));
+            if name == 0 || first == 0 {
+                break;
             }
+            let lib = img.c_string(base + name).to_uppercase();
+            let mut i = 0;
+            loop {
+                let Some(th) = img.read_u32(base + if orig != 0 { orig } else { first } + 4 * i).filter(|&t| t != 0) else { break };
+                let name =
+                    if th & 0x8000_0000 != 0 { format!("Ordinal_{}", th & 0xffff) } else { img.c_string(base + th + 2) };
+                img.imports.insert(base + first + 4 * i, (lib.clone(), name));
+                i += 1;
+            }
+            d += 20;
         }
         Ok(img)
+    }
+
+    pub fn c_string(&self, a: u32) -> String {
+        let Some(s) = self.block_of(a) else { return String::new() };
+        let b = &s.data[(a - s.addr) as usize..];
+        String::from_utf8_lossy(&b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())]).into_owned()
     }
 
     pub fn section(&self, name: &str) -> Option<&Section> {
@@ -97,6 +106,7 @@ pub struct Ins {
     pub target: Option<u32>, // direct flow target
     pub slot: Option<u32>,   // memory operand of an indirect call/jump through a constant address
     pub refs: Vec<u32>,      // data references: constant addresses inside the image
+    pub code_imms: Vec<u32>, // immediates that point into an executable section
 }
 
 impl Ins {
@@ -274,7 +284,9 @@ impl Analysis {
                 .filter(|(_, b)| {
                     !b.iter().any(|a| {
                         let i = &an.insns[a];
-                        i.flow == Flow::Return || i.flow == Flow::JumpInd && !an.tables.contains_key(a)
+                        // a JMP [slot] thunk to a non-returning import does not return either
+                        i.flow == Flow::Return
+                            || i.flow == Flow::JumpInd && !an.tables.contains_key(a) && !i.slot.is_some_and(|s| an.noreturn.contains(&s))
                             || i.flow == Flow::Jump && i.target.is_some_and(|t| an.funcs.contains(&t) && !an.noreturn.contains(&t))
                     })
                 })
@@ -300,7 +312,7 @@ impl Analysis {
         let code = sl.code_space();
         let next = a as u64 + len as u64;
         let (mut flow, mut target, mut slot) = (Flow::Fall, None, None);
-        let mut refs = Vec::new();
+        let (mut refs, mut code_imms) = (Vec::new(), Vec::new());
         for op in &ops {
             match op.opc {
                 // REP-prefixed string ops branch to their own start or end: no flow change
@@ -316,7 +328,12 @@ impl Analysis {
                 6 | 8 => {
                     flow = if op.opc == 6 { Flow::JumpInd } else { Flow::CallInd };
                     // through a direct memory operand: `CALL dword ptr [slot]`
-                    slot = (op.ins[0].space == code).then_some(op.ins[0].offset as u32);
+                    // (CALL copies the slot to a temporary first, since it pushes the return)
+                    let mut v = &op.ins[0];
+                    if let Some(c) = ops.iter().rev().find(|c| c.opc == 1 && c.out.as_ref().is_some_and(|o| o == v)) {
+                        v = &c.ins[0];
+                    }
+                    slot = (v.space == code).then_some(v.offset as u32);
                 }
                 10 => flow = Flow::Return,
                 _ => {}
@@ -324,6 +341,11 @@ impl Analysis {
             // data references: direct memory operands (ram varnodes), not flow targets
             let skip = usize::from(matches!(op.opc, 4 | 5 | 7));
             for v in op.ins.iter().skip(skip).chain(op.out.as_ref()) {
+                // e.g. PUSH offset callback (not CALL's pushed return address)
+                let imm = v.offset as u32;
+                if v.space == 0 && v.size == 4 && v.offset != next && self.is_code(img, imm) && !code_imms.contains(&imm) {
+                    code_imms.push(imm);
+                }
                 let is_ref = match v.space {
                     0 => v.size == 4 && img.block_of(v.offset as u32).is_some_and(|s| !s.exec), // immediate pointing at data
                     s => s == code && img.block_of(v.offset as u32).is_some(),
@@ -333,7 +355,22 @@ impl Analysis {
                 }
             }
         }
-        Some(Ins { len: len as u8, flow, target, slot, refs })
+        Some(Ins { len: len as u8, flow, target, slot, refs, code_imms })
+    }
+
+    /// Ghidra's `disassemble(addr)` after analysis: recursive descent from `addrs` into bytes no
+    /// code covers yet, without making functions.
+    pub fn disassemble(&mut self, img: &Image, sl: &Sleigh, addrs: &[u32]) {
+        let mut owner = vec![0u8; (self.code_hi - self.code_lo) as usize];
+        for (&a, i) in &self.insns {
+            let o = (a - self.code_lo) as usize;
+            owner[o] = 1;
+            owner[o + 1..o + i.len as usize].fill(2);
+        }
+        let funcs = self.funcs.clone();
+        let mut queue: Vec<u32> = addrs.iter().copied().filter(|&a| self.is_code(img, a)).collect();
+        self.descend(img, sl, &mut sl.new_parse(), &mut owner, &mut queue);
+        self.funcs = funcs;
     }
 
     /// Recursive descent from every queued address. Call targets in .text become functions.
@@ -381,18 +418,28 @@ impl Analysis {
         }
     }
 
-    // `JMP dword ptr [reg*4 + table]`, bounded by a preceding `CMP reg,imm` when there is one.
+    // `JMP dword ptr [reg*4 + table]`, bounded by a preceding `CMP reg,imm` when there is one,
+    // possibly through a byte index table (`MOVZX reg,byte ptr [idx + bytetable]`). Cases must
+    // lie in the jump's own section.
     fn switch_table(&self, img: &Image, at: u32, recent: &[u32]) -> Option<(u32, Vec<u32>)> {
         let bytes = |a: u32| img.block_of(a).map(|s| &s.data[(a - s.addr) as usize..]);
         let b = bytes(at)?.get(..7)?;
         if b[0] != 0xff || b[1] != 0x24 || b[2] & 0xc7 != 0x85 {
             return None;
         }
-        let reg = (b[2] >> 3) & 7;
+        let mut reg = (b[2] >> 3) & 7; // the register the CMP bounds
         let table = u32::from_le_bytes(b[3..7].try_into().unwrap());
         let mut count = None;
+        let mut index_table = None; // two-level switch: `MOVZX reg,byte ptr [r + bytetable]`
         for &r in recent.iter().rev().take(8) {
             let Some(c) = bytes(r) else { continue };
+            if let [0x0f, 0xb6, m, d0, d1, d2, d3, ..] = c {
+                if index_table.is_none() && m & 0xc0 == 0x80 && m & 7 != 4 && (m >> 3) & 7 == reg {
+                    index_table = Some(u32::from_le_bytes([*d0, *d1, *d2, *d3]));
+                    reg = m & 7;
+                    continue;
+                }
+            }
             let imm = match c {
                 [0x83, m, i, ..] if *m == 0xf8 | reg => Some(*i as u32),
                 [0x81, m, i0, i1, i2, i3, ..] if *m == 0xf8 | reg => Some(u32::from_le_bytes([*i0, *i1, *i2, *i3])),
@@ -404,10 +451,16 @@ impl Analysis {
                 break;
             }
         }
+        // The CMP bounds the byte table; the jump table has max(byte table) + 1 entries.
+        if let (Some(bt), Some(n)) = (index_table, count) {
+            let b = img.block_of(bt).map(|s| &s.data[(bt - s.addr) as usize..])?;
+            count = Some(*b.get(..n.min(b.len()))?.iter().max()? as usize + 1);
+        }
+        let own = img.block_of(at)?.addr;
         let mut cases = Vec::new();
         for i in 0..count.unwrap_or(1024).min(1024) {
             match img.read_u32(table + 4 * i as u32) {
-                Some(t) if self.is_code(img, t) => cases.push(t),
+                Some(t) if self.is_code(img, t) && img.block_of(t).is_some_and(|s| s.addr == own) => cases.push(t),
                 _ => break,
             }
         }
@@ -484,12 +537,16 @@ impl Analysis {
         self.bodies = bodies;
     }
 
-    /// Is this instruction a call reference to `t` (a CALL, or a JMP to a function entry,
-    /// which Ghidra's Shared Return Calls analyzer turns into a call)?
-    pub fn call_target(&self, i: &Ins) -> Option<u32> {
-        match i.flow {
-            Flow::Call => i.target,
-            Flow::Jump => i.target.filter(|t| self.funcs.contains(t)),
+    /// The function a call references, as Ghidra's `getCalledFunctions` counts it: a direct
+    /// CALL; a JMP to a function entry (Shared Return Calls makes it a call; counting these
+    /// matches Ghidra better than not, though Ghidra leaves some as jumps, e.g. 0x72cc00);
+    /// `CALL [slot]` through an import slot (the slot stands for the external function);
+    /// `CALL [global]` whose initial value is a function entry.
+    pub fn call_target(&self, img: &Image, i: &Ins) -> Option<u32> {
+        match (i.flow, i.slot) {
+            (Flow::Call | Flow::Jump, _) => i.target.filter(|t| self.funcs.contains(t)),
+            (Flow::CallInd, Some(s)) if img.imports.contains_key(&s) => Some(s),
+            (Flow::CallInd, Some(s)) => img.read_u32(s).filter(|t| self.funcs.contains(t)),
             _ => None,
         }
     }

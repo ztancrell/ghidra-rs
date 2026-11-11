@@ -4,7 +4,8 @@ use std::io::Write;
 use std::path::PathBuf;
 
 const USAGE: &str = "usage: ghidra-rs disasm <binary> [--func <symbol>|--addr <hex>] [--count N] [--pcode] [--sla <file>]
-       ghidra-rs analyze <pe32> [--functions <csv>] [--gaps <csv>] [--seeds <csv> | --functions-from <csv>]... [--sla <file>]";
+       ghidra-rs analyze <pe32> [--functions <csv>] [--gaps <csv>] [--abi-callers <register_abi.csv> <out.csv>]
+                         [--seeds <csv> | --functions-from <csv>]... [--sla <file>]";
 
 fn main() {
     if let Err(e) = run() {
@@ -124,6 +125,7 @@ fn run() -> Result<(), String> {
 fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     use ghidra_rs::{analysis, scripts};
     let (mut functions, mut gaps, mut seeds, mut exact) = (None, None, Vec::new(), false);
+    let mut abi: Option<(String, String)> = None;
     let mut sla = std::env::var_os("GHIDRA_RS_SLA").map(PathBuf::from).unwrap_or_else(|| Sleigh::sla_path("x86"));
     let mut it = args.iter();
     while let Some(flag) = it.next() {
@@ -132,6 +134,10 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
             "--functions" => functions = Some(val),
             "--gaps" => gaps = Some(val),
             "--sla" => sla = PathBuf::from(val),
+            "--abi-callers" => {
+                let out = it.next().cloned().ok_or("--abi-callers needs <register_abi.csv> <out.csv>")?;
+                abi = Some((val, out));
+            }
             // function entries: the first column of each 0x-prefixed line. --seeds adds them
             // to what discovery finds; --functions-from makes them the whole function set.
             "--seeds" | "--functions-from" => {
@@ -145,11 +151,35 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
             _ => return Err(USAGE.into()),
         }
     }
+    // CheckAbiCallers reads config/securom_functions.csv next to register_abi.csv: the targets
+    // (second column) are the function bodies the wrapper relocated, which the pipeline's
+    // AddRelocatedEntries.java makes functions.
+    let mut relocated = std::collections::HashSet::new();
+    if let Some((csv, _)) = &abi {
+        let p = std::path::Path::new(csv).with_file_name("securom_functions.csv");
+        let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+        for t in text.lines().skip(1).filter_map(|l| l.split(',').nth(1)) {
+            let a = u32::from_str_radix(t.trim_start_matches("0x"), 16).map_err(|e| format!("{}: {t}: {e}", p.display()))?;
+            relocated.insert(a);
+            seeds.push(a);
+        }
+    }
     let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
     let img = analysis::Image::from_pe(&data).map_err(|e| format!("{path}: {e}"))?;
     let sl = Sleigh::load(&sla)?;
     let t = std::time::Instant::now();
-    let an = analysis::Analysis::run(&img, &sl, &seeds, exact)?;
+    let mut an = analysis::Analysis::run(&img, &sl, &seeds, exact)?;
+    if let Some((csv, _)) = &abi {
+        // The script disassembles a contract entry analysis never reached (a vtable-only function).
+        let text = std::fs::read_to_string(csv).map_err(|e| format!("{csv}: {e}"))?;
+        let entries: Vec<u32> = text
+            .lines()
+            .filter(|l| l.split(',').nth(2) != Some("extern"))
+            .filter_map(|l| u32::from_str_radix(l.split(',').next()?.strip_prefix("0x")?, 16).ok())
+            .filter(|a| !an.insns.contains_key(a))
+            .collect();
+        an.disassemble(&img, &sl, &entries);
+    }
     eprintln!(
         "analyzed {} instructions, {} functions ({} imports) in {:.1}s",
         an.insns.len(),
@@ -165,6 +195,16 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     if let Some(p) = gaps {
         let (covered, total) = scripts::export_gaps(&img, &an, &mut create(&p)?).map_err(|e| e.to_string())?;
         println!("function coverage: {covered} / {total} .text bytes");
+    }
+    if let Some((csv, out)) = abi {
+        let t = std::time::Instant::now();
+        let text = std::fs::read_to_string(&csv).map_err(|e| format!("{csv}: {e}"))?;
+        let mut ck = ghidra_rs::abi::Checker::new(&img, &an, &sl, relocated);
+        let mut w = create(&out)?;
+        let (total, outputs, inputs) = ck.run(&text, &mut w)?;
+        w.flush().map_err(|e| format!("{out}: {e}"))?;
+        println!("Checked {total} references into {out}; {outputs} output findings; {inputs} input findings");
+        eprintln!("abi check in {:.1}s", t.elapsed().as_secs_f64());
     }
     Ok(())
 }
