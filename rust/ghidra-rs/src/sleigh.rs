@@ -696,6 +696,11 @@ impl Sleigh {
         self.code_space
     }
 
+    /// Index of the `unique` (temporary) space.
+    pub fn uniq_space(&self) -> u32 {
+        self.uniq_space
+    }
+
     pub fn new_parse(&self) -> Parse {
         Parse {
             buf: [0; 48],

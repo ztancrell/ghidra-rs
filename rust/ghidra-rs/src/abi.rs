@@ -577,24 +577,18 @@ impl<'a> Checker<'a> {
         // and runs of 4+ aligned words that are all addresses in the image (Create Address
         // Tables). With `data_pointers`, every aligned word equal to an entry.
         let referenced: FxSet<u32> = an.insns.values().flat_map(|i| i.refs.iter().copied()).collect();
-        let is_addr = |v: u32| self.img.block_of(v).is_some_and(|s| s.name != "Headers");
         let (ed, en) = self.img.export_dir;
         for s in self.img.sections.iter().filter(|s| !s.exec && s.name != "Headers") {
-            let words: Vec<u32> = s.data.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
-            let mut keep = vec![self.data_pointers; words.len()];
-            let mut o = 0;
-            while o < words.len() {
-                let run = words[o..].iter().take_while(|&&v| is_addr(v)).count();
-                if run >= 4 {
-                    keep[o..o + run].fill(true);
-                }
-                o += run.max(1);
-            }
-            for (o, &v) in words.iter().enumerate() {
+            for (o, c) in s.data.chunks_exact(4).enumerate() {
                 let at = s.addr + 4 * o as u32;
-                if (keep[o] || referenced.contains(&at)) && !(at >= ed && at - ed < en) {
-                    add(v, at, RefKind::Data);
+                if (self.data_pointers || referenced.contains(&at)) && !an.table_slots.contains_key(&at) && !(at >= ed && at - ed < en) {
+                    add(u32::from_le_bytes(c.try_into().unwrap()), at, RefKind::Data);
                 }
+            }
+        }
+        for (&at, &v) in &an.table_slots {
+            if !(at >= ed && at - ed < en) {
+                add(v, at, RefKind::Data);
             }
         }
         let is_code = |v: u32| self.img.block_of(v).is_some_and(|s| s.exec);
@@ -966,10 +960,21 @@ impl<'a> Checker<'a> {
         // `CALL ESI` after `MOV ESI,dword ptr [slot]`, which Ghidra resolves by constant
         // propagation. ponytail: the nearest write of the register before the call, by address
         // within the function, must be that MOV; full constant propagation would follow flow.
+        // Outside every function (code reached through constants or address tables): the
+        // straight line of instructions falling into the call.
         let r = self.ins(a)?.reg0?;
-        let f = *self.func_of.get(&a)?;
-        let body = self.an.bodies.get(&f)?;
-        let before: Vec<u32> = body[..body.partition_point(|&b| b < a)].iter().rev().copied().collect();
+        let before: Vec<u32> = match self.func_of.get(&a).and_then(|f| self.an.bodies.get(f)) {
+            Some(body) => body[..body.partition_point(|&b| b < a)].iter().rev().copied().collect(),
+            None => std::iter::successors(Some(a), |&c| {
+                self.prev(c).filter(|p| {
+                    let i = &self.an.insns[p];
+                    p + i.len as u32 == c && i.falls_through()
+                })
+            })
+            .skip(1)
+            .take(64)
+            .collect(),
+        };
         for b in before {
             let i = self.ins(b)?;
             if i.results.iter().any(|&w| self.regs.base(w) == self.regs.base(r)) {

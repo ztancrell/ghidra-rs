@@ -123,6 +123,10 @@ pub struct Ins {
     pub code_imms: Vec<u32>, // immediates that point into an executable section
 }
 
+/// A folded constant: (space, offset, size, value, computed rather than a plain immediate).
+#[derive(Clone, Copy)]
+pub struct Folded(u32, u64, u32, u32, bool);
+
 impl Ins {
     pub fn falls_through(&self) -> bool {
         !matches!(self.flow, Flow::Jump | Flow::JumpInd | Flow::Return)
@@ -139,6 +143,7 @@ pub struct Analysis {
     pub funcs: BTreeSet<u32>,
     pub noreturn: HashSet<u32>,          // functions and IAT slots that do not return
     pub bodies: BTreeMap<u32, Vec<u32>>, // function -> sorted instruction addresses
+    pub table_slots: BTreeMap<u32, u32>, // Create Address Tables (`disassemble` with constants): slot -> pointer
     fpu_ip: Option<(u32, u64)>,          // FPUInstructionPointer, which x87 constructors set to inst_start
 }
 
@@ -209,6 +214,7 @@ impl Analysis {
             funcs: BTreeSet::new(),
             noreturn: HashSet::new(),
             bodies: BTreeMap::new(),
+            table_slots: BTreeMap::new(),
             fpu_ip: None,
         };
         let (rs, list) = sl.registers();
@@ -319,7 +325,7 @@ impl Analysis {
         Ok(an)
     }
 
-    fn decode(&self, img: &Image, sl: &Sleigh, p: &mut crate::sleigh::Parse, a: u32) -> Option<Ins> {
+    fn decode(&self, img: &Image, sl: &Sleigh, p: &mut crate::sleigh::Parse, a: u32, fold: &mut Vec<Folded>) -> Option<Ins> {
         let sec = img.block_of(a)?;
         let o = (a - sec.addr) as usize;
         let len = sl.decode(p, a as u64, &sec.data[o..]).ok()?;
@@ -331,7 +337,52 @@ impl Analysis {
         let next = a as u64 + len as u64;
         let (mut flow, mut target, mut slot) = (Flow::Fall, None, None);
         let (mut refs, mut code_imms) = (Vec::new(), Vec::new());
+        // Local constant fold (a stand-in for Ghidra's constant propagation): 4-byte register
+        // and temporary values from immediates, initialised memory, ADD/SUB/XOR/AND/OR. A
+        // computed value (not a plain immediate) stored to memory that is code is a code
+        // constant, e.g. SecuROM's `MOV EDI,[a]; XOR EDI,[b]; XCHG [ESP],EDI`.
+        let uniq = sl.uniq_space();
+        fold.retain(|f| f.0 != uniq);
+        let val = |v: &crate::sleigh::Varnode, fold: &Vec<Folded>| -> Option<(u32, bool)> {
+            match v.space {
+                0 => Some((v.offset as u32, false)),
+                s if s == code => (v.size == 4).then(|| img.read_u32(v.offset as u32)).flatten().map(|x| (x, true)),
+                s => fold.iter().find(|f| f.0 == s && f.1 == v.offset && f.2 == v.size).map(|f| (f.3, f.4)),
+            }
+        };
         for op in &ops {
+            if op.opc == 3 {
+                if let Some((x, true)) = op.ins.get(2).and_then(|v| val(v, fold)) {
+                    if self.is_code(img, x) && !code_imms.contains(&x) {
+                        code_imms.push(x);
+                    }
+                }
+            }
+            if let Some(o) = op.out.as_ref().filter(|o| o.space != code) {
+                let r = match (op.opc, op.ins.as_slice()) {
+                    (1, [x]) if o.size == 4 => val(x, fold),
+                    (2, [_, x]) if o.size == 4 => val(x, fold).and_then(|(x, _)| img.read_u32(x)).map(|x| (x, true)),
+                    (19 | 20 | 26 | 27 | 28, [x, y]) if o.size == 4 => val(x, fold).zip(val(y, fold)).map(|((x, _), (y, _))| {
+                        let r = match op.opc {
+                            19 => x.wrapping_add(y),
+                            20 => x.wrapping_sub(y),
+                            26 => x ^ y,
+                            27 => x & y,
+                            _ => x | y,
+                        };
+                        (r, true)
+                    }),
+                    _ => None,
+                };
+                let end = o.offset + o.size as u64;
+                fold.retain(|f| f.0 != o.space || f.1 >= end || f.1 + f.2 as u64 <= o.offset);
+                if let Some((x, c)) = r {
+                    fold.push(Folded(o.space, o.offset, o.size, x, c));
+                }
+            }
+            if matches!(op.opc, 7 | 8) {
+                fold.clear(); // ponytail: a call clobbers everything; per-ABI volatile sets if needed
+            }
             match op.opc {
                 // REP-prefixed string ops branch to their own start or end: no flow change
                 4 | 5 if op.ins[0].space == code && (op.ins[0].offset == a as u64 || op.ins[0].offset == next) => {}
@@ -382,7 +433,9 @@ impl Analysis {
     /// code covers yet, without making functions. With `constants`, also the code Ghidra's
     /// analysis decodes beyond the function bodies, which reference checks see: code reached
     /// through code constants (`PUSH offset callback`, `MOV [g],offset fn`, SecuROM's
-    /// `PUSH next; PUSH callee; RET`), repeated over what that reaches. Bodies stay as they are.
+    /// `PUSH next; PUSH callee; RET`, values the local fold computes) where `valid_subroutine`
+    /// accepts them, and the entries of address tables of code (`address_tables`), repeated
+    /// over what that reaches. Bodies stay as they are.
     pub fn disassemble(&mut self, img: &Image, sl: &Sleigh, addrs: &[u32], constants: bool) {
         let mut owner = vec![0u8; (self.code_hi - self.code_lo) as usize];
         for (&a, i) in &self.insns {
@@ -395,12 +448,183 @@ impl Analysis {
         let mut p = sl.new_parse();
         let mut log: Vec<u32> = if constants { self.insns.keys().copied().collect() } else { Vec::new() };
         self.descend(img, sl, &mut p, &mut owner, &mut queue, &mut log);
+        let mut checked = HashSet::new(); // targets asked once, as Ghidra's checkedTargets
         while constants && !log.is_empty() {
-            let mut queue: Vec<u32> = log.iter().flat_map(|a| self.insns[a].code_imms.iter().copied()).collect();
+            let mut queue: Vec<u32> = Vec::new();
+            for t in log.iter().flat_map(|a| self.insns[a].code_imms.iter().copied()).collect::<Vec<_>>() {
+                if owner[(t - self.code_lo) as usize] == 0 && checked.insert(t) && self.valid_subroutine(img, sl, &mut p, &owner, t) {
+                    queue.push(t);
+                }
+            }
             log.clear();
             self.descend(img, sl, &mut p, &mut owner, &mut queue, &mut log);
+            if log.is_empty() {
+                // Create Address Tables over what is still undefined; tables of code are
+                // disassembled, and what that reaches is checked for code constants again.
+                let mut queue = self.address_tables(img, &owner);
+                queue.retain(|&t| owner[(t - self.code_lo) as usize] == 0);
+                self.descend(img, sl, &mut p, &mut owner, &mut queue, &mut log);
+            }
         }
         self.funcs = funcs;
+    }
+
+    /// PseudoDisassembler.isValidSubroutine(entry, false), which Ghidra asks before it
+    /// disassembles at a code constant ("Found code from operand reference"): the flow from
+    /// `entry` (not into calls, nor jumps to functions) decodes without a bad instruction, runs
+    /// into no existing code, jumps only to instruction starts, never branches conditionally
+    /// to its own fallthrough, and returns, jumps through a register or reaches a function;
+    /// a single instruction must reach a function. Not modelled: references into the body.
+    fn valid_subroutine(&self, img: &Image, sl: &Sleigh, p: &mut crate::sleigh::Parse, owner: &[u8], entry: u32) -> bool {
+        if img.read_u32(entry) == Some(0) && img.read_u32(entry + 4) == Some(0) {
+            return false;
+        }
+        let (mut body, mut targets) = (BTreeMap::new(), Vec::new());
+        let (mut terminated, mut called) = (false, false);
+        let mut work = vec![entry];
+        let mut fold = Vec::new();
+        while let Some(mut a) = work.pop() {
+            while body.len() < 4000 && !body.contains_key(&a) {
+                if !self.is_code(img, a) {
+                    return false;
+                }
+                let Some(i) = self.decode(img, sl, p, a, &mut fold) else { return false };
+                let o = (a - self.code_lo) as usize;
+                if owner.get(o..o + i.len as usize).is_none_or(|b| b.iter().any(|&b| b != 0)) {
+                    return false;
+                }
+                body.insert(a, i.len);
+                let next = a + i.len as u32;
+                match (i.flow, i.target) {
+                    (Flow::Return, _) | (Flow::JumpInd, _) => terminated = true,
+                    (Flow::Call, Some(t)) => {
+                        called |= self.funcs.contains(&t);
+                        if self.noreturn.contains(&t) {
+                            break;
+                        }
+                    }
+                    (Flow::CondJump, Some(t)) if t == next => return false,
+                    (Flow::Jump | Flow::CondJump, Some(t)) if self.funcs.contains(&t) => called = true,
+                    (Flow::Jump | Flow::CondJump, Some(t)) => {
+                        targets.push(t);
+                        work.push(t);
+                    }
+                    _ => {}
+                }
+                if !i.falls_through() {
+                    break;
+                }
+                a = next;
+            }
+        }
+        let start_of = |t: u32| body.range(..=t).next_back().map(|(&s, &l)| (s, t < s + l as u32));
+        if targets.iter().any(|&t| matches!(start_of(t), Some((s, true)) if s != t)) {
+            return false; // a jump into the middle of an instruction of the body
+        }
+        (terminated || called) && (called || body.len() > 1)
+    }
+
+    /// Ghidra's Create Address Tables analyzer (AddressTableAnalyzer, AddressTable.getEntry and
+    /// checkTable) over the bytes no instruction covers, in every section: runs of at least
+    /// `getThresholdRunOfValidPointers` (one in a billion by chance) 4-aligned words that are
+    /// addresses (not 0, not below 1024), cut by a reference into the run (after its second
+    /// word, or before its end), the next instruction, a pointer into the middle of an
+    /// instruction or to an instruction something falls into, a UTF-16 string, or a jump of
+    /// more than 0xffffff between neighbours (which drops that entry). Adds the slots to
+    /// `table_slots` and returns the entries of tables whose entries are all code.
+    /// Not modelled: Ghidra's defined data (strings, structures) and its order of analysis.
+    pub fn address_tables(&mut self, img: &Image, owner: &[u8]) -> Vec<u32> {
+        let undefined = |a: u32| !self.is_code(img, a) || owner[(a - self.code_lo) as usize] == 0;
+        let bytes: f64 = img.sections.iter().map(|s| s.data.len() as f64).sum();
+        let min = ((1e-9f64).ln() / (bytes / 2f64.powi(32)).ln()).ceil().max(2.0) as usize;
+        // Reference destinations in undefined bytes (anything else is past the next instruction).
+        let mut refs: BTreeSet<u32> = BTreeSet::new();
+        for i in self.insns.values() {
+            refs.extend(i.refs.iter().chain(&i.code_imms).chain(&i.target).copied().filter(|&t| undefined(t)));
+        }
+        for c in self.tables.values() {
+            refs.extend(c.iter().copied().filter(|&t| undefined(t)));
+        }
+        let collides = |t: u32| {
+            self.is_code(img, t)
+                && match owner[(t - self.code_lo) as usize] {
+                    2 => true, // into the middle of an instruction
+                    1 => self.insns.range(..t).next_back().is_some_and(|(&a, i)| {
+                        a + i.len as u32 == t
+                            && i.falls_through()
+                            && !(i.flow == Flow::Call && i.target.is_some_and(|t| self.noreturn.contains(&t)))
+                    }),
+                    _ => false,
+                }
+        };
+        let (mut code, mut slots) = (Vec::new(), Vec::new());
+        for s in &img.sections {
+            let end = s.addr + s.data.len() as u32;
+            let word = |a: u32| u32::from_le_bytes(s.data[(a - s.addr) as usize..][..4].try_into().unwrap());
+            let mut top = s.addr;
+            while top + 4 <= end {
+                if !undefined(top) {
+                    top += 4;
+                    continue;
+                }
+                // getEntry
+                let mut elems: Vec<u32> = Vec::new();
+                let mut cur = top;
+                while cur + 4 <= end {
+                    let v = word(cur);
+                    if v < 1024 || img.block_of(v).is_none() || (elems.len() > 1 && refs.contains(&cur)) || collides(v) {
+                        break;
+                    }
+                    elems.push(v);
+                    cur += 4;
+                }
+                let mut count = elems.len();
+                if count >= min {
+                    let stop = refs.range(top + 1..top + 4 * count as u32).next().copied();
+                    let stop = stop.into_iter().chain((top..top + 4 * count as u32).find(|&a| !undefined(a)));
+                    if let Some(at) = stop.min() {
+                        count = count.min(((at - top) / 4) as usize);
+                    }
+                }
+                if count < min {
+                    top += 4;
+                    continue;
+                }
+                elems.truncate(count);
+                // processAddressTable: checkTable, make the table, carry on one entry past it
+                let mut first = 0;
+                while first < count {
+                    let at = |i: usize| top + 4 * i as u32;
+                    let strings = utf16_strings(s, at(first), at(count));
+                    let mut len = 0;
+                    for i in first..count {
+                        let offcut = self.is_code(img, elems[i]) && owner[(elems[i] - self.code_lo) as usize] == 2;
+                        let far = i > first && elems[i - 1].abs_diff(elems[i]) > 0xff_ffff;
+                        if strings.iter().any(|r| r.contains(&at(i)) || r.contains(&(at(i) + 3))) || far || offcut {
+                            break;
+                        }
+                        len += 1;
+                    }
+                    if len >= min {
+                        let t = &elems[first..first + len];
+                        for (i, &v) in t.iter().enumerate() {
+                            slots.push((at(first + i), v));
+                            if undefined(v) {
+                                refs.insert(v);
+                            }
+                        }
+                        // ponytail: "valid code" is "in an executable section"; Ghidra pseudo-disassembles
+                        if t.iter().all(|&v| self.is_code(img, v)) {
+                            code.extend(t);
+                        }
+                    }
+                    first += len + 1;
+                }
+                top += 4 * count as u32;
+            }
+        }
+        self.table_slots.extend(slots);
+        code
     }
 
     /// Recursive descent from every queued address. Call targets in .text become functions.
@@ -408,8 +632,9 @@ impl Analysis {
         while let Some(start) = queue.pop() {
             let mut a = start;
             let mut recent: Vec<u32> = Vec::new(); // straight-line history, for switch bounds
+            let mut fold = Vec::new(); // ponytail: straight-line, not reset at labels
             while self.is_code(img, a) && owner[(a - self.code_lo) as usize] == 0 {
-                let Some(ins) = self.decode(img, sl, p, a) else { break };
+                let Some(ins) = self.decode(img, sl, p, a, &mut fold) else { break };
                 let o = (a - self.code_lo) as usize;
                 if owner[o..o + ins.len as usize].iter().any(|&b| b != 0) {
                     break; // would overlap code already there
@@ -585,4 +810,33 @@ impl Analysis {
     pub fn body_size(&self, f: u32) -> u64 {
         self.bodies[&f].iter().map(|a| self.insns[a].len as u64).sum()
     }
+}
+
+/// AddressTableAnalyzer.findPossibleStrings over `[from, to)`: the ranges of UTF-16 strings
+/// longer than 4 characters (tab, CR, LF and 0x20..0x7e, up to a 0 or half the range).
+fn utf16_strings(s: &Section, from: u32, to: u32) -> Vec<std::ops::RangeInclusive<u32>> {
+    let max = (to - from) / 2;
+    let short = |a: u32| s.data.get((a - s.addr) as usize..(a - s.addr) as usize + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+    let mut out = Vec::new();
+    let mut a = from;
+    while a < to {
+        let mut n = 0;
+        while n < max {
+            match short(a + 2 * n) {
+                Some(0) => {
+                    n += 1;
+                    break;
+                }
+                Some(9 | 10 | 13 | 0x20..=0x7e) => n += 1,
+                _ => break,
+            }
+        }
+        if n > 4 {
+            out.push(a..=a + 2 * n);
+            a += 2 * n;
+        } else {
+            a += 1;
+        }
+    }
+    out
 }

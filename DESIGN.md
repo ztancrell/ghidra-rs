@@ -18,6 +18,12 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   only where Ghidra would define one (a word an instruction references, or a run of 4+ image
   addresses). The wider scan (every aligned word in `.rdata`/`.data`/SecuROM data equal to a
   function entry), which finds callers Ghidra misses, stays behind `--data-pointers`.
+  Superseded (same day, branch `coverage`): "a run of 4+ image addresses" is now Ghidra's own
+  Create Address Tables rule, ported (`Analysis::address_tables`, see `rust/README.md`).
+- 2026-11-11: To reach the code Ghidra reaches, ghidra-rs improves its own disassembly
+  coverage (a local constant fold, Ghidra's address tables in every section, Ghidra's
+  valid-subroutine check on code constants). It does not import Ghidra's instruction set
+  (no `--code-from` option).
 
 ## Milestones
 
@@ -37,7 +43,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    check: `ghidra-rs analyze --abi-callers`. On branch `m2b-abi-callers`: 96.5% of the
    reference rows identical. On branch `abi-dropin` (a drop-in for the script, judged by the
    mercs2 ABI gate): 97.7% identical, output independent of the thread count (details, timing
-   and the causes of the rest in `rust/README.md`).
+   and the causes of the rest in `rust/README.md`). On branch `coverage` (more of the code
+   Ghidra reaches: folded SecuROM pointers, address tables in code sections, Ghidra's
+   valid-subroutine check): 98.3% identical, and every reference `violation` the gate missed
+   before is found.
 3. Decompilation: a Rust decompiler, or FFI to the existing C++ decompiler as a stopgap.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and

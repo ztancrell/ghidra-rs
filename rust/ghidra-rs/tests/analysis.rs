@@ -61,10 +61,11 @@ fn code_constants_x86_32() {
         0x68, 0x20, 0x10, 0x40, 0x00, // 401007 PUSH 0x401020 (callee)
         0xc3, // 40100c RET
     ];
+    // (a lone RET would be no valid subroutine to Ghidra, so each target is two instructions)
     text.resize(0x10, 0xcc);
-    text.push(0xc3); // 401010 RET
+    text.extend([0x33, 0xc0, 0xc3]); // 401010 XOR EAX,EAX; RET
     text.resize(0x20, 0xcc);
-    text.push(0xc3); // 401020 RET
+    text.extend([0x33, 0xc0, 0xc3]); // 401020 XOR EAX,EAX; RET
     text.resize(0x30, 0xcc);
     let img = Image { sections: vec![Section { name: ".text".into(), exec: true, addr: 0x401000, data: text }], ..Image::default() };
     let mut an = Analysis::run(&img, &sl, &[0x401000], true).unwrap();
@@ -73,4 +74,35 @@ fn code_constants_x86_32() {
     an.disassemble(&img, &sl, &[], true);
     assert!(an.insns.contains_key(&0x401010) && an.insns.contains_key(&0x401020));
     assert_eq!(an.bodies[&0x401000].len(), 4);
+}
+
+// SecuROM hides a code address as two dwords XORed together (`MOV EDI,[a]; XOR EDI,[b];
+// PUSH EDI`): the local constant fold makes the stored value a code constant at the PUSH,
+// and the code there is disassembled (it decodes, returns, and is more than one instruction).
+#[test]
+fn xor_folded_code_pointer_x86_32() {
+    let sl = Sleigh::load(&Sleigh::sla_path("x86")).unwrap();
+    let mut text = vec![
+        0x8b, 0x3d, 0x00, 0x20, 0x40, 0x00, // 401000 MOV EDI,[0x402000]
+        0x33, 0x3d, 0x04, 0x20, 0x40, 0x00, // 401006 XOR EDI,[0x402004]
+        0x57, // 40100c PUSH EDI
+        0xc3, // 40100d RET
+    ];
+    text.resize(0x20, 0xcc);
+    text.extend([0x33, 0xc0, 0xc3]); // 401020 XOR EAX,EAX; RET
+    text.resize(0x30, 0xcc);
+    let mut data = 0x1234_5678u32.to_le_bytes().to_vec();
+    data.extend((0x1234_5678u32 ^ 0x401020).to_le_bytes());
+    let img = Image {
+        sections: vec![
+            Section { name: ".text".into(), exec: true, addr: 0x401000, data: text },
+            Section { name: ".data".into(), exec: false, addr: 0x402000, data },
+        ],
+        ..Image::default()
+    };
+    let mut an = Analysis::run(&img, &sl, &[0x401000], true).unwrap();
+    assert_eq!(an.insns[&0x40100c].code_imms, [0x401020]);
+    assert!(!an.insns.contains_key(&0x401020));
+    an.disassemble(&img, &sl, &[], true);
+    assert!(an.insns.contains_key(&0x401020) && an.insns.contains_key(&0x401022));
 }
