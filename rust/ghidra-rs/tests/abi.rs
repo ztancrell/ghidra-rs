@@ -11,7 +11,7 @@ fn register_reads_writes_x86_32() {
     let regs = Regs::new(&sl);
     let mut p = sl.new_parse();
     let keys = |rs: &[usize]| {
-        let mut k: Vec<String> = rs.iter().flat_map(|&r| regs.keys(r).iter().cloned()).collect();
+        let mut k: Vec<String> = rs.iter().flat_map(|&r| regs.keys(r).iter().map(|k| k.to_string())).collect();
         k.sort();
         k.join(" ")
     };

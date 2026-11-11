@@ -235,8 +235,14 @@ of the rest:
   either side did not decode (`no instruction`);
 - the register reported when several are live at once (135 rows).
 
-It takes about 48 s wall (9 s analysis, 38 s checking, one thread). The script's own run
-time in Ghidra was not measured here.
+It takes about 13 s wall on a 12-thread machine (8.5 s analysis on one thread, 2.8 s
+checking on 12; checking alone is about 10 s on one thread). The contracts are split over
+threads (contract `t`, `t+n`, ... to thread `t`), each with its own caches, and written in
+file order; `GHIDRA_RS_THREADS=<n>` sets the count (default: all cores). The output was the
+same byte for byte with 1, 2, 5, 7 and 12 threads. Before 2026-11-11 the check took 38 s on one
+thread: each walk step copied and hashed the whole live set (a set of `String`s) to detect
+revisits; live keys are now inline (`Key`) and a walk numbers each distinct live set once. The
+script's own run time in Ghidra was not measured here.
 
 ## Speed
 

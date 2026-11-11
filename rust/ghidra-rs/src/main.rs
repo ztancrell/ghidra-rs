@@ -201,7 +201,11 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
         let text = std::fs::read_to_string(&csv).map_err(|e| format!("{csv}: {e}"))?;
         let mut ck = ghidra_rs::abi::Checker::new(&img, &an, &sl, relocated);
         let mut w = create(&out)?;
-        let (total, outputs, inputs) = ck.run(&text, &mut w)?;
+        let threads = std::env::var("GHIDRA_RS_THREADS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+        let (total, outputs, inputs) = ck.run(&text, &mut w, threads)?;
         w.flush().map_err(|e| format!("{out}: {e}"))?;
         println!("Checked {total} references into {out}; {outputs} output findings; {inputs} input findings");
         eprintln!("abi check in {:.1}s", t.elapsed().as_secs_f64());
