@@ -381,18 +381,28 @@ impl Analysis {
         }
     }
 
-    // `JMP dword ptr [reg*4 + table]`, bounded by a preceding `CMP reg,imm` when there is one.
+    // `JMP dword ptr [reg*4 + table]`, bounded by a preceding `CMP reg,imm` when there is one,
+    // possibly through a byte index table (`MOVZX reg,byte ptr [idx + bytetable]`). Cases must
+    // lie in the jump's own section.
     fn switch_table(&self, img: &Image, at: u32, recent: &[u32]) -> Option<(u32, Vec<u32>)> {
         let bytes = |a: u32| img.block_of(a).map(|s| &s.data[(a - s.addr) as usize..]);
         let b = bytes(at)?.get(..7)?;
         if b[0] != 0xff || b[1] != 0x24 || b[2] & 0xc7 != 0x85 {
             return None;
         }
-        let reg = (b[2] >> 3) & 7;
+        let mut reg = (b[2] >> 3) & 7; // the register the CMP bounds
         let table = u32::from_le_bytes(b[3..7].try_into().unwrap());
         let mut count = None;
+        let mut index_table = None; // two-level switch: `MOVZX reg,byte ptr [r + bytetable]`
         for &r in recent.iter().rev().take(8) {
             let Some(c) = bytes(r) else { continue };
+            if let [0x0f, 0xb6, m, d0, d1, d2, d3, ..] = c {
+                if index_table.is_none() && m & 0xc0 == 0x80 && m & 7 != 4 && (m >> 3) & 7 == reg {
+                    index_table = Some(u32::from_le_bytes([*d0, *d1, *d2, *d3]));
+                    reg = m & 7;
+                    continue;
+                }
+            }
             let imm = match c {
                 [0x83, m, i, ..] if *m == 0xf8 | reg => Some(*i as u32),
                 [0x81, m, i0, i1, i2, i3, ..] if *m == 0xf8 | reg => Some(u32::from_le_bytes([*i0, *i1, *i2, *i3])),
@@ -404,10 +414,16 @@ impl Analysis {
                 break;
             }
         }
+        // The CMP bounds the byte table; the jump table has max(byte table) + 1 entries.
+        if let (Some(bt), Some(n)) = (index_table, count) {
+            let b = img.block_of(bt).map(|s| &s.data[(bt - s.addr) as usize..])?;
+            count = Some(*b.get(..n.min(b.len()))?.iter().max()? as usize + 1);
+        }
+        let own = img.block_of(at)?.addr;
         let mut cases = Vec::new();
         for i in 0..count.unwrap_or(1024).min(1024) {
             match img.read_u32(table + 4 * i as u32) {
-                Some(t) if self.is_code(img, t) => cases.push(t),
+                Some(t) if self.is_code(img, t) && img.block_of(t).is_some_and(|s| s.addr == own) => cases.push(t),
                 _ => break,
             }
         }

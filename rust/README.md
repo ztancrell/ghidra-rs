@@ -126,7 +126,9 @@ What discovery does, after Ghidra's analyzers:
 - Function Start Search: the definite `x86win_patterns.xml` prologue pairs (`CC`/`90`/`C3`/
   `C9 C3`/`C2 nn 00` or `JMP` before a prologue) in bytes no code covers yet;
 - switch tables `JMP [reg*4 + table]`, bounded by a preceding `CMP reg,imm` (else up to 1024
-  entries while they point at code);
+  entries while they point at code in the jump's own section); in a two-level switch
+  (`MOVZX reg,byte ptr [idx + bytetable]` between them) the CMP bounds the byte table and the
+  jump table has as many entries as its largest byte plus one;
 - Create Address Tables: runs of 2+ code pointers in data are disassembled, without making
   functions;
 - Shared Return Calls with contiguous functions: an unconditional jump past the next function
