@@ -14,6 +14,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
 - 2026-11-11: Processor support comes from compiled `.sla` files that Ghidra's existing
   SLEIGH compiler builds. Rust reads `.sla` and doesn't parse `.slaspec`. We start with x86-64.
 - 2026-11-11: Speed claims need a benchmark against Ghidra's `analyzeHeadless` on the same binaries.
+- 2026-11-11: `analyze --abi-callers` matches Ghidra by default: a pointer in data is a reference
+  only where Ghidra would define one (a word an instruction references, or a run of 4+ image
+  addresses). The wider scan (every aligned word in `.rdata`/`.data`/SecuROM data equal to a
+  function entry), which finds callers Ghidra misses, stays behind `--data-pointers`.
 
 ## Milestones
 
@@ -31,7 +35,9 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    propagation.
 2b. CheckAbiCallers.java (register liveness over p-code), the mercs2 pipeline's per-batch
    check: `ghidra-rs analyze --abi-callers`. On branch `m2b-abi-callers`: 96.5% of the
-   reference rows identical, about 13 s on 12 threads (details and the causes of the rest in `rust/README.md`).
+   reference rows identical. On branch `abi-dropin` (a drop-in for the script, judged by the
+   mercs2 ABI gate): 97.7% identical, output independent of the thread count (details, timing
+   and the causes of the rest in `rust/README.md`).
 3. Decompilation: a Rust decompiler, or FFI to the existing C++ decompiler as a stopgap.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and

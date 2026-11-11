@@ -238,6 +238,14 @@ fn flaglike(b: &str) -> bool {
     FLAGS.contains(&b) || X87_CC.contains(&b)
 }
 
+/// The source of an export's external reference, which Ghidra prints as "Entry Point".
+const ENTRY_POINT: u32 = 0;
+
+// A reference's source address as Ghidra prints it.
+fn site(a: u32) -> String {
+    if a == ENTRY_POINT { "Entry Point".into() } else { hex(a) }
+}
+
 fn hex(a: u32) -> String {
     format!("{a:08x}")
 }
@@ -414,6 +422,7 @@ enum RefKind {
     ComputedJump,
     Data,
     Read,
+    External, // the loader's "Entry Point" reference to an export
 }
 
 impl RefKind {
@@ -426,6 +435,7 @@ impl RefKind {
             RefKind::ComputedJump => "COMPUTED_JUMP",
             RefKind::Data => "DATA",
             RefKind::Read => "READ",
+            RefKind::External => "EXTERNAL",
         }
     }
     fn is_call(self) -> bool {
@@ -438,7 +448,7 @@ impl RefKind {
         matches!(self, RefKind::ComputedCall | RefKind::ComputedJump)
     }
     fn is_data(self) -> bool {
-        matches!(self, RefKind::Data | RefKind::Read)
+        matches!(self, RefKind::Data | RefKind::Read | RefKind::External)
     }
 }
 
@@ -468,6 +478,7 @@ pub struct Checker<'a> {
     info: FxMap<u32, Arc<Info>>,
     func_of: FxMap<u32, u32>,
     refs_to: FxMap<u32, Vec<(u32, RefKind)>>,
+    pub data_pointers: bool, // every aligned data word equal to an entry is a reference
     relocated: HashSet<u32>,
     contracts: HashMap<u32, Vec<String>>,
     output_check: bool,
@@ -503,6 +514,7 @@ impl<'a> Checker<'a> {
             func_of,
             refs_to: FxMap::default(),
             relocated,
+            data_pointers: false,
             contracts: HashMap::new(),
             output_check: false,
             output_walk: false,
@@ -553,14 +565,39 @@ impl<'a> Checker<'a> {
                 add(t, a, RefKind::Data);
             }
         }
-        // Pointers in data: every aligned word equal to an entry. (Only runs of 2+ code pointers,
-        // like Create Address Tables, matched Ghidra on fewer rows.)
-        let is_code = |v: u32| self.img.block_of(v).is_some_and(|s| s.exec);
+        // Exports: the loader's external "Entry Point" reference, and the export address table
+        // slot (an image-base offset).
+        for &(t, _) in &self.img.exports {
+            add(t, ENTRY_POINT, RefKind::External);
+        }
+        for &(slot, t) in &self.img.eat {
+            add(t, slot, RefKind::Data);
+        }
+        // Pointers in data. By default the ones Ghidra defines: words an instruction references,
+        // and runs of 4+ aligned words that are all addresses in the image (Create Address
+        // Tables). With `data_pointers`, every aligned word equal to an entry.
+        let referenced: FxSet<u32> = an.insns.values().flat_map(|i| i.refs.iter().copied()).collect();
+        let is_addr = |v: u32| self.img.block_of(v).is_some_and(|s| s.name != "Headers");
+        let (ed, en) = self.img.export_dir;
         for s in self.img.sections.iter().filter(|s| !s.exec && s.name != "Headers") {
-            for (o, c) in s.data.chunks_exact(4).enumerate() {
-                add(u32::from_le_bytes(c.try_into().unwrap()), s.addr + 4 * o as u32, RefKind::Data);
+            let words: Vec<u32> = s.data.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+            let mut keep = vec![self.data_pointers; words.len()];
+            let mut o = 0;
+            while o < words.len() {
+                let run = words[o..].iter().take_while(|&&v| is_addr(v)).count();
+                if run >= 4 {
+                    keep[o..o + run].fill(true);
+                }
+                o += run.max(1);
+            }
+            for (o, &v) in words.iter().enumerate() {
+                let at = s.addr + 4 * o as u32;
+                if (keep[o] || referenced.contains(&at)) && !(at >= ed && at - ed < en) {
+                    add(v, at, RefKind::Data);
+                }
             }
         }
+        let is_code = |v: u32| self.img.block_of(v).is_some_and(|s| s.exec);
         // Code references first (made while disassembling), then pointers in data.
         for v in refs.values_mut() {
             v.sort_by_key(|r| (!is_code(r.0), r.0));
@@ -1272,7 +1309,7 @@ impl<'a> Checker<'a> {
                 return fail(
                     "unknown",
                     &regs_live,
-                    &format!("{} live at return; {} reference from {}", hex(f), kind.name(), hex(from)),
+                    &format!("{} live at return; {} reference from {}", hex(f), kind.name(), site(from)),
                 );
             }
             let inner = self.from_site(fall, &at_return, up + 1);
@@ -1702,6 +1739,12 @@ impl<'a> Checker<'a> {
     /// checked, output findings, input findings).
     fn check_row(&mut self, f: &[String], out: &mut Vec<u8>) -> std::io::Result<[usize; 3]> {
         let (mut total, mut output_findings, mut input_count) = (0, 0, 0);
+        // Memos live for one contract: a result cached at one depth, or under pushes_float's
+        // recursion guard, would otherwise depend on which contracts a thread checked before.
+        self.callee_memo.clear();
+        self.never_returned_memo.clear();
+        self.pushes_float_memo.clear();
+        self.input_memo.clear();
         {
             let target = parse_hex(&f[0]).unwrap() as u32;
             let contract = format!("{}|{}", f[5], f[6]);
@@ -1722,7 +1765,7 @@ impl<'a> Checker<'a> {
                     let fall = self.flow(from).fall;
                     self.from_site(fall, &watch, 0)
                 };
-                writeln!(out, "{},{contract},{},{},{},{}", f[0], hex(from), o.status, o.reg, o.where_)?;
+                writeln!(out, "{},{contract},{},{},{},{}", f[0], site(from), o.status, o.reg, o.where_)?;
                 total += 1;
             }
             if refs.is_empty() {
@@ -1746,7 +1789,7 @@ impl<'a> Checker<'a> {
                             Some(sign) => o = fail("unknown", &o.reg, &format!("{}; original returns it: {sign}", o.where_)),
                         }
                     }
-                    writeln!(out, "{},{contract},output:{},{},{},{}", f[0], hex(from), o.status, o.reg, o.where_)?;
+                    writeln!(out, "{},{contract},output:{},{},{},{}", f[0], site(from), o.status, o.reg, o.where_)?;
                     output_findings += 1;
                 }
             }

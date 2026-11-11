@@ -18,6 +18,8 @@ pub struct Image {
     pub entry: Option<u32>,
     pub exports: Vec<(u32, String)>,
     pub imports: HashMap<u32, (String, String)>, // IAT slot -> (library, function)
+    pub export_dir: (u32, u32), // export directory (address, size): its tables hold RVAs, not addresses
+    pub eat: Vec<(u32, u32)>,   // export address table: (slot, function it names)
 }
 
 impl Image {
@@ -41,6 +43,18 @@ impl Image {
         img.entry = (entry != 0).then_some(base + entry);
         for x in pe.exports().map_err(|e| e.to_string())? {
             img.exports.push((x.address() as u32, String::from_utf8_lossy(x.name()).into_owned()));
+        }
+        // The loader types the export address table as image-base offsets (ibo32): each slot
+        // references base + RVA.
+        if let Some(d) = pe.data_directory(object::pe::IMAGE_DIRECTORY_ENTRY_EXPORT) {
+            let at = base + d.virtual_address.get(LE);
+            img.export_dir = (at, d.size.get(LE));
+            let (n, funcs) = (img.read_u32(at + 0x14).unwrap_or(0), img.read_u32(at + 0x1c).unwrap_or(0));
+            for i in 0..n.min(0x10000) {
+                if let Some(rva) = img.read_u32(base + funcs + 4 * i).filter(|&r| r != 0) {
+                    img.eat.push((base + funcs + 4 * i, base + rva));
+                }
+            }
         }
         // Import descriptors, read through the loaded image: names and thunks may lie in other
         // sections than the directory (the mercs2 image keeps its IAT in .rdata and the
@@ -125,6 +139,7 @@ pub struct Analysis {
     pub funcs: BTreeSet<u32>,
     pub noreturn: HashSet<u32>,          // functions and IAT slots that do not return
     pub bodies: BTreeMap<u32, Vec<u32>>, // function -> sorted instruction addresses
+    fpu_ip: Option<(u32, u64)>,          // FPUInstructionPointer, which x87 constructors set to inst_start
 }
 
 const KNOWN_NORETURN: [&str; 9] =
@@ -194,7 +209,10 @@ impl Analysis {
             funcs: BTreeSet::new(),
             noreturn: HashSet::new(),
             bodies: BTreeMap::new(),
+            fpu_ip: None,
         };
+        let (rs, list) = sl.registers();
+        an.fpu_ip = list.iter().find(|r| r.0 == "FPUInstructionPointer").map(|r| (rs, r.1));
         for (slot, (_, name)) in &img.imports {
             if KNOWN_NORETURN.contains(&name.as_str()) {
                 an.noreturn.insert(*slot);
@@ -239,7 +257,7 @@ impl Analysis {
             queue.push(s);
         }
         loop {
-            an.descend(img, sl, &mut p, &mut owner, &mut queue);
+            an.descend(img, sl, &mut p, &mut owner, &mut queue, &mut Vec::new());
             // Function Start Search: prologue patterns in bytes no code covers yet.
             let before = an.funcs.len();
             for sec in exec() {
@@ -256,7 +274,7 @@ impl Analysis {
                     if hit {
                         an.funcs.insert(a);
                         queue.push(a);
-                        an.descend(img, sl, &mut p, &mut owner, &mut queue);
+                        an.descend(img, sl, &mut p, &mut owner, &mut queue, &mut Vec::new());
                     }
                 }
             }
@@ -266,7 +284,7 @@ impl Analysis {
                 }
                 // after everything the seeds reach, so stray pointers cannot claim their bytes
                 queue.append(&mut tables_queue);
-                an.descend(img, sl, &mut p, &mut owner, &mut queue);
+                an.descend(img, sl, &mut p, &mut owner, &mut queue, &mut Vec::new());
             }
         }
         an.funcs.retain(|a| an.insns.contains_key(a));
@@ -340,10 +358,12 @@ impl Analysis {
             }
             // data references: direct memory operands (ram varnodes), not flow targets
             let skip = usize::from(matches!(op.opc, 4 | 5 | 7));
+            // x87 constructors copy inst_start into FPUInstructionPointer: not a reference
+            let fpu_ip = op.out.as_ref().is_some_and(|o| Some((o.space, o.offset)) == self.fpu_ip);
             for v in op.ins.iter().skip(skip).chain(op.out.as_ref()) {
                 // e.g. PUSH offset callback (not CALL's pushed return address)
                 let imm = v.offset as u32;
-                if v.space == 0 && v.size == 4 && v.offset != next && self.is_code(img, imm) && !code_imms.contains(&imm) {
+                if v.space == 0 && v.size == 4 && v.offset != next && !fpu_ip && self.is_code(img, imm) && !code_imms.contains(&imm) {
                     code_imms.push(imm);
                 }
                 let is_ref = match v.space {
@@ -359,8 +379,11 @@ impl Analysis {
     }
 
     /// Ghidra's `disassemble(addr)` after analysis: recursive descent from `addrs` into bytes no
-    /// code covers yet, without making functions.
-    pub fn disassemble(&mut self, img: &Image, sl: &Sleigh, addrs: &[u32]) {
+    /// code covers yet, without making functions. With `constants`, also the code Ghidra's
+    /// analysis decodes beyond the function bodies, which reference checks see: code reached
+    /// through code constants (`PUSH offset callback`, `MOV [g],offset fn`, SecuROM's
+    /// `PUSH next; PUSH callee; RET`), repeated over what that reaches. Bodies stay as they are.
+    pub fn disassemble(&mut self, img: &Image, sl: &Sleigh, addrs: &[u32], constants: bool) {
         let mut owner = vec![0u8; (self.code_hi - self.code_lo) as usize];
         for (&a, i) in &self.insns {
             let o = (a - self.code_lo) as usize;
@@ -369,12 +392,19 @@ impl Analysis {
         }
         let funcs = self.funcs.clone();
         let mut queue: Vec<u32> = addrs.iter().copied().filter(|&a| self.is_code(img, a)).collect();
-        self.descend(img, sl, &mut sl.new_parse(), &mut owner, &mut queue);
+        let mut p = sl.new_parse();
+        let mut log: Vec<u32> = if constants { self.insns.keys().copied().collect() } else { Vec::new() };
+        self.descend(img, sl, &mut p, &mut owner, &mut queue, &mut log);
+        while constants && !log.is_empty() {
+            let mut queue: Vec<u32> = log.iter().flat_map(|a| self.insns[a].code_imms.iter().copied()).collect();
+            log.clear();
+            self.descend(img, sl, &mut p, &mut owner, &mut queue, &mut log);
+        }
         self.funcs = funcs;
     }
 
     /// Recursive descent from every queued address. Call targets in .text become functions.
-    fn descend(&mut self, img: &Image, sl: &Sleigh, p: &mut crate::sleigh::Parse, owner: &mut [u8], queue: &mut Vec<u32>) {
+    fn descend(&mut self, img: &Image, sl: &Sleigh, p: &mut crate::sleigh::Parse, owner: &mut [u8], queue: &mut Vec<u32>, log: &mut Vec<u32>) {
         while let Some(start) = queue.pop() {
             let mut a = start;
             let mut recent: Vec<u32> = Vec::new(); // straight-line history, for switch bounds
@@ -409,6 +439,7 @@ impl Analysis {
                     || ins.flow == Flow::CallInd && ins.slot.is_some_and(|s| self.noreturn.contains(&s));
                 recent.push(a);
                 let len = ins.len as u32;
+                log.push(a);
                 self.insns.insert(a, ins);
                 if stop {
                     break;
