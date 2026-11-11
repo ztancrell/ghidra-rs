@@ -168,9 +168,10 @@ impl Analysis {
         a >= self.code_lo && a < self.code_hi && img.block_of(a).is_some_and(|s| s.exec)
     }
 
-    /// Run discovery from `seeds` (plus exports, the entry point and call targets) and
-    /// compute function bodies. `extra` entries are made functions even when unreachable.
-    pub fn run(img: &Image, sl: &Sleigh, extra: &[u32]) -> Result<Analysis, String> {
+    /// Discover code and functions from exports, the entry point, RTTI vftables, call targets,
+    /// prologue patterns and far jumps, then compute function bodies. `extra` entries are
+    /// disassembled and made functions too; with `exact`, they are the whole function set.
+    pub fn run(img: &Image, sl: &Sleigh, extra: &[u32], exact: bool) -> Result<Analysis, String> {
         let text = img.section(".text").ok_or("no .text section")?;
         let exec = || img.sections.iter().filter(|s| s.exec);
         let mut an = Analysis {
@@ -260,6 +261,9 @@ impl Analysis {
         }
         an.funcs.retain(|a| an.insns.contains_key(a));
         an.shared_returns();
+        if exact {
+            an.funcs = extra.iter().copied().filter(|a| an.insns.contains_key(a)).collect();
+        }
         an.compute_bodies();
         // Non-returning functions: no RETURN anywhere in the body; then redo the bodies.
         for _ in 0..4 {
@@ -299,6 +303,8 @@ impl Analysis {
         let mut refs = Vec::new();
         for op in &ops {
             match op.opc {
+                // REP-prefixed string ops branch to their own start or end: no flow change
+                4 | 5 if op.ins[0].space == code && (op.ins[0].offset == a as u64 || op.ins[0].offset == next) => {}
                 4 | 5 | 7 if op.ins[0].space == code => {
                     target = Some(op.ins[0].offset as u32);
                     flow = match op.opc {
@@ -307,20 +313,25 @@ impl Analysis {
                         _ => Flow::Call,
                     };
                 }
-                6 => flow = Flow::JumpInd,
-                8 => flow = Flow::CallInd,
+                6 | 8 => {
+                    flow = if op.opc == 6 { Flow::JumpInd } else { Flow::CallInd };
+                    // through a direct memory operand: `CALL dword ptr [slot]`
+                    slot = (op.ins[0].space == code).then_some(op.ins[0].offset as u32);
+                }
                 10 => flow = Flow::Return,
-                2 if op.ins[1].space == 0 => slot = Some(op.ins[1].offset as u32),
                 _ => {}
             }
-            for v in &op.ins {
-                if v.space == 0 && v.size == 4 && v.offset != next && img.block_of(v.offset as u32).is_some() && !refs.contains(&(v.offset as u32)) {
+            // data references: direct memory operands (ram varnodes), not flow targets
+            let skip = usize::from(matches!(op.opc, 4 | 5 | 7));
+            for v in op.ins.iter().skip(skip).chain(op.out.as_ref()) {
+                let is_ref = match v.space {
+                    0 => v.size == 4 && img.block_of(v.offset as u32).is_some_and(|s| !s.exec), // immediate pointing at data
+                    s => s == code && img.block_of(v.offset as u32).is_some(),
+                };
+                if is_ref && !refs.contains(&(v.offset as u32)) {
                     refs.push(v.offset as u32);
                 }
             }
-        }
-        if !matches!(flow, Flow::CallInd | Flow::JumpInd) {
-            slot = None;
         }
         Some(Ins { len: len as u8, flow, target, slot, refs })
     }

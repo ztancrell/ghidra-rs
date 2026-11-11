@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 const USAGE: &str = "usage: ghidra-rs disasm <binary> [--func <symbol>|--addr <hex>] [--count N] [--pcode] [--sla <file>]
-       ghidra-rs analyze <pe32> [--functions <csv>] [--gaps <csv>] [--seeds <csv>]... [--sla <file>]";
+       ghidra-rs analyze <pe32> [--functions <csv>] [--gaps <csv>] [--seeds <csv> | --functions-from <csv>]... [--sla <file>]";
 
 fn main() {
     if let Err(e) = run() {
@@ -123,7 +123,7 @@ fn run() -> Result<(), String> {
 /// scripts ExportFunctions.java (`--functions`) and ExportGaps.java (`--gaps`).
 fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     use ghidra_rs::{analysis, scripts};
-    let (mut functions, mut gaps, mut seeds) = (None, None, Vec::new());
+    let (mut functions, mut gaps, mut seeds, mut exact) = (None, None, Vec::new(), false);
     let mut sla = std::env::var_os("GHIDRA_RS_SLA").map(PathBuf::from).unwrap_or_else(|| Sleigh::sla_path("x86"));
     let mut it = args.iter();
     while let Some(flag) = it.next() {
@@ -132,8 +132,10 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
             "--functions" => functions = Some(val),
             "--gaps" => gaps = Some(val),
             "--sla" => sla = PathBuf::from(val),
-            // extra function entries: the first column of each 0x-prefixed line
-            "--seeds" => {
+            // function entries: the first column of each 0x-prefixed line. --seeds adds them
+            // to what discovery finds; --functions-from makes them the whole function set.
+            "--seeds" | "--functions-from" => {
+                exact |= flag == "--functions-from";
                 let text = std::fs::read_to_string(&val).map_err(|e| format!("{val}: {e}"))?;
                 for line in text.lines().filter(|l| l.starts_with("0x")) {
                     let a = line.split(',').next().unwrap_or("");
@@ -147,8 +149,14 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     let img = analysis::Image::from_pe(&data).map_err(|e| format!("{path}: {e}"))?;
     let sl = Sleigh::load(&sla)?;
     let t = std::time::Instant::now();
-    let an = analysis::Analysis::run(&img, &sl, &seeds)?;
-    eprintln!("analyzed {} instructions, {} functions in {:.1}s", an.insns.len(), an.funcs.len(), t.elapsed().as_secs_f64());
+    let an = analysis::Analysis::run(&img, &sl, &seeds, exact)?;
+    eprintln!(
+        "analyzed {} instructions, {} functions ({} imports) in {:.1}s",
+        an.insns.len(),
+        an.funcs.len(),
+        img.imports.len(),
+        t.elapsed().as_secs_f64()
+    );
     let create = |p: &str| std::fs::File::create(p).map(std::io::BufWriter::new).map_err(|e| format!("{p}: {e}"));
     if let Some(p) = functions {
         let n = scripts::export_functions(&img, &an, &mut create(&p)?).map_err(|e| e.to_string())?;
