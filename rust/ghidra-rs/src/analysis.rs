@@ -106,6 +106,7 @@ pub struct Ins {
     pub target: Option<u32>, // direct flow target
     pub slot: Option<u32>,   // memory operand of an indirect call/jump through a constant address
     pub refs: Vec<u32>,      // data references: constant addresses inside the image
+    pub code_imms: Vec<u32>, // immediates that point into an executable section
 }
 
 impl Ins {
@@ -311,7 +312,7 @@ impl Analysis {
         let code = sl.code_space();
         let next = a as u64 + len as u64;
         let (mut flow, mut target, mut slot) = (Flow::Fall, None, None);
-        let mut refs = Vec::new();
+        let (mut refs, mut code_imms) = (Vec::new(), Vec::new());
         for op in &ops {
             match op.opc {
                 // REP-prefixed string ops branch to their own start or end: no flow change
@@ -340,6 +341,11 @@ impl Analysis {
             // data references: direct memory operands (ram varnodes), not flow targets
             let skip = usize::from(matches!(op.opc, 4 | 5 | 7));
             for v in op.ins.iter().skip(skip).chain(op.out.as_ref()) {
+                // e.g. PUSH offset callback (not CALL's pushed return address)
+                let imm = v.offset as u32;
+                if v.space == 0 && v.size == 4 && v.offset != next && self.is_code(img, imm) && !code_imms.contains(&imm) {
+                    code_imms.push(imm);
+                }
                 let is_ref = match v.space {
                     0 => v.size == 4 && img.block_of(v.offset as u32).is_some_and(|s| !s.exec), // immediate pointing at data
                     s => s == code && img.block_of(v.offset as u32).is_some(),
@@ -349,7 +355,22 @@ impl Analysis {
                 }
             }
         }
-        Some(Ins { len: len as u8, flow, target, slot, refs })
+        Some(Ins { len: len as u8, flow, target, slot, refs, code_imms })
+    }
+
+    /// Ghidra's `disassemble(addr)` after analysis: recursive descent from `addrs` into bytes no
+    /// code covers yet, without making functions.
+    pub fn disassemble(&mut self, img: &Image, sl: &Sleigh, addrs: &[u32]) {
+        let mut owner = vec![0u8; (self.code_hi - self.code_lo) as usize];
+        for (&a, i) in &self.insns {
+            let o = (a - self.code_lo) as usize;
+            owner[o] = 1;
+            owner[o + 1..o + i.len as usize].fill(2);
+        }
+        let funcs = self.funcs.clone();
+        let mut queue: Vec<u32> = addrs.iter().copied().filter(|&a| self.is_code(img, a)).collect();
+        self.descend(img, sl, &mut sl.new_parse(), &mut owner, &mut queue);
+        self.funcs = funcs;
     }
 
     /// Recursive descent from every queued address. Call targets in .text become functions.

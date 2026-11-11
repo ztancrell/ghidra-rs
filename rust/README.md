@@ -18,7 +18,11 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   RTTI vftables and a small MSVC name demangler.
 - `ghidra-rs/src/main.rs`: the `ghidra-rs` CLI (binary loading via the `object` crate).
 - `ghidra-rs/tests/decode.rs`: decodes a fixed byte sequence and checks text and p-code.
+- `ghidra-rs/src/abi.rs`: port of CheckAbiCallers.java: per-byte register liveness walks
+  over p-code register reads and writes.
 - `ghidra-rs/tests/analysis.rs`: function discovery and both CSV writers on a fixed 32-bit blob.
+- `ghidra-rs/tests/abi.rs`: register reads and writes (sub-registers as base-register bytes)
+  of a few fixed instructions.
 - `build-sla.sh`: builds Ghidra's SLEIGH compiler and compiles `x86-64.sla` and `x86.sla`.
 - `tools/sleigh_ref.cc`: a reference disassembler on Ghidra's C++ engine, printing in the
   same format, used to verify the Rust port.
@@ -86,20 +90,21 @@ Varnodes print as a register name when one matches exactly, `0x5:4` for constant
 ## Analysis (Milestone 2): the mercs2 Ghidra scripts
 
 ```sh
-ghidra-rs analyze <pe32> [--functions <csv>] [--gaps <csv>]
+ghidra-rs analyze <pe32> [--functions <csv>] [--gaps <csv>] [--abi-callers <register_abi.csv> <out.csv>]
                          [--seeds <csv> | --functions-from <csv>]... [--sla <file>]
 ```
 
-Analyzes a 32-bit x86 PE and writes the files of two headless Ghidra scripts of the mercs2
+Analyzes a 32-bit x86 PE and writes the files of three headless Ghidra scripts of the mercs2
 decomp project (`mercs2-decomp/tools/ghidra`), in the same format:
 
 | ghidra-rs flag | Ghidra script | file |
 |---|---|---|
 | `--functions` | `ExportFunctions.java` | `address,size,name,exported,fid,vtable_class,lua,callees,callers,data_refs`, one row per `.text` function |
 | `--gaps` | `ExportGaps.java` | `address,size,class`: `.text` ranges outside every function body (`padding`, `table`, `unexamined`) |
+| `--abi-callers` | `CheckAbiCallers.java` | `address,contract,site,status,register,instruction`: register-ABI contracts checked at every reference (see below) |
 
 It also prints the scripts' summary lines (`exported N functions`, `function coverage: N / M
-.text bytes`). `CheckAbiCallers.java` is not covered yet.
+.text bytes`, `Checked N references into <out>; N output findings; N input findings`).
 
 The mercs2 pipeline does not run plain auto-analysis: after import it runs RecoverFunctions,
 AuditRecoveredFunctions, FoldSlotFragments, AddRelocatedEntries and ClearFalseNoReturn
@@ -180,6 +185,58 @@ Known differences:
 Time on the same machine: ghidra-rs `analyze` takes about 9.5 s wall (8.3 s analysis, one
 thread). Ghidra's auto-analysis of the same game (`Mercenaries2.exe`, mercs2
 `build/ghidra-import.log`) took 723 s, before the post-scripts.
+
+### CheckAbiCallers (`--abi-callers`)
+
+```sh
+ghidra-rs analyze orig/Mercenaries2.analysis.exe --functions-from build/functions.csv \
+    --abi-callers config/register_abi.csv config/abi_callers.csv
+```
+
+The port follows the script method by method (`ghidra-rs/src/abi.rs`). What it takes from
+ghidra-rs instead of a Ghidra project:
+
+- Register reads and writes per instruction come from its p-code, as Ghidra's
+  `getInputObjects`/`getResultObjects` compute them: a register-space varnode maps to the
+  smallest register at its offset that is at least as large (`RegisterManager`), and a register
+  read after the instruction wrote it is no input. Liveness keys are bytes of the base register
+  (the largest register containing it: `EAX#1` for AH, `ZMM0#0` for XMM0's low byte). Inputs
+  are ordered as Java's `HashSet` iterates them, since the script reports the first live one.
+- Instruction text is Ghidra's Java `Instruction.toString`: branch targets and `[0x...]`
+  addresses as 8 hex digits, operands joined with a bare `,`.
+- Flow types: a CALL to a non-returning function has no fallthrough (CALL_TERMINATOR); a JMP
+  to a function entry is a call (CALL_RETURN); `CALL/JMP [ptr]` through an initialised pointer
+  to code flows to its value; `JMP [reg*4+table]` flows to the switch cases.
+- References to an address: flows (calls, jumps, switch cases, through initialised
+  pointers), memory operands (READ), immediates (DATA) and every aligned word in a data section
+  equal to it (DATA); code references first, then data, each by source address.
+- `CALL ESI` counts as an import call when the nearest write of ESI before it in the function
+  is `MOV ESI,[import slot]` (a stand-in for Ghidra's constant propagation).
+- `securom_functions.csv`, read from the directory of `register_abi.csv` as the script reads
+  `config/securom_functions.csv`, gives the relocated bodies; they are made functions, as
+  AddRelocatedEntries.java does. Contract entries no analysis reached are disassembled first,
+  as the script's `disassemble(entry)` does.
+
+Result on 2026-11-11 with `--functions-from` the fresh 37,635-function export: 50,855 of
+52,674 rows of `config/abi_callers.csv` (2026-11-10) identical (96.5%; the file is compared
+sorted, since Ghidra lists references in its database order). ghidra-rs writes 52,213 rows and
+reports `Checked 35864 references; 2936 output findings; 264 input findings`. The main causes
+of the rest:
+
+- references Ghidra has and ghidra-rs does not (about 540 `trivial` site rows): calls from
+  code ghidra-rs did not disassemble, and references from constant propagation (`CALL EAX`,
+  `XCHG [ESP],EDX` in wrapper code);
+- references ghidra-rs has and Ghidra does not (about 250 site rows and 340 `DATA reference`
+  rows): words in data that equal a function entry where Ghidra defined no pointer;
+- which reference a stopped walk names (about 200 rows): the same failure is reported from
+  a different caller, because Ghidra iterates references in its database order;
+- JMPs Ghidra left as jumps (46 rows `UNCONDITIONAL_JUMP reference` against
+  `tail jump reference`), switch tables Ghidra did not recover (`computed jump`), and code
+  either side did not decode (`no instruction`);
+- the register reported when several are live at once (135 rows).
+
+It takes about 48 s wall (9 s analysis, 38 s checking, one thread). The script's own run
+time in Ghidra was not measured here.
 
 ## Speed
 
