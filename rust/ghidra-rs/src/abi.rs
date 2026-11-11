@@ -558,6 +558,9 @@ impl<'a> Checker<'a> {
                     add(t, a, if i.flow == Flow::CallInd { RefKind::ComputedCall } else { RefKind::ComputedJump });
                 }
             }
+            if let Some(t) = i.computed {
+                add(t, a, if i.flow == Flow::CallInd { RefKind::ComputedCall } else { RefKind::ComputedJump });
+            }
             for &t in &i.refs {
                 add(t, a, RefKind::Read);
             }
@@ -638,6 +641,7 @@ impl<'a> Checker<'a> {
             .filter(|s| !self.img.imports.contains_key(s))
             .and_then(|s| self.img.read_u32(s))
             .filter(|&t| self.img.block_of(t).is_some_and(|s| s.exec))
+            .or(i.computed)
             .into_iter()
             .collect();
         match i.flow {
@@ -955,7 +959,13 @@ impl<'a> Checker<'a> {
     // Library of a call or jump through the import table, or None.
     fn import_library(&mut self, a: u32) -> Option<String> {
         if let Some(s) = self.an.insns[&a].slot {
-            return self.img.imports.get(&s).map(|(lib, _)| lib.clone());
+            if let Some((lib, _)) = self.img.imports.get(&s) {
+                return Some(lib.clone());
+            }
+            // A pointer to an import thunk (`JMP [import slot]`): Ghidra's walk passes such a
+            // call as that import (CALL [0xcddff0] at 0x9deb31 -> 0x9ee9fe -> free).
+            let thunk = self.img.read_u32(s).and_then(|t| self.an.insns.get(&t)).filter(|i| i.flow == Flow::JumpInd);
+            return thunk.and_then(|i| i.slot).and_then(|s| self.img.imports.get(&s)).map(|(lib, _)| lib.clone());
         }
         // `CALL ESI` after `MOV ESI,dword ptr [slot]`, which Ghidra resolves by constant
         // propagation. ponytail: the nearest write of the register before the call, by address
@@ -1288,6 +1298,10 @@ impl<'a> Checker<'a> {
             return fail("unknown", &regs_live, &format!("{} live at return{of}", hex(at)));
         };
         let refs = self.refs(f);
+        // Ghidra walks the references in its database (analysis) order and reports the first
+        // walk that stops. That order is not reproduced here, so a violation behind any
+        // reference wins over a stopped walk; else the first stopped walk is reported.
+        let mut stopped: Option<Outcome> = None;
         for &(from, kind) in &refs {
             let ci = self.ins(from);
             if let (true, Some(ci)) = (self.output_walk, &ci) {
@@ -1302,30 +1316,33 @@ impl<'a> Checker<'a> {
                         None
                     };
                     if let Some(inner) = inner {
-                        if inner.status != "ok" {
+                        if inner.status == "violation" {
                             return inner;
+                        }
+                        if inner.status != "ok" {
+                            stopped.get_or_insert(inner);
                         }
                         continue;
                     }
                 }
             }
             let fall = ci.as_ref().and_then(|_| self.flow(from).fall);
-            if ci.is_none() || !kind.is_call() || kind.is_computed() || ci.as_ref().unwrap().mnem == "JMP" || fall.is_none() {
-                return fail(
-                    "unknown",
-                    &regs_live,
-                    &format!("{} live at return; {} reference from {}", hex(f), kind.name(), site(from)),
-                );
-            }
-            let inner = self.from_site(fall, &at_return, up + 1);
-            if inner.status != "ok" {
+            let inner = if ci.is_none() || !kind.is_call() || kind.is_computed() || ci.as_ref().unwrap().mnem == "JMP" || fall.is_none() {
+                fail("unknown", &regs_live, &format!("{} live at return; {} reference from {}", hex(f), kind.name(), site(from)))
+            } else {
+                self.from_site(fall, &at_return, up + 1)
+            };
+            if inner.status == "violation" {
                 return inner;
+            }
+            if inner.status != "ok" {
+                stopped.get_or_insert(inner);
             }
         }
         if refs.is_empty() {
             fail("unknown", &regs_live, &format!("{} live at return; no references", hex(f)))
         } else {
-            ok()
+            stopped.unwrap_or_else(ok)
         }
     }
 

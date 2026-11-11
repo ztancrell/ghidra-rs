@@ -22,7 +22,8 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   over p-code register reads and writes.
 - `ghidra-rs/tests/analysis.rs`: function discovery and both CSV writers on a fixed 32-bit blob;
   code constants (no x87 self-reference; a disguised call `PUSH next; PUSH callee; RET`); a
-  code pointer hidden as two XORed dwords (`MOV EDI,[a]; XOR EDI,[b]; PUSH EDI`).
+  code pointer hidden as two XORed dwords (`MOV EDI,[a]; XOR EDI,[b]; PUSH EDI`); a call through
+  an object's vtable, resolved through a value stored via a symbolic register.
 - `ghidra-rs/tests/abi.rs`: register reads and writes (sub-registers as base-register bytes)
   of a few fixed instructions.
 - `build-sla.sh`: builds Ghidra's SLEIGH compiler and compiles `x86-64.sla` and `x86.sla`.
@@ -163,7 +164,7 @@ ClearFalseNoReturn and AddRelocatedEntries); the pipeline's `build/functions*.cs
 | run | reference | functions | size | callees | callers | data_refs | gaps rows |
 |---|---|---|---|---|---|---|---|
 | plain discovery | `functions-analysis.csv` (import only, 23,323) | 22,388 common, 935 missing, 365 extra | 95.7% | 87.6% | 88.4% | 76.3% | (no reference) |
-| `--functions-from` fresh export | fresh export (functions and gaps) | 37,633 of 37,635 | 99.1% | 94.6% | 97.2% | 80.5% | 39,243 of 39,557 identical (ours: 39,368 rows) |
+| `--functions-from` fresh export | fresh export (functions and gaps) | 37,633 of 37,635 | 99.1% | 94.6% | 97.2% | 82.9% | 39,243 of 39,557 identical (ours: 39,368 rows) |
 
 `name`, `exported`, `vtable_class` and `lua` match on 99.9% or more of the rows; `fid` is
 always 0.
@@ -172,8 +173,9 @@ Known differences:
 
 - Function ID (FID) is not implemented: `fid` is 0 and FID library names are missing.
 - Indirect calls and memory operands that Ghidra resolves by constant propagation (`CALL EDX`
-  after `MOV EDX,[vtable+n]`, `[ESI+n]` with known ESI) are not resolved: fewer `callees` and
-  `data_refs`.
+  after `MOV EDX,[vtable+n]`, `[ESI+n]` with known ESI) are resolved only by the local fold
+  (see CheckAbiCallers below): fewer `callees` and `data_refs`. Calls it resolves are not
+  counted as `callees`.
 - Ghidra leaves some JMPs to a function entry as jumps (e.g. 0x72cc00 -> 0x4ddaab, a target
   recovered after auto-analysis); ghidra-rs counts every one as a call, which matches Ghidra
   on more rows than counting none.
@@ -210,7 +212,8 @@ ghidra-rs instead of a Ghidra project:
   to a function entry is a call (CALL_RETURN); `CALL/JMP [ptr]` through an initialised pointer
   to code flows to its value; `JMP [reg*4+table]` flows to the switch cases.
 - References to an address: flows (calls, jumps, switch cases, through initialised
-  pointers), memory operands (READ), immediates (DATA; not the x87 constructors' copy of the
+  pointers or values the local fold computes), memory operands and addresses the fold
+  computes (READ), immediates (DATA; not the x87 constructors' copy of the
   instruction's own address into `FPUInstructionPointer`), the loader's `Entry Point`
   reference to an export (EXTERNAL) and its export address table slot (DATA, an image-base
   offset), and pointers in data sections (DATA); code references first, then data, each by
@@ -239,15 +242,36 @@ ghidra-rs instead of a Ghidra project:
   or reaches a function; a single instruction must reach a function. This code belongs to no
   function and does not change `--functions` or `--gaps`.
 - Code constants also come from a local constant fold (a stand-in for Ghidra's constant
-  propagation): along a straight line of instructions, 4-byte register values from
-  immediates, initialised memory and ADD/SUB/XOR/AND/OR; a computed value stored to memory
-  that points at code is a code constant of the storing instruction. This finds SecuROM's
-  hidden pointers such as `MOV EDI,[0x25084c9]; XOR EDI,[0x24d82a0]; XCHG [ESP],EDI` at
-  0x553217 (0x4793f0). It does not resolve calls through object vtables (`MOV EDX,[EDI];
-  CALL [EDX+n]`), which Ghidra's propagation does (the `COMPUTED_CALL` rows below).
+  propagation, `SymbolicPropogator`): 4-byte register values from immediates, initialised
+  memory and ADD/SUB/XOR/AND/OR, along a straight line of instructions and on into the
+  targets of its jumps (the first jump to reach a target hands it the state, as Ghidra's
+  first flow wins); a computed value stored to memory that points at code is a code constant
+  of the storing instruction. This finds SecuROM's hidden pointers such as `MOV
+  EDI,[0x25084c9]; XOR EDI,[0x24d82a0]; XCHG [ESP],EDI` at 0x553217 (0x4793f0). As in
+  Ghidra, an unknown register is a symbol (its value where the fold began, plus an offset),
+  and values stored through a folded address are kept (the newest 16 on the stack and 64
+  elsewhere); a call makes EAX, ECX, EDX and ESP new symbols. So a call through an object's
+  vtable, `MOV [ESI],0xbcc47c; MOV ECX,ESI; JMP; MOV EAX,[ECX]; MOV EDX,[EAX+0x14]; CALL
+  EDX` (0x66fce0), gives the slot 0xbcc490 a READ reference (the reference that ends the
+  address table there after five words, as in Ghidra) and the call its target, read from
+  the slot (Ghidra's COMPUTED_CALL reference; it also becomes the call's flow). Not
+  modelled: the callee's stack purge (ESP's offset is lost at a call), merging states where
+  flows join, and values across a whole function (e.g. 0x73b4d1, whose vtable was stored
+  450 instructions earlier).
 - `CALL ESI` counts as an import call when the nearest write of ESI before it in the function
   is `MOV ESI,[import slot]` (a stand-in for Ghidra's constant propagation); outside every
   function, the straight line of instructions falling into the call is searched instead.
+  `CALL/JMP [ptr]` whose pointer holds an import thunk (`JMP [import slot]`) counts as that
+  import: Ghidra's walk passes `CALL [0xcddff0]` at 0x9deb31 (-> 0x9ee9fe -> `free`) as one,
+  which its `violation` at 0x675611 needs.
+- Ghidra walks the references to a function in its database order (the order analysis made
+  them) and reports the first walk that stops. That order is not reproduced (ours: code
+  references by source address, then data), so where a value is live at a function's
+  return, a `violation` behind any of its references wins over a walk that stopped
+  (`unknown`); otherwise the first stopped walk is reported. Ghidra's own order put
+  0x41e69a before 0x401bbc among the callers of 0x41d7a0, which its `violation` rows at
+  0x41d7be and 0x41d834 need (the walk from 0x401bbc stops in the relocated body of
+  0x41ef50); the same rule also turns 9 rows Ghidra reports `unknown` into `violation`.
 - `securom_functions.csv`, read from the directory of `register_abi.csv` as the script reads
   `config/securom_functions.csv`, gives the relocated bodies; they are made functions, as
   AddRelocatedEntries.java does. Contract entries no analysis reached are disassembled first,
@@ -255,49 +279,69 @@ ghidra-rs instead of a Ghidra project:
 
 Result on 2026-11-11 with `--functions-from` the fresh 37,635-function export, against
 `config/abi_callers.csv` and `config/register_abi.csv` as of 2026-11-11 13:05 (52,922 rows):
-52,000 rows identical (98.3%; the file is compared sorted, since Ghidra lists references in
-its database order; 51,705 before the coverage changes of 2026-11-11, 51,099 before the
-drop-in changes). ghidra-rs writes 52,991 rows and reports `Checked 36503 references; 2926
-output findings; 279 input findings`.
+52,198 rows identical (98.6%; the file is compared sorted, since Ghidra lists references in
+its database order; 52,000 before the symbolic fold of 2026-11-11, 51,705 before the
+coverage changes, 51,099 before the drop-in changes). ghidra-rs writes 52,967 rows and
+reports `Checked 36451 references; 2879 output findings; 274 input findings`.
 
 The mercs2 ABI gate reads only `address`, `contract`, `site` and `status` (and the `output`/
-`input` marker rows). Projected to those fields and sorted, 491 reference lines are missing
-from ours and 560 are extra (746 and 784 before the local constant fold, the address tables
-in all sections and the valid-subroutine check; 2,189 lines before the x87 self-reference,
-export and data-pointer rules and the code-constant disassembly). By cause (missing / extra):
+`input` marker rows). Projected to those fields and sorted, 317 reference lines are missing
+from ours and 362 are extra (491 and 560 before the symbolic fold, the import-thunk and the
+violation-first rules; 746 and 784 before the local constant fold, the address tables in all
+sections and the valid-subroutine check; 2,189 lines before the x87 self-reference, export
+and data-pointer rules and the code-constant disassembly). By kind (missing / extra; before
+the symbolic fold in brackets):
 
-- code one side decoded and the other did not (216 / 244 lines at code sites): code
-  ghidra-rs decodes that Ghidra did not, e.g. the callers of LtiDebug_Log at 0x755d30
-  (reached by a CALL from 0x755f46, 18 lines) and of VehicleDriver_Send* at 0x545a90 (from
-  0x545e98, 13 lines): real callers, reported as `unknown` where Ghidra writes no row; and
-  code Ghidra decoded by means not found here.
-- the results of those differences: `output:`/`input:` rows (145 / 142) and the `""` "no
-  references" rows (94 / 14), whose walks pass through the code above or whose references
-  differ.
-- pointers in data (15 / 156 lines at data-section sites): mostly per-class records such as
-  0xbcc47c and 0xbcd014 (`[0x66c150, 0x4ccd40, 0x45e6d0, 0x4ccd40, 0x45e6d0, 0x54cde0, A, B,
-  C]` per class), which the address-table rule types whole, while Ghidra types the first six
-  slots and leaves A, B, C undefined. No rule found yet that explains the cut.
-- computed references from constant propagation (17 `COMPUTED_CALL` rows missing: calls
-  through object vtables, not covered by the local fold) and JMPs Ghidra left as jumps (3
-  `tail jump reference` rows extra, 1 missing).
+| lines | missing | extra |
+|---|---|---|
+| code sites | 125 (216) | 242 (244) |
+| `output:`/`input:` rows | 145 (145) | 91 (142) |
+| "no references" rows | 15 (94) | 15 (14) |
+| data-section sites | 23 (15) | 10 (156) |
+| `COMPUTED_CALL` rows | 5 (17) | 1 (0) |
+| `tail jump reference` rows | 1 (1) | 3 (3) |
 
-Every `violation` site of the reference that the gate needs is written with that status: the
-eight that were missing before (0x4793ff, 0x47940e, 0x479440, 0x479445, 0x479450, 0x47945b,
+By cause:
+
+- code only ghidra-rs decodes (policy, 31 extra lines): the callers of LtiDebug_Log in
+  0x755d30..0x755e13 (reached by a CALL from 0x755f46, code Ghidra has no function or
+  instruction for: the walks there end at `live at return` with no function) and of
+  VehicleDriver_Send* in 0x5454ea..0x545c3c (0x545a90 has no references in either tool).
+  Ghidra writes no row for these sites.
+- a site whose status differs (48 code-site lines each way, and 2 "no references", 1 data
+  site): 18 `unknown` -> `violation` (9 from the violation-first rule, 9 older: walks that
+  stop in Ghidra at relocated SecuROM bodies, `enters wrapper code`, or at computed jumps),
+  24 `unknown` -> `ok` (mostly XMM/ZMM bytes Ghidra still finds live at a return, e.g.
+  0x4bcb5c), 3 `ok` -> `unknown`, 5 `trivial`/`ok` swaps.
+- a reference only one side has (83 / 198 code-site lines, 22 / 9 data-site lines): calls
+  Ghidra resolved by whole-function constant propagation (`CALL EAX` at 0x73b4d1, whose
+  vtable was stored 450 instructions earlier), references in code only one side decoded,
+  and address tables cut at different places (Ghidra's analysis order adds the cutting
+  references before or after a table is made; e.g. 0xbb0b70 is no longer a table in ours).
+- the results of those: `output:`/`input:` rows and "no references" rows whose walks pass
+  through the code above or whose references differ, and 14 `output:` rows of 0x42f850 where
+  Ghidra loses X87#0 and ours finds it never returned (Ghidra's callee memo spans contracts,
+  ours one contract).
+- JMPs Ghidra left as jumps (3 `tail jump reference` rows extra, 1 missing).
+- inputs: some rows (e.g. 0x54c990 HumanExit_Update) come from mercs2's DefineTableFunctions
+  and ClearFalseNoReturn passes, which the `--functions-from` export lacks.
+
+Every `violation` site of the reference is written with that status: the eight missing
+before the coverage changes (0x4793ff, 0x47940e, 0x479440, 0x479445, 0x479450, 0x47945b,
 0x479466 through the folded pointer at 0x553224, and 0x6fd52b through the address table at
-0x6fe900, the 42-case switch of the undecoded dispatcher at 0x6fd500) now match. Three
-reference `violation` rows of 0x84af20 (0x41d7be, 0x41d834, 0x675611) are `unknown` in ours,
-which the gate also fails.
+0x6fe900), and the three of 0x84af20 at 0x41d7be and 0x41d834 (the violation-first rule) and
+0x675611 (the import-thunk rule). 25 extra `violation` lines remain where Ghidra says
+`unknown` or has no row (16 before these changes).
 
-It takes about 16 s wall on a 12-thread machine (about 12 s analysis on one thread, of which
-about 2.3 s check code constants for valid subroutines and 0.5 s build address tables; 14 s
-before the coverage changes; 2.6 s checking on 12; checking alone is about 11 s on one
-thread). The contracts are split over
+It takes about 20 s wall on a 12-thread machine (about 15 s analysis on one thread, of which
+about 3 s are the symbolic fold, 2.3 s check code constants for valid subroutines and 0.5 s
+build address tables; 16 s before the symbolic fold, 14 s before the coverage changes; 3.5 s
+checking on 12; checking alone is about 25 s on one thread). The contracts are split over
 threads (contract `t`, `t+n`, ... to thread `t`), and written in file order;
 `GHIDRA_RS_THREADS=<n>` sets the count (default: all cores). The caches (callee walks,
 `pushes_float`, never-returned values, input walks) live for one contract, so a result never
 depends on which contracts a thread checked before: the output is the same byte for byte with
-1, 3 and 12 threads (1 and 12 checked again after the coverage changes). Before 2026-11-11 the check took 38 s on one
+1, 3 and 12 threads (1 and 12 checked again after the symbolic fold). Before 2026-11-11 the check took 38 s on one
 thread: each walk step copied and hashed the whole live set (a set of `String`s) to detect
 revisits; live keys are now inline (`Key`) and a walk numbers each distinct live set once. The
 script's own run time in Ghidra was not measured here.

@@ -46,13 +46,26 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    and the causes of the rest in `rust/README.md`). On branch `coverage` (more of the code
    Ghidra reaches: folded SecuROM pointers, address tables in code sections, Ghidra's
    valid-subroutine check): 98.3% identical, and every reference `violation` the gate missed
-   before is found.
+   before is found. On branch `abi-rest` (the local fold keeps unknown registers as symbols
+   and stored values, and follows jumps, so vtable calls resolve; pointers to import thunks
+   count as imports; a `violation` behind any reference wins over a stopped walk): 98.6%
+   identical, and the last three missing `violation` rows (0x84af20 at 0x41d7be, 0x41d834,
+   0x675611) are found.
 3. Decompilation: a Rust decompiler, or FFI to the existing C++ decompiler as a stopgap.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.
 
 ## Open questions
+
+- `--abi-callers`: Ghidra reports the first stopped walk in its database order of references,
+  which ghidra-rs does not reproduce. ghidra-rs now lets a `violation` behind any reference
+  win (finds the violations Ghidra reports at 0x41d7be and 0x41d834, but also reports
+  `violation` on 9 rows where Ghidra says `unknown`). Keep this, or match
+  Ghidra's `unknown` there?
+- The SecuROM stub `PUSH EDX; ...; XCHG [ESP],EDX` reads as an EDX use, in Ghidra too (its
+  `violation` at 0x4793ff, overridden in mercs2). Model the save/restore (more correct, but
+  differs from Ghidra), or keep matching Ghidra?
 
 - Decompiler: rewrite it in Rust, or use FFI to the C++ one first?
 - Should Ghidra's GUI ever be able to use this core (e.g. via a server), or does it stay CLI-only?

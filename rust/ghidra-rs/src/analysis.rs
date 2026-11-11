@@ -119,13 +119,28 @@ pub struct Ins {
     pub flow: Flow,
     pub target: Option<u32>, // direct flow target
     pub slot: Option<u32>,   // memory operand of an indirect call/jump through a constant address
+    pub computed: Option<u32>, // code target of another indirect call/jump, from the local fold
     pub refs: Vec<u32>,      // data references: constant addresses inside the image
     pub code_imms: Vec<u32>, // immediates that point into an executable section
 }
 
-/// A folded constant: (space, offset, size, value, computed rather than a plain immediate).
-#[derive(Clone, Copy)]
-pub struct Folded(u32, u64, u32, u32, bool);
+/// A value of the local fold: a constant, or what a 4-byte register held where the fold
+/// began (or before the last call that clobbered it) plus an offset, as Ghidra's
+/// SymbolicPropogator keeps unknown registers as symbols.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Val {
+    C(u32),
+    S(u64, u32),
+}
+
+/// State of the local fold: (space, offset, size, value or unknown, computed rather than a
+/// plain immediate) of registers and temporaries, and memory written through a folded
+/// address (address, value or unknown, computed).
+#[derive(Clone, Default)]
+pub struct Fold {
+    regs: Vec<(u32, u64, u32, Option<Val>, bool)>,
+    mem: Vec<(Val, Option<Val>, bool)>,
+}
 
 impl Ins {
     pub fn falls_through(&self) -> bool {
@@ -145,6 +160,7 @@ pub struct Analysis {
     pub bodies: BTreeMap<u32, Vec<u32>>, // function -> sorted instruction addresses
     pub table_slots: BTreeMap<u32, u32>, // Create Address Tables (`disassemble` with constants): slot -> pointer
     fpu_ip: Option<(u32, u64)>,          // FPUInstructionPointer, which x87 constructors set to inst_start
+    reg_space: u32,
 }
 
 const KNOWN_NORETURN: [&str; 9] =
@@ -216,9 +232,11 @@ impl Analysis {
             bodies: BTreeMap::new(),
             table_slots: BTreeMap::new(),
             fpu_ip: None,
+            reg_space: 0,
         };
         let (rs, list) = sl.registers();
         an.fpu_ip = list.iter().find(|r| r.0 == "FPUInstructionPointer").map(|r| (rs, r.1));
+        an.reg_space = rs;
         for (slot, (_, name)) in &img.imports {
             if KNOWN_NORETURN.contains(&name.as_str()) {
                 an.noreturn.insert(*slot);
@@ -325,7 +343,7 @@ impl Analysis {
         Ok(an)
     }
 
-    fn decode(&self, img: &Image, sl: &Sleigh, p: &mut crate::sleigh::Parse, a: u32, fold: &mut Vec<Folded>) -> Option<Ins> {
+    fn decode(&self, img: &Image, sl: &Sleigh, p: &mut crate::sleigh::Parse, a: u32, fold: &mut Fold) -> Option<Ins> {
         let sec = img.block_of(a)?;
         let o = (a - sec.addr) as usize;
         let len = sl.decode(p, a as u64, &sec.data[o..]).ok()?;
@@ -341,47 +359,119 @@ impl Analysis {
         // and temporary values from immediates, initialised memory, ADD/SUB/XOR/AND/OR. A
         // computed value (not a plain immediate) stored to memory that is code is a code
         // constant, e.g. SecuROM's `MOV EDI,[a]; XOR EDI,[b]; XCHG [ESP],EDI`.
-        let uniq = sl.uniq_space();
-        fold.retain(|f| f.0 != uniq);
-        let val = |v: &crate::sleigh::Varnode, fold: &Vec<Folded>| -> Option<(u32, bool)> {
+        //
+        // Unknown 4-byte registers are symbols (`Val::S`), and values stored through a folded
+        // address are kept, as Ghidra's SymbolicPropogator does: `MOV [ESI],vtable; MOV
+        // ECX,ESI; MOV EAX,[ECX]; MOV EDX,[EAX+0x14]; CALL EDX` gives a READ reference to the
+        // slot vtable+0x14 and the call's target (Ghidra's COMPUTED_CALL reference). The fold
+        // follows jumps (`descend` hands it to the target) and a call clobbers EAX/ECX/EDX/ESP.
+        let (uniq, rs) = (sl.uniq_space(), self.reg_space);
+        fold.regs.retain(|f| f.0 != uniq);
+        let val = |v: &crate::sleigh::Varnode, fold: &Fold| -> Option<(Val, bool)> {
+            let mem = |x: u32| match fold.mem.iter().find(|m| m.0 == Val::C(x)) {
+                Some(m) => m.1.map(|v| (v, m.2)),
+                None => img.read_u32(x).map(|x| (Val::C(x), true)),
+            };
             match v.space {
-                0 => Some((v.offset as u32, false)),
-                s if s == code => (v.size == 4).then(|| img.read_u32(v.offset as u32)).flatten().map(|x| (x, true)),
-                s => fold.iter().find(|f| f.0 == s && f.1 == v.offset && f.2 == v.size).map(|f| (f.3, f.4)),
+                0 => Some((Val::C(v.offset as u32), false)),
+                s if s == code => (v.size == 4).then(|| mem(v.offset as u32)).flatten(),
+                s => match fold.regs.iter().find(|f| f.0 == s && f.1 < v.offset + v.size as u64 && v.offset < f.1 + f.2 as u64) {
+                    Some(f) if f.1 == v.offset && f.2 == v.size => f.3.map(|x| (x, f.4)),
+                    None if s == rs && v.size == 4 => Some((Val::S(v.offset, 0), false)),
+                    _ => None,
+                },
             }
         };
+        let load = |p: Val, fold: &Fold| -> Option<(Val, bool)> {
+            match p {
+                Val::C(x) => val(&crate::sleigh::Varnode { space: code, offset: x as u64, size: 4 }, fold),
+                s => fold.mem.iter().find(|m| m.0 == s).and_then(|m| m.1.map(|v| (v, m.2))),
+            }
+        };
+        let in_image = |x: u32| img.block_of(x).is_some();
+        // ponytail: at most 16 stack stores (ESP-relative) and 64 others, the newest; Ghidra
+        // keeps all. A map would lift the cap but costs more to copy at every jump.
+        let stack = fold.mem.iter().filter(|m| matches!(m.0, Val::S(0x10, _))).count();
+        if stack > 16 {
+            let old = fold.mem.iter().position(|m| matches!(m.0, Val::S(0x10, _))).unwrap();
+            fold.mem.remove(old);
+        }
+        if fold.mem.len() - stack.min(16) > 64 {
+            let old = fold.mem.iter().position(|m| !matches!(m.0, Val::S(0x10, _))).unwrap();
+            fold.mem.remove(old);
+        }
+        let mut computed = None;
         for op in &ops {
             if op.opc == 3 {
-                if let Some((x, true)) = op.ins.get(2).and_then(|v| val(v, fold)) {
+                let v = op.ins.get(2).and_then(|v| val(v, fold));
+                if let Some((Val::C(x), true)) = v {
                     if self.is_code(img, x) && !code_imms.contains(&x) {
                         code_imms.push(x);
                     }
                 }
+                if let Some((p, _)) = op.ins.get(1).and_then(|v| val(v, fold)) {
+                    if let Val::C(x) = p {
+                        if in_image(x) && !refs.contains(&x) {
+                            refs.push(x); // WRITE reference through a folded address
+                        }
+                    }
+                    fold.mem.retain(|m| m.0 != p);
+                    let size4 = op.ins.get(2).is_some_and(|v| v.size == 4);
+                    fold.mem.push((p, v.filter(|_| size4).map(|v| v.0), v.is_some_and(|v| v.1)));
+                }
             }
-            if let Some(o) = op.out.as_ref().filter(|o| o.space != code) {
+            if let Some(o) = op.out.as_ref() {
                 let r = match (op.opc, op.ins.as_slice()) {
                     (1, [x]) if o.size == 4 => val(x, fold),
-                    (2, [_, x]) if o.size == 4 => val(x, fold).and_then(|(x, _)| img.read_u32(x)).map(|x| (x, true)),
-                    (19 | 20 | 26 | 27 | 28, [x, y]) if o.size == 4 => val(x, fold).zip(val(y, fold)).map(|((x, _), (y, _))| {
-                        let r = match op.opc {
-                            19 => x.wrapping_add(y),
-                            20 => x.wrapping_sub(y),
-                            26 => x ^ y,
-                            27 => x & y,
-                            _ => x | y,
+                    (2, [_, x]) if o.size == 4 => val(x, fold).and_then(|(p, _)| {
+                        if let Val::C(x) = p {
+                            if in_image(x) && !refs.contains(&x) {
+                                refs.push(x); // READ reference through a folded address
+                            }
+                        }
+                        load(p, fold).map(|(v, _)| (v, true))
+                    }),
+                    (19 | 20 | 26 | 27 | 28, [x, y]) if o.size == 4 => val(x, fold).zip(val(y, fold)).and_then(|((x, _), (y, _))| {
+                        let r = match (op.opc, x, y) {
+                            (_, Val::C(x), Val::C(y)) => Val::C(match op.opc {
+                                19 => x.wrapping_add(y),
+                                20 => x.wrapping_sub(y),
+                                26 => x ^ y,
+                                27 => x & y,
+                                _ => x | y,
+                            }),
+                            (19, Val::S(b, d), Val::C(c)) | (19, Val::C(c), Val::S(b, d)) => Val::S(b, d.wrapping_add(c)),
+                            (20, Val::S(b, d), Val::C(c)) => Val::S(b, d.wrapping_sub(c)),
+                            _ => return None,
                         };
-                        (r, true)
+                        Some((r, true))
                     }),
                     _ => None,
                 };
-                let end = o.offset + o.size as u64;
-                fold.retain(|f| f.0 != o.space || f.1 >= end || f.1 + f.2 as u64 <= o.offset);
-                if let Some((x, c)) = r {
-                    fold.push(Folded(o.space, o.offset, o.size, x, c));
+                if o.space == code {
+                    // a direct store, `MOV [g],reg`
+                    let p = Val::C(o.offset as u32);
+                    fold.mem.retain(|m| m.0 != p);
+                    fold.mem.push((p, r.map(|r| r.0), r.is_some_and(|r| r.1)));
+                } else {
+                    let end = o.offset + o.size as u64;
+                    fold.regs.retain(|f| f.0 != o.space || f.1 >= end || f.1 + f.2 as u64 <= o.offset);
+                    fold.regs.push((o.space, o.offset, o.size, r.map(|r| r.0), r.is_some_and(|r| r.1)));
+                }
+            }
+            if matches!(op.opc, 6 | 8) && op.ins[0].space != code {
+                if let Some((Val::C(t), _)) = val(&op.ins[0], fold) {
+                    computed = Some(t).filter(|&t| self.is_code(img, t));
                 }
             }
             if matches!(op.opc, 7 | 8) {
-                fold.clear(); // ponytail: a call clobbers everything; per-ABI volatile sets if needed
+                // EAX, ECX, EDX and ESP (offsets 0, 4, 8, 0x10) are the callee's, flags too: each
+                // becomes a new symbol of this call, which aliases nothing stored before it
+                // (ponytail: ESP loses its stack offset; Ghidra adds the callee's purge)
+                fold.regs.retain(|f| f.0 != rs || (f.1 >= 0xc && f.1 < 0x10) || (f.1 >= 0x14 && f.1 < 0x200));
+                for r in [0u64, 4, 8, 0x10] {
+                    fold.regs.push((rs, r, 4, Some(Val::S(1 << 40 | (a as u64) << 8 | r, 0)), false));
+                }
             }
             match op.opc {
                 // REP-prefixed string ops branch to their own start or end: no flow change
@@ -426,7 +516,8 @@ impl Analysis {
                 }
             }
         }
-        Some(Ins { len: len as u8, flow, target, slot, refs, code_imms })
+        let computed = computed.filter(|_| slot.is_none());
+        Some(Ins { len: len as u8, flow, target, slot, computed, refs, code_imms })
     }
 
     /// Ghidra's `disassemble(addr)` after analysis: recursive descent from `addrs` into bytes no
@@ -482,7 +573,7 @@ impl Analysis {
         let (mut body, mut targets) = (BTreeMap::new(), Vec::new());
         let (mut terminated, mut called) = (false, false);
         let mut work = vec![entry];
-        let mut fold = Vec::new();
+        let mut fold = Fold::default();
         while let Some(mut a) = work.pop() {
             while body.len() < 4000 && !body.contains_key(&a) {
                 if !self.is_code(img, a) {
@@ -629,10 +720,12 @@ impl Analysis {
 
     /// Recursive descent from every queued address. Call targets in .text become functions.
     fn descend(&mut self, img: &Image, sl: &Sleigh, p: &mut crate::sleigh::Parse, owner: &mut [u8], queue: &mut Vec<u32>, log: &mut Vec<u32>) {
+        let mut pending: HashMap<u32, Fold> = HashMap::new();
         while let Some(start) = queue.pop() {
             let mut a = start;
             let mut recent: Vec<u32> = Vec::new(); // straight-line history, for switch bounds
-            let mut fold = Vec::new(); // ponytail: straight-line, not reset at labels
+            // the fold of the first jump that reached `start` (Ghidra: first flow wins)
+            let mut fold = pending.remove(&start).unwrap_or_default();
             while self.is_code(img, a) && owner[(a - self.code_lo) as usize] == 0 {
                 let Some(ins) = self.decode(img, sl, p, a, &mut fold) else { break };
                 let o = (a - self.code_lo) as usize;
@@ -644,6 +737,11 @@ impl Analysis {
                 if let Some(t) = ins.target.filter(|&t| self.is_code(img, t)) {
                     if ins.flow == Flow::Call {
                         self.funcs.insert(t);
+                    }
+                    if ins.flow != Flow::Call {
+                        if owner[(t - self.code_lo) as usize] == 0 {
+                            pending.entry(t).or_insert_with(|| fold.clone());
+                        }
                     }
                     queue.push(t);
                 }

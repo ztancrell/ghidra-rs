@@ -106,3 +106,36 @@ fn xor_folded_code_pointer_x86_32() {
     an.disassemble(&img, &sl, &[], true);
     assert!(an.insns.contains_key(&0x401020) && an.insns.contains_key(&0x401022));
 }
+
+// A call through an object's vtable (`MOV [ESI],vtable; MOV ECX,ESI; JMP; MOV EAX,[ECX];
+// MOV EDX,[EAX+4]; CALL EDX`): the fold keeps ESI as a symbol, remembers what was stored
+// through it across the jump, and gives the slot a READ reference and the call its target
+// (Ghidra's COMPUTED_CALL reference).
+#[test]
+fn vtable_call_through_symbolic_store_x86_32() {
+    let sl = Sleigh::load(&Sleigh::sla_path("x86")).unwrap();
+    let mut text = vec![
+        0xc7, 0x06, 0x00, 0x20, 0x40, 0x00, // 401000 MOV dword ptr [ESI],0x402000
+        0x8b, 0xce, // 401006 MOV ECX,ESI
+        0xeb, 0x00, // 401008 JMP 0x40100a
+        0x8b, 0x01, // 40100a MOV EAX,[ECX]
+        0x8b, 0x50, 0x04, // 40100c MOV EDX,[EAX + 0x4]
+        0xff, 0xd2, // 40100f CALL EDX
+        0xc3, // 401011 RET
+    ];
+    text.resize(0x20, 0xcc);
+    text.extend([0x33, 0xc0, 0xc3]); // 401020 XOR EAX,EAX; RET
+    text.resize(0x30, 0xcc);
+    let mut data = 0x401030u32.to_le_bytes().to_vec();
+    data.extend(0x401020u32.to_le_bytes());
+    let img = Image {
+        sections: vec![
+            Section { name: ".text".into(), exec: true, addr: 0x401000, data: text },
+            Section { name: ".rdata".into(), exec: false, addr: 0x402000, data },
+        ],
+        ..Image::default()
+    };
+    let an = Analysis::run(&img, &sl, &[0x401000], true).unwrap();
+    assert!(an.insns[&0x40100c].refs.contains(&0x402004));
+    assert_eq!(an.insns[&0x40100f].computed, Some(0x401020));
+}
