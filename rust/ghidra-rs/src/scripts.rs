@@ -148,7 +148,8 @@ pub fn export_functions(img: &Image, an: &Analysis, out: &mut dyn Write) -> std:
     let mut lua_strings = HashSet::new();
     for s in img.sections.iter().filter(|s| s.name != ".text") {
         for m in LUA_MARKERS {
-            for (i, _) in memchr_all(&s.data, m.as_bytes()) {
+            let hits = s.data.windows(m.len()).enumerate().filter(|(_, w)| *w == m.as_bytes());
+            for (i, _) in hits {
                 let start = s.data[..i].iter().rposition(|&b| b == 0).map_or(0, |z| z + 1);
                 lua_strings.insert(s.addr + start as u32);
             }
@@ -191,10 +192,6 @@ pub fn export_functions(img: &Image, an: &Analysis, out: &mut dyn Write) -> std:
         n += 1;
     }
     Ok(n)
-}
-
-fn memchr_all<'a>(hay: &'a [u8], needle: &'a [u8]) -> impl Iterator<Item = (usize, ())> + 'a {
-    hay.windows(needle.len()).enumerate().filter(move |(_, w)| *w == needle).map(|(i, _)| (i, ()))
 }
 
 /// tools/ghidra/ExportGaps.java: .text ranges outside every function body.

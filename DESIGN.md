@@ -21,12 +21,16 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    Done on branch `m1-sleigh-x86` (see `rust/README.md`). Output matches Ghidra's C++ SLEIGH
    engine exactly (text and p-code) on ls, libcrypto and libLLVM, checked with `rust/tools/sleigh_ref.cc`.
 2. Function discovery, CFG, xrefs, strings, symbols. Benchmark against `analyzeHeadless`.
-   Needs first: context commits (`globalset`) that flow to later addresses, which M1 skips
-   because it decodes every instruction from the default context.
+   First user: the mercs2 decomp project's headless Ghidra scripts on a 32-bit PE (x86:LE:32).
+   On branch `m2-analysis`: 32-bit x86 (`x86.sla`), context defaults read from the `.pspec`,
+   context commits (`globalset`) carried to later addresses, and `ghidra-rs analyze`, which
+   writes the files of ExportFunctions.java and ExportGaps.java (match rates in
+   `rust/README.md`; about 9.5 s against Ghidra's 723 s auto-analysis). Not done yet:
+   CheckAbiCallers.java (register liveness over p-code), Function ID, constant propagation.
 3. Decompilation: a Rust decompiler, or FFI to the existing C++ decompiler as a stopgap.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
-   Will need the engine parts M1 left out: delay slots, `crossbuild`, `inst_next2`,
-   flowref/flowdest, and context defaults read from the `.pspec` instead of hardcoded.
+   Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
+   flowref/flowdest.
 
 ## Open questions
 
