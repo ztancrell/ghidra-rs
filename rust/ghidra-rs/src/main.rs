@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 const USAGE: &str = "usage: ghidra-rs disasm <binary> [--func <symbol>|--addr <hex>] [--count N] [--pcode] [--sla <file>]
-       ghidra-rs analyze <pe32> [--functions <csv>] [--gaps <csv>] [--abi-callers <register_abi.csv> <out.csv>]
+       ghidra-rs analyze <pe32> [--functions <csv>] [--gaps <csv>] [--abi-callers <register_abi.csv> <out.csv> [--data-pointers]]
                          [--seeds <csv> | --functions-from <csv>]... [--sla <file>]";
 
 fn main() {
@@ -124,11 +124,15 @@ fn run() -> Result<(), String> {
 /// scripts ExportFunctions.java (`--functions`) and ExportGaps.java (`--gaps`).
 fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     use ghidra_rs::{analysis, scripts};
-    let (mut functions, mut gaps, mut seeds, mut exact) = (None, None, Vec::new(), false);
+    let (mut functions, mut gaps, mut seeds, mut exact, mut data_pointers) = (None, None, Vec::new(), false, false);
     let mut abi: Option<(String, String)> = None;
     let mut sla = std::env::var_os("GHIDRA_RS_SLA").map(PathBuf::from).unwrap_or_else(|| Sleigh::sla_path("x86"));
     let mut it = args.iter();
     while let Some(flag) = it.next() {
+        if flag == "--data-pointers" {
+            data_pointers = true;
+            continue;
+        }
         let val = it.next().cloned().ok_or(format!("{flag} needs a value"))?;
         match flag.as_str() {
             "--functions" => functions = Some(val),
@@ -171,6 +175,8 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     let mut an = analysis::Analysis::run(&img, &sl, &seeds, exact)?;
     if let Some((csv, _)) = &abi {
         // The script disassembles a contract entry analysis never reached (a vtable-only function).
+        // Its references also come from code Ghidra decoded outside the function bodies: code
+        // reached through code constants. Neither changes --functions or --gaps.
         let text = std::fs::read_to_string(csv).map_err(|e| format!("{csv}: {e}"))?;
         let entries: Vec<u32> = text
             .lines()
@@ -178,7 +184,7 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
             .filter_map(|l| u32::from_str_radix(l.split(',').next()?.strip_prefix("0x")?, 16).ok())
             .filter(|a| !an.insns.contains_key(a))
             .collect();
-        an.disassemble(&img, &sl, &entries);
+        an.disassemble(&img, &sl, &entries, true);
     }
     eprintln!(
         "analyzed {} instructions, {} functions ({} imports) in {:.1}s",
@@ -200,6 +206,7 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
         let t = std::time::Instant::now();
         let text = std::fs::read_to_string(&csv).map_err(|e| format!("{csv}: {e}"))?;
         let mut ck = ghidra_rs::abi::Checker::new(&img, &an, &sl, relocated);
+        ck.data_pointers = data_pointers;
         let mut w = create(&out)?;
         let threads = std::env::var("GHIDRA_RS_THREADS")
             .ok()

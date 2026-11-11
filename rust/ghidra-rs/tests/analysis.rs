@@ -48,3 +48,29 @@ fn discover_functions_x86_32() {
         "address,size,class\n0x0040100a,6,padding\n0x00401016,10,padding\n0x00401025,11,padding\n"
     );
 }
+
+// An x87 instruction's p-code copies its own address into FPUInstructionPointer: that is no
+// code constant. SecuROM's disguised call `PUSH next; PUSH callee; RET` is reached through its
+// code constants, without changing the function bodies.
+#[test]
+fn code_constants_x86_32() {
+    let sl = Sleigh::load(&Sleigh::sla_path("x86")).unwrap();
+    let mut text = vec![
+        0xd9, 0x01, // 401000 FLD float ptr [ECX]
+        0x68, 0x10, 0x10, 0x40, 0x00, // 401002 PUSH 0x401010 (return address)
+        0x68, 0x20, 0x10, 0x40, 0x00, // 401007 PUSH 0x401020 (callee)
+        0xc3, // 40100c RET
+    ];
+    text.resize(0x10, 0xcc);
+    text.push(0xc3); // 401010 RET
+    text.resize(0x20, 0xcc);
+    text.push(0xc3); // 401020 RET
+    text.resize(0x30, 0xcc);
+    let img = Image { sections: vec![Section { name: ".text".into(), exec: true, addr: 0x401000, data: text }], ..Image::default() };
+    let mut an = Analysis::run(&img, &sl, &[0x401000], true).unwrap();
+    assert!(an.insns[&0x401000].code_imms.is_empty());
+    assert!(!an.insns.contains_key(&0x401010) && !an.insns.contains_key(&0x401020));
+    an.disassemble(&img, &sl, &[], true);
+    assert!(an.insns.contains_key(&0x401010) && an.insns.contains_key(&0x401020));
+    assert_eq!(an.bodies[&0x401000].len(), 4);
+}
