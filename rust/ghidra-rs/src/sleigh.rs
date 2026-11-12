@@ -106,8 +106,13 @@ pub const OPCODE_NAMES: [&str; 75] = [
 
 /// `<set name=".." val=".."/>` entries of a .pspec `<context_set>`: the context defaults.
 fn pspec_context(text: &str) -> Vec<(String, u32)> {
-    let Some(start) = text.find("<context_set") else { return Vec::new() };
-    let end = text[start..].find("</context_set>").map_or(text.len(), |e| start + e);
+    pspec_sets(text, "context_set")
+}
+
+/// `<set name=".." val=".."/>` entries of the .pspec element `tag` (`context_set`, `tracked_set`).
+fn pspec_sets(text: &str, tag: &str) -> Vec<(String, u32)> {
+    let Some(start) = text.find(&format!("<{tag}")) else { return Vec::new() };
+    let end = text[start..].find(&format!("</{tag}>")).map_or(text.len(), |e| start + e);
     let attr = |tag: &str, name: &str| {
         let i = tag.find(&format!("{name}=\""))? + name.len() + 2;
         Some(tag[i..i + tag[i..].find('"')?].to_string())
@@ -155,7 +160,7 @@ struct Operand {
 #[derive(Debug)]
 enum Kind {
     None,
-    UserOp,
+    UserOp(u32),
     Epsilon,
     Value(Expr),
     ValueMap(Expr, Vec<i64>),
@@ -286,6 +291,10 @@ pub struct Sleigh {
     uniq_mask: u64,
     ctx_default: Vec<u32>,
     regnames: HashMap<(u32, u64, u32), usize>,
+    /// the .pspec `<tracked_set>`: registers with a known value at every address (x86: DF = 0)
+    pub tracked: Vec<(String, u32)>,
+    /// user-defined op names by index
+    userops: Vec<Option<String>>,
 }
 
 // ---------------------------------------------------------------- parse state
@@ -403,6 +412,32 @@ pub struct PcodeOp {
     pub out: Option<Varnode>,
     pub ins: Vec<Varnode>,
 }
+
+/// Why an instruction has no p-code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PcodeError {
+    /// a constructor of the instruction has no p-code body (C++ `UnimplError`)
+    Unimplemented,
+    /// anything else (a malformed template, an unsupported directive)
+    Invalid(String),
+}
+
+impl std::fmt::Display for PcodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PcodeError::Unimplemented => f.write_str("instruction not implemented in p-code"),
+            PcodeError::Invalid(e) => f.write_str(e),
+        }
+    }
+}
+
+impl From<String> for PcodeError {
+    fn from(e: String) -> Self {
+        PcodeError::Invalid(e)
+    }
+}
+
+pub type PcodeResult<T> = std::result::Result<T, PcodeError>;
 
 #[derive(Debug, Clone)]
 pub struct Insn {
@@ -669,7 +704,9 @@ impl Sleigh {
     /// Load a `.sla`; context defaults come from the `.pspec` of the same name next to it, if any.
     pub fn load(path: &Path) -> Result<Sleigh> {
         let pspec = std::fs::read_to_string(path.with_extension("pspec")).unwrap_or_default();
-        Self::load_with_context(path, &pspec_context(&pspec))
+        let mut sl = Self::load_with_context(path, &pspec_context(&pspec))?;
+        sl.tracked = pspec_sets(&pspec, "tracked_set");
+        Ok(sl)
     }
 
     pub fn load_with_context(path: &Path, context: &[(String, u32)]) -> Result<Sleigh> {
@@ -711,7 +748,7 @@ impl Sleigh {
         for k in &st.kids {
             let first = || k.kids.first().ok_or_else(|| format!("symbol element {} without expression", k.id));
             let kind = match k.id {
-                e::USEROP => Kind::UserOp,
+                e::USEROP => Kind::UserOp(k.int(a::INDEX)? as u32),
                 e::EPSILON_SYM => Kind::Epsilon,
                 e::VALUE_SYM => Kind::Value(expr(first()?)?),
                 e::VALUEMAP_SYM => {
@@ -788,6 +825,14 @@ impl Sleigh {
                 ctx_default[num] = (ctx_default[num] & !mask) | ((val << shift) & mask);
             }
         }
+        let mut userops: Vec<Option<String>> = Vec::new();
+        for s in &syms {
+            if let Kind::UserOp(i) = s.kind {
+                let i = i as usize;
+                userops.resize(userops.len().max(i + 1), None);
+                userops[i] = Some(s.name.clone());
+            }
+        }
         let mut regnames = HashMap::new();
         for (i, s) in syms.iter().enumerate() {
             if let Kind::Varnode { space, off, size } = s.kind {
@@ -805,6 +850,8 @@ impl Sleigh {
             uniq_mask: root.uint(a::UNIQMASK).unwrap_or(0),
             ctx_default,
             regnames,
+            tracked: Vec::new(),
+            userops,
         })
     }
 
@@ -1579,7 +1626,7 @@ impl Sleigh {
                         out.extend(names[i].chars().map(|_| None));
                     }
                 }
-                Kind::Operand(_) | Kind::Subtable { .. } | Kind::None | Kind::UserOp => {}
+                Kind::Operand(_) | Kind::Subtable { .. } | Kind::None | Kind::UserOp(_) => {}
                 _ => out.push(Some(st.hand)),
             },
             None => {
@@ -1668,7 +1715,7 @@ impl Sleigh {
     // ------------------------------------------------------------ p-code (SleighBuilder)
 
     /// P-code for the instruction last decoded into `p`.
-    pub fn pcode(&self, p: &Parse) -> Result<Vec<PcodeOp>> {
+    pub fn pcode(&self, p: &Parse) -> PcodeResult<Vec<PcodeOp>> {
         let mut b = Builder {
             s: self,
             p,
@@ -1679,12 +1726,15 @@ impl Sleigh {
             label_refs: Vec::new(),
             uniqoff: (p.addr & self.uniq_mask) << 8,
         };
-        let t = self.ctors[p.states[0].ct].templ.as_ref().ok_or("instruction not implemented in p-code")?;
+        let t = self.ctors[p.states[0].ct].templ.as_ref().ok_or(PcodeError::Unimplemented)?;
         b.build(t, -1, 0)?;
         for &i in &b.label_refs {
             let vn = &mut b.ops[i].ins[0];
-            let target =
-                *b.labels.get(vn.offset as usize).filter(|&&l| l != NONE).ok_or("reference to missing sleigh label")?;
+            let target = *b
+                .labels
+                .get(vn.offset as usize)
+                .filter(|&&l| l != NONE)
+                .ok_or_else(|| PcodeError::Invalid("reference to missing sleigh label".into()))?;
             vn.offset = (target as u64).wrapping_sub(i as u64) & calc_mask(vn.size);
         }
         Ok(b.ops)
@@ -1703,6 +1753,22 @@ impl Sleigh {
             })
             .collect();
         (reg, list)
+    }
+
+    /// Every varnode symbol (registers): (name, space, offset, size).
+    pub fn varnode_syms(&self) -> Vec<(&str, u32, u64, u32)> {
+        self.syms
+            .iter()
+            .filter_map(|s| match s.kind {
+                Kind::Varnode { space, off, size } => Some((s.name.as_str(), space, off, size)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The name of user-defined p-code op `index` (CALLOTHER's first input).
+    pub fn userop_name(&self, index: u64) -> Option<&str> {
+        self.userops.get(usize::try_from(index).ok()?).and_then(|n| n.as_deref())
     }
 
     pub fn fmt_varnode(&self, v: &Varnode) -> String {
@@ -1747,7 +1813,7 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
-    fn build(&mut self, t: &Tpl, secnum: i64, point: u32) -> Result<()> {
+    fn build(&mut self, t: &Tpl, secnum: i64, point: u32) -> PcodeResult<()> {
         let old = self.labelbase;
         self.labelbase = self.labelcount;
         self.labelcount += t.labels;
@@ -1759,7 +1825,9 @@ impl Builder<'_> {
                     self.labels.resize(self.labels.len().max(id + 1), NONE);
                     self.labels[id] = self.ops.len() as u32;
                 }
-                OP_DELAY_SLOT | OP_CROSSBUILD => return Err("delay slots / crossbuild are not supported".into()),
+                OP_DELAY_SLOT | OP_CROSSBUILD => {
+                    return Err(PcodeError::Invalid("delay slots / crossbuild are not supported".into()))
+                }
                 _ => self.dump(op, point)?,
             }
         }
@@ -1767,7 +1835,7 @@ impl Builder<'_> {
         Ok(())
     }
 
-    fn build_sub(&mut self, point: u32, secnum: i64) -> Result<()> {
+    fn build_sub(&mut self, point: u32, secnum: i64) -> PcodeResult<()> {
         let ct = &self.s.ctors[self.p.states[point as usize].ct];
         if secnum >= 0 {
             match ct.named.get(secnum as usize).and_then(|t| t.as_ref()) {
@@ -1775,12 +1843,12 @@ impl Builder<'_> {
                 None => self.build_empty(point, secnum),
             }
         } else {
-            let t = ct.templ.as_ref().ok_or("instruction not implemented in p-code")?;
+            let t = ct.templ.as_ref().ok_or(PcodeError::Unimplemented)?;
             self.build(t, -1, point)
         }
     }
 
-    fn append_build(&mut self, op: &OpTpl, secnum: i64, point: u32) -> Result<()> {
+    fn append_build(&mut self, op: &OpTpl, secnum: i64, point: u32) -> PcodeResult<()> {
         let index = self.s.fix(&op.ins[0].off, self.p, point)? as usize;
         let ct = self.p.states[point as usize].ct;
         let o = self.s.operand(self.s.ctors[ct].operands[index]);
@@ -1790,7 +1858,7 @@ impl Builder<'_> {
         }
     }
 
-    fn build_empty(&mut self, point: u32, secnum: i64) -> Result<()> {
+    fn build_empty(&mut self, point: u32, secnum: i64) -> PcodeResult<()> {
         let ct = self.p.states[point as usize].ct;
         for (i, &osym) in self.s.ctors[ct].operands.iter().enumerate() {
             if let Some(t) = self.s.operand(osym).triple {
@@ -1843,7 +1911,7 @@ impl Builder<'_> {
         }
     }
 
-    fn dump(&mut self, op: &OpTpl, point: u32) -> Result<()> {
+    fn dump(&mut self, op: &OpTpl, point: u32) -> PcodeResult<()> {
         let mut ins = Vec::with_capacity(op.ins.len());
         for vt in &op.ins {
             let vn = self.loc(vt, point)?;

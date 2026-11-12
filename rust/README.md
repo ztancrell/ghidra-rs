@@ -39,6 +39,18 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   Ghidra's console decompiler (`decompile -i`) and the datatest runner (port of
   `testfunction.cc`). See "Decompiler harness (Milestone 3, stage S0)" below.
 - `ghidra-rs/tests/console.rs`: console commands not ported yet fail; a datatest XML parses.
+- `ghidra-rs/src/decomp/`: the decompiler (milestone 3), one module per C++ concern:
+  `mod.rs` (`Arch`: image, SLEIGH engine, mapped functions, register names; `LowlevelError`),
+  `funcdata.rs` (`Funcdata`: op/varnode arenas, op insertion, calls), `op.rs`, `varnode.rs`,
+  `opcode.rs` (opcodes and their `print raw` names), `flow.rs` (`FlowInfo`), `block.rs`
+  (basic blocks, spanning tree), `action.rs` (the universal action up to `funclink`),
+  `print.rs` (`print raw`), `stdsort.rs` (libstdc++'s `std::sort`). See "Decompiler
+  (Milestone 3)" below.
+- `ghidra-rs/tests/decomp.rs`, `tests/data/raw-funclink-*.txt`: `print raw` at `funclink` against
+  the reference's output, for mercs2's 0x40a110 (rebuilt from its bytes) and for `INTO; RET` (a
+  relative branch to the end of its own instruction).
+- `tools/stdsort_ref.cc`, `ghidra-rs/tests/data/stdsort-gxx.txt`: libstdc++ `std::sort` tie orders
+  that `decomp/stdsort.rs` must reproduce.
 - `tools/decomp-ref.sh`, `tools/decomp-ref.patch`: build the reference decompiler `decomp_dbg`.
 - `tools/decomp-diff.sh`: runs a corpus on both decompilers and compares.
 - `tools/decomp-corpus.sh`, `tools/corpus/m8.txt`, `tools/corpus/m500.txt`: the mercs2 corpora.
@@ -465,8 +477,8 @@ script's own run time in Ghidra was not measured here.
 ## Decompiler harness (Milestone 3, stage S0)
 
 The decompiler is checked stage by stage against Ghidra's C++ console decompiler `decomp_dbg`
-(plan: `docs/plans/m3-decompiler.md`). Nothing of the decompiler is ported yet: this is the
-harness the stages are measured with.
+(plan: `docs/plans/m3-decompiler.md`). This is the harness the stages are measured with; what
+is ported is in "Decompiler (Milestone 3)" below.
 
 ```sh
 rust/tools/decomp-ref.sh                       # builds rust/target/decomp-build/{decomp_dbg,decomp_test_dbg}
@@ -490,10 +502,12 @@ rust/tools/decomp-diff.sh --script <file>      # one script on both engines, ful
   every function with its FID or export name. For mercs2: 30,262 `map function` lines (1,022 of
   them import slots), 1,022 `map externalref`.
 - `decompile -i` reads `load file`, `source`, `map function`, `map externalref`, `readonly`,
-  `option`, `load function`, `load addr`, `break start` and `quit`, and echoes them as
-  `decomp_dbg -i` does. `decompile`, `continue`, `print raw|C|tree block` and `parse line` fail
-  with "not implemented in ghidra-rs yet (milestone 3, stage S1a ...)"; any other command fails
-  with "not implemented in ghidra-rs".
+  `option`, `load function`, `load addr`, `break start`, `decompile`, `print raw` and `quit`,
+  and echoes them as `decomp_dbg -i` does. `decompile` runs up to the `break start` action
+  (stage S1a: at most `funclink`). `continue`, `print C|tree block` and `parse line` fail with
+  "not implemented in ghidra-rs yet (milestone 3, stage S1b and later)"; any other command
+  fails with "not implemented in ghidra-rs". `option` and `map externalref` are read and
+  ignored (no ported stage uses them yet).
 - `datatest` is the port of `testfunction.cc`: it reads an upstream XML test (`<script>`,
   `<stringmatch>` regexes with `min`/`max`) and checks the script's bulk output. With `--ref` it
   runs the script on `decomp_dbg` (needs `SLEIGHHOME`); without, on the Rust console, which
@@ -517,6 +531,54 @@ Results on 2026-11-12 (branch `m3-s0`):
 | corpus d (`ghidra-rs datatest`) | 665 / 665 checks; 16 files not run (non-x86) | 0 checks run; 93 files not run (not ported) |
 | corpus m8 | decompiles 8 / 8 | identical 0 / 8 (`decompile` not ported) |
 | corpus m500 | decompiles 500 / 500 | identical 0 / 500 |
+
+Superseded: S1a's results are in "Decompiler (Milestone 3)" below.
+
+## Decompiler (Milestone 3)
+
+Stage S1a (branch `m3-s1a`): flow and raw p-code. `decompile` follows the function's flow with
+the milestone-1 SLEIGH engine, builds basic blocks and runs the universal action's first
+actions (`start`, `constbase`, `normalizesetup`, `defaultparams`, `extrapopsetup`,
+`prototypetypes`); `break start funclink` stops there and `print raw` prints the result.
+Check:
+
+```sh
+BREAK=funclink rust/tools/decomp-diff.sh m8
+BREAK=funclink rust/tools/decomp-diff.sh m500
+```
+
+| corpus | identical (`print raw` at `break start funclink`) |
+|---|---|
+| m8 | 8 / 8 |
+| m500 | 500 / 500 |
+
+No differences remain. What the port keeps from the C++ because the output depends on it:
+
+- Op sequence numbers count creation, so flow decodes in Ghidra's order: the address stack is
+  last-in-first-out, ops after a final branch are deleted (their numbers stay used), halts get
+  their numbers when created (an indirect jump that becomes a call gets its `return(#0x1)` only
+  after all flow), and the actions' ops (`DF = #0x0:1`, `ESP = ESP [] i...`) come last.
+- Blocks are printed in the reverse post-order of `findSpanningTree` (fall-through edge first),
+  with irreducible edges skipped as the C++ does.
+- Calls are sorted (`sortCallSpecs`) by block index and the op's order key. The key is
+  `BlockBasic::insert`'s, not the position: in a block of more than about 280 ops the keys
+  saturate at `0xfffffffd` and tie, so the INDIRECTs of `extrapopsetup` come out in the order
+  libstdc++'s unstable `std::sort` leaves the ties in (0x73a340); `stdsort.rs` ports it, and
+  its unit test pins g++'s exact tie order (`tools/stdsort_ref.cc`, `tests/data/stdsort-gxx.txt`).
+- `print raw` writes to a stream whose number base is sticky (an address leaves it hex, a block
+  index or register offset decimal); `print.rs` tracks it.
+
+What S1a does not port, because the console reference never reaches it on mercs2: call fixups
+and inlining (the console applies no `callfixup` by name), non-returning calls (the console's
+functions have no prototypes), p-code injection, multistage jump tables, and flow limits other
+than the instruction count and bad-data count. Jump tables (stage S3) have a stand-in: the
+MSVC switch `JMP dword ptr [reg*4 + table]` bounded by a `CMP reg,imm` (imm8 sign-extended) with a
+`JA` before the jump, possibly through a byte index table, gives one target per switch value in
+order, as `JumpBasic` does, and fails past `max_jumptable_size` (1024) entries; any other
+indirect jump becomes a call and a halt (`truncateIndirectJump`). It covers the 5 switches in
+M8 and M500. As in the C++, an instruction at an unmapped address ends the decompile with an
+error (`DataUnavailError`), and only a constructor without p-code counts as unimplemented
+(`Sleigh::pcode` returns `PcodeError::Unimplemented` for it, `Invalid` for anything else).
 
 ## Speed
 

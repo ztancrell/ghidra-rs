@@ -1,6 +1,6 @@
 # Milestone 3 plan: the decompiler
 
-Written 2026-11-12. Plan only; nothing here is built yet.
+Written 2026-11-12 as a plan. Built so far: S0 and S1a (see their sections below).
 
 ## Goal
 
@@ -211,6 +211,24 @@ Done on branch `m3-s0` (2026-11-12); the commands and results are in `rust/READM
   upstream's and the early stages compare without types.
 - The datatest runner is `ghidra-rs datatest [--ref <decomp_dbg>]`; `decomp-diff.sh d` runs it on
   both engines. On the reference it reproduces `decomp_test_dbg`'s 665 / 665.
+
+### S1a: done on branch `m3-s1a` (2026-11-12)
+
+M8 8 / 8 and M500 500 / 500 identical at `break start funclink`; details in `rust/README.md`,
+"Decompiler (Milestone 3)". Where it differs from the table row:
+
+- Jump tables are needed already: flow recovers them (`FlowInfo::recoverJumpTables`) and an
+  indirect jump without one becomes a call plus a halt. S1a has a stand-in (the MSVC
+  `JMP [reg*4 + table]` switch bounded by its `CMP`, one target per value as `JumpBasic`
+  gives); S3 replaces it with the real recovery.
+- `action.cc` is ported only as far as a sequence with `break start`: the universal action's
+  first six actions. The repeat/restart groups and rule pools come with the main loop (S2).
+- `print raw` at `funclink` already shows three actions before it: `ActionConstbase` (the
+  tracked `DF = 0`), `ActionExtraPopSetup` (`ESP = ESP [] <call>` before every call, since every
+  callee's extrapop is unknown without prototypes) and `ActionPrototypeTypes` (`return(#0x0)`).
+  They are ported in that minimal form; S1b owns the rest of them.
+- Two C++ details reach the output and are ported as such: `BlockBasic::insert`'s order keys,
+  which tie in long blocks, and libstdc++'s `std::sort`, which `sortCallSpecs` uses on them.
 
 ## Running stages in parallel
 

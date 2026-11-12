@@ -8,7 +8,8 @@ fn console_unported_commands_fail() {
     let mut c = Console::default();
     let mut out = Vec::new();
     assert!(c.command("option readonly on", &mut out).is_err(), "nothing loaded yet");
-    assert!(c.command("print raw", &mut out).unwrap_err().contains("not implemented"));
+    assert!(c.command("print C", &mut out).unwrap_err().contains("not implemented"));
+    assert!(c.command("print raw", &mut out).is_err(), "nothing decompiled yet");
     assert!(c.command("frobnicate", &mut out).unwrap_err().contains("not implemented"));
     assert!(!c.command("quit", &mut out).unwrap());
 }
