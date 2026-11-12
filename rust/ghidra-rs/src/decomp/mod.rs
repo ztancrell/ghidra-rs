@@ -19,6 +19,7 @@ mod inject;
 mod op;
 mod opcode;
 mod print;
+mod readers;
 mod stdsort;
 mod varnode;
 

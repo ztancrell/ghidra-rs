@@ -432,7 +432,8 @@ impl Funcdata {
 
     /// Port of `Funcdata::totalReplace`: every reader of `vn` reads `newvn` instead.
     pub(crate) fn total_replace(&mut self, vn: VarnodeId, newvn: VarnodeId) -> Result<()> {
-        for op in self.vn(vn).descend.clone() {
+        let readers = self.vn(vn).descend.to_vec();
+        for op in readers {
             let slot = self
                 .op(op)
                 .ins

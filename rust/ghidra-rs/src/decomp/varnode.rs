@@ -3,6 +3,7 @@
 //! function's location-sorted set of them (`VarnodeBank::loc_tree`) is keyed by [`LocKey`].
 
 use super::op::{OpId, SeqNum};
+use super::readers::Readers;
 
 /// Index of a varnode in its function's arena. It counts creation, so it is also the C++
 /// `create_index` that orders free varnodes.
@@ -78,13 +79,13 @@ pub(crate) struct Varnode {
     /// the op writing this varnode (`Varnode::def`, the `written` flag)
     pub(crate) def: Option<OpId>,
     /// the ops reading this varnode, in the order they were added (`descend`)
-    pub(crate) descend: Vec<OpId>,
+    pub(crate) descend: Readers,
     pub(crate) flags: VnFlags,
 }
 
 impl Varnode {
     pub(crate) fn new(space: Space, offset: u64, size: u32) -> Varnode {
-        Varnode { space, offset, size, def: None, descend: Vec::new(), flags: VnFlags::default() }
+        Varnode { space, offset, size, def: None, descend: Readers::default(), flags: VnFlags::default() }
     }
 
     pub(crate) fn is_constant(&self) -> bool {
