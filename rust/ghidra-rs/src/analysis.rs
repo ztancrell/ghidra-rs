@@ -60,8 +60,9 @@ impl Image {
         // sections than the directory (the mercs2 image keeps its IAT in .rdata and the
         // directory in .securom), which object's section-bound ImportTable cannot read.
         let dir = pe.data_directory(object::pe::IMAGE_DIRECTORY_ENTRY_IMPORT).map_or(0, |d| d.virtual_address.get(LE));
+        // A zero directory means no imports; otherwise the table ends at an all-zero descriptor.
         let mut d = base + dir;
-        while dir != 0 {
+        while dir != 0 && d < base + dir + 20 * 0x10000 {
             let f = |i: u32| img.read_u32(d + 4 * i).unwrap_or(0);
             let (orig, name, first) = (f(0), f(3), f(4));
             if name == 0 || first == 0 {
@@ -69,8 +70,8 @@ impl Image {
             }
             let lib = img.c_string(base + name).to_uppercase();
             let mut i = 0;
-            loop {
-                let Some(th) = img.read_u32(base + if orig != 0 { orig } else { first } + 4 * i).filter(|&t| t != 0) else { break };
+            let names = if orig != 0 { orig } else { first };
+            while let Some(th) = img.read_u32(base + names + 4 * i).filter(|&t| t != 0) {
                 let name =
                     if th & 0x8000_0000 != 0 { format!("Ordinal_{}", th & 0xffff) } else { img.c_string(base + th + 2) };
                 img.imports.insert(base + first + 4 * i, (lib.clone(), name));
@@ -448,7 +449,7 @@ impl Analysis {
                     (1, [x]) if o.size < 4 => val(x, fold).filter(|v| matches!(v.0, Val::C(_))),
                     (17 | 18, [x]) if o.size == 4 && x.size < 4 => match val(x, fold) {
                         Some((Val::C(c), _)) => {
-                            let sh = 32 - 8 * x.size as u32;
+                            let sh = 32 - 8 * x.size;
                             Some((Val::C(if op.opc == 17 { c } else { ((c << sh) as i32 >> sh) as u32 }), true))
                         }
                         _ => None,
@@ -791,11 +792,10 @@ impl Analysis {
                     if ins.flow == Flow::Call {
                         self.funcs.insert(t);
                     }
-                    if ins.flow != Flow::Call {
-                        if owner[(t - self.code_lo) as usize] == 0 {
+                    if ins.flow != Flow::Call
+                        && owner[(t - self.code_lo) as usize] == 0 {
                             pending.entry(t).or_insert_with(|| fold.clone());
                         }
-                    }
                     queue.push(t);
                 }
                 if ins.flow == Flow::JumpInd {

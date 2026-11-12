@@ -259,8 +259,8 @@ pub fn export_gaps(img: &Image, an: &Analysis, out: &mut dyn Write) -> std::io::
         let addr = an.text_start + start as u32;
         let class = if bytes.iter().all(|&b| b == 0 || b == 0x90 || b == 0xcc) {
             "padding"
-        } else if addr % 4 == 0
-            && bytes.len() % 4 == 0
+        } else if addr.is_multiple_of(4)
+            && bytes.len().is_multiple_of(4)
             && bytes.chunks(4).all(|c| img.block_of(u32::from_le_bytes(c.try_into().unwrap())).is_some())
         {
             "table"

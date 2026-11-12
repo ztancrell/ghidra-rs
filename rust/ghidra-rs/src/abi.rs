@@ -175,11 +175,11 @@ struct Fx(u64);
 
 impl std::hash::Hasher for Fx {
     fn write(&mut self, bytes: &[u8]) {
-        let mut c = bytes.chunks_exact(8);
-        for w in &mut c {
-            self.add(u64::from_le_bytes(w.try_into().unwrap()));
+        let (words, rest) = bytes.as_chunks::<8>();
+        for w in words {
+            self.add(u64::from_le_bytes(*w));
         }
-        for &b in c.remainder() {
+        for &b in rest {
             self.add(b as u64);
         }
     }
@@ -582,10 +582,10 @@ impl<'a> Checker<'a> {
         let referenced: FxSet<u32> = an.insns.values().flat_map(|i| i.refs.iter().copied()).collect();
         let (ed, en) = self.img.export_dir;
         for s in self.img.sections.iter().filter(|s| !s.exec && s.name != "Headers") {
-            for (o, c) in s.data.chunks_exact(4).enumerate() {
+            for (o, c) in s.data.as_chunks::<4>().0.iter().enumerate() {
                 let at = s.addr + 4 * o as u32;
                 if (self.data_pointers || referenced.contains(&at)) && !an.table_slots.contains_key(&at) && !(at >= ed && at - ed < en) {
-                    add(u32::from_le_bytes(c.try_into().unwrap()), at, RefKind::Data);
+                    add(u32::from_le_bytes(*c), at, RefKind::Data);
                 }
             }
         }
@@ -1251,7 +1251,7 @@ impl<'a> Checker<'a> {
 
     // Walks from a call's return address; a value still live when the caller returns is
     // followed into each of the caller's own call sites, up to MAX_UP levels.
-    fn from_site(&mut self, ret: Option<u32>, live: &Live, up: usize) -> Outcome {
+    fn walk_from_site(&mut self, ret: Option<u32>, live: &Live, up: usize) -> Outcome {
         let Some(r) = ret else { return ok() };
         let o = self.walk(Some(r), live, 0);
         if o.status != "ok" || o.at_return.is_empty() {
@@ -1308,7 +1308,7 @@ impl<'a> Checker<'a> {
                 if !kind.is_computed() {
                     // Mutated calls and direct jumps, which site walks of the output also follow.
                     let inner = if let Some(resume) = self.mutated_return(from) {
-                        Some(self.from_site(Some(resume), &at_return, up + 1))
+                        Some(self.walk_from_site(Some(resume), &at_return, up + 1))
                     } else if kind.is_jump() || ci.mnem == "JMP" {
                         let g = self.func_of.get(&from).copied();
                         Some(self.live_at_return(g, from, &at_return, up + 1))
@@ -1330,7 +1330,7 @@ impl<'a> Checker<'a> {
             let inner = if ci.is_none() || !kind.is_call() || kind.is_computed() || ci.as_ref().unwrap().mnem == "JMP" || fall.is_none() {
                 fail("unknown", &regs_live, &format!("{} live at return; {} reference from {}", hex(f), kind.name(), site(from)))
             } else {
-                self.from_site(fall, &at_return, up + 1)
+                self.walk_from_site(fall, &at_return, up + 1)
             };
             if inner.status == "violation" {
                 return inner;
@@ -1494,13 +1494,13 @@ impl<'a> Checker<'a> {
         let direct = ins.is_some() && !kind.is_computed();
         let resume = if ins.is_some() { self.mutated_return(from) } else { None };
         if resume.is_some() {
-            return self.from_site(resume, lost, 0);
+            return self.walk_from_site(resume, lost, 0);
         }
         if let Some(i) = &ins {
             // A computed call Ghidra resolved to this function is a call site like any other.
             if kind.is_call() && i.mnem != "JMP" {
                 let fall = self.flow(from).fall;
-                return self.from_site(fall, lost, 0);
+                return self.walk_from_site(fall, lost, 0);
             }
         }
         // A direct jump leaves the value to the jumper's callers.
@@ -1785,7 +1785,7 @@ impl<'a> Checker<'a> {
                     fail("unknown", "", "tail jump reference")
                 } else {
                     let fall = self.flow(from).fall;
-                    self.from_site(fall, &watch, 0)
+                    self.walk_from_site(fall, &watch, 0)
                 };
                 writeln!(out, "{},{contract},{},{},{},{}", f[0], site(from), o.status, o.reg, o.where_)?;
                 total += 1;
