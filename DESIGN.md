@@ -45,6 +45,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   small `print raw` patch on the reference) are in `docs/plans/m3-decompiler.md`.
 - 2026-11-12: CLI only for now: no server or other way for Ghidra's GUI to use this core. User's
   decision; may be revisited later.
+- 2026-11-12: No direct `.gpr`/`.rep` support (Ghidra's undocumented, version-bound database).
+  Data moves between Ghidra projects and ghidra-rs as plain files exported by headless Ghidra
+  scripts (as mercs2 already does with `functions.csv` and `register_abi.csv`), in both
+  directions. Milestone 4's project DB is ghidra-rs's own format. User's decision.
 
 ## Milestones
 
@@ -86,4 +90,4 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
 
 ## Open questions
 
-- Project DB format: does it need to read or write Ghidra `.gpr` projects?
+- None right now.
