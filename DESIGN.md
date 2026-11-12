@@ -54,8 +54,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    writes the files of ExportFunctions.java and ExportGaps.java (match rates in
    `rust/README.md`; about 9.5 s against Ghidra's 723 s auto-analysis). On branch
    `m2b-abi-callers`: two-level switch tables, imports read through the image, call-through-
-   pointer callees and non-returning import thunks. Not done yet: Function ID, constant
-   propagation.
+   pointer callees and non-returning import thunks. On branch `fid`: Function ID (the FID
+   hasher, Ghidra's `.fidbf` databases read in place, matching and naming): of Ghidra's 26 FID
+   functions in mercs2's `.text`, 24 get the same name, 2 another, none missing (details in
+   `rust/README.md`). Not done yet: constant propagation.
 2b. CheckAbiCallers.java (register liveness over p-code), the mercs2 pipeline's per-batch
    check: `ghidra-rs analyze --abi-callers`. On branch `m2b-abi-callers`: 96.5% of the
    reference rows identical. On branch `abi-dropin` (a drop-in for the script, judged by the

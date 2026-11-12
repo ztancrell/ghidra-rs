@@ -271,6 +271,9 @@ pub struct Parse {
     pending: Vec<(usize, u32, usize, u32, u32, bool)>, // (sym, point, num, mask, value, flow)
     /// Context changes committed by `globalset`, by address: (word, mask, value, flows).
     pub changes: BTreeMap<u64, Vec<(usize, u32, u32, bool)>>,
+    /// Record the instruction bits the decode matched on, for `fid_parts` (Function ID).
+    pub fid: bool,
+    pats: std::cell::RefCell<Vec<(u32, u32, u32)>>, // (state, byte offset, mask word)
 }
 
 impl Parse {
@@ -332,6 +335,31 @@ pub struct Insn {
     pub len: usize,
     pub mnemonic: String,
     pub body: String,
+}
+
+/// An operand object as Function ID sees it (`Instruction.getOpObjects`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FidObj {
+    Reg(u64), // offset in the register space
+    Scalar(i64),
+    Addr,
+}
+
+/// One display operand: its value bits, objects, and whether its handle is a constant
+/// (`OperandType.SCALAR` before references are added).
+#[derive(Debug, Clone)]
+pub struct FidOperand {
+    pub mask: Vec<u8>,
+    pub objs: Vec<FidObj>,
+    pub scalar: bool,
+}
+
+/// The instruction mask (operand bits cleared) and operands of an instruction, as
+/// Ghidra's SleighDebugLogger (MASKS_ONLY) and SleighInstructionPrototype compute them.
+#[derive(Debug, Clone)]
+pub struct FidParts {
+    pub mask: Vec<u8>,
+    pub ops: Vec<FidOperand>,
 }
 
 fn calc_mask(size: u32) -> u64 {
@@ -711,6 +739,8 @@ impl Sleigh {
             states: Vec::with_capacity(64),
             pending: Vec::new(),
             changes: BTreeMap::new(),
+            fid: false,
+            pats: Default::default(),
         }
     }
 
@@ -852,6 +882,11 @@ impl Sleigh {
             }
             off += 4;
         }
+        // SleighDebugLogger: a matched instruction pattern joins the instruction mask
+        if p.fid && !ctx {
+            let mut pats = p.pats.borrow_mut();
+            pats.extend(b.words.iter().enumerate().map(|(i, w)| (point, base + b.off + 4 * i as u32, w.0)));
+        }
         Ok(true)
     }
 
@@ -876,6 +911,11 @@ impl Sleigh {
             let v = if d.ctx {
                 p.ctx_bits(d.start, d.size)
             } else {
+                if p.fid {
+                    // DecisionNode.debugInstructionBitsDecision
+                    let m = u32::MAX.wrapping_shl(32 - d.size as u32).wrapping_shr(d.start as u32);
+                    p.pats.borrow_mut().push((point, p.states[point as usize].offset, m));
+                }
                 p.ins_bits(p.states[point as usize].offset, d.start, d.size)?
             };
             d = d.kids.get(v as usize).ok_or("decision tree out of range")?;
@@ -953,6 +993,7 @@ impl Sleigh {
             }
         }
         p.pending.clear();
+        p.pats.borrow_mut().clear();
         p.states.clear();
         p.states.push(State::new(NONE));
 
@@ -1260,6 +1301,238 @@ impl Sleigh {
         self.print_part(ct, p, 0, false, &mut mnemonic)?;
         self.print_part(ct, p, 0, true, &mut body)?;
         Ok(Insn { addr, len, mnemonic, body })
+    }
+
+    // ------------------------------------------------------------ Function ID masks
+
+    /// Masks and operand objects of the instruction last decoded into `p`, which must have
+    /// been decoded with `p.fid` set (SleighDebugLogger.buildMasks, getOpObjects, getOpType).
+    pub fn fid_parts(&self, p: &Parse) -> FidParts {
+        let len = p.len;
+        let pats = p.pats.borrow();
+        let under = |mut s: u32, top: u32| {
+            while s != NONE && s != top {
+                s = p.states[s as usize].parent;
+            }
+            s == top
+        };
+        let pat_mask = |top: u32| {
+            let mut m = vec![0u8; len];
+            for &(pt, off, w) in pats.iter().filter(|x| under(x.0, top)) {
+                let _ = pt;
+                for n in 0..4 {
+                    if let Some(b) = m.get_mut(off as usize + n) {
+                        *b |= (w >> (24 - 8 * n)) as u8;
+                    }
+                }
+            }
+            m
+        };
+        let mut mask = pat_mask(0);
+        // mnemonic state (cacheMnemonicState)
+        let (mut ct, mut point) = (p.states[0].ct, 0u32);
+        while let Some(i) = self.ctors[ct].flowthru {
+            let op = self.operand(self.ctors[ct].operands[i]);
+            match op.triple {
+                Some(t) if self.is_subtable(t) => {
+                    point = p.states[point as usize].resolve[op.index];
+                    ct = p.states[point as usize].ct;
+                }
+                _ => break,
+            }
+        }
+        let c = &self.ctors[ct];
+        let order: Vec<usize> = match c.firstws {
+            -1 => vec![],
+            w => c.pieces.iter().skip(w as usize + 1).filter_map(|x| if let Piece::Op(i) = x { Some(*i) } else { None }).collect(),
+        };
+        let root = &self.ctors[p.states[0].ct];
+        let mut ops = Vec::new();
+        for i in order {
+            let sym = c.operands[i];
+            let mut m = vec![0u8; len];
+            self.fid_op_mask(p, point, sym, &mut m);
+            if m.iter().all(|&b| b == 0) {
+                // steal the bits of the top-level pattern group of the same name
+                if let Some(&s) = root.operands.iter().find(|&&s| self.syms[s].name == self.syms[sym].name) {
+                    let sub = p.states[0].resolve[self.operand(s).index];
+                    if sub != NONE {
+                        m = pat_mask(sub);
+                    }
+                }
+            }
+            for (a, b) in mask.iter_mut().zip(&m) {
+                *a &= !b;
+            }
+            let mut list = Vec::new();
+            self.fid_op_list(p, point, sym, &mut list);
+            let objs = list.into_iter().flatten().filter_map(|h| self.fid_obj(&h)).collect();
+            let child = p.states[point as usize].resolve[self.operand(sym).index];
+            let h = if child == NONE { Handle::default() } else { p.states[child as usize].hand };
+            ops.push(FidOperand { mask: m, objs, scalar: h.offset_space == NONE && h.space == CONST_SPACE });
+        }
+        FidParts { mask, ops }
+    }
+
+    /// SleighDebugLogger.combineOperandMask
+    fn fid_op_mask(&self, p: &Parse, point: u32, sym: usize, m: &mut [u8]) {
+        let op = self.operand(sym);
+        let sub = p.states[point as usize].resolve[op.index];
+        let x = match op.triple {
+            Some(t) if self.is_subtable(t) => {
+                if sub != NONE {
+                    let c = &self.ctors[p.states[sub as usize].ct];
+                    for piece in &c.pieces {
+                        if let Piece::Op(j) = piece {
+                            self.fid_op_mask(p, sub, c.operands[*j], m);
+                        }
+                    }
+                }
+                None
+            }
+            Some(t) => match &self.syms[t].kind {
+                Kind::Value(x) | Kind::ValueMap(x, _) | Kind::Name(x, _) | Kind::VarList(x, _) | Kind::Context { exp: x, .. } => Some(x),
+                _ => None,
+            },
+            None => op.defexp.as_ref(),
+        };
+        let Some(x) = x else { return };
+        if op.offbase < 0 {
+            self.fid_pat_mask(p, point, x, (p.states[point as usize].offset as i32 + op.reloff) as u32, m);
+        } else if sub != NONE {
+            self.fid_pat_mask(p, sub, x, p.states[sub as usize].offset, m);
+        }
+    }
+
+    /// SleighDebugLogger.combinePatternMask (little-endian memory)
+    fn fid_pat_mask(&self, p: &Parse, point: u32, x: &Expr, off: u32, m: &mut [u8]) {
+        match x {
+            Expr::Bin(_, l, r) => {
+                self.fid_pat_mask(p, point, l, off, m);
+                self.fid_pat_mask(p, point, r, off, m);
+            }
+            Expr::Neg(u) | Expr::Not(u) => self.fid_pat_mask(p, point, u, off, m),
+            Expr::Operand { index, table, ct } => {
+                if let Kind::Subtable { ctors, .. } = &self.syms[*table].kind {
+                    if let Some(&c) = ctors.get(*ct) {
+                        self.fid_op_mask(p, point, self.ctors[c].operands[*index], m);
+                    }
+                }
+            }
+            Expr::Token { bitstart, bitend, bytestart, byteend, .. } => {
+                for i in *bytestart..=*byteend {
+                    let (mut first, mut last) = (0i32, 7i32);
+                    if i == *byteend {
+                        last = bitend % 8;
+                    }
+                    if i == *bytestart {
+                        first = bitstart % 8;
+                    }
+                    let b = (0xffi32.wrapping_shr((7 - last + first) as u32) << first) as u8;
+                    if let Some(x) = m.get_mut((i + off as i32) as usize) {
+                        *x |= b;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// OperandSymbol.printList: handles in print order (None for printed characters).
+    fn fid_op_list(&self, p: &Parse, point: u32, sym: usize, out: &mut Vec<Option<Handle>>) {
+        let op = self.operand(sym);
+        let child = p.states[point as usize].resolve[op.index];
+        if child == NONE {
+            return;
+        }
+        let st = &p.states[child as usize];
+        match op.triple {
+            Some(t) if self.is_subtable(t) => self.fid_ctor_list(p, child, out),
+            Some(t) => match &self.syms[t].kind {
+                Kind::Name(x, names) => {
+                    if let Ok(i) = self.table_index(x, names.len(), p, child) {
+                        out.extend(names[i].chars().map(|_| None));
+                    }
+                }
+                Kind::Operand(_) | Kind::Subtable { .. } | Kind::None | Kind::UserOp => {}
+                _ => out.push(Some(st.hand)),
+            },
+            None => {
+                let mut h = st.hand;
+                if h.offset_size == 0 {
+                    h.offset_size = st.length;
+                }
+                out.push(Some(h));
+            }
+        }
+    }
+
+    /// Constructor.printList, with its fix of a constant exported as an address.
+    fn fid_ctor_list(&self, p: &Parse, point: u32, out: &mut Vec<Option<Handle>>) {
+        let ct = p.states[point as usize].ct;
+        let c = &self.ctors[ct];
+        let (mut count, mut last) = (0, None);
+        for piece in &c.pieces {
+            match piece {
+                Piece::Lit(s) => out.extend(s.chars().map(|_| None)),
+                Piece::Op(i) => {
+                    let prev = out.len();
+                    self.fid_op_list(p, point, c.operands[*i], out);
+                    if out.len() != prev {
+                        count += 1;
+                        if count == 1 {
+                            for n in prev..out.len() {
+                                if out[n].is_some() {
+                                    if last.is_some() {
+                                        last = None;
+                                        break;
+                                    }
+                                    last = Some((n, *i));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let (Some((n, i)), 1) = (last, count) else { return };
+        let Some(res) = c.templ.as_ref().and_then(|t| t.result.as_ref()) else { return };
+        let Some(mut h) = out[n] else { return };
+        if h.space != CONST_SPACE || matches!(res.space, C::SpaceId(s) if s == self.uniq_space) {
+            return;
+        }
+        if let C::Handle { idx, .. } = res.ptroffset {
+            if idx == i {
+                if let (Ok(space), Ok(size)) = (self.fix_space(&res.space, p, point), self.fix(&res.size, p, point)) {
+                    h.space = space;
+                    h.size = size as u32;
+                    out[n] = Some(h);
+                }
+            }
+        }
+    }
+
+    /// SleighInstructionPrototype.addHandleObject
+    fn fid_obj(&self, h: &Handle) -> Option<FidObj> {
+        let name = self.spaces.get(h.space as usize).map(|s| s.name.as_str());
+        if h.space == CONST_SPACE {
+            let size = [h.size, h.offset_size, self.spaces[self.code_space as usize].size].into_iter().find(|&s| s != 0).unwrap();
+            let v = h.offset_offset as i64;
+            return Some(FidObj::Scalar(if size >= 8 { v } else { sign_extend(v, 8 * size as i32 - 1) }));
+        }
+        match name {
+            Some("register") => self.regnames.get(&(h.space, h.offset_offset, h.size)).map(|_| FidObj::Reg(h.offset_offset)),
+            Some(_) if h.space == self.code_space => {
+                if h.offset_space == NONE {
+                    Some(FidObj::Addr)
+                } else if self.spaces.get(h.offset_space as usize).map(|s| s.name.as_str()) == Some("register") {
+                    Some(FidObj::Reg(h.offset_offset))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 
     // ------------------------------------------------------------ p-code (SleighBuilder)

@@ -63,7 +63,26 @@ fn template_arg(s: &str) -> Option<(String, &str)> {
 
 /// Ghidra's qualified display name for an exported MSVC symbol (no parameters).
 pub fn demangle(sym: &str) -> String {
+    // __fastcall C names `@name@N` (Function ID's names)
+    if let Some((name, n)) = sym.strip_prefix('@').and_then(|s| s.rsplit_once('@')) {
+        if !name.is_empty() && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) {
+            return name.to_string();
+        }
+    }
     let Some(r) = sym.strip_prefix('?') else { return sym.to_string() };
+    // compiler-generated helpers (Function ID's names); a global one has no class
+    let helpers = [
+        ("?_E", "`vector_deleting_destructor'"),
+        ("?_G", "`scalar_deleting_destructor'"),
+        ("?_L", "`eh_vector_constructor_iterator'"),
+        ("?_M", "`eh_vector_destructor_iterator'"),
+    ];
+    if let Some((x, name)) = helpers.iter().find_map(|(k, n)| Some((r.strip_prefix(k)?, n))) {
+        return match qualified(x) {
+            Some((cls, _)) if !cls.is_empty() && !x.starts_with('@') => format!("{cls}::{name}"),
+            _ => name.to_string(),
+        };
+    }
     let special = |code: &str, r: &str| {
         let (cls, _) = qualified(r)?;
         let last = cls.rsplit("::").next().unwrap_or(&cls).to_string();
@@ -123,7 +142,13 @@ fn containing(an: &Analysis) -> HashMap<u32, u32> {
 }
 
 /// tools/ghidra/ExportFunctions.java: one CSV row per function in .text.
-pub fn export_functions(img: &Image, an: &Analysis, out: &mut dyn Write) -> std::io::Result<usize> {
+/// `fid`: the functions Function ID marked (`fid::apply`), with the names it applied.
+pub fn export_functions(
+    img: &Image,
+    an: &Analysis,
+    fid: &BTreeMap<u32, crate::fid::Applied>,
+    out: &mut dyn Write,
+) -> std::io::Result<usize> {
     let owner = containing(an);
     // vftable slots -> class; a walk stops at the next labelled or referenced slot
     let tables = vftables(img);
@@ -176,13 +201,19 @@ pub fn export_functions(img: &Image, an: &Analysis, out: &mut dyn Write) -> std:
         let callees: HashSet<u32> =
             body.iter().filter_map(|a| an.call_target(img, &an.insns[a])).collect();
         let data_refs: usize = body.iter().map(|a| an.insns[a].refs.len()).sum();
-        let name = exports.get(&f).map(|s| demangle(s)).unwrap_or_default();
+        let name = match (exports.get(&f), fid.get(&f)) {
+            (Some(s), _) => demangle(s),
+            (None, Some(a)) if a.conflict => a.name.clone(),
+            (None, Some(a)) => demangle(&a.name),
+            _ => String::new(),
+        };
         writeln!(
             out,
-            "0x{f:08x},{},{},{},0,{},{},{},{},{}",
+            "0x{f:08x},{},{},{},{},{},{},{},{},{}",
             an.body_size(f),
             quote(&name),
             exports.contains_key(&f) as u8,
+            fid.contains_key(&f) as u8,
             quote(vclass.get(&f).copied().unwrap_or("")),
             lua.contains(&f) as u8,
             callees.len(),

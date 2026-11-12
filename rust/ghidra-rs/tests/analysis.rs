@@ -33,7 +33,7 @@ fn discover_functions_x86_32() {
     assert_eq!([an.body_size(0x401000), an.body_size(0x401010), an.body_size(0x401020)], [10, 6, 5]);
 
     let mut out = Vec::new();
-    export_functions(&img, &an, &mut out).unwrap();
+    export_functions(&img, &an, &Default::default(), &mut out).unwrap();
     assert_eq!(
         String::from_utf8(out).unwrap(),
         "address,size,name,exported,fid,vtable_class,lua,callees,callers,data_refs\n\
