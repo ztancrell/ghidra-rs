@@ -139,3 +139,43 @@ fn vtable_call_through_symbolic_store_x86_32() {
     assert!(an.insns[&0x40100c].refs.contains(&0x402004));
     assert_eq!(an.insns[&0x40100f].computed, Some(0x401020));
 }
+
+// Whole-function constant propagation: a vtable stored to the stack must survive a call to a
+// `RET 4` function (the callee's purge) and a join, so `CALL [EAX+4]` gets its target. The
+// local fold of discovery, which knows no purges yet, loses ESP at the call.
+#[test]
+fn propagation_survives_call_purge_and_join_x86_32() {
+    let sl = Sleigh::load(&Sleigh::sla_path("x86")).unwrap();
+    let mut text = vec![
+        0x83, 0xec, 0x08, // 401000 SUB ESP,0x8
+        0xc7, 0x04, 0x24, 0x00, 0x20, 0x40, 0x00, // 401003 MOV dword ptr [ESP],0x402000
+        0x6a, 0x01, // 40100a PUSH 0x1
+        0xe8, 0x1f, 0x00, 0x00, 0x00, // 40100c CALL 0x401030 (RET 0x4)
+        0x85, 0xc0, // 401011 TEST EAX,EAX
+        0x74, 0x01, // 401013 JZ 0x401016
+        0x90, // 401015 NOP
+        0x8b, 0x04, 0x24, // 401016 MOV EAX,dword ptr [ESP]
+        0xff, 0x50, 0x04, // 401019 CALL dword ptr [EAX + 0x4]
+        0x83, 0xc4, 0x08, // 40101c ADD ESP,0x8
+        0xc3, // 40101f RET
+    ];
+    text.resize(0x30, 0xcc);
+    text.extend([0xc2, 0x04, 0x00]); // 401030 RET 0x4
+    text.resize(0x40, 0xcc);
+    text.extend([0x33, 0xc0, 0xc3]); // 401040 XOR EAX,EAX; RET
+    text.resize(0x50, 0xcc);
+    let mut data = 0x401050u32.to_le_bytes().to_vec();
+    data.extend(0x401040u32.to_le_bytes());
+    let img = Image {
+        sections: vec![
+            Section { name: ".text".into(), exec: true, addr: 0x401000, data: text },
+            Section { name: ".rdata".into(), exec: false, addr: 0x402000, data },
+        ],
+        ..Image::default()
+    };
+    let mut an = Analysis::run(&img, &sl, &[0x401000, 0x401030, 0x401040], true).unwrap();
+    assert_eq!(an.insns[&0x401019].computed, None);
+    an.disassemble(&img, &sl, &[], true);
+    assert_eq!(an.insns[&0x401019].computed, Some(0x401040));
+    assert!(an.insns[&0x401019].refs.contains(&0x402004));
+}
