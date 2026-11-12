@@ -50,6 +50,14 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   scripts (as mercs2 already does with `functions.csv` and `register_abi.csv`), in both
   directions. Milestone 4's project DB is ghidra-rs's own format. User's decision.
 
+- 2026-11-12: Beating Ghidra's decompiler: parity first, then fixes. The mercs2 rewrite found the
+  C++ decompiler dropping values (stores after cursor pushes at 0x006664eb, a steer value in
+  0x005460a0), and an exact port copies those drops. The port stays byte-identical through S10;
+  after that, ghidra-rs fixes such drops inside its own decompiler behind options, never by
+  default (as the plan's "Where to diverge" says). Each fix names the Ghidra behaviour it changes
+  and a mercs2 function that shows it. User's decision (chosen over a separate p-code checker
+  first).
+
 ## Milestones
 
 1. Load ELF/PE/Mach-O, decode x86-64 via `.sla`, and lift to p-code. A CLI dumps the disassembly and p-code.
