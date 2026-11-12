@@ -10,8 +10,8 @@
 use super::cspec::SleighNames;
 use super::inject::InjectId;
 use super::op::OpId;
-use super::xml::Element;
 use super::{err, LowlevelError, Result};
+use crate::xml::Element;
 
 /// Index of a model in [`Models::list`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,18 +64,29 @@ impl Storage {
                 }
                 Ok(Storage::Join(pieces))
             }
-            "stack" => Ok(Storage::Stack { offset: el.int("offset")? as u64, size }),
-            name => Ok(Storage::Space { space: regs.space(name)?, offset: el.int("offset")? as u64, size }),
+            "stack" => Ok(Storage::Stack { offset: regs.wrap(None, el.int("offset")?), size }),
+            name => {
+                let space = regs.space(name)?;
+                Ok(Storage::Space { space, offset: regs.wrap(Some(space), el.int("offset")?), size })
+            }
         }
     }
 
-    /// The key `EffectRecord::compareByAddress` sorts by: space (SLEIGH spaces in their index
-    /// order, then `stack` and `join`, which the C++ creates after them), then offset.
+    /// The key `EffectRecord::compareByAddress` sorts by: space index, then offset. The SLEIGH
+    /// spaces come first; `join` follows (made in `Architecture::restoreFromSpec` with `fspec` and
+    /// `iop`), then `stack` (made later, in `parseCompilerConfig`).
+    fn size(&self) -> u32 {
+        match self {
+            Storage::Space { size, .. } | Storage::Stack { size, .. } => *size,
+            Storage::Join(pieces) => pieces.iter().map(|p| p.2).sum(),
+        }
+    }
+
     fn address_key(&self) -> (u32, u64) {
         match self {
             Storage::Space { space, offset, .. } => (*space, *offset),
-            Storage::Stack { offset, .. } => (u32::MAX - 1, *offset),
-            Storage::Join(_) => (u32::MAX, 0),
+            Storage::Join(_) => (u32::MAX - 1, 0),
+            Storage::Stack { offset, .. } => (u32::MAX, *offset),
         }
     }
 }
@@ -84,20 +95,59 @@ impl Storage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParamEntry {
     pub(crate) storage: Storage,
+    /// `type`: the storage class (`metatype`/`storage` attribute)
+    pub(crate) class: TypeClass,
     pub(crate) minsize: i32,
     /// `maxsize`: the size of the slot
     pub(crate) size: i32,
     pub(crate) align: i32,
 }
 
+/// `type_class` (`string2typeclass`): which data types a parameter entry takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TypeClass {
+    General,
+    Float,
+    Ptr,
+    HiddenRet,
+    Vector,
+    /// `class1` .. `class4`
+    Class(u8),
+}
+
+impl TypeClass {
+    /// Port of `string2typeclass`.
+    fn parse(s: &str) -> Result<TypeClass> {
+        Ok(match s {
+            "general" => TypeClass::General,
+            "float" => TypeClass::Float,
+            "ptr" => TypeClass::Ptr,
+            "hiddenret" => TypeClass::HiddenRet,
+            "vector" => TypeClass::Vector,
+            "class1" => TypeClass::Class(1),
+            "class2" => TypeClass::Class(2),
+            "class3" => TypeClass::Class(3),
+            "class4" => TypeClass::Class(4),
+            _ => return err(format!("Unknown data-type class: {s}")),
+        })
+    }
+}
+
 impl ParamEntry {
-    /// Port of `ParamEntry::decode`.
+    /// Port of `ParamEntry::decode`. (The `extension` attribute is checked but not kept:
+    /// TODO(S4) return recovery reads it, `smallsize_*ext`.)
     fn decode(el: &Element, regs: &SleighNames) -> Result<ParamEntry> {
         for attr in el.attr_names() {
             if !matches!(attr, "minsize" | "maxsize" | "size" | "align" | "metatype" | "storage" | "extension") {
                 return err(format!("Unknown <pentry> attribute {attr}"));
             }
         }
+        if let Some(ext) = el.attr("extension") {
+            if !matches!(ext, "sign" | "zero" | "inttype" | "float" | "none") {
+                return err(format!("Bad extension attribute: {ext}"));
+            }
+        }
+        let class = el.attr("metatype").or(el.attr("storage")).map_or(Ok(TypeClass::General), TypeClass::parse)?;
         let num = |name: &str| -> Result<i32> {
             i32::try_from(el.int(name)?).map_err(|_| LowlevelError(format!("<pentry>: {name} out of range")))
         };
@@ -111,6 +161,7 @@ impl ParamEntry {
         let [addr] = &el.kids[..] else { return err("<pentry> needs exactly one storage element") };
         Ok(ParamEntry {
             storage: Storage::decode(addr, regs)?,
+            class,
             minsize,
             size,
             // ParamEntry::decode: an alignment equal to the size means none
@@ -118,8 +169,39 @@ impl ParamEntry {
         })
     }
 
-    fn is_stack(&self) -> bool {
-        matches!(self.storage, Storage::Stack { .. })
+    /// `isStackSpill`: a stack entry with an alignment (it holds several slots).
+    fn is_stack_spill(&self) -> bool {
+        matches!(self.storage, Storage::Stack { .. }) && self.align != 0
+    }
+
+    /// The entry's space, start and size, as `subsumesDefinition` compares them (a join is
+    /// its own space; two joins compare as equal pieces).
+    fn range(&self) -> (Option<u32>, u64, u64) {
+        let size = self.size as u64;
+        match &self.storage {
+            Storage::Space { space, offset, .. } => (Some(*space), *offset, size),
+            Storage::Stack { offset, .. } => (None, *offset, size),
+            Storage::Join(_) => (None, u64::MAX, size),
+        }
+    }
+
+    /// Port of `ParamEntry::subsumesDefinition`: `other` lies within this entry, same class
+    /// (unless this is general) and alignment.
+    fn subsumes(&self, other: &ParamEntry) -> bool {
+        if self.class != TypeClass::General && other.class != self.class {
+            return false;
+        }
+        let same_space = match (&self.storage, &other.storage) {
+            (Storage::Join(a), Storage::Join(b)) => a == b,
+            (Storage::Stack { .. }, Storage::Stack { .. }) => true,
+            (Storage::Space { space: a, .. }, Storage::Space { space: b, .. }) => a == b,
+            _ => false,
+        };
+        let ((_, base, size), (_, obase, osize)) = (self.range(), other.range());
+        same_space
+            && obase >= base
+            && obase.wrapping_add(osize).wrapping_sub(1) <= base.wrapping_add(size).wrapping_sub(1)
+            && self.align == other.align
     }
 }
 
@@ -148,16 +230,29 @@ impl ParamList {
         Ok(ParamList { entries })
     }
 
-    /// Port of `ParamListStandard::getSpacebase`: the stack, when some entry is on it.
+    /// Port of `ParamListStandard::getSpacebase` (`getStackEntry`): whether the last entry is
+    /// a stack spill, the one way parameters reach the stack.
     pub(crate) fn has_stack(&self) -> bool {
-        self.entries.iter().any(ParamEntry::is_stack)
+        self.entries.last().is_some_and(ParamEntry::is_stack_spill)
     }
 
-    /// Port of `ParamListMerged::foldIn`: add the entries not already present.
+    /// Port of `ParamListMerged::foldIn`: an empty list takes `other` whole; else each entry of
+    /// `other` is dropped when an entry with the same minimum size contains it, replaces an
+    /// entry with the same minimum size it contains, and is appended otherwise.
     fn fold_in(&mut self, other: &ParamList) {
-        for e in &other.entries {
-            if !self.entries.contains(e) {
-                self.entries.push(e.clone());
+        if self.entries.is_empty() {
+            self.entries = other.entries.clone();
+            return;
+        }
+        for op in &other.entries {
+            let hit = self.entries.iter().position(|e| e.subsumes(op) || op.subsumes(e));
+            match hit {
+                Some(i) if self.entries[i].minsize == op.minsize => {
+                    if !self.entries[i].subsumes(op) {
+                        self.entries[i] = op.clone();
+                    }
+                }
+                _ => self.entries.push(op.clone()),
             }
         }
     }
@@ -234,6 +329,8 @@ impl ProtoModel {
         }
         // stable, as std::sort's result does not matter for distinct addresses
         effects.sort_by_key(|e| e.storage.address_key());
+        // VarnodeData::operator<: space, offset, then the larger size first
+        likelytrash.sort_by_key(|s: &Storage| (s.address_key(), std::cmp::Reverse(s.size())));
         Ok(ProtoModel { name, extrapop, input, output, effects, likelytrash })
     }
 
@@ -318,10 +415,14 @@ pub(crate) struct FuncProto {
 }
 
 impl FuncProto {
-    /// Port of `FuncProto::setModel`: the model and its extrapop.
+    /// Port of `FuncProto::setModel`: the model and its extrapop, except that a model replacing
+    /// another does not overwrite the extrapop with unknown.
     pub(crate) fn set_model(&mut self, models: &Models, id: ModelId) {
+        let pop = models.get(id).extrapop;
+        if self.model.is_none() || pop != ExtraPop::Unknown {
+            self.extrapop = pop;
+        }
         self.model = Some(id);
-        self.extrapop = models.get(id).extrapop;
     }
 
     /// Port of `FuncProto::hasMatchingModel`.
@@ -335,7 +436,8 @@ impl FuncProto {
         self.inject = other.inject;
     }
 
-    /// Port of `FuncProto::copy` (`FuncCallSpecs::copy` keeps the call's own fields).
+    /// Port of `FuncProto::copy`: this prototype becomes `other`'s (the call site's own fields
+    /// live in `CallSpec`, outside the prototype, so they are kept).
     pub(crate) fn copy(&mut self, other: &FuncProto) {
         *self = other.clone();
     }
@@ -347,8 +449,9 @@ pub(crate) struct CallSpec {
     pub(crate) op: OpId,
     /// the called address of a direct call
     pub(crate) entry: Option<u64>,
-    /// the callee's display name, when the scope knows a function there (`setFuncdata`)
-    pub(crate) name: Option<String>,
+    /// whether the scope knows a function at `entry` (`setFuncdata`); its name is in
+    /// `Arch::functions`
+    pub(crate) known: bool,
     pub(crate) proto: FuncProto,
     /// the CALL's input slot holding the stack-pointer placeholder (`stackPlaceholderSlot`)
     pub(crate) stack_placeholder_slot: Option<usize>,
@@ -356,12 +459,12 @@ pub(crate) struct CallSpec {
 
 impl CallSpec {
     /// A call site before analysis (the `FuncCallSpecs` constructor).
-    pub(crate) fn new(op: OpId, entry: Option<u64>, name: Option<String>) -> CallSpec {
-        CallSpec { op, entry, name, proto: FuncProto::default(), stack_placeholder_slot: None }
+    pub(crate) fn new(op: OpId, entry: Option<u64>, known: bool) -> CallSpec {
+        CallSpec { op, entry, known, proto: FuncProto::default(), stack_placeholder_slot: None }
     }
 
     /// The callee's entry when the scope knows a function there (`getFuncdata`).
     pub(crate) fn callee(&self) -> Option<u64> {
-        self.name.as_ref().and(self.entry)
+        self.entry.filter(|_| self.known)
     }
 }

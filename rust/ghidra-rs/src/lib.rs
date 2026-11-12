@@ -7,3 +7,4 @@ pub mod fid;
 pub mod scripts;
 pub mod sla;
 pub mod sleigh;
+mod xml;

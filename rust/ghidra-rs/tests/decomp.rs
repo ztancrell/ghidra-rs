@@ -21,7 +21,14 @@ fn print_raw_at_heritage() {
 }
 
 fn img_40a110() -> Image {
-    let section = |addr: u32, data: Vec<u8>| Section { name: ".text".into(), exec: true, readonly: true, addr, data };
+    let section = |addr: u32, data: Vec<u8>| Section {
+        name: ".text".into(),
+        exec: true,
+        readonly: true,
+        zero_tail: 0,
+        addr,
+        data,
+    };
     Image {
         sections: vec![
             section(0x40a110, vec![0xe9, 0x4b, 0xe5, 0x09, 0x00]), // JMP 0x4a8660
@@ -51,7 +58,14 @@ fn img_40a110() -> Image {
 /// Expected output: decomp_dbg on a `load test file` image holding `INTO; RET` at 0x401000.
 #[test]
 fn print_raw_relative_branch_to_own_end() {
-    let text = Section { name: ".text".into(), exec: true, readonly: true, addr: 0x401000, data: vec![0xce, 0xc3] };
+    let text = Section {
+        name: ".text".into(),
+        exec: true,
+        readonly: true,
+        zero_tail: 0,
+        addr: 0x401000,
+        data: vec![0xce, 0xc3],
+    };
     let img = Image { sections: vec![text], ..Image::default() };
     assert_eq!(raw_at(img, 0x401000, "funclink"), include_str!("data/raw-funclink-into.txt"));
 }

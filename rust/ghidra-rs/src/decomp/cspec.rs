@@ -9,9 +9,9 @@
 
 use super::fspec::{ModelId, Models, ProtoModel, Storage};
 use super::inject::InjectLibrary;
-use super::xml::{self, Element};
 use super::{err, LowlevelError, Result};
 use crate::sleigh::Sleigh;
+use crate::xml::{self, Element};
 use std::collections::HashMap;
 
 /// The compiler spec, as the architecture keeps it.
@@ -48,6 +48,26 @@ impl SleighNames<'_> {
     pub(crate) fn space(&self, name: &str) -> Result<u32> {
         let i = self.sleigh.spaces.iter().position(|s| s.name == name);
         i.map(|i| i as u32).ok_or_else(|| LowlevelError(format!("Unknown space name: {name}")))
+    }
+
+    /// An offset read from the spec, wrapped to the address size of `space` (`AddrSpace::wrapOffset`
+    /// for a negative offset such as a stack slot below the stack pointer). `None`: the code
+    /// space, whose size the `stack` space shares.
+    pub(crate) fn wrap(&self, space: Option<u32>, offset: i64) -> u64 {
+        let s = space.unwrap_or_else(|| self.sleigh.code_space());
+        let bytes = self.sleigh.spaces.get(s as usize).map_or(8, |sp| sp.size);
+        let mask = if bytes >= 8 { u64::MAX } else { (1u64 << (8 * bytes)) - 1 };
+        offset as u64 & mask
+    }
+
+    /// The unique space, for snippet temporaries.
+    pub(crate) fn uniq_space(&self) -> u32 {
+        self.sleigh.uniq_space()
+    }
+
+    /// The default space of `*` in a snippet.
+    pub(crate) fn code_space(&self) -> u32 {
+        self.sleigh.code_space()
     }
 }
 
@@ -89,7 +109,7 @@ impl CompilerSpec {
                     let body = el.kid("pcode").and_then(|p| p.kid("body")).ok_or_else(|| {
                         LowlevelError(format!("callfixup {}: missing <pcode><body>", el.attr("name").unwrap_or("?")))
                     })?;
-                    injects.add_callfixup(sleigh, el.req("name")?, &body.text)?;
+                    injects.add_callfixup(names, el.req("name")?, &body.text)?;
                 }
                 // read with the prototypes, or later (see the module comment)
                 "returnaddress" | "data_organization" | "global" => {}

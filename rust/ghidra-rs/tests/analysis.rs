@@ -24,7 +24,14 @@ fn discover_functions_x86_32() {
     text.extend([0x55, 0x8b, 0xec, 0x5d, 0xc3]); // 401020: reached by nothing
     text.resize(0x30, 0xcc);
     let img = Image {
-        sections: vec![Section { name: ".text".into(), exec: true, readonly: true, addr: 0x401000, data: text }],
+        sections: vec![Section {
+            name: ".text".into(),
+            exec: true,
+            readonly: true,
+            zero_tail: 0,
+            addr: 0x401000,
+            data: text,
+        }],
         exports: vec![(0x401000, "?Swap@GMatrix2D@@QAEXPAV1@@Z".into())],
         ..Image::default()
     };
@@ -68,7 +75,14 @@ fn code_constants_x86_32() {
     text.extend([0x33, 0xc0, 0xc3]); // 401020 XOR EAX,EAX; RET
     text.resize(0x30, 0xcc);
     let img = Image {
-        sections: vec![Section { name: ".text".into(), exec: true, readonly: true, addr: 0x401000, data: text }],
+        sections: vec![Section {
+            name: ".text".into(),
+            exec: true,
+            readonly: true,
+            zero_tail: 0,
+            addr: 0x401000,
+            data: text,
+        }],
         ..Image::default()
     };
     let mut an = Analysis::run(&img, &sl, &[0x401000], true).unwrap();
@@ -98,8 +112,8 @@ fn xor_folded_code_pointer_x86_32() {
     data.extend((0x1234_5678u32 ^ 0x401020).to_le_bytes());
     let img = Image {
         sections: vec![
-            Section { name: ".text".into(), exec: true, readonly: true, addr: 0x401000, data: text },
-            Section { name: ".data".into(), exec: false, readonly: false, addr: 0x402000, data },
+            Section { name: ".text".into(), exec: true, readonly: true, zero_tail: 0, addr: 0x401000, data: text },
+            Section { name: ".data".into(), exec: false, readonly: false, zero_tail: 0, addr: 0x402000, data },
         ],
         ..Image::default()
     };
@@ -133,8 +147,8 @@ fn vtable_call_through_symbolic_store_x86_32() {
     data.extend(0x401020u32.to_le_bytes());
     let img = Image {
         sections: vec![
-            Section { name: ".text".into(), exec: true, readonly: true, addr: 0x401000, data: text },
-            Section { name: ".rdata".into(), exec: false, readonly: true, addr: 0x402000, data },
+            Section { name: ".text".into(), exec: true, readonly: true, zero_tail: 0, addr: 0x401000, data: text },
+            Section { name: ".rdata".into(), exec: false, readonly: true, zero_tail: 0, addr: 0x402000, data },
         ],
         ..Image::default()
     };
@@ -180,8 +194,8 @@ fn propagation_survives_call_purge_and_join_x86_32() {
     data.extend(0x401040u32.to_le_bytes());
     let img = Image {
         sections: vec![
-            Section { name: ".text".into(), exec: true, readonly: true, addr: 0x401000, data: text },
-            Section { name: ".rdata".into(), exec: false, readonly: true, addr: 0x402000, data },
+            Section { name: ".text".into(), exec: true, readonly: true, zero_tail: 0, addr: 0x401000, data: text },
+            Section { name: ".rdata".into(), exec: false, readonly: true, zero_tail: 0, addr: 0x402000, data },
         ],
         ..Image::default()
     };

@@ -126,7 +126,12 @@ impl Flow<'_> {
         for call in std::mem::take(&mut self.injectlist) {
             let Some(inject) = self.fd.call(call).proto.inject else { continue };
             let arch = self.arch;
-            self.do_injection(&arch.spec.injects.payload(inject).ops, call)?;
+            let payload = arch.spec.injects.payload(inject);
+            self.do_injection(&payload.ops, call)?;
+            // the injected call's callee is always known: its prototype holds the fixup
+            let callee =
+                self.fd.call(call).callee().and_then(|e| arch.functions.get(&e)).map_or("", |f| f.name.as_str());
+            self.fd.warnings.push(format!("Function: {callee} replaced with injection: {}", payload.name));
             self.fd.qlst.retain(|&c| c != call);
         }
         Ok(())
@@ -441,7 +446,7 @@ impl Flow<'_> {
     fn setup_call_specs(&mut self, op: OpId) -> Result<()> {
         let entry = self.fd.vn(self.fd.input(op, 0)?).offset;
         let callee = self.arch.functions.get(&entry);
-        let mut spec = CallSpec::new(op, Some(entry), callee.map(|f| f.name.clone()));
+        let mut spec = CallSpec::new(op, Some(entry), callee.is_some());
         if let Some(f) = callee {
             spec.proto.copy_flow_effects(&f.proto);
         }
@@ -457,7 +462,7 @@ impl Flow<'_> {
 
     /// Port of `FlowInfo::setupCallindSpecs` (without overrides, an indirect call stays one).
     fn setup_callind_specs(&mut self, op: OpId) {
-        self.new_call(CallSpec::new(op, None, None));
+        self.new_call(CallSpec::new(op, None, false));
     }
 
     fn new_call(&mut self, spec: CallSpec) -> CallId {
@@ -572,7 +577,7 @@ impl Flow<'_> {
         while let Some(&c) = self.fd.qlst.get(i) {
             i += 1;
             let call = self.fd.call(c);
-            let (op, known) = (call.op, call.name.is_some());
+            let (op, known) = (call.op, call.known);
             let Some(addr) = call.entry.filter(|_| !known && self.opc(op) == Opcode::Call) else { continue };
             let Some((&start, stat)) = self.visited.range(..=addr).next_back() else { continue };
             if start != addr || start + stat.size <= addr {

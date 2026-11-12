@@ -18,7 +18,6 @@ mod opcode;
 mod print;
 mod stdsort;
 mod varnode;
-mod xml;
 
 use crate::analysis::Image;
 use crate::sleigh::Sleigh;
@@ -41,6 +40,13 @@ impl std::fmt::Display for LowlevelError {
 
 impl std::error::Error for LowlevelError {}
 
+/// Spec-reading errors (`crate::xml`) end a decompile like any other.
+impl From<String> for LowlevelError {
+    fn from(msg: String) -> LowlevelError {
+        LowlevelError(msg)
+    }
+}
+
 pub type Result<T> = std::result::Result<T, LowlevelError>;
 
 pub(crate) fn err<T>(msg: impl Into<String>) -> Result<T> {
@@ -53,6 +59,11 @@ type RegKey = (u32, u64, std::cmp::Reverse<u32>);
 
 /// Size of an external-reference symbol: a pointer (`ExternRefSymbol::buildNameType`).
 const EXTERNREF_SIZE: u64 = 4;
+
+/// How much of a section bfd loads (`Section::zero_tail`).
+fn loaded_len(s: &crate::analysis::Section) -> usize {
+    s.data.len().saturating_sub(s.zero_tail as usize)
+}
 
 /// A function the console mapped (`map function`): its name and prototype (the scope's
 /// `Funcdata`, as `queryFunction` finds it).
@@ -106,7 +117,7 @@ impl Arch {
             .sections
             .iter()
             .filter(|s| s.readonly)
-            .map(|s| (u64::from(s.addr), u64::from(s.addr) + s.data.len() as u64))
+            .map(|s| (u64::from(s.addr), u64::from(s.addr) + loaded_len(s) as u64))
             .collect();
         Ok(Arch {
             sleigh,
@@ -173,6 +184,22 @@ impl Arch {
         it.take_while(|((s, o, _), _)| *s == space && *o == base)
             .find(|((_, o, std::cmp::Reverse(z)), _)| o + u64::from(*z) >= off + u64::from(size))
             .map(|((_, o, std::cmp::Reverse(z)), name)| (name.as_str(), *o, *z))
+    }
+
+    /// Port of `LoadImageBfd::loadFill`: `buf.len()` bytes from `addr`, which must be loaded;
+    /// past it the read goes on into later sections, and bytes no section holds are zero.
+    /// `None` when `addr` itself is not loaded (`DataUnavailError`).
+    pub(crate) fn fill_bytes(&self, addr: u64, buf: &mut [u8]) -> Option<()> {
+        let byte = |a: u64| {
+            let a = u32::try_from(a).ok()?;
+            let s = self.image.sections.iter().find(|s| s.addr <= a && ((a - s.addr) as usize) < loaded_len(s))?;
+            s.data.get((a - s.addr) as usize).copied()
+        };
+        buf[0] = byte(addr)?;
+        for (i, b) in buf.iter_mut().enumerate().skip(1) {
+            *b = byte(addr + i as u64).unwrap_or(0);
+        }
+        Some(())
     }
 
     /// The bytes of the loaded image from `addr` on, as the instruction decoder reads them.

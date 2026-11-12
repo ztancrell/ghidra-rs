@@ -13,6 +13,7 @@
 //! snippet to the next as `PcodeInjectLibrarySleigh::parseInject` does, so injected temporaries
 //! print as `u0x00309190` like the reference's.
 
+use super::cspec::SleighNames;
 use super::opcode::Opcode;
 use super::{err, LowlevelError, Result};
 use crate::sleigh::{PcodeOp, Sleigh, Varnode};
@@ -51,8 +52,8 @@ impl InjectLibrary {
     }
 
     /// Port of `PcodeInjectLibrary::decodeInject` + `parseInject` for a `<callfixup>`.
-    pub(crate) fn add_callfixup(&mut self, sleigh: &Sleigh, name: &str, body: &str) -> Result<()> {
-        let mut c = Compiler::new(sleigh, self.tempbase);
+    pub(crate) fn add_callfixup(&mut self, names: &SleighNames, name: &str, body: &str) -> Result<()> {
+        let mut c = Compiler::new(names, self.tempbase);
         let ops = c.compile(body).map_err(|e| LowlevelError(format!("callfixup {name}: {}", e.0)))?;
         self.tempbase = c.tempbase;
         self.payloads.push(InjectPayload { name: name.to_string(), ops });
@@ -145,22 +146,26 @@ type Slot = (usize, Option<usize>);
 
 /// Port of `PcodeSnippet` (`PcodeCompile`): one snippet's parse.
 struct Compiler<'a> {
-    sleigh: &'a Sleigh,
-    /// registers (the `.sla` varnode symbols) and the snippet's temporaries, by name
-    syms: HashMap<String, Vn>,
+    /// the registers and spaces
+    names: &'a SleighNames<'a>,
+    /// the snippet's own temporaries, by name
+    temps: HashMap<String, Vn>,
     tempbase: u64,
     toks: Vec<Tok>,
     pos: usize,
 }
 
 impl<'a> Compiler<'a> {
-    fn new(sleigh: &'a Sleigh, tempbase: u64) -> Compiler<'a> {
-        let syms = sleigh
-            .varnode_syms()
-            .into_iter()
-            .map(|(n, space, offset, size)| (n.to_string(), Vn { space, offset, size, unnamed: false }))
-            .collect();
-        Compiler { sleigh, syms, tempbase, toks: Vec::new(), pos: 0 }
+    fn new(names: &'a SleighNames<'a>, tempbase: u64) -> Compiler<'a> {
+        Compiler { names, temps: HashMap::new(), tempbase, toks: Vec::new(), pos: 0 }
+    }
+
+    /// A name in the snippet: one of its temporaries, else a register.
+    fn symbol(&self, name: &str) -> Option<Vn> {
+        self.temps.get(name).copied().or_else(|| {
+            let (space, offset, size) = self.names.register(name).ok()?;
+            Some(Vn { space, offset, size, unnamed: false })
+        })
     }
 
     /// Port of `PcodeSnippet::parseStream` and `PcodeCompile::propagateSize`.
@@ -170,7 +175,7 @@ impl<'a> Compiler<'a> {
         while self.pos < self.toks.len() {
             self.statement(&mut ops)?;
         }
-        if !propagate_size(&mut ops, self.sleigh.uniq_space())? {
+        if !propagate_size(&mut ops, self.names.uniq_space())? {
             return err("could not resolve the size of every varnode");
         }
         Ok(ops
@@ -255,7 +260,7 @@ impl<'a> Compiler<'a> {
         self.expect("=")?;
         let rhs = self.expr(0)?;
         self.expect(";")?;
-        match self.syms.get(&name).copied() {
+        match self.symbol(&name) {
             Some(_) if local || size != 0 => err(format!("redefinition of symbol {name}")),
             // lhsvarnode '=' expr ';'
             Some(lhs) => {
@@ -274,7 +279,7 @@ impl<'a> Compiler<'a> {
         let mut tmp = self.build_temporary();
         tmp.size = if size != 0 { size } else { rhs.out.size };
         let ops = set_output(rhs, tmp);
-        self.syms.insert(name, Vn { unnamed: false, ..tmp });
+        self.temps.insert(name, Vn { unnamed: false, ..tmp });
         ops
     }
 
@@ -282,7 +287,7 @@ impl<'a> Compiler<'a> {
     fn build_temporary(&mut self) -> Vn {
         let offset = self.tempbase;
         self.tempbase += TEMP_STEP;
-        Vn { space: self.sleigh.uniq_space(), offset, size: 0, unnamed: true }
+        Vn { space: self.names.uniq_space(), offset, size: 0, unnamed: true }
     }
 
     /// Port of `PcodeCompile::createStore`.
@@ -292,7 +297,7 @@ impl<'a> Compiler<'a> {
         ops.extend(val.ops);
         ops.push(Op { opc: Opcode::Store, out: None, ins: vec![space_id(space), ptr.out, val.out] });
         let at = ops.len() - 1;
-        force_size(&mut ops[first..], self.sleigh.uniq_space(), (at - first, Some(2)), size)
+        force_size(&mut ops[first..], self.names.uniq_space(), (at - first, Some(2)), size)
     }
 
     // -------------------------------------------------------- expressions
@@ -300,15 +305,10 @@ impl<'a> Compiler<'a> {
     /// `'*' ['[' space ']'] [':' size]`: the space (default: the code space) and size (0: unknown).
     fn sized_star(&mut self) -> Result<(u32, u32)> {
         self.expect("*")?;
-        let mut space = self.sleigh.code_space();
+        let mut space = self.names.code_space();
         if self.eat("[") {
             let name = self.ident()?;
-            space = self
-                .sleigh
-                .spaces
-                .iter()
-                .position(|s| s.name == name)
-                .ok_or_else(|| LowlevelError(format!("unknown space {name}")))? as u32;
+            space = self.names.space(&name)?;
             self.expect("]")?;
         }
         let size = if self.eat(":") { self.size()? } else { 0 };
@@ -325,8 +325,11 @@ impl<'a> Compiler<'a> {
                 break;
             }
             self.pos += 1;
-            // all levels are left-associative; the comparisons are non-associative in yacc
+            // every level is left-associative but the comparisons (`%nonassoc`: `a < b < c` is an error)
             let rhs = self.expr(prec + 1)?;
+            if prec == COMPARE && matches!(self.peek(), Some(Tok::P(p)) if binary(p).is_some_and(|b| b.0 == COMPARE)) {
+                return err("comparisons do not chain");
+            }
             let (a, b) = if swap { (rhs, lhs) } else { (lhs, rhs) };
             lhs = self.create_op2(opc, a, b);
         }
@@ -361,7 +364,7 @@ impl<'a> Compiler<'a> {
                 if self.peek_p("(") {
                     return err(format!("{name}(...): user ops are not supported in snippets"));
                 }
-                *self.syms.get(&name).ok_or_else(|| LowlevelError(format!("Unknown varnode parameter: {name}")))?
+                self.symbol(&name).ok_or_else(|| LowlevelError(format!("Unknown varnode parameter: {name}")))?
             }
         };
         Ok(Expr { ops: Vec::new(), out })
@@ -389,11 +392,16 @@ impl<'a> Compiler<'a> {
         let out = self.build_temporary();
         ptr.ops.push(Op { opc: Opcode::Load, out: Some(out), ins: vec![space_id(space), ptr.out] });
         let at = ptr.ops.len() - 1;
-        force_size(&mut ptr.ops, self.sleigh.uniq_space(), (at, None), size)?;
+        if size > 0 {
+            force_size(&mut ptr.ops, self.names.uniq_space(), (at, None), size)?;
+        }
         ptr.out = ptr.ops[at].out.unwrap_or(out);
         Ok(ptr)
     }
 }
+
+/// The precedence level of the comparisons (`%nonassoc` in `pcodeparse.y`).
+const COMPARE: u8 = 7;
 
 /// The binary operator `p`: its precedence level, opcode and whether the operands swap
 /// (`a > b` is `b < a`).
@@ -408,10 +416,10 @@ fn binary(p: &str) -> Option<(u8, Opcode, bool)> {
         "&" => (5, IntAnd, false),
         "==" => (6, IntEqual, false),
         "!=" => (6, IntNotequal, false),
-        "<" => (7, IntLess, false),
-        ">" => (7, IntLess, true),
-        "<=" => (7, IntLessequal, false),
-        ">=" => (7, IntLessequal, true),
+        "<" => (COMPARE, IntLess, false),
+        ">" => (COMPARE, IntLess, true),
+        "<=" => (COMPARE, IntLessequal, false),
+        ">=" => (COMPARE, IntLessequal, true),
         "<<" => (8, IntLeft, false),
         ">>" => (8, IntRight, false),
         "+" => (9, IntAdd, false),
@@ -575,7 +583,7 @@ mod tests {
         let sl = sleigh();
         let mut lib = InjectLibrary::new(&sl);
         let base = lib.tempbase;
-        lib.add_callfixup(&sl, "alloca_probe", "ESP = ESP + 4 - EAX;").unwrap();
+        lib.add_callfixup(&SleighNames::new(&sl), "alloca_probe", "ESP = ESP + 4 - EAX;").unwrap();
         // `ESP + 4` takes the first slot, `... - EAX` the second, renamed to ESP
         assert_eq!(lib.tempbase, base + 2 * TEMP_STEP);
         let (esp, eax) = (reg(&sl, "ESP"), reg(&sl, "EAX"));
@@ -593,7 +601,12 @@ mod tests {
         let sl = sleigh();
         let mut lib = InjectLibrary::new(&sl);
         let base = lib.tempbase;
-        lib.add_callfixup(&sl, "f", "frame = ESP + 8; size:4 = * frame; *(ESP + 4) = EDI; zero:4 = 0;").unwrap();
+        lib.add_callfixup(
+            &SleighNames::new(&sl),
+            "f",
+            "frame = ESP + 8; size:4 = * frame; *(ESP + 4) = EDI; zero:4 = 0;",
+        )
+        .unwrap();
         let u = |slot: u64| Varnode { space: sl.uniq_space(), offset: base + slot * TEMP_STEP, size: 4 };
         let (esp, edi) = (reg(&sl, "ESP"), reg(&sl, "EDI"));
         let ram = Varnode { space: 0, offset: u64::from(sl.code_space()), size: SPACE_ID_SIZE };
@@ -611,7 +624,7 @@ mod tests {
             ]
         );
         // temporaries keep counting in the next snippet
-        lib.add_callfixup(&sl, "g", "EAX = 0;").unwrap();
+        lib.add_callfixup(&SleighNames::new(&sl), "g", "EAX = 0;").unwrap();
         assert_eq!(lib.tempbase, base + 6 * TEMP_STEP);
     }
 
@@ -620,7 +633,7 @@ mod tests {
         let sl = sleigh();
         let mut lib = InjectLibrary::new(&sl);
         let base = lib.tempbase;
-        lib.add_callfixup(&sl, "f", "*:4 ESP = -1;").unwrap();
+        lib.add_callfixup(&SleighNames::new(&sl), "f", "*:4 ESP = -1;").unwrap();
         let t = Varnode { space: sl.uniq_space(), offset: base, size: 4 };
         let ops = &lib.payload(InjectId(0)).ops;
         assert_eq!(ops[0].opc, Opcode::Int2comp as u8);
@@ -632,8 +645,9 @@ mod tests {
     fn errors() {
         let sl = sleigh();
         let mut lib = InjectLibrary::new(&sl);
-        for bad in ["EAX = nosuch;", "EAX = 1", "foo(EAX);", "t = 5;", "EAX = 1 @ 2;", "EAX:4 = 1;"] {
-            assert!(lib.add_callfixup(&sl, "bad", bad).is_err(), "{bad} should not compile");
+        for bad in ["EAX = nosuch;", "EAX = 1", "foo(EAX);", "t = 5;", "EAX = 1 @ 2;", "EAX:4 = 1;", "EAX = 1 < 2 < 3;"]
+        {
+            assert!(lib.add_callfixup(&SleighNames::new(&sl), "bad", bad).is_err(), "{bad} should not compile");
         }
     }
 }

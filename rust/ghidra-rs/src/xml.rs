@@ -1,8 +1,14 @@
-//! A small XML reader for the `.cspec`/`.pspec` files (the part of Ghidra's `xml.y` +
-//! `XmlDecode` the decompiler's spec loading needs): elements, attributes, character data
-//! (entities and CDATA decoded). Comments, the `<?xml?>` declaration and `<!DOCTYPE>` are skipped.
+//! A small XML reader (the part of Ghidra's `xml.y` + `XmlDecode` ghidra-rs needs) for the
+//! `.pspec`/`.cspec` files and the decompiler datatests: elements, attributes, character data
+//! (entities and CDATA decoded). Comments, the `<?xml?>` declaration and `<!DOCTYPE>` are
+//! skipped. A character reference below 256 (`&#xc2;`) is one byte, as Ghidra's reader takes
+//! it; text that is then not UTF-8 is converted lossily.
 
-use super::{err, LowlevelError, Result};
+/// Errors are messages with the line number.
+pub(crate) type Result<T> = std::result::Result<T, String>;
+
+/// How deep elements may nest: a bound on the recursion for hostile input.
+const MAX_DEPTH: usize = 256;
 
 /// One element: its name, attributes in document order, child elements and character data.
 #[derive(Debug, Default)]
@@ -27,13 +33,13 @@ impl Element {
 
     /// The attribute `name`, or an error naming the element.
     pub(crate) fn req(&self, name: &str) -> Result<&str> {
-        self.attr(name).ok_or_else(|| LowlevelError(format!("<{}>: missing attribute {name}", self.name)))
+        self.attr(name).ok_or_else(|| format!("<{}>: missing attribute {name}", self.name))
     }
 
     /// The attribute `name` as an integer (decimal, `0x` hex, or negative decimal), as
     /// `Decoder::readSignedInteger` reads it.
     pub(crate) fn int(&self, name: &str) -> Result<i64> {
-        parse_int(self.req(name)?).ok_or_else(|| LowlevelError(format!("<{}>: bad integer in {name}", self.name)))
+        parse_int(self.req(name)?).ok_or_else(|| format!("<{}>: bad integer in {name}", self.name))
     }
 
     /// The attribute `name` as a boolean (`true`/`1`/`yes`; absent is false), as `xml_readbool`.
@@ -50,6 +56,11 @@ impl Element {
     pub(crate) fn kid(&self, name: &str) -> Option<&Element> {
         self.kids.iter().find(|k| k.name == name)
     }
+
+    /// The first element named `name` at any depth below this one, in document order.
+    pub(crate) fn find(&self, name: &str) -> Option<&Element> {
+        self.kids.iter().find_map(|k| if k.name == name { Some(k) } else { k.find(name) })
+    }
 }
 
 /// `0x` hex, decimal, or `-` decimal.
@@ -63,7 +74,7 @@ pub(crate) fn parse_int(s: &str) -> Option<i64> {
 
 /// Parse a document; returns its root element.
 pub(crate) fn parse(text: &str) -> Result<Element> {
-    let mut p = Parser { s: text, pos: 0 };
+    let mut p = Parser { s: text, pos: 0, depth: 0 };
     p.skip_misc()?;
     let root = p.element()?;
     p.skip_misc()?;
@@ -76,6 +87,8 @@ pub(crate) fn parse(text: &str) -> Result<Element> {
 struct Parser<'a> {
     s: &'a str,
     pos: usize,
+    /// elements open around the current position
+    depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -85,7 +98,7 @@ impl<'a> Parser<'a> {
 
     fn fail<T>(&self, what: &str) -> Result<T> {
         let line = self.s[..self.pos].matches('\n').count() + 1;
-        err(format!("XML line {line}: {what}"))
+        Err(format!("XML line {line}: {what}"))
     }
 
     /// Skip past `end`, which must follow.
@@ -130,6 +143,9 @@ impl<'a> Parser<'a> {
         if !self.rest().starts_with('<') {
             return self.fail("expected an element");
         }
+        if self.depth >= MAX_DEPTH {
+            return self.fail("elements nested too deeply");
+        }
         self.pos += 1;
         let mut el = Element { name: self.name()?, ..Element::default() };
         loop {
@@ -154,8 +170,10 @@ impl<'a> Parser<'a> {
             el.attrs.push((name, unescape(&r[1..=end])));
             self.pos = self.s.len() - r.len() + end + 2;
         }
-        self.content(&mut el)?;
-        Ok(el)
+        self.depth += 1;
+        let res = self.content(&mut el);
+        self.depth -= 1;
+        res.map(|()| el)
     }
 
     /// Children and character data up to the element's end tag.
@@ -173,7 +191,7 @@ impl<'a> Parser<'a> {
             } else if r.starts_with("<!--") || r.starts_with("<?") {
                 self.skip_misc()?;
             } else if let Some(close) = r.strip_prefix("</") {
-                let end = close.find('>').unwrap_or(close.len());
+                let Some(end) = close.find('>') else { return self.fail("unterminated end tag") };
                 if close[..end].trim() != el.name {
                     return self.fail(&format!("</{}> closes <{}>", close[..end].trim(), el.name));
                 }
@@ -186,46 +204,46 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// Decode the predefined entities and character references.
+/// Decode the predefined entities and character references (below 256: one byte).
 fn unescape(s: &str) -> String {
     if !s.contains('&') {
         return s.to_string();
     }
-    let mut out = String::with_capacity(s.len());
+    let mut out = Vec::with_capacity(s.len());
     let mut rest = s;
     while let Some(i) = rest.find('&') {
-        out.push_str(&rest[..i]);
+        out.extend_from_slice(&rest.as_bytes()[..i]);
         rest = &rest[i..];
         let decoded = rest.find(';').and_then(|e| {
-            let c = match &rest[1..e] {
-                "lt" => '<',
-                "gt" => '>',
-                "amp" => '&',
-                "quot" => '"',
-                "apos" => '\'',
-                n => {
-                    let code = match n.strip_prefix("#x") {
-                        Some(h) => u32::from_str_radix(h, 16).ok(),
-                        None => n.strip_prefix('#').and_then(|d| d.parse().ok()),
-                    };
-                    char::from_u32(code?)?
-                }
+            let code = match &rest[1..e] {
+                "lt" => u32::from(b'<'),
+                "gt" => u32::from(b'>'),
+                "amp" => u32::from(b'&'),
+                "quot" => u32::from(b'"'),
+                "apos" => u32::from(b'\''),
+                n => match n.strip_prefix("#x") {
+                    Some(h) => u32::from_str_radix(h, 16).ok()?,
+                    None => n.strip_prefix('#')?.parse().ok()?,
+                },
             };
-            Some((c, e + 1))
+            Some((code, e + 1))
         });
         match decoded {
-            Some((c, len)) => {
-                out.push(c);
+            Some((code, len)) => {
+                match u8::try_from(code) {
+                    Ok(b) => out.push(b),
+                    Err(_) => out.extend_from_slice(char::from_u32(code).unwrap_or('\u{fffd}').to_string().as_bytes()),
+                }
                 rest = &rest[len..];
             }
             None => {
-                out.push('&');
+                out.push(b'&');
                 rest = &rest[1..];
             }
         }
     }
-    out.push_str(rest);
-    out
+    out.extend_from_slice(rest.as_bytes());
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[cfg(test)]
@@ -243,12 +261,15 @@ mod tests {
         let c = a.kid("c").unwrap();
         assert_eq!(c.int("n").unwrap(), 16);
         assert_eq!(c.text, "t < * ESP = 4; ");
+        assert_eq!(parse("<a><b><c/></b></a>").unwrap().find("c").map(|c| c.name.as_str()), Some("c"));
     }
 
     #[test]
     fn errors() {
-        assert!(parse("<a><b></a>").is_err());
-        assert!(parse("<a x=1/>").is_err());
-        assert!(parse("<a>").is_err());
+        for bad in ["<a><b></a>", "<a x=1/>", "<a>", "<a></a", "<a><!-- x"] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+        let deep = "<a>".repeat(MAX_DEPTH + 1);
+        assert!(parse(&deep).unwrap_err().contains("too deeply"));
     }
 }

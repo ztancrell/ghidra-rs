@@ -48,6 +48,8 @@ pub struct Funcdata {
     pub(crate) proto: FuncProto,
     /// the next free offset of the unique space (`VarnodeBank::uniqid`)
     next_unique: u64,
+    /// header warnings (`Funcdata::warningHeader`), for `print C`
+    pub(crate) warnings: Vec<String>,
 }
 
 impl Funcdata {
@@ -66,6 +68,7 @@ impl Funcdata {
             jumptables: Vec::new(),
             proto: FuncProto::default(),
             next_unique: UNIQUE_ANALYSIS,
+            warnings: Vec::new(),
         }
     }
 

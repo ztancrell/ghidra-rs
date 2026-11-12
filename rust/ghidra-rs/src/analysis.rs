@@ -10,6 +10,10 @@ pub struct Section {
     pub exec: bool,
     /// not writable (no `IMAGE_SCN_MEM_WRITE`): bfd's `SEC_READONLY`, which the decompiler reads as constant
     pub readonly: bool,
+    /// how many bytes at the end of `data` lie past the section as bfd loads it (its `size`: the
+    /// raw size when that is smaller than the virtual size, else the virtual size), which the
+    /// decompiler treats as unmapped (`LoadImageBfd`)
+    pub zero_tail: u32,
     pub addr: u32,
     pub data: Vec<u8>, // virtual size, zero filled past the raw data
 }
@@ -37,6 +41,7 @@ impl Image {
             name: "Headers".into(),
             exec: false,
             readonly: false, // not a section of the file, so not in bfd's list
+            zero_tail: 0,
             addr: base,
             data: bytes[..hdr.min(bytes.len())].to_vec(),
         });
@@ -46,8 +51,16 @@ impl Image {
             data.resize(s.virtual_size.get(LE) as usize, 0);
             let exec =
                 s.characteristics.get(LE) & (object::pe::IMAGE_SCN_CNT_CODE | object::pe::IMAGE_SCN_MEM_EXECUTE) != 0;
-            let readonly = s.characteristics.get(LE) & object::pe::IMAGE_SCN_MEM_WRITE == 0;
-            img.sections.push(Section { name, exec, readonly, addr: base + s.virtual_address.get(LE), data });
+            let flags = s.characteristics.get(LE);
+            let readonly = flags & object::pe::IMAGE_SCN_MEM_WRITE == 0;
+            // bfd (_bfd_XXi_swap_scnhdr_in) takes the virtual size when the raw size is larger, or
+            // for uninitialized data without raw bytes; else the raw size
+            let (raw, virt) = (s.size_of_raw_data.get(LE), s.virtual_size.get(LE));
+            let uninit = flags & object::pe::IMAGE_SCN_CNT_UNINITIALIZED_DATA != 0;
+            let bfd_size = if raw > virt || uninit && raw == 0 { virt } else { raw };
+            let zero_tail = virt.saturating_sub(bfd_size);
+            let addr = base + s.virtual_address.get(LE);
+            img.sections.push(Section { name, exec, readonly, zero_tail, addr, data });
         }
         let entry = opt.address_of_entry_point();
         img.entry = (entry != 0).then_some(base + entry);

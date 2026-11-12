@@ -166,9 +166,19 @@ impl Console {
                 let (a, name) = self.function.as_ref().ok_or("decompile: no function selected")?;
                 writeln!(out, "Decompiling {name}").map_err(io)?;
                 let mut fd = Funcdata::new(u64::from(*a));
-                let brk = action::perform(&mut fd, arch, self.break_start.as_deref()).map_err(|e| e.to_string())?;
-                if let Some(path) = brk {
-                    writeln!(out, "Break at {path} start").map_err(io)?;
+                match action::perform(&mut fd, arch, self.break_start.as_deref()) {
+                    Ok(Some(path)) => writeln!(out, "Break at {path} start").map_err(io)?,
+                    Ok(None) => {}
+                    // the console reports the error, drops the function and goes on (`abortFunction`)
+                    Err(e) => {
+                        writeln!(out, "Low-level ERROR: {e}\nUnable to proceed with function: {name}").map_err(io)?;
+                        self.fd = None;
+                        return Ok(true);
+                    }
+                }
+                // the function's prototype lives on in the scope, as the C++ Funcdata's does
+                if let Some(f) = self.arch.as_mut().and_then(|a| a.functions.get_mut(&fd.entry)) {
+                    f.proto = fd.proto.clone();
                 }
                 self.fd = Some(fd);
             }
@@ -207,66 +217,6 @@ pub mod datatest {
         pub patterns: Vec<regex_lite::Regex>,
     }
 
-    /// XML character data: entities and character references (`&#xc2;` is one byte, as in
-    /// Ghidra's XML reader) decoded, `<![CDATA[...]]>` sections taken as they are.
-    fn unescape(s: &str) -> String {
-        let mut out = Vec::new();
-        let mut rest = s;
-        while let Some(i) = rest.find(['&', '<']) {
-            out.extend_from_slice(&rest.as_bytes()[..i]);
-            rest = &rest[i..];
-            if let Some(cdata) = rest.strip_prefix("<![CDATA[") {
-                let end = cdata.find("]]>").unwrap_or(cdata.len());
-                out.extend_from_slice(&cdata.as_bytes()[..end]);
-                rest = cdata.get(end + 3..).unwrap_or("");
-                continue;
-            }
-            let ent = rest.find(';').map(|e| &rest[1..e]);
-            let byte = match ent {
-                Some("lt") => Some(b'<'),
-                Some("gt") => Some(b'>'),
-                Some("amp") => Some(b'&'),
-                Some("quot") => Some(b'"'),
-                Some("apos") => Some(b'\''),
-                Some(e) if e.starts_with("#x") => u8::from_str_radix(&e[2..], 16).ok(),
-                Some(e) if e.starts_with('#') => e[1..].parse().ok(),
-                _ => None,
-            };
-            match (byte, ent) {
-                (Some(b), Some(e)) => {
-                    out.push(b);
-                    rest = &rest[e.len() + 2..];
-                }
-                _ => {
-                    out.push(rest.as_bytes()[0]);
-                    rest = &rest[1..];
-                }
-            }
-        }
-        out.extend_from_slice(rest.as_bytes());
-        String::from_utf8_lossy(&out).into_owned()
-    }
-
-    fn attr(tag: &str, name: &str) -> Option<String> {
-        let i = tag.find(&format!(" {name}=\""))? + name.len() + 3;
-        Some(unescape(&tag[i..i + tag[i..].find('"')?]))
-    }
-
-    /// The elements `<name ...>content</name>` in `xml`: (start tag, content).
-    fn elements<'a>(xml: &'a str, name: &str) -> Vec<(&'a str, &'a str)> {
-        let (open, close) = (format!("<{name}"), format!("</{name}>"));
-        let mut v = Vec::new();
-        let mut rest = xml;
-        while let Some(i) = rest.find(&open) {
-            rest = &rest[i..];
-            let Some(gt) = rest.find('>') else { break };
-            let Some(end) = rest.find(&close) else { break };
-            v.push((&rest[..gt], &rest[gt + 1..end]));
-            rest = &rest[end + close.len()..];
-        }
-        v
-    }
-
     /// std::regex (ECMAScript) reads `\<` and `\>` as the characters; regex-lite reads them as
     /// word boundaries.
     pub fn ecmascript(pat: &str) -> String {
@@ -287,25 +237,24 @@ pub mod datatest {
     }
 
     pub fn load(path: &Path) -> Result<Test, String> {
-        let xml = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let script =
-            elements(&xml, "script").into_iter().next().ok_or("Did not see <script> tag in <decompilertest>")?.1;
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let root = crate::xml::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let script = root.find("script").ok_or("Did not see <script> tag in <decompilertest>")?;
         // stripNewlines: CR removed, LF made a space
-        let commands =
-            elements(script, "com").iter().map(|(_, c)| unescape(c).replace('\r', "").replace('\n', " ")).collect();
+        let commands = script.kids_named("com").map(|c| c.text.replace('\r', "").replace('\n', " ")).collect();
         let mut checks = Vec::new();
-        for (tag, content) in elements(&xml, "stringmatch") {
-            let num = |n| attr(tag, n).and_then(|v| v.trim().parse().ok()).ok_or(format!("stringmatch: bad {n}"));
+        for tag in root.kids_named("stringmatch") {
+            let num = |n| tag.attr(n).and_then(|v| v.trim().parse().ok()).ok_or(format!("stringmatch: bad {n}"));
             let mut patterns = Vec::new();
             // one regex per line, leading blanks removed (FunctionTestProperty::restoreXml)
-            for line in unescape(content).split('\n') {
+            for line in tag.text.split('\n') {
                 let line = line.trim_start_matches([' ', '\t']);
                 if !line.is_empty() {
                     patterns.push(regex_lite::Regex::new(&ecmascript(line)).map_err(|e| format!("{line}: {e}"))?);
                 }
             }
             checks.push(Check {
-                name: attr(tag, "name").unwrap_or_default(),
+                name: tag.attr("name").unwrap_or_default().to_string(),
                 min: num("min")?,
                 max: num("max")?,
                 patterns,

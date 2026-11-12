@@ -256,6 +256,19 @@ prelude's `option readonly on`). Where it differs from the table row:
   types until S6), the `.pspec`'s register data (read by later stages).
 - `<data_organization>` and `<global>` are skipped (types S6, scopes); any other unknown
   `.cspec` element is an error.
+- Review fixes (second commit): `setModel` keeps a known extrapop, `getSpacebase` looks only at
+  the last entry (a stack spill), `ParamListMerged::foldIn` by containment, join before stack
+  in effect order, `loadFill` semantics and bfd section sizes for read-only memory, constants
+  made in location order, the snippet parser rejects chained comparisons; one XML reader
+  (`src/xml.rs`) for `.pspec`, `.cspec` and datatests. Mall (29,240 functions to `heritage`):
+  about 6,200 functions per second on one thread, no panics.
+- Required in S2/S4 (prototype state across decompiles): the C++ scope keeps each function's
+  `funcp`; `ActionPrototypeTypes` sets its model, and `ActionStackPtrFlow`/
+  `Funcdata::fillinExtrapop` (coreaction.cc, funcdata.cc) record its extrapop, which later
+  decompiles of callers copy (`ActionDefaultParams` → `FuncCallSpecs::copy`). The Rust console
+  now writes `fd.proto` back to the function's `map function` entry after `decompile`; S2/S4
+  must port `fillinExtrapop` and check the 21 datatests that decompile more than one function
+  per script (the decomp-diff corpora decompile one).
 - Harness fix: a name mapped twice finds its first function, as the C++ does (mercs2 has
   several `__onexit`, `__SEH_prolog`, ...).
 

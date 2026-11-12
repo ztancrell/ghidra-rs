@@ -191,10 +191,23 @@ fn create_placeholder(fd: &mut Funcdata, arch: &Arch, c: CallId) -> Result<()> {
     Ok(())
 }
 
-/// `ActionUnreachable` (`removeUnreachableBlocks`): flow builds only blocks reachable from the
-/// entry, so on the first pass there is nothing to remove; it matters once later actions cut
-/// edges (stage S4).
-fn unreachable(_: &mut Funcdata, _: &Arch) -> Result<()> {
+/// `ActionUnreachable` (`Funcdata::removeUnreachableBlocks`). Flow builds only blocks reachable
+/// from the entry, so on the first pass there is nothing to remove; block removal is not ported
+/// (stage S4), so an unreachable block is an error rather than a silent difference.
+fn unreachable(fd: &mut Funcdata, _: &Arch) -> Result<()> {
+    let Some(&entry) = fd.blocks.list.first() else { return Ok(()) };
+    let mut seen = vec![false; fd.blocks.list.len()];
+    let mut stack = vec![entry];
+    while let Some(b) = stack.pop() {
+        let i = fd.blocks.block(b).index as usize;
+        if std::mem::replace(&mut seen[i], true) {
+            continue;
+        }
+        stack.extend(fd.blocks.block(b).outs.iter().map(|e| e.point));
+    }
+    if seen.contains(&false) {
+        return err("action unreachable: removing unreachable blocks is not implemented in ghidra-rs yet (stage S4)");
+    }
     Ok(())
 }
 
@@ -202,41 +215,49 @@ fn unreachable(_: &mut Funcdata, _: &Arch) -> Result<()> {
 /// `option readonly on`, each free read of read-only memory becomes the constant the image
 /// holds there (`Funcdata::fillinReadOnly`). The rest of the action needs later passes
 /// (auto-live holds) or masks that are all ones before heritage; x86 declares no volatile memory.
+///
+/// The C++ walks the varnodes in location order (`beginLoc`: address, size, then creation for
+/// free ones) and makes one constant per read; before heritage each free varnode has one
+/// reader, so the reads are visited in that order and the constants made in it.
 fn varnode_props(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
     if !arch.readonly_propagate {
         return Ok(());
     }
     let ram = Space::Sleigh(arch.sleigh.code_space());
-    let ops: Vec<_> = fd.blocks.ops().collect();
-    for op in ops {
-        for slot in 0..fd.op(op).ins.len() {
-            let v = *fd.vn(fd.op(op).ins[slot]);
+    let mut reads = Vec::new();
+    for op in fd.blocks.ops() {
+        for (slot, &vn) in fd.op(op).ins.iter().enumerate() {
+            let v = fd.vn(vn);
             // a written read-only varnode only gets a warning
-            if v.space != ram || v.def.is_some() || !arch.is_readonly(v.offset, v.size) {
-                continue;
+            if v.space == ram && v.def.is_none() && arch.is_readonly(v.offset, v.size) {
+                reads.push((v.offset, v.size, vn.0, op, slot));
             }
-            // larger than a uintb, or not loaded: the C++ leaves it (and clears its read-only flag)
-            let Some(bytes) = arch.bytes_at(v.offset).and_then(|b| b.get(..v.size as usize)).filter(|_| v.size <= 8)
-            else {
-                continue;
-            };
-            let value = bytes.iter().rev().fold(0u64, |acc, &b| acc << 8 | u64::from(b));
-            match fd.op(op).opc {
-                // only the first input of an INDIRECT, which then becomes a COPY
-                Opcode::Indirect => {
-                    let out = fd.op(op).out.map(|o| *fd.vn(o));
-                    if slot != 0 || out.is_some_and(|o| o.space == v.space && o.offset == v.offset) {
-                        continue;
-                    }
-                    fd.op_mut(op).ins.truncate(1);
-                    fd.op_mut(op).opc = Opcode::Copy;
-                }
-                Opcode::Multiequal => continue,
-                _ => {}
-            }
-            let c = fd.new_constant(v.size, value);
-            fd.op_mut(op).ins[slot] = c;
         }
+    }
+    reads.sort_unstable_by_key(|r| (r.0, r.1, r.2));
+    for (offset, size, _, op, slot) in reads {
+        // larger than a uintb, or not loaded: the C++ leaves it (and clears its read-only flag)
+        let mut bytes = [0u8; 8];
+        let Some(buf) = bytes.get_mut(..size as usize) else { continue };
+        if arch.fill_bytes(offset, buf).is_none() {
+            continue;
+        }
+        let value = buf.iter().rev().fold(0u64, |acc, &b| acc << 8 | u64::from(b));
+        match fd.op(op).opc {
+            // only the first input of an INDIRECT, which then becomes a COPY
+            Opcode::Indirect => {
+                let out = fd.op(op).out.map(|o| *fd.vn(o));
+                if slot != 0 || out.is_some_and(|o| o.space == ram && o.offset == offset) {
+                    continue;
+                }
+                fd.op_mut(op).ins.truncate(1);
+                fd.op_mut(op).opc = Opcode::Copy;
+            }
+            Opcode::Multiequal => continue,
+            _ => {}
+        }
+        let c = fd.new_constant(size, value);
+        fd.op_mut(op).ins[slot] = c;
     }
     Ok(())
 }
@@ -262,7 +283,7 @@ mod tests {
     }
 
     fn section(name: &str, exec: bool, addr: u32, data: Vec<u8>) -> Section {
-        Section { name: name.into(), exec, readonly: true, addr, data }
+        Section { name: name.into(), exec, readonly: true, zero_tail: 0, addr, data }
     }
 
     fn raw_at_heritage(arch: &Arch, entry: u64) -> String {
@@ -272,22 +293,24 @@ mod tests {
         crate::decomp::print_raw(&fd, arch).unwrap()
     }
 
-    /// `MOVSS XMM0, dword ptr [0x402000]; RET` with 1.0f read-only at 0x402000: the read becomes
-    /// the constant with `option readonly on`, and stays a ram varnode without it.
+    /// `MOVSD XMM0, qword ptr [0x4020fc]; MOVSS XMM1, dword ptr [0x4020fe]; RET` with read-only
+    /// bytes `00 00 00 00 11 22 33 44` at 0x4020f8 and nothing after: with `option readonly on`
+    /// the reads become constants, zero-filled past the end (`LoadImage::loadFill`), against
+    /// decomp_dbg on the same image as a `load test file`; without the option they stay varnodes.
     #[test]
     fn readonly_reads_become_constants() {
-        let text = vec![0xf3, 0x0f, 0x10, 0x05, 0x00, 0x20, 0x40, 0x00, 0xc3];
+        let text =
+            vec![0xf2, 0x0f, 0x10, 0x05, 0xfc, 0x20, 0x40, 0x00, 0xf3, 0x0f, 0x10, 0x0d, 0xfe, 0x20, 0x40, 0x00, 0xc3];
+        let rdata = vec![0, 0, 0, 0, 0x11, 0x22, 0x33, 0x44];
         let img = Image {
-            sections: vec![
-                section(".text", true, 0x401000, text),
-                section(".rdata", false, 0x402000, 1.0f32.to_le_bytes().to_vec()),
-            ],
+            sections: vec![section(".text", true, 0x401000, text), section(".rdata", false, 0x4020f8, rdata)],
             ..Image::default()
         };
         let mut arch = arch(img);
-        assert!(raw_at_heritage(&arch, 0x401000).contains("XMM0_Da(0x00401000:0) = r0x00402000(free)\n"));
+        assert!(raw_at_heritage(&arch, 0x401000).contains("XMM1_Da(0x00401008:2) = r0x004020fe(free)\n"));
         arch.readonly_propagate = true;
-        assert!(raw_at_heritage(&arch, 0x401000).contains("XMM0_Da(0x00401000:0) = #0x3f800000\n"));
+        let raw = raw_at_heritage(&arch, 0x401000);
+        assert_eq!(raw, include_str!("../../tests/data/raw-heritage-readonly-tail.txt"));
     }
 
     #[test]

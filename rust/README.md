@@ -38,12 +38,13 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
 - `ghidra-rs/src/console.rs`: the milestone 3 harness: the decompiler prelude, the Rust side of
   Ghidra's console decompiler (`decompile -i`) and the datatest runner (port of
   `testfunction.cc`). See "Decompiler harness (Milestone 3, stage S0)" below.
+- `ghidra-rs/src/xml.rs`: the small XML reader for the `.pspec`/`.cspec` files and the datatests.
 - `ghidra-rs/tests/console.rs`: console commands not ported yet fail; a datatest XML parses.
 - `ghidra-rs/src/decomp/`: the decompiler (milestone 3), one module per C++ concern:
   `mod.rs` (`Arch`: image, SLEIGH engine, compiler spec, mapped functions and external
   references, read-only ranges, register names; `LowlevelError`), `cspec.rs` (reading
   `x86win.cspec`), `fspec.rs` (prototype models, `FuncProto`, `CallSpec`), `inject.rs` (call
-  fixups: the p-code snippet parser), `xml.rs` (the small XML reader the specs need),
+  fixups: the p-code snippet parser),
   `funcdata.rs` (`Funcdata`: op/varnode arenas, op insertion, stack loads), `op.rs`,
   `varnode.rs`, `opcode.rs` (opcodes and their `print raw` names), `flow.rs` (`FlowInfo`,
   call-fixup injection), `block.rs` (basic blocks, spanning tree), `action.rs` (the universal
@@ -602,7 +603,8 @@ Stage S1b (branch `m3-s1b`) runs the universal action up to `heritage`: after `f
 - `cspec.rs`: the stack pointer (`<stackpointer>`, replacing S1a's hard-coded ESP), the return
   address, the four prototype models with their parameter entries, unaffected,
   killed-by-call (including `<output killedbycall="true">`) and likely-trash registers,
-  `<resolveprototype>` (`ProtoModelMerged`: shared effects, merged input entries),
+  `<resolveprototype>` (`ProtoModelMerged`: shared effects and likely trash, input entries
+  merged as `ParamListMerged::foldIn` does, by containment and minimum size),
   `<eval_current_prototype>`/`<eval_called_prototype>`, and the ten `<callfixup>` snippets.
   `<data_organization>` and `<global>` are skipped until types (S6) and scopes read them;
   any other element is an error. The tracked `DF = 0` still comes from the `.pspec`.
@@ -623,13 +625,22 @@ Stage S1b (branch `m3-s1b`) runs the universal action up to `heritage`: after `f
   the `evalfp_current` model; RETURN loses its address), `funclink` (a call whose model passes
   parameters on the stack gets the stack-pointer placeholder: `u = ESP + 0`, a 1-byte LOAD,
   as its last input; unique varnodes count from 0x10000000), `unreachable` (nothing to remove
-  on the first pass), `varnodeprops` (with `option readonly on`, a free read of read-only
-  memory becomes the constant the image holds there). `normalizesetup` and `funclinkoutonly`
+  on the first pass; an unreachable block is an error until block removal is ported in S4),
+  `varnodeprops` (with `option readonly on`, a free read of read-only memory becomes the
+  constant the image holds there, read as `loadFill` reads: on into later sections, zero where
+  none is; the reads are taken in the varnodes' location order, as `beginLoc` walks them). `normalizesetup` and `funclinkoutonly`
   are not in the `decompile` root's groups and are left out.
 - Read-only memory is the loader's read-only sections (bfd's `SEC_READONLY`: PE sections
   without `IMAGE_SCN_MEM_WRITE`, `Section::readonly`) plus `readonly` commands; a varnode is
   read-only by the property at its first byte unless an external-reference slot (`map
   externalref`, 4 bytes) contains it, which is how the IAT slots called through stay varnodes.
+  A section is as long as bfd loads it (`Section::zero_tail`): the raw size when that is
+  smaller than the virtual size, else the virtual size (`_bfd_XXi_swap_scnhdr_in`); in mercs2
+  the two are equal for every section.
+- The function's prototype is written back to its `map function` entry after `decompile`, as
+  the C++ scope keeps its `Funcdata`; a header warning records each injected call fixup
+  (`Funcdata::warnings`, for `print C`). A decompile error prints `Low-level ERROR: ...` and
+  `Unable to proceed with function: ...` and the script goes on, as in the C++ console.
 
 Check:
 
@@ -643,6 +654,13 @@ BREAK=funclink rust/tools/decomp-diff.sh m500   # S1a's check still holds
 |---|---|---|
 | m8 | 8 / 8 | 8 / 8 |
 | m500 | 500 / 500 | 500 / 500 |
+
+Speed (Mall: every non-import `map function` of the mercs2 prelude, 29,240 functions, one
+script, one thread, release build, 2026-11-12): to `break start heritage` in 4.7 s including
+loading the PE and the prelude, about 6,200 functions per second; peak RSS 472 MB. 29,139
+reach the break, 101 end with the C++'s errors (70 `Unable to load bytes` (flow into unmapped
+addresses), 30 `Bad instruction count exceeded`, 1 `Flow exceeded maximum allowable
+instructions`); no panics.
 
 No differences remain. Call fixups do not occur in the corpora (the console applies them
 only with `fixup apply`); they are checked on mercs2's `__onexit` (0x9ee37a) with
@@ -661,8 +679,8 @@ What S1b reads but does not use yet, and what it leaves out:
   is plan decision 6, later in milestone 3), no-return calls, inlining, overrides, user-op
   (`callotherfixup`) injection, `uponentry`/`uponreturn` model injections (the x86 specs
   declare none), the `.pspec`'s register data, data types beyond none.
-- A read-only range covers the section's virtual size, where bfd's covers its file size;
-  reads past the raw data would differ (none in the corpora).
+- Superseded: S1b's first commit had read-only ranges over the virtual size; they now follow
+  bfd (above).
 
 ## Speed
 
