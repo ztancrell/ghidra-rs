@@ -24,6 +24,17 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   coverage (a local constant fold, Ghidra's address tables in every section, Ghidra's
   valid-subroutine check on code constants). It does not import Ghidra's instruction set
   (no `--code-from` option).
+- 2026-11-11: The SecuROM stub `PUSH EDX; ...; XCHG [ESP],EDX` stays an EDX use, as in Ghidra
+  (its `violation` at 0x4793ff, overridden in mercs2). ghidra-rs keeps matching Ghidra here
+  and does not model the save/restore.
+- 2026-11-11: `--abi-callers` keeps the violation-first rule: a `violation` behind any reference
+  wins over a stopped walk, since Ghidra's database order of references isn't reproduced.
+  It finds Ghidra's violations at 0x41d7be and 0x41d834, and gives `violation` on 9 rows
+  Ghidra reports `unknown`. Checked by hand: all 11 end at a `PUSH` of the watched register
+  that is never read back (8 at the `4e1259` SecuROM stub, see the stub decision above), so
+  they are consistent with treating PUSH as a use. mercs2 overrides all but 0x59d660 at
+  0x70043d. Not taken: letting a violation win only over "enters wrapper code" stops (drops
+  8 of the 9 but is fitted to these rows).
 
 ## Milestones
 
@@ -57,15 +68,6 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    flowref/flowdest.
 
 ## Open questions
-
-- `--abi-callers`: Ghidra reports the first stopped walk in its database order of references,
-  which ghidra-rs does not reproduce. ghidra-rs now lets a `violation` behind any reference
-  win (finds the violations Ghidra reports at 0x41d7be and 0x41d834, but also reports
-  `violation` on 9 rows where Ghidra says `unknown`). Keep this, or match
-  Ghidra's `unknown` there?
-- The SecuROM stub `PUSH EDX; ...; XCHG [ESP],EDX` reads as an EDX use, in Ghidra too (its
-  `violation` at 0x4793ff, overridden in mercs2). Model the save/restore (more correct, but
-  differs from Ghidra), or keep matching Ghidra?
 
 - Decompiler: rewrite it in Rust, or use FFI to the C++ one first?
 - Should Ghidra's GUI ever be able to use this core (e.g. via a server), or does it stay CLI-only?

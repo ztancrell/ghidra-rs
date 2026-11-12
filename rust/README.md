@@ -271,7 +271,9 @@ ghidra-rs instead of a Ghidra project:
   (`unknown`); otherwise the first stopped walk is reported. Ghidra's own order put
   0x41e69a before 0x401bbc among the callers of 0x41d7a0, which its `violation` rows at
   0x41d7be and 0x41d834 need (the walk from 0x401bbc stops in the relocated body of
-  0x41ef50); the same rule also turns 9 rows Ghidra reports `unknown` into `violation`.
+  0x41ef50); the same rule also turns 9 rows Ghidra reports `unknown` into `violation`
+  (all end at a `PUSH` of the register that is never read back, like the two above; kept,
+  see `../DESIGN.md`).
 - `securom_functions.csv`, read from the directory of `register_abi.csv` as the script reads
   `config/securom_functions.csv`, gives the relocated bodies; they are made functions, as
   AddRelocatedEntries.java does. Contract entries no analysis reached are disassembled first,
