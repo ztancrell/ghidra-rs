@@ -35,6 +35,12 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   they are consistent with treating PUSH as a use. mercs2 overrides all but 0x59d660 at
   0x70043d. Not taken: letting a violation win only over "enters wrapper code" stops (drops
   8 of the 9 but is fitted to these rows).
+- 2026-11-11: Change of direction: the goal is a full headless Rust Ghidra for decompiling
+  and rewriting old video games (mercs2 first), through milestone 4. This supersedes "a
+  headless Rust core, not a full rewrite" above. Still no GUI.
+- 2026-11-11 (Claude's call, not yet confirmed): the decompiler (milestone 3) is written in
+  Rust, and Ghidra's C++ decompiler is the reference its output is checked against, as
+  `rust/tools/sleigh_ref.cc` was for SLEIGH. No FFI stopgap.
 
 ## Milestones
 
@@ -69,6 +75,5 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
 
 ## Open questions
 
-- Decompiler: rewrite it in Rust, or use FFI to the C++ one first?
 - Should Ghidra's GUI ever be able to use this core (e.g. via a server), or does it stay CLI-only?
 - Project DB format: does it need to read or write Ghidra `.gpr` projects?
