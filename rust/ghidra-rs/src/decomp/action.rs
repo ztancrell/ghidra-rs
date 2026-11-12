@@ -311,7 +311,7 @@ fn varnode_props(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         for (slot, &vn) in fd.op(op).ins.iter().enumerate() {
             let v = fd.vn(vn);
             // a written read-only varnode only gets a warning
-            if v.space == ram && v.def.is_none() && arch.is_readonly(v.offset, v.size) {
+            if v.space == ram && v.def.is_none() && !v.is_annotation() && arch.is_readonly(v.offset, v.size) {
                 reads.push((v.offset, v.size, vn.0, op, slot));
             }
         }

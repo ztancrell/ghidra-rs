@@ -282,6 +282,8 @@ pub struct Sleigh {
     regnames: HashMap<(u32, u64, u32), usize>,
     /// the .pspec `<tracked_set>`: registers with a known value at every address (x86: DF = 0)
     pub tracked: Vec<(String, u32)>,
+    /// the .pspec `<incidentalcopy>` registers (x86: ST0..ST7): copies into them are side effects
+    pub incidental: Vec<String>,
     /// user-defined op names by index
     userops: Vec<Option<String>>,
 }
@@ -692,15 +694,19 @@ impl Sleigh {
 
     /// Load a `.sla`; context defaults come from the `.pspec` of the same name next to it, if any.
     pub fn load(path: &Path) -> Result<Sleigh> {
-        let (context, tracked) = match std::fs::read_to_string(path.with_extension("pspec")) {
+        let (context, tracked, incidental) = match std::fs::read_to_string(path.with_extension("pspec")) {
             Ok(text) => {
                 let root = crate::xml::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-                (pspec_sets(&root, "context_set")?, pspec_sets(&root, "tracked_set")?)
+                let incidental = root.find("incidentalcopy").map_or(Ok(Vec::new()), |el| {
+                    el.kids_named("register").map(|r| r.req("name").map(str::to_string)).collect::<Result<Vec<_>>>()
+                })?;
+                (pspec_sets(&root, "context_set")?, pspec_sets(&root, "tracked_set")?, incidental)
             }
-            Err(_) => (Vec::new(), Vec::new()),
+            Err(_) => (Vec::new(), Vec::new(), Vec::new()),
         };
         let mut sl = Self::load_with_context(path, &context)?;
         sl.tracked = tracked;
+        sl.incidental = incidental;
         Ok(sl)
     }
 
@@ -852,6 +858,7 @@ impl Sleigh {
             ctx_default,
             regnames,
             tracked: Vec::new(),
+            incidental: Vec::new(),
             userops,
         })
     }

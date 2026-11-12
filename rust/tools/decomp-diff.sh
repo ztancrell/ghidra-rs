@@ -17,6 +17,7 @@
 #   ORDER=easy run the corpus simplest first (decomp-rank.sh, cached at rust/target/decomp-check/<corpus>.ranked)
 #   STOP=1     one function at a time, in corpus order, stopping at the first mismatch the reference ran
 #   OUT        output directory (default: rust/target/decomp-check/<corpus>)
+#   TIMEOUT    seconds each engine may take per function (default 120; a killed run prints nothing)
 # Each function is selected with `load function <name>`, its name taken from the prelude (which maps
 # every function, FID names included; `load addr` for one it lacks). Outputs are compared from that
 # line on: everything before it is the shared prelude.
@@ -30,7 +31,7 @@ export GHIDRA_RS=$rust/target/release/ghidra-rs
 export GHIDRA_RS_SLA=${GHIDRA_RS_SLA:-$root/Ghidra/Processors/x86/data/languages/x86.sla}
 export BIN=${BIN:-/home/zpt/projects/mercs/mercs2-decomp/orig/Mercenaries2.analysis.exe}
 export PRELUDE=${PRELUDE:-$rust/target/decomp-check/mercs2.prelude}
-export BREAK PRINT=${PRINT:-print raw} OPTIONS CONTINUES=${CONTINUES:-0}
+export BREAK PRINT=${PRINT:-print raw} OPTIONS CONTINUES=${CONTINUES:-0} TIMEOUT=${TIMEOUT:-120}
 [ -x "$DECOMP" ] || { echo "no reference: run rust/tools/decomp-ref.sh" >&2; exit 1; }
 [ -x "$GHIDRA_RS" ] || (cd "$rust" && cargo build --release)
 
@@ -84,8 +85,8 @@ one() {
         for ((i = 0; i < CONTINUES; i++)); do echo continue; echo "$PRINT"; done
         echo quit
     } > "$s"
-    "$DECOMP" -i "$s" </dev/null 2>&1 | sed -n '/^init> load \(function\|addr\)/,$p' > "$out/ref/$a"
-    "$GHIDRA_RS" decompile -i "$s" 2>&1 | sed -n '/^init> load \(function\|addr\)/,$p' > "$out/rust/$a"
+    timeout "$TIMEOUT" "$DECOMP" -i "$s" </dev/null 2>&1 | sed -n '/^init> load \(function\|addr\)/,$p' > "$out/ref/$a"
+    timeout "$TIMEOUT" "$GHIDRA_RS" decompile -i "$s" 2>&1 | sed -n '/^init> load \(function\|addr\)/,$p' > "$out/rust/$a"
 }
 export -f one
 # the reference failed: an error, or no decompile result
@@ -116,7 +117,7 @@ for f in "$out"/ref/*; do
     else
         # first differing line: cmp's line number (at EOF, the line after the shorter file's last)
         c=$(cmp "$f" "$out/rust/$a" 2>&1 || true)
-        n=$(grep -o 'line [0-9]*' <<<"$c" | grep -o '[0-9]*')
+        n=$(grep -o 'line [0-9]*' <<<"$c" | grep -o '[0-9]*' || echo 1)
         grep -q EOF <<<"$c" && n=$((n + 1))
         echo "different $a, line $n: ref: $(sed -n "${n}p" "$f") | rust: $(sed -n "${n}p" "$out/rust/$a")"
         if [ -n "$VERBOSE$STOP" ]; then "$rust/tools/decomp-show.sh" "$f" "$out/rust/$a"; fi

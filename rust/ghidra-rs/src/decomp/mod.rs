@@ -91,6 +91,9 @@ pub struct Arch {
     registers: BTreeMap<RegKey, String>,
     /// `<tracked_set>` registers: space, offset, size, value (ActionConstbase)
     pub(crate) tracked: Vec<(u32, u64, u32, u64)>,
+    /// the `<incidentalcopy>` registers (space, offset, size): varnodes starting in them are
+    /// `incidental_copy` (`Database::setPropertyRange`)
+    pub(crate) incidental: Vec<(u32, u64, u32)>,
     /// ram ranges `[start, end)` with the `readonly` property: the loader's read-only sections
     /// (`fillinReadOnlyFromLoader`) and the console's `readonly` commands
     readonly: Vec<(u64, u64)>,
@@ -119,6 +122,7 @@ impl Arch {
             .map(|(name, val)| names.register(name).map(|(s, o, z)| (s, o, z, u64::from(*val))))
             .collect::<Result<_>>()?;
         let spec = CompilerSpec::parse(cspec, &sleigh, &names)?;
+        let incidental = sleigh.incidental.iter().map(|n| names.register(n)).collect::<Result<_>>()?;
         let readonly = image
             .sections
             .iter()
@@ -132,6 +136,7 @@ impl Arch {
             functions: HashMap::new(),
             registers,
             tracked,
+            incidental,
             readonly,
             externrefs: HashMap::new(),
             readonly_propagate: false,

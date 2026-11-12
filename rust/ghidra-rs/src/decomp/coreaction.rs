@@ -169,7 +169,7 @@ fn only_op_use(fd: &Funcdata, invn: VarnodeId, opmatch: OpId, trial: &ParamTrial
                 }
                 Opcode::Indirect => cur |= INDIRECTALT,
                 Opcode::Copy => {
-                    if !is_internal(fd, o.out) {
+                    if !is_internal(fd, o.out) && !incidental(fd, vn) {
                         cur |= ACTIONALT;
                     }
                 }
@@ -217,6 +217,11 @@ fn is_internal(fd: &Funcdata, vn: Option<VarnodeId>) -> bool {
     vn.is_some_and(|v| fd.ram.is_some() && is_unique(fd, v))
 }
 
+/// `Varnode::isIncidentalCopy` (no op is an incidental COPY without a call fixup declaring it).
+fn incidental(fd: &Funcdata, vn: VarnodeId) -> bool {
+    fd.vn(vn).has(VnFlags::INCIDENTAL_COPY)
+}
+
 fn is_unique(fd: &Funcdata, vn: VarnodeId) -> bool {
     matches!(fd.vn(vn).space, Space::Sleigh(s) if Some(s) == fd.uniq)
 }
@@ -261,7 +266,7 @@ fn ancestor_op_use(
             return Ok(false);
         }
         Opcode::Copy => {
-            if is_unique(fd, invn) {
+            if is_unique(fd, invn) || incidental(fd, d.ins[0]) {
                 return ancestor_op_use(fd, maxlevel - 1, d.ins[0], op, trial, offset, main, marks);
             }
         }
@@ -283,7 +288,7 @@ fn ancestor_op_use(
                     }
                 }
             }
-            if is_unique(fd, invn) || vn_overlap(fd, invn, d.ins[0]) == Some(newoff) {
+            if is_unique(fd, invn) || incidental(fd, d.ins[0]) || vn_overlap(fd, invn, d.ins[0]) == Some(newoff) {
                 return ancestor_op_use(fd, maxlevel - 1, d.ins[0], op, trial, offset + newoff, main, marks);
             }
         }
@@ -407,7 +412,7 @@ fn enter_node(
         }
         Opcode::Subpiece => {
             let suboff = fd.vn(op.ins[1]).offset as u32;
-            if is_unique(fd, vn) || vn_overlap(fd, vn, op.ins[0]) == Some(suboff) {
+            if is_unique(fd, vn) || incidental(fd, op.ins[0]) || vn_overlap(fd, vn, op.ins[0]) == Some(suboff) {
                 stack.push(State { op: def, slot: 0, flags: 0, offset: state.offset + suboff });
                 return Cmd::Enter;
             }
@@ -430,7 +435,7 @@ fn enter_node(
         }
         Opcode::Copy => {
             let inv = fd.vn(op.ins[0]);
-            if is_unique(fd, vn) || (inv.space == v.space && inv.offset == v.offset) {
+            if is_unique(fd, vn) || incidental(fd, op.ins[0]) || (inv.space == v.space && inv.offset == v.offset) {
                 stack.push(State { op: def, slot: 0, flags: 0, offset: 0 });
                 return Cmd::Enter;
             }
@@ -514,7 +519,8 @@ fn upon_pop(
                 // checkConditionalExe
                 let bl = fd.op(state.op).parent.expect("live op");
                 let b = fd.blocks.block(bl);
-                let solid = if prev.flags & SEEN_SOLID0 != 0 { 0 } else { 1 };
+                // getSolidSlot reads the MULTIEQUAL's own state, as the C++ does
+                let solid = if state.flags & SEEN_SOLID0 != 0 { 0 } else { 1 };
                 if b.ins.len() != 2 || fd.blocks.block(b.ins[solid].point).outs.len() != 1 {
                     res = Cmd::Fail;
                 } else {
@@ -587,11 +593,15 @@ pub(crate) fn return_recovery(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             let slot = active.trials[i].slot;
             let vn = fd.input(op, slot)?;
             let mut trial = active.trials[i].clone();
-            if ancestor_realistic(fd, op, slot, &mut trial, false) {
+            let real = ancestor_realistic(fd, op, slot, &mut trial, false);
+            if real {
                 let mut marks = HashSet::new();
                 if ancestor_op_use(fd, TRIM_RECURSE_MAX, vn, op, &mut trial, 0, 0, &mut marks)? {
                     trial.mark_active();
                 }
+            }
+            if std::env::var_os("S4_DEBUG").is_some() {
+                eprintln!("return trial {:?} real {real} flags {:x}", (trial.space, trial.off, trial.size), trial.flags);
             }
             active.trials[i] = trial;
             count += 1;
@@ -623,10 +633,32 @@ fn build_return_output(fd: &mut Funcdata, active: &ParamActive, retop: OpId) -> 
         }
         newparam.push(fd.op(retop).ins[t.slot]);
     }
-    if newparam.len() > 2 {
-        return err("a return value in several pieces (join space): not implemented in ghidra-rs yet");
+    if newparam.len() <= 2 {
+        return fd.op_set_all_input(retop, &newparam);
     }
-    fd.op_set_all_input(retop, &newparam)
+    if newparam.len() > 3 {
+        return err("a return value in more than two pieces: not implemented in ghidra-rs yet");
+    }
+    // most significant first
+    let pieces: Vec<(u32, u64, u32)> = newparam[1..]
+        .iter()
+        .rev()
+        .map(|&v| match fd.vn(v).space {
+            Space::Sleigh(s) => Ok((s, fd.vn(v).offset, fd.vn(v).size)),
+            _ => err("a return value piece outside a SLEIGH space"),
+        })
+        .collect::<Result<_>>()?;
+    let whole = fd.join_pieces(pieces)?;
+    let (lo, hi) = (newparam[1], newparam[2]);
+    let size = fd.vn(lo).size + fd.vn(hi).size;
+    let addr = fd.op(retop).seq.addr;
+    let newop = fd.new_op(Opcode::Piece, addr);
+    let newout = fd.new_varnode_out(size, Space::Join, whole, newop);
+    fd.vn_set(newout, VnFlags::WRITEMASK);
+    fd.op_set_input(newop, hi, 0)?;
+    fd.op_set_input(newop, lo, 1)?;
+    fd.op_insert_before(newop, retop)?;
+    fd.op_set_all_input(retop, &[newparam[0], newout])
 }
 
 /// Port of `ActionActiveReturn::apply`: each call's output trials become its output.
@@ -696,17 +728,43 @@ fn build_output_from_trials(
     if active.trials.is_empty() {
         return Ok(());
     }
-    if active.trials.len() > 1 {
-        return err("a call output in several pieces (join space): not implemented in ghidra-rs yet");
-    }
     let op = fd.call(c).op;
-    let out = finalvn[0];
-    let indop = fd.vn(out).def.ok_or_else(|| LowlevelError("output trial without its INDIRECT".into()))?;
-    fd.op_set_output(op, out)?;
-    let ins = fd.op(indop).ins.clone();
-    fd.op_destroy(indop);
-    for vn in ins {
-        fd.delete_varnode(vn);
+    let mut deleted = Vec::new();
+    if active.trials.len() == 1 {
+        let out = finalvn[0];
+        deleted.push(fd.vn(out).def.ok_or_else(|| LowlevelError("output trial without its INDIRECT".into()))?);
+        fd.op_set_output(op, out)?;
+    } else {
+        // joinMostSigFirst is false: the trials come least significant first
+        finalvn.reverse();
+        let mut pieces = Vec::new();
+        for &vn in &finalvn {
+            let Space::Sleigh(s) = fd.vn(vn).space else { return err("a call output piece outside a SLEIGH space") };
+            pieces.push((s, fd.vn(vn).offset, fd.vn(vn).size));
+            deleted.push(fd.vn(vn).def.ok_or_else(|| LowlevelError("output trial without its INDIRECT".into()))?);
+        }
+        let size = pieces.iter().map(|p| p.2).sum();
+        let whole = fd.join_pieces(pieces)?;
+        let finalout = fd.new_varnode(size, Space::Join, whole);
+        fd.op_set_output(op, finalout)?;
+        let addr = fd.op(op).seq.addr;
+        let mut trunc = 0u64;
+        for &vn in finalvn.iter().rev() {
+            let subop = fd.new_op(Opcode::Subpiece, addr);
+            fd.op_set_input(subop, finalout, 0)?;
+            let c = fd.new_constant(4, trunc);
+            fd.op_set_input(subop, c, 1)?;
+            fd.op_set_output(subop, vn)?;
+            fd.op_insert_after(subop, op)?;
+            trunc += u64::from(fd.vn(vn).size);
+        }
+    }
+    for dop in deleted {
+        let ins = fd.op(dop).ins.clone();
+        fd.op_destroy(dop);
+        for vn in ins {
+            fd.delete_varnode(vn);
+        }
     }
     Ok(())
 }
@@ -1733,27 +1791,83 @@ fn unblocked_multi(fd: &Funcdata, bb: BlockId) -> bool {
     true
 }
 
-/// Port of `BlockBasic::hasNoImmediateCopy` (`hasImmedCopyEdge`, `PcodeOp::hasCopyImmed`):
-/// no MULTIEQUAL of the successor takes, along `bb`'s edge, a value COPYed in `bb`'s
-/// predecessor.
-fn has_no_immediate_copy(fd: &Funcdata, bb: BlockId) -> bool {
-    if fd.blocks.block(bb).ins.len() != 1 {
-        return true;
+/// `BlockBasic::hasNoImmediateCopy`: only copy propagation (`RulePropagateCopy`, stage R1)
+/// marks the immediate-copy edges it looks for, so with the rules off there are none.
+fn has_no_immediate_copy(_: &Funcdata, _: BlockId) -> bool {
+    true
+}
+
+/// Port of `Funcdata::pushMultiequals`: a MULTIEQUAL of `bb` read past its successor gets a
+/// MULTIEQUAL in the successor, so the value survives `bb`'s removal.
+fn push_multiequals(fd: &mut Funcdata, bb: BlockId) -> Result<()> {
+    if fd.blocks.block(bb).outs.is_empty() {
+        return Ok(());
     }
-    let blout = fd.blocks.block(bb).outs[0].point;
-    let pred = fd.blocks.block(bb).ins[0].point;
-    let in_this = fd.blocks.block(blout).ins.iter().position(|e| e.point == bb).unwrap();
-    !fd.blocks.block(blout).ops.iter().any(|&op| {
-        fd.op(op).opc == Opcode::Multiequal
-            && fd.vn(fd.op(op).ins[in_this]).def.is_some_and(|d| fd.op(d).opc == Opcode::Copy && fd.op(d).parent == Some(pred))
-    })
+    let outblock = fd.blocks.block(bb).outs[0].point;
+    let outblock_ind = fd.blocks.block(bb).outs[0].reverse;
+    for origop in fd.blocks.block(bb).ops.clone() {
+        if fd.op(origop).opc != Opcode::Multiequal {
+            continue;
+        }
+        let origvn = fd.op(origop).out.unwrap();
+        let mut needreplace = false;
+        let mut neednewunique = false;
+        for &op in fd.vn(origvn).descend.iter() {
+            let o = fd.op(op);
+            if o.opc == Opcode::Multiequal && o.parent == Some(outblock) {
+                let dead_edge = !o.ins.iter().enumerate().any(|(i, &v)| i != outblock_ind && v == origvn);
+                if dead_edge {
+                    let out = fd.vn(o.out.unwrap());
+                    let ov = fd.vn(origvn);
+                    if out.space == ov.space && out.offset == ov.offset && ov.has(VnFlags::ADDRTIED) {
+                        neednewunique = true;
+                    }
+                    continue;
+                }
+            }
+            needreplace = true;
+            break;
+        }
+        if !needreplace {
+            continue;
+        }
+        let (space, offset, size) = (fd.vn(origvn).space, fd.vn(origvn).offset, fd.vn(origvn).size);
+        let replacevn = if neednewunique {
+            fd.new_unique(size, fd.uniq.unwrap_or(0))
+        } else {
+            fd.new_varnode(size, space, offset)
+        };
+        let branches: Vec<VarnodeId> = fd
+            .blocks
+            .block(outblock)
+            .ins
+            .iter()
+            .map(|e| if e.point == bb { origvn } else { replacevn })
+            .collect();
+        let start = fd.blocks.block(outblock).start;
+        let replaceop = fd.new_op(Opcode::Multiequal, start);
+        fd.op_set_output(replaceop, replacevn)?;
+        fd.op_set_all_input(replaceop, &branches)?;
+        fd.op_insert_begin(replaceop, outblock);
+        for op in fd.vn(origvn).descend.to_vec() {
+            for i in 0..fd.op(op).ins.len() {
+                if fd.op(op).ins[i] != origvn {
+                    continue;
+                }
+                if i == outblock_ind && fd.op(op).parent == Some(outblock) && fd.op(op).opc == Opcode::Multiequal {
+                    continue;
+                }
+                fd.op_set_input(op, replacevn, i)?;
+                break;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Port of `Funcdata::removeDoNothingBlock` (`blockRemoveInternal` for a reachable block).
 fn remove_do_nothing_block(fd: &mut Funcdata, arch: &Arch, bb: BlockId) -> Result<()> {
-    if fd.blocks.block(bb).ops.iter().any(|&o| fd.op(o).opc == Opcode::Multiequal) {
-        return err("removing a do-nothing block with MULTIEQUALs: not implemented in ghidra-rs yet");
-    }
+    push_multiequals(fd, bb)?;
     let nin = fd.blocks.block(bb).ins.len();
     for e in fd.blocks.block(bb).outs.clone() {
         let bbout = e.point;
@@ -1764,17 +1878,24 @@ fn remove_do_nothing_block(fd: &mut Funcdata, arch: &Arch, bb: BlockId) -> Resul
             }
             let deadvn = fd.op(op).ins[blocknum];
             fd.op_remove_input(op, blocknum);
-            for _ in 0..nin {
+            let deadop = fd.vn(deadvn).def.filter(|&d| fd.op(d).opc == Opcode::Multiequal && fd.op(d).parent == Some(bb));
+            for j in 0..nin {
+                let v = match deadop {
+                    Some(d) => fd.op(d).ins[j],
+                    None => deadvn,
+                };
                 let n = fd.op(op).ins.len();
-                fd.op_insert_input(op, deadvn, n)?;
+                fd.op_insert_input(op, v, n)?;
             }
             op_zero_multi(fd, arch, op)?;
         }
     }
     fd.blocks.remove_from_flow(bb);
     for op in fd.blocks.block(bb).ops.clone() {
-        if fd.op(op).out.is_some() {
-            return err("Deleting op with descendants");
+        if let Some(out) = fd.op(op).out {
+            if fd.vn(out).descend.iter().any(|&d| fd.op(d).parent.is_some_and(|p| p != bb)) {
+                return err("Deleting op with descendants");
+            }
         }
         fd.op_destroy(op);
     }

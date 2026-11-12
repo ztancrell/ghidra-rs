@@ -24,6 +24,8 @@ pub(crate) enum Space {
     /// the `stack` space the `.cspec`'s `<stackpointer>` makes (no varnode lives in it until
     /// the `stackvars` rules, stage R5)
     Stack,
+    /// `join`: the offset indexes [`super::funcdata::Funcdata::joins`] (`JoinRecord`)
+    Join,
 }
 
 impl Space {
@@ -35,6 +37,8 @@ impl Space {
             Space::Fspec => u32::MAX - 3,
             Space::Iop => u32::MAX - 2,
             Space::Stack => u32::MAX - 1,
+            // made with fspec and iop in `restoreFromSpec`, before them
+            Space::Join => u32::MAX - 4,
         }
     }
 }
@@ -80,6 +84,11 @@ impl VnFlags {
     pub(crate) const CONSUME_VACUOUS: VnFlags = VnFlags(1 << 14);
     /// `mark` (traversals)
     pub(crate) const MARK: VnFlags = VnFlags(1 << 15);
+    /// `annotation` on a code reference (`Funcdata::newCodeRef`): the target of a BRANCH,
+    /// CBRANCH or CALL
+    pub(crate) const CODEREF: VnFlags = VnFlags(1 << 17);
+    /// `incidental_copy`, from the `.pspec`
+    pub(crate) const INCIDENTAL_COPY: VnFlags = VnFlags(1 << 16);
 
     pub(crate) fn has(self, f: VnFlags) -> bool {
         self.0 & f.0 != 0
@@ -116,7 +125,7 @@ impl Varnode {
         self.space == CONST_SPACE
     }
     pub(crate) fn is_annotation(&self) -> bool {
-        matches!(self.space, Space::Iop | Space::Fspec)
+        matches!(self.space, Space::Iop | Space::Fspec) || self.has(VnFlags::CODEREF)
     }
     /// `isInput`
     pub(crate) fn is_input(&self) -> bool {

@@ -69,6 +69,10 @@ pub struct Funcdata {
     pub(crate) ram: Option<u32>,
     /// the unique space (`IPTR_INTERNAL`)
     pub(crate) uniq: Option<u32>,
+    /// the join records (pieces, most significant first) of `Space::Join` varnodes
+    pub(crate) joins: Vec<Vec<(u32, u64, u32)>>,
+    /// the `<incidentalcopy>` ranges (`Arch::incidental`)
+    incidental: Vec<(u32, u64, u32)>,
     /// `ActionStackPtrFlow::analysis_finished` (the action is made per function)
     pub(crate) stackptrflow_done: bool,
 }
@@ -97,6 +101,8 @@ impl Funcdata {
             warnings: Vec::new(),
             ram: None,
             uniq: None,
+            incidental: Vec::new(),
+            joins: Vec::new(),
             stackptrflow_done: false,
         }
     }
@@ -216,6 +222,11 @@ impl Funcdata {
             v.flags.set(VnFlags::PERSIST);
             v.flags.set(VnFlags::ADDRTIED);
         }
+        if let Space::Sleigh(s) = v.space {
+            if self.incidental.iter().any(|&(is, io, iz)| is == s && io <= v.offset && v.offset < io + u64::from(iz)) {
+                v.flags.set(VnFlags::INCIDENTAL_COPY);
+            }
+        }
         v
     }
 
@@ -278,8 +289,20 @@ impl Funcdata {
             if let Some(o) = p.out {
                 self.new_varnode_out(o.size, Space::Sleigh(o.space), o.offset, op);
             }
-            let ins: Vec<_> =
+            let mut ins: Vec<_> =
                 p.ins.iter().map(|v| self.new_varnode(v.size, Space::Sleigh(v.space), v.offset)).collect();
+            // PcodeOp::isCodeRef: input 0 is a code reference (`newCodeRef`: one byte, annotation)
+            if matches!(opc, Opcode::Branch | Opcode::Cbranch | Opcode::Call) {
+                if let Some(&target) = ins.first() {
+                    if !self.vn(target).is_constant() {
+                        self.vn_mut(target).size = 1;
+                        self.vn_set(target, VnFlags::CODEREF);
+                        self.vn_clear(target, VnFlags::PERSIST);
+                        self.vn_clear(target, VnFlags::ADDRTIED);
+                        ins[0] = target;
+                    }
+                }
+            }
             self.op_set_all_input(op, &ins)?;
         }
         Ok(())
@@ -700,6 +723,7 @@ impl Funcdata {
     pub(crate) fn start_processing(&mut self, arch: &Arch) -> Result<()> {
         self.ram = Some(arch.spec.stack_container);
         self.uniq = Some(arch.sleigh.uniq_space());
+        self.incidental = arch.incidental.clone();
         flow::follow_flow(self, arch)?;
         self.blocks.structure_loops()?;
         self.sort_call_specs();
@@ -864,6 +888,23 @@ impl Funcdata {
         let ops = &self.blocks.block(bl).ops;
         let at = ops.iter().position(|&o| o == op)?;
         at.checked_sub(1).map(|i| ops[i])
+    }
+
+    /// Port of `AddrSpaceManager::joinPieces` for register pieces (most significant first)
+    /// that are not contiguous: the join record's offset.
+    pub(crate) fn join_pieces(&mut self, pieces: Vec<(u32, u64, u32)>) -> Result<u64> {
+        let contiguous = pieces.windows(2).all(|w| w[0].0 == w[1].0 && w[1].1 + u64::from(w[1].2) == w[0].1);
+        if contiguous {
+            return err("joining contiguous pieces: not implemented in ghidra-rs yet");
+        }
+        let at = match self.joins.iter().position(|j| *j == pieces) {
+            Some(i) => i,
+            None => {
+                self.joins.push(pieces);
+                self.joins.len() - 1
+            }
+        };
+        Ok(at as u64)
     }
 
     /// Port of `Funcdata::warningHeader`.
