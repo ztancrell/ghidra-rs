@@ -793,7 +793,7 @@ impl Sleigh {
             if let Some(Sym { kind: Kind::Context { low, high, .. }, .. }) = syms.iter().find(|s| s.name == *name) {
                 let num = (*low / 32) as usize;
                 let shift = 31 - high % 32;
-                let mask = ((u32::MAX >> (low % 32 + shift)) << shift) as u32;
+                let mask = (u32::MAX >> (low % 32 + shift)) << shift;
                 ctx_default[num] = (ctx_default[num] & !mask) | ((val << shift) & mask);
             }
         }
@@ -1616,8 +1616,8 @@ impl Sleigh {
                     if out.len() != prev {
                         count += 1;
                         if count == 1 {
-                            for n in prev..out.len() {
-                                if out[n].is_some() {
+                            for (n, slot) in out.iter().enumerate().skip(prev) {
+                                if slot.is_some() {
                                     if last.is_some() {
                                         last = None;
                                         break;

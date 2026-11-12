@@ -21,9 +21,8 @@ pub fn default_files() -> Vec<std::path::PathBuf> {
     let dir = std::env::var_os("GHIDRA_RS_FID")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| "/opt/ghidra/Ghidra/Features/FunctionID/data".into());
-    let mut v: Vec<_> = std::fs::read_dir(dir)
-        .map(|d| d.filter_map(|e| Some(e.ok()?.path())).collect())
-        .unwrap_or_default();
+    let mut v: Vec<_> =
+        std::fs::read_dir(dir).map(|d| d.filter_map(|e| Some(e.ok()?.path())).collect()).unwrap_or_default();
     v.retain(|p| p.to_string_lossy().ends_with("_x86.fidbf"));
     v.sort();
     v
@@ -119,7 +118,12 @@ pub fn hash(sl: &Sleigh, insns: &[HashInsn]) -> Option<Quad> {
                             FidObj::Scalar(v) => {
                                 let address = i.addresses.iter().any(|s| s.contains(&(v as u32)));
                                 let val = if op.scalar {
-                                    if address { FEEDDEAD as i64 } else { specific_count += 1; v }
+                                    if address {
+                                        FEEDDEAD as i64
+                                    } else {
+                                        specific_count += 1;
+                                        v
+                                    }
                                 } else if !(-256 < v && v < 256) {
                                     FEEDDEAD as i64
                                 } else {
@@ -298,7 +302,13 @@ impl FidDb {
             }
         })?;
         let root = |n: &str| tables.get(n).copied().ok_or_else(|| format!("{}: no table {n}", path.display()));
-        let mut db = FidDb { functions: Vec::new(), by_full: HashMap::new(), strings: HashMap::new(), superior: HashSet::new(), inferior: HashSet::new() };
+        let mut db = FidDb {
+            functions: Vec::new(),
+            by_full: HashMap::new(),
+            strings: HashMap::new(),
+            superior: HashSet::new(),
+            inferior: HashSet::new(),
+        };
         bf.records(root("Functions Table")?, Some(52), &mut |key, r| {
             db.functions.push(FidFunction {
                 key,
@@ -407,7 +417,13 @@ pub struct Applied {
 /// Run Function ID over every function of `an` (FidAnalyzer with default options) and
 /// return the functions it marks, with the name it gives them. Exported functions keep their
 /// names (hasUserOrImportedSymbols) and are not marked.
-pub fn apply(img: &Image, an: &Analysis, sl: &Sleigh, dbs: &[FidDb], demangle: &dyn Fn(&str) -> String) -> BTreeMap<u32, Applied> {
+pub fn apply(
+    img: &Image,
+    an: &Analysis,
+    sl: &Sleigh,
+    dbs: &[FidDb],
+    demangle: &dyn Fn(&str) -> String,
+) -> BTreeMap<u32, Applied> {
     let quads = hashes(img, an, sl);
     let mut owner = HashMap::new();
     for (&f, body) in &an.bodies {
@@ -441,7 +457,8 @@ pub fn apply(img: &Image, an: &Analysis, sl: &Sleigh, dbs: &[FidDb], demangle: &
         let Some(h) = quads.get(&f) else { continue };
         let k: Vec<Quad> = kids.get(&f).into_iter().flatten().filter_map(|g| quads.get(g).copied()).collect();
         let par: Vec<Quad> = parents.get(&f).into_iter().flatten().filter_map(|g| quads.get(g).copied()).collect();
-        let mut ms: Vec<Match> = dbs.iter().flat_map(|db| db.by_full_hash(h.full).filter_map(|r| score(db, r, h, &k, &par))).collect();
+        let mut ms: Vec<Match> =
+            dbs.iter().flat_map(|db| db.by_full_hash(h.full).filter_map(|r| score(db, r, h, &k, &par))).collect();
         if ms.is_empty() {
             continue;
         }
@@ -475,7 +492,8 @@ pub fn apply(img: &Image, an: &Analysis, sl: &Sleigh, dbs: &[FidDb], demangle: &
         // addFunctionLabelMultipleMatches: names no other function holds, as labels
         let mut unused = Vec::new();
         for n in &names {
-            let elsewhere = !multi.contains(n) && [n.clone(), format!("_{n}"), format!("__{n}")].iter().any(|x| primary.contains(x));
+            let elsewhere = !multi.contains(n)
+                && [n.clone(), format!("_{n}"), format!("__{n}")].iter().any(|x| primary.contains(x));
             if !elsewhere {
                 unused.push(n.clone());
                 if unused.len() > MAGIC_MULTIPLE_MATCH_LIMIT {
@@ -513,7 +531,8 @@ pub fn hashes(img: &Image, an: &Analysis, sl: &Sleigh) -> HashMap<u32, Quad> {
                     addr: a,
                     bytes: s.data.get(o..o + i.len as usize)?,
                     // a JMP to a function entry is a call (Shared Return Calls), as in analysis
-                    call: matches!(i.flow, Flow::Call | Flow::CallInd) || (i.flow == Flow::Jump && an.call_target(img, i).is_some()),
+                    call: matches!(i.flow, Flow::Call | Flow::CallInd)
+                        || (i.flow == Flow::Jump && an.call_target(img, i).is_some()),
                     addresses: [&i.refs, &i.code_imms],
                 })
             })

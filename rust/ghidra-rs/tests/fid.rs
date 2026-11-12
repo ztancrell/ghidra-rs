@@ -10,7 +10,12 @@ const COOKIE: [(u32, &[u8], bool); 4] = [
     (0x9eec66, &[0xf3, 0xc3], false),
     (0x9eec68, &[0xe9, 0x6f, 0x05, 0x00, 0x00], true),
 ];
-const QUAD: Quad = Quad { code_units: 3, full: 0x8e1abbebf48dd414_u64 as i64, specific_count: 0, specific: 0xe1fd1886d3360c04_u64 as i64 };
+const QUAD: Quad = Quad {
+    code_units: 3,
+    full: 0x8e1abbebf48dd414_u64 as i64,
+    specific_count: 0,
+    specific: 0xe1fd1886d3360c04_u64 as i64,
+};
 
 #[test]
 fn fid_hash() {

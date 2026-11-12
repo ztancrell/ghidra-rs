@@ -44,7 +44,8 @@ fn run() -> Result<(), String> {
             "--func" => func = Some(val()?),
             "--addr" => {
                 let v = val()?;
-                addr = Some(u64::from_str_radix(v.trim_start_matches("0x"), 16).map_err(|e| format!("--addr {v}: {e}"))?)
+                addr =
+                    Some(u64::from_str_radix(v.trim_start_matches("0x"), 16).map_err(|e| format!("--addr {v}: {e}"))?)
             }
             "--count" => count = Some(val()?.parse::<usize>().map_err(|e| format!("--count: {e}"))?),
             "--pcode" => pcode = true,
@@ -143,7 +144,11 @@ fn datatest(args: &[String]) -> Result<(), String> {
     let mut files = Vec::new();
     for p in paths.iter().map(PathBuf::from) {
         if p.is_dir() {
-            let mut v: Vec<_> = std::fs::read_dir(&p).map_err(|e| format!("{}: {e}", p.display()))?.flatten().map(|e| e.path()).collect();
+            let mut v: Vec<_> = std::fs::read_dir(&p)
+                .map_err(|e| format!("{}: {e}", p.display()))?
+                .flatten()
+                .map(|e| e.path())
+                .collect();
             v.retain(|f| f.extension().is_some_and(|x| x == "xml"));
             v.sort();
             files.extend(v);
@@ -246,7 +251,8 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
         let p = std::path::Path::new(csv).with_file_name("securom_functions.csv");
         let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
         for t in text.lines().skip(1).filter_map(|l| l.split(',').nth(1)) {
-            let a = u32::from_str_radix(t.trim_start_matches("0x"), 16).map_err(|e| format!("{}: {t}: {e}", p.display()))?;
+            let a = u32::from_str_radix(t.trim_start_matches("0x"), 16)
+                .map_err(|e| format!("{}: {t}: {e}", p.display()))?;
             relocated.insert(a);
             seeds.push(a);
         }
@@ -287,7 +293,12 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
         let files = ghidra_rs::fid::default_files();
         let dbs = files.iter().map(|f| ghidra_rs::fid::FidDb::open(f)).collect::<Result<Vec<_>, _>>()?;
         let fid = ghidra_rs::fid::apply(&img, &an, &sl, &dbs, &scripts::demangle);
-        eprintln!("function id: {} functions named from {} databases in {:.1}s", fid.len(), dbs.len(), t.elapsed().as_secs_f64());
+        eprintln!(
+            "function id: {} functions named from {} databases in {:.1}s",
+            fid.len(),
+            dbs.len(),
+            t.elapsed().as_secs_f64()
+        );
         if let Some(p) = functions {
             let n = scripts::export_functions(&img, &an, &fid, &mut create(&p)?).map_err(|e| e.to_string())?;
             println!("exported {n} functions");

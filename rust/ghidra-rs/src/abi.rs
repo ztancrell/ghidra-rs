@@ -175,11 +175,11 @@ struct Fx(u64);
 
 impl std::hash::Hasher for Fx {
     fn write(&mut self, bytes: &[u8]) {
-        let mut c = bytes.chunks_exact(8);
-        for w in &mut c {
-            self.add(u64::from_le_bytes(w.try_into().unwrap()));
+        let (words, rest) = bytes.as_chunks::<8>();
+        for w in words {
+            self.add(u64::from_le_bytes(*w));
         }
-        for &b in c.remainder() {
+        for &b in rest {
             self.add(b as u64);
         }
     }
@@ -220,12 +220,12 @@ const X87_CC: [&str; 4] = ["C0", "C1", "C2", "C3"];
 const X87_PUSH: [&str; 10] = ["FLD", "FILD", "FLD1", "FLDZ", "FLDPI", "FLDLN2", "FLDLG2", "FLDL2E", "FLDL2T", "FBLD"];
 const X87_STORE_POP: [&str; 4] = ["FSTP", "FISTP", "FISTTP", "FBSTP"];
 const X87_READ_POP: [&str; 14] = [
-    "FADDP", "FMULP", "FSUBP", "FSUBRP", "FDIVP", "FDIVRP", "FCOMP", "FICOMP", "FUCOMP", "FCOMIP", "FUCOMIP", "FYL2X", "FYL2XP1",
-    "FPATAN",
+    "FADDP", "FMULP", "FSUBP", "FSUBRP", "FDIVP", "FDIVRP", "FCOMP", "FICOMP", "FUCOMP", "FCOMIP", "FUCOMIP", "FYL2X",
+    "FYL2XP1", "FPATAN",
 ];
 const X87_CONTROL: [&str; 14] = [
-    "FNSTCW", "FSTCW", "FLDCW", "FNSTSW", "FSTSW", "FNCLEX", "FCLEX", "FWAIT", "FNOP", "FNSTENV", "FLDENV", "FXSAVE", "FXRSTOR",
-    "FRSTOR",
+    "FNSTCW", "FSTCW", "FLDCW", "FNSTSW", "FSTSW", "FNCLEX", "FCLEX", "FWAIT", "FNOP", "FNSTENV", "FLDENV", "FXSAVE",
+    "FXRSTOR", "FRSTOR",
 ];
 const SAVED: [&str; 4] = ["EBX", "ESI", "EDI", "EBP"];
 const FLAG_USERS: [&str; 9] = ["ADC", "SBB", "RCL", "RCR", "LAHF", "CMC", "PUSHFD", "FNSTSW", "FSTSW"];
@@ -243,7 +243,11 @@ const ENTRY_POINT: u32 = 0;
 
 // A reference's source address as Ghidra prints it.
 fn site(a: u32) -> String {
-    if a == ENTRY_POINT { "Entry Point".into() } else { hex(a) }
+    if a == ENTRY_POINT {
+        "Entry Point".into()
+    } else {
+        hex(a)
+    }
 }
 
 fn hex(a: u32) -> String {
@@ -355,8 +359,8 @@ pub fn reads_writes(regs: &Regs, ops: &[crate::sleigh::PcodeOp]) -> (Vec<usize>,
     let mut written: Vec<usize> = Vec::new();
     for op in ops {
         let skip = match op.opc {
-            4 | 7 => None,                                     // BRANCH, CALL: flow only
-            5 | 3 => Some(1),                                  // CBRANCH: target; STORE: space id
+            4 | 7 => None,                                            // BRANCH, CALL: flow only
+            5 | 3 => Some(1),                                         // CBRANCH: target; STORE: space id
             2 if op.ins.get(1).is_some_and(|v| v.space == 0) => None, // LOAD from a constant address
             2 => Some(1),
             _ => Some(0),
@@ -582,10 +586,13 @@ impl<'a> Checker<'a> {
         let referenced: FxSet<u32> = an.insns.values().flat_map(|i| i.refs.iter().copied()).collect();
         let (ed, en) = self.img.export_dir;
         for s in self.img.sections.iter().filter(|s| !s.exec && s.name != "Headers") {
-            for (o, c) in s.data.chunks_exact(4).enumerate() {
+            for (o, c) in s.data.as_chunks::<4>().0.iter().enumerate() {
                 let at = s.addr + 4 * o as u32;
-                if (self.data_pointers || referenced.contains(&at)) && !an.table_slots.contains_key(&at) && !(at >= ed && at - ed < en) {
-                    add(u32::from_le_bytes(c.try_into().unwrap()), at, RefKind::Data);
+                if (self.data_pointers || referenced.contains(&at))
+                    && !an.table_slots.contains_key(&at)
+                    && !(at >= ed && at - ed < en)
+                {
+                    add(u32::from_le_bytes(*c), at, RefKind::Data);
                 }
             }
         }
@@ -776,7 +783,8 @@ impl<'a> Checker<'a> {
                 return word(a) && a == b;
             }
         }
-        (m == "OR" && ops.strip_suffix(",0xffffffff").is_some_and(ereg)) || (m == "AND" && ops.strip_suffix(",0x0").is_some_and(ereg))
+        (m == "OR" && ops.strip_suffix(",0xffffffff").is_some_and(ereg))
+            || (m == "AND" && ops.strip_suffix(",0x0").is_some_and(ereg))
     }
 
     // Alignment padding such as LEA ECX,[ECX] or MOV EDI,EDI.
@@ -808,7 +816,8 @@ impl<'a> Checker<'a> {
         if Self::pure_write(&i.text) {
             return None;
         }
-        if let Some(r) = i.text.strip_prefix("SBB ").and_then(|o| o.split_once(',')).filter(|(a, b)| ereg(a) && a == b) {
+        if let Some(r) = i.text.strip_prefix("SBB ").and_then(|o| o.split_once(',')).filter(|(a, b)| ereg(a) && a == b)
+        {
             let _ = r; // depends only on CF
             return live.contains("CF#0").then(|| "CF#0".to_string());
         }
@@ -1085,11 +1094,18 @@ impl<'a> Checker<'a> {
                         // Imports use standard conventions; only C++ runtime imports
                         // (thiscall) take an argument in ECX.
                         if live.iter().any(|k| base(k) == "ECX") && library.to_uppercase().starts_with("MSVCP") {
-                            return fail("unknown", "ECX", &format!("{} live at {} import {}", hex(a), library, ins.text));
+                            return fail(
+                                "unknown",
+                                "ECX",
+                                &format!("{} live at {} import {}", hex(a), library, ins.text),
+                            );
                         }
                         live.retain(|k| {
                             let b = base(k);
-                            !(["EAX", "ECX", "EDX"].contains(&b) || b.starts_with("XMM") || b.starts_with("YMM") || flaglike(b))
+                            !(["EAX", "ECX", "EDX"].contains(&b)
+                                || b.starts_with("XMM")
+                                || b.starts_with("YMM")
+                                || flaglike(b))
                         });
                         let x87 = self.x87_across_call(None, true, &mut live);
                         live.extend(x87);
@@ -1115,7 +1131,11 @@ impl<'a> Checker<'a> {
                     }
                     if flow.computed {
                         if live.iter().any(|k| ["ECX", "EDX"].contains(&base(k))) {
-                            return fail("unknown", &join(&live), &format!("{} live at indirect call {}", hex(a), ins.text));
+                            return fail(
+                                "unknown",
+                                &join(&live),
+                                &format!("{} live at indirect call {}", hex(a), ins.text),
+                            );
                         }
                         live.retain(|k| !volatile_reg(k));
                         live.extend(x87);
@@ -1127,12 +1147,17 @@ impl<'a> Checker<'a> {
                         at = flow.fall;
                         continue;
                     }
-                    let known = if self.input_walk { target.and_then(|t| self.contracts.get(&t).cloned()) } else { None };
+                    let known =
+                        if self.input_walk { target.and_then(|t| self.contracts.get(&t).cloned()) } else { None };
                     if let Some(known) = known {
                         // A callee with a contract: its inputs are reads, its writes kill.
                         for k in self.contract_inputs(&known) {
                             if live.contains(&k) {
-                                self.input_hit(&k, &format!("{} {} passes it to {}", hex(a), ins.text, known[1]), &mut live);
+                                self.input_hit(
+                                    &k,
+                                    &format!("{} {} passes it to {}", hex(a), ins.text, known[1]),
+                                    &mut live,
+                                );
                             }
                         }
                         for k in self.watched(&known[6], "") {
@@ -1251,7 +1276,7 @@ impl<'a> Checker<'a> {
 
     // Walks from a call's return address; a value still live when the caller returns is
     // followed into each of the caller's own call sites, up to MAX_UP levels.
-    fn from_site(&mut self, ret: Option<u32>, live: &Live, up: usize) -> Outcome {
+    fn walk_from_site(&mut self, ret: Option<u32>, live: &Live, up: usize) -> Outcome {
         let Some(r) = ret else { return ok() };
         let o = self.walk(Some(r), live, 0);
         if o.status != "ok" || o.at_return.is_empty() {
@@ -1308,7 +1333,7 @@ impl<'a> Checker<'a> {
                 if !kind.is_computed() {
                     // Mutated calls and direct jumps, which site walks of the output also follow.
                     let inner = if let Some(resume) = self.mutated_return(from) {
-                        Some(self.from_site(Some(resume), &at_return, up + 1))
+                        Some(self.walk_from_site(Some(resume), &at_return, up + 1))
                     } else if kind.is_jump() || ci.mnem == "JMP" {
                         let g = self.func_of.get(&from).copied();
                         Some(self.live_at_return(g, from, &at_return, up + 1))
@@ -1327,10 +1352,19 @@ impl<'a> Checker<'a> {
                 }
             }
             let fall = ci.as_ref().and_then(|_| self.flow(from).fall);
-            let inner = if ci.is_none() || !kind.is_call() || kind.is_computed() || ci.as_ref().unwrap().mnem == "JMP" || fall.is_none() {
-                fail("unknown", &regs_live, &format!("{} live at return; {} reference from {}", hex(f), kind.name(), site(from)))
+            let inner = if ci.is_none()
+                || !kind.is_call()
+                || kind.is_computed()
+                || ci.as_ref().unwrap().mnem == "JMP"
+                || fall.is_none()
+            {
+                fail(
+                    "unknown",
+                    &regs_live,
+                    &format!("{} live at return; {} reference from {}", hex(f), kind.name(), site(from)),
+                )
             } else {
-                self.from_site(fall, &at_return, up + 1)
+                self.walk_from_site(fall, &at_return, up + 1)
             };
             if inner.status == "violation" {
                 return inner;
@@ -1416,7 +1450,12 @@ impl<'a> Checker<'a> {
             if !["MOV", "MOVZX", "MOVSX", "LEA"].contains(&i.mnem.as_str()) && !Self::pure_write(&i.text) {
                 continue;
             }
-            let wrote: Live = i.results.iter().flat_map(|&r| self.regs.keys(r).iter().cloned()).filter(|k| bytes.contains(k)).collect();
+            let wrote: Live = i
+                .results
+                .iter()
+                .flat_map(|&r| self.regs.keys(r).iter().cloned())
+                .filter(|k| bytes.contains(k))
+                .collect();
             let fall = self.flow(a).fall;
             let Some(fall) = fall.filter(|_| !wrote.is_empty()) else { continue };
             let o = self.callee(fall, &wrote, 1);
@@ -1494,13 +1533,13 @@ impl<'a> Checker<'a> {
         let direct = ins.is_some() && !kind.is_computed();
         let resume = if ins.is_some() { self.mutated_return(from) } else { None };
         if resume.is_some() {
-            return self.from_site(resume, lost, 0);
+            return self.walk_from_site(resume, lost, 0);
         }
         if let Some(i) = &ins {
             // A computed call Ghidra resolved to this function is a call site like any other.
             if kind.is_call() && i.mnem != "JMP" {
                 let fall = self.flow(from).fall;
-                return self.from_site(fall, lost, 0);
+                return self.walk_from_site(fall, lost, 0);
             }
         }
         // A direct jump leaves the value to the jumper's callers.
@@ -1564,7 +1603,9 @@ impl<'a> Checker<'a> {
         if let Some(rest) = ins.text.strip_prefix("MOV dword ptr [ESP") {
             if let Some((mid, reg)) = rest.split_once("],") {
                 let disp_ok = mid.is_empty()
-                    || mid.strip_prefix(" + 0x").is_some_and(|h| !h.is_empty() && h.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+                    || mid.strip_prefix(" + 0x").is_some_and(|h| {
+                        !h.is_empty() && h.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                    });
                 if disp_ok && SAVED.contains(&reg) {
                     return true;
                 }
@@ -1615,7 +1656,12 @@ impl<'a> Checker<'a> {
     // conditional instructions use them.
     fn input_read(&self, ins: &Info, live: &Live) -> Option<String> {
         let m = ins.mnem.as_str();
-        if FLAG_USERS.contains(&m) || m.starts_with('J') || m.starts_with("SET") || m.starts_with("CMOV") || m.starts_with("FCMOV") {
+        if FLAG_USERS.contains(&m)
+            || m.starts_with('J')
+            || m.starts_with("SET")
+            || m.starts_with("CMOV")
+            || m.starts_with("FCMOV")
+        {
             return self.reads_watched(ins, live);
         }
         let no_flags: Live = live.iter().filter(|k| !flaglike(base(k))).cloned().collect();
@@ -1632,7 +1678,8 @@ impl<'a> Checker<'a> {
                 && (b'1'..=b'3').contains(&b[4])
                 && ((b[1].is_ascii_uppercase() && b[2] == b'X') || (b"SDB".contains(&b[1]) && b"IP".contains(&b[2])))
         };
-        let whole: Live = live.iter().filter(|k| !(upper(k) && !live.contains(format!("{}#0", base(k)).as_str()))).cloned().collect();
+        let whole: Live =
+            live.iter().filter(|k| !(upper(k) && !live.contains(format!("{}#0", base(k)).as_str()))).cloned().collect();
         self.input_read(ins, &whole)
     }
 
@@ -1690,8 +1737,11 @@ impl<'a> Checker<'a> {
         if lines.first() != Some(&"address,name,kind,inputs,cleanup,output,clobbers") {
             return Err("unexpected register_abi.csv header".into());
         }
-        let rows: Vec<Vec<String>> =
-            lines[1..].iter().filter(|l| !l.trim().is_empty()).map(|l| l.split(',').map(String::from).collect()).collect();
+        let rows: Vec<Vec<String>> = lines[1..]
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.split(',').map(String::from).collect())
+            .collect();
         for f in &rows {
             if f.len() < 7 {
                 return Err(format!("register_abi.csv: short row {}", f.join(",")));
@@ -1716,11 +1766,14 @@ impl<'a> Checker<'a> {
                 .enumerate()
                 .map(|(t, mut ck)| {
                     s.spawn(move || {
-                        (t..rows.len()).step_by(n).map(|i| {
-                            let mut b = Vec::new();
-                            let c = ck.check_row(rows[i], &mut b).unwrap(); // writes to a Vec do not fail
-                            (i, b, c)
-                        }).collect::<Vec<_>>()
+                        (t..rows.len())
+                            .step_by(n)
+                            .map(|i| {
+                                let mut b = Vec::new();
+                                let c = ck.check_row(rows[i], &mut b).unwrap(); // writes to a Vec do not fail
+                                (i, b, c)
+                            })
+                            .collect::<Vec<_>>()
                     })
                 })
                 .collect();
@@ -1785,7 +1838,7 @@ impl<'a> Checker<'a> {
                     fail("unknown", "", "tail jump reference")
                 } else {
                     let fall = self.flow(from).fall;
-                    self.from_site(fall, &watch, 0)
+                    self.walk_from_site(fall, &watch, 0)
                 };
                 writeln!(out, "{},{contract},{},{},{},{}", f[0], site(from), o.status, o.reg, o.where_)?;
                 total += 1;
@@ -1808,7 +1861,9 @@ impl<'a> Checker<'a> {
                     if o.status == "unknown" {
                         match self.leaves_value(target, &lost) {
                             None => o.status = "unconcluded".into(),
-                            Some(sign) => o = fail("unknown", &o.reg, &format!("{}; original returns it: {sign}", o.where_)),
+                            Some(sign) => {
+                                o = fail("unknown", &o.reg, &format!("{}; original returns it: {sign}", o.where_))
+                            }
                         }
                     }
                     writeln!(out, "{},{contract},output:{},{},{},{}", f[0], site(from), o.status, o.reg, o.where_)?;
@@ -1832,7 +1887,11 @@ impl<'a> Checker<'a> {
 // EAX/ECX/EDX/XMM/flags are clobbered.
 fn volatile_reg(key: &str) -> bool {
     let b = base(key);
-    ["EAX", "ECX", "EDX"].contains(&b) || b.starts_with("XMM") || b.starts_with("YMM") || b.starts_with("ZMM") || flaglike(b)
+    ["EAX", "ECX", "EDX"].contains(&b)
+        || b.starts_with("XMM")
+        || b.starts_with("YMM")
+        || b.starts_with("ZMM")
+        || flaglike(b)
 }
 
 fn history(b: &str, live: &Live) -> Option<Key> {
