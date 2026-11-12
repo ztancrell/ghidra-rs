@@ -1,17 +1,20 @@
 //! Milestone 3: the decompiler, a port of Ghidra's C++ decompiler
 //! (`Ghidra/Features/Decompiler/src/decompile/cpp`). See `docs/plans/m3-decompiler.md`.
 //!
-//! Stages S1a and S1b: the IR (ops and varnodes in arenas, [`Funcdata`]), flow following on
+//! Stages S1a to S2: the IR (ops and varnodes in arenas, [`Funcdata`]), flow following on
 //! the SLEIGH engine of milestone 1 ([`flow`]) with call fixups ([`inject`]), basic blocks
-//! ([`block`]), the compiler spec ([`cspec`]) and prototypes ([`fspec`]), the actions that run
-//! before `heritage` ([`action`]) and `print raw` ([`print`]).
+//! ([`block`]), the compiler spec ([`cspec`]) and prototypes ([`fspec`]), the action framework
+//! ([`actiontree`]) and the actions up to `paramdouble` ([`action`]), SSA construction
+//! ([`heritage`]) and `print raw` ([`print`]).
 
 pub mod action;
+pub mod actiontree;
 mod block;
 mod cspec;
 mod flow;
 mod fspec;
 mod funcdata;
+mod heritage;
 mod inject;
 mod op;
 mod opcode;

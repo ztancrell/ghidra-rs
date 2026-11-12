@@ -45,12 +45,16 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   references, read-only ranges, register names; `LowlevelError`), `cspec.rs` (reading
   `x86win.cspec`), `fspec.rs` (prototype models, `FuncProto`, `CallSpec`), `inject.rs` (call
   fixups: the p-code snippet parser),
-  `funcdata.rs` (`Funcdata`: op/varnode arenas, op insertion, stack loads), `op.rs`,
+  `funcdata.rs` (`Funcdata`: op/varnode arenas, readers and the location-sorted varnode set,
+  op insertion and input/output edits, stack loads), `op.rs`,
   `varnode.rs`, `opcode.rs` (opcodes and their `print raw` names), `flow.rs` (`FlowInfo`,
-  call-fixup injection), `block.rs` (basic blocks, spanning tree), `action.rs` (the universal
-  action up to `heritage`), `print.rs` (`print raw`), `stdsort.rs` (libstdc++'s `std::sort`).
+  call-fixup injection), `block.rs` (basic blocks, spanning tree, dominators), `actiontree.rs`
+  (the action framework: groups, repeat, breakpoints, `continue`), `heritage.rs` (SSA: phi
+  placement and renaming), `action.rs` (the universal
+  action up to `paramdouble`), `print.rs` (`print raw`), `stdsort.rs` (libstdc++'s `std::sort`).
   See "Decompiler (Milestone 3)" below.
-- `ghidra-rs/tests/decomp.rs`, `tests/data/raw-funclink-*.txt`, `tests/data/raw-heritage-40a110.txt`:
+- `ghidra-rs/tests/decomp.rs`, `tests/data/raw-funclink-*.txt`, `tests/data/raw-heritage-40a110.txt`,
+  `tests/data/raw-paramdouble-40ad80.txt` (S2: a loop at `paramdouble`):
   `print raw` at `funclink` and `heritage` against the reference's output, for mercs2's 0x40a110
   (rebuilt from its bytes) and for `INTO; RET` (a relative branch to the end of its own
   instruction). Unit tests in `decomp/action.rs` (`tests/data/raw-heritage-onexit.txt`: mercs2's
@@ -59,7 +63,9 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
 - `tools/stdsort_ref.cc`, `ghidra-rs/tests/data/stdsort-gxx.txt`: libstdc++ `std::sort` tie orders
   that `decomp/stdsort.rs` must reproduce.
 - `tools/decomp-ref.sh`, `tools/decomp-ref.patch`: build the reference decompiler `decomp_dbg`.
-- `tools/decomp-diff.sh`: runs a corpus on both decompilers and compares.
+- `tools/decomp-diff.sh`: runs a corpus on both decompilers and compares; `tools/decomp-show.sh`,
+  `tools/decomp-rank.sh`, `tools/decomp-bisect.sh`: the S2 debugging tools (verbose diff,
+  easy-first order, first differing step; see "Debugging tools").
 - `tools/decomp-corpus.sh`, `tools/corpus/m8.txt`, `tools/corpus/m500.txt`: the mercs2 corpora.
 
 ## Build
@@ -510,10 +516,12 @@ rust/tools/decomp-diff.sh --script <file>      # one script on both engines, ful
   them import slots), 1,022 `map externalref`.
 - `decompile -i` reads `load file`, `source`, `map function`, `map externalref`, `readonly`,
   `option`, `fixup apply`, `load function`, `load addr`, `break start`, `decompile`,
-  `print raw` and `quit`, and echoes them as `decomp_dbg -i` does. `decompile` runs up to the
-  `break start` action (stage S1b: at most `heritage`). `continue`, `print C|tree block` and
-  `parse line` fail with "not implemented in ghidra-rs yet (milestone 3, stage S2 and
-  later)"; any other command fails with "not implemented in ghidra-rs". Of the options only
+  `print raw`, `continue` and `quit`, and echoes them as `decomp_dbg -i` does. `decompile`
+  runs up to the `break start` action (stage S2: at most `paramdouble`) and `continue`
+  resumes it; a function mapped `nocode` prints `No code for <name>` instead. `print
+  C|tree block` and `parse line` fail with "not implemented in ghidra-rs yet (milestone 3,
+  later stages)"; any other command fails with "not implemented in ghidra-rs".
+  Superseded: until S2, `decompile` stopped at most at `heritage` and `continue` failed. Of the options only
   `option readonly on|off` has an effect (and prints the reference's message); the others
   switch rules and actions not ported yet and are read and ignored. A name mapped twice
   (`map function`) finds its first function, as the C++ `findFirstByName` does.
@@ -725,6 +733,83 @@ What S1b reads but does not use yet, and what it leaves out:
   declare none), the `.pspec`'s register data, data types beyond none.
 - Superseded: S1b's first commit had read-only ranges over the virtual size; they now follow
   bfd (above).
+
+### Stage S2: heritage (SSA)
+
+Stage S2 (branch `m3-s2`) runs the universal action up to `paramdouble`: after `varnodeprops`,
+`heritage` builds SSA form for the spaces of the first pass (register and unique), and
+`break start paramdouble` prints `Break at universal:fullloop:mainloop:paramdouble start`.
+Modules:
+
+- `actiontree.rs`: the action framework (`Action::perform`, `ActionGroup`,
+  `ActionRestartGroup`): statuses, repeat while changing, breakpoints and `continue`, the
+  `Break at` path. `action.rs` builds the universal tree from it (S1b's flat list is gone).
+- `heritage.rs`: `Heritage::heritage` for pass 0: the disjoint ranges (`LocationMap`,
+  `TaskList`), `collect`, refinement (cutting a range read and written in pieces), widening
+  smaller reads and writes (`normalizeReadSize`/`normalizeWriteSize`: SUBPIECE, PIECE),
+  `guardInput`, call guards (`r = r [] call` for an unknown effect, `[create]` for
+  killed-by-call, return-value and parameter trials, a possible parameter as a new call
+  input), return guards (the possible return value as a RETURN input), phi placement on the
+  augmented dominator tree (`buildADT`, `visitIncr`, `calcMultiequals`) and renaming
+  (`renameRecurse`, as an explicit stack).
+- `block.rs`: `calcForwardDominator` (with the virtual root of the C++, index 0) and the
+  dominator tree and depths. `funcdata.rs`: every input/output edit goes through
+  `op_set_input`/`op_set_output`/... which keep the readers (`descend`) and the
+  location-sorted varnode set (`loc_tree`: address, size, inputs, written by sequence number,
+  free by creation), input varnodes (`setInputVarnode`), INDIRECT ops (`newIndirectOp`,
+  `newIndirectCreation`). `fspec.rs`: effect lookup (`lookupEffect`), `characterizeAsParam`
+  (joins included: `EDX` is part of the `EDX:EAX` output), the trial lists (`ParamActive`).
+- `print raw` shows inputs (`(i)`) and `[create]`.
+
+Check:
+
+```sh
+BREAK=paramdouble rust/tools/decomp-diff.sh m8
+BREAK=paramdouble rust/tools/decomp-diff.sh m500
+BREAK=heritage rust/tools/decomp-diff.sh m500   # S1b's check still holds
+BREAK=funclink rust/tools/decomp-diff.sh m500   # S1a's check still holds
+```
+
+| corpus | at `break start paramdouble` | at `heritage` | at `funclink` |
+|---|---|---|---|
+| m8 | 8 / 8 | 8 / 8 | 8 / 8 |
+| m500 | 500 / 500 | 500 / 500 | 500 / 500 |
+
+No differences remain on M8 and M500. The test `print_raw_at_paramdouble_with_a_loop`
+(`tests/decomp.rs`, expected output `tests/data/raw-paramdouble-40ad80.txt` from decomp_dbg)
+pins a loop function; unit tests in `heritage.rs` check phi placement on hand-built graphs
+(diamond, loop, nested loops) and `actiontree.rs` a break inside a repeating group.
+
+Mall (29,240 functions, one script, one thread, release build, 2026-11-12): to
+`break start paramdouble` in 24.4 s including loading (about 1,200 functions per second), to
+`heritage` in 11.2 s; peak RSS about 1 GB, reached by one function in garbage code that decodes
+100,000 instructions before it fails (the readers and the location set cost memory per
+varnode; the run stays near 200 MB otherwise); no panics. 29,131 reach the break, 8 are
+`nocode` imports a duplicate name picks first (`No code for`, as the reference), 101 fail. The
+101 against decomp_dbg (one run each): 97 fail with the same message. The other 4, all in
+the garbage code past 0x2300000, differ in flow: 0x232f745 and 0x2384399 fail on a different
+unmapped address, 0x23831b0 exceeds the instruction limit where the reference hits an unmapped
+address, and 0x2396e7d fails where the reference recovers a switch at 0x2396eec, which the
+S1a jump-table stand-in does not (S3). Superseded: S1b's "70 `Unable to load bytes`" message
+is `Unable to load 512 bytes` now, as `LoadImageBfd::loadFill` words it (it reads 512-byte
+chunks), and S1b counted the 8 `nocode` functions among its failures.
+
+What S2 does not port, and why:
+
+- Later heritage passes: ram (pass 1) and the stack (pass 2) are only reached after the main
+  loop's other actions and rule pools (`paramdouble` on), which the reference cannot skip, so
+  they cannot be compared yet; a later pass fails loudly (`heritage of the ram space: not
+  implemented`). With them wait `varmap` (stack ranges), load and store guards, stack
+  placeholders (`clearStackPlaceholders`), revisited markers (`removeRevisitedMarkers`),
+  `discoverIndexedStackPointers`, scope properties (`addrtied`, `persist`) and the dead-code
+  delay warnings.
+- `cover.cc`: nothing before `paramdouble` uses covers (they serve merging, S7).
+- Overlapping guards (`guardCallOverlappingInput`, `tryOutputOverlapGuard`,
+  `guardReturnsOverlapping`) fail loudly; no M500 function needs them. Joins and
+  `<prefersplit>` (none in x86) are skipped.
+- Prototype state across decompiles (S1b's required item): `fillinExtrapop` belongs to
+  `ActionStackPtrFlow`, after `paramdouble` (S4). The 21 datatests that decompile several
+  functions cannot be compared yet: the Rust console does not load a test's `<binaryimage>`.
 
 ## Speed
 

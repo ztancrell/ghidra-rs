@@ -1,6 +1,6 @@
 # Milestone 3 plan: the decompiler
 
-Written 2026-11-12 as a plan. Built so far: S0, S1a and S1b (see their sections below).
+Written 2026-11-12 as a plan. Built so far: S0, S1a, S1b and S2 (see their sections below).
 
 ## Goal
 
@@ -269,8 +269,40 @@ prelude's `option readonly on`). Where it differs from the table row:
   now writes `fd.proto` back to the function's `map function` entry after `decompile`; S2/S4
   must port `fillinExtrapop` and check the 21 datatests that decompile more than one function
   per script (the decomp-diff corpora decompile one).
+  Superseded: S2 does not reach it; it moves to S4 (see "S2: done" below).
 - Harness fix: a name mapped twice finds its first function, as the C++ does (mercs2 has
   several `__onexit`, `__SEH_prolog`, ...).
+
+### S2: done on branch `m3-s2` (2026-11-12)
+
+M8 8 / 8 and M500 500 / 500 identical at `break start paramdouble`; the heritage and funclink
+checks stay 8 / 8 and 500 / 500. Details in `rust/README.md`, "Stage S2" and "Debugging
+tools". Where it differs from the table row:
+
+- Debugging tools first (`rust/tools/`): `VERBOSE=1`/`ORDER=easy`/`STOP=1`/`CONTINUES=N` for
+  `decomp-diff.sh`, `decomp-show.sh` (side-by-side diff at the first differing op),
+  `decomp-rank.sh` (corpus by loops and blocks), `decomp-bisect.sh` (first action and hit where
+  the engines differ).
+- `break start paramdouble` stops after the first heritage pass only, which links the register
+  and unique spaces (SLEIGH gives ram a delay of 1, the stack 2). The second pass is reached
+  only after `paramdouble` and the rest of the main loop with its rule pools; the reference
+  cannot skip them (`option currentaction` turns off groups, but the stack pass needs base
+  actions such as `ActionSpacebase`), so "compare at every heritage pass" has to wait for S4
+  and the rule stages. Ported: pass 0 in full; a later pass fails loudly.
+- Not ported, for that reason: `varmap` (stack ranges), the stack and ram paths of heritage
+  (load/store guards, placeholders, revisited markers, indexed stack pointers, scope
+  properties), and `cover` (nothing before merging, S7, uses it).
+- The action framework (`actiontree.rs`) is ported in full except rule pools: statuses,
+  repeat, restart (nothing asks for one yet), breakpoints, `continue`.
+- The varnode bank keeps readers and the location order for every edit (S1 code now edits
+  through `op_set_input`/`op_set_output`), as heritage reads both.
+- The S1b required item (prototype state across decompiles) moves to S4: `fillinExtrapop` is
+  in `ActionStackPtrFlow`, after `paramdouble`, and the 21 multi-function datatests need the
+  Rust console to load a `<binaryimage>` first.
+- Console fixes found with the Mall check: a `nocode` function prints `No code for <name>`
+  (8 duplicate names pick an import first), and an unmapped address reads `Unable to load 512
+  bytes` as the C++ loader words it. Of the 101 Mall failures, 97 match decomp_dbg; 4 in
+  garbage code differ in flow (one verified: a switch the S1a stand-in does not recover, S3).
 
 ## Running stages in parallel
 

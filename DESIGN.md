@@ -95,6 +95,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    S1b (specs, prototypes, call fixups) done on branch `m3-s1b`: reads `x86win.cspec`
    (prototype models, call-fixup snippets), `print raw` at `break start heritage` identical on
    M8 (8 / 8) and M500 (500 / 500); locked prototypes (the register ABI) still to come.
+   S2 (heritage / SSA, first pass) done on branch `m3-s2`: the action framework with
+   breakpoints and `continue`, phi placement and renaming for registers and temporaries;
+   `print raw` at `break start paramdouble` identical on M8 (8 / 8) and M500 (500 / 500);
+   later heritage passes (ram, stack) wait for the main loop's other actions (S4 on). Debugging
+   tools: verbose diff, easy-first order, first-differing-step bisect (`rust/tools/`).
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.

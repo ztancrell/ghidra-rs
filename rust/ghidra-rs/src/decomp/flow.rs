@@ -9,7 +9,7 @@
 use super::block::BlockId;
 use super::fspec::CallSpec;
 use super::funcdata::{CallId, Funcdata, JumpTable};
-use super::op::{OpFlags, OpId, SeqNum};
+use super::op::{Halt, OpFlags, OpId, SeqNum};
 use super::opcode::Opcode;
 use super::varnode::Space;
 use super::{err, Arch, LowlevelError, Result};
@@ -247,12 +247,12 @@ impl Flow<'_> {
         let step = match self.emit(addr) {
             Ok(len) => len,
             Err(EmitError::Unimplemented) => {
-                self.artificial_halt(addr);
+                self.artificial_halt(addr, Some(Halt::Unimplemented))?;
                 1
             }
             Err(EmitError::BadData(msg)) => {
                 self.count_bad_data(msg)?;
-                self.artificial_halt(addr);
+                self.artificial_halt(addr, Some(Halt::BadInstruction))?;
                 1
             }
             Err(EmitError::Fatal(e)) => return Err(e),
@@ -277,11 +277,12 @@ impl Flow<'_> {
     /// `PcodeEmitFd::dump`); returns the instruction length.
     fn emit(&mut self, addr: u64) -> std::result::Result<u64, EmitError> {
         let sl = &self.arch.sleigh;
-        // LoadImageBfd::loadFill: an unmapped address is a DataUnavailError, which ends the decompile
+        // LoadImageBfd::loadFill: an unmapped address is a DataUnavailError, which ends the decompile;
+        // the loader reads 512-byte chunks (`bufsize`), so the message names all 512
         let bytes = self
             .arch
             .bytes_at(addr)
-            .ok_or_else(|| EmitError::Fatal(LowlevelError(format!("Unable to load bytes at r0x{addr:08x}"))))?;
+            .ok_or_else(|| EmitError::Fatal(LowlevelError(format!("Unable to load 512 bytes at r0x{addr:08x}"))))?;
         let len = sl.decode(&mut self.parse, addr, bytes).map_err(EmitError::BadData)?;
         let ops = sl.pcode(&self.parse).map_err(|e| match e {
             PcodeError::Unimplemented => EmitError::Unimplemented,
@@ -309,8 +310,9 @@ impl Flow<'_> {
             let opc = self.opc(op);
             match opc {
                 Opcode::Branch | Opcode::Cbranch => {
-                    let dest = *self.fd.vn(self.fd.input(op, 0)?);
-                    if dest.is_constant() {
+                    let dest = self.fd.vn(self.fd.input(op, 0)?);
+                    let (dest_const, dest_off) = (dest.is_constant(), dest.offset);
+                    if dest_const {
                         match self.find_rel_target(op)? {
                             RelTarget::Op(d) => {
                                 self.mark(d, OpFlags::START_BASIC);
@@ -319,7 +321,7 @@ impl Flow<'_> {
                             RelTarget::Fallthru(_) => isfallthru = true,
                         }
                     } else {
-                        self.new_address(dest.offset)?;
+                        self.new_address(dest_off)?;
                     }
                     if opc == Opcode::Branch {
                         self.end_instruction_at(op, i, maxtime);
@@ -432,11 +434,12 @@ impl Flow<'_> {
     }
 
     /// Port of `FlowInfo::artificialHalt`: a RETURN that ends flow at `addr`.
-    fn artificial_halt(&mut self, addr: u64) -> OpId {
+    fn artificial_halt(&mut self, addr: u64, halt: Option<Halt>) -> Result<OpId> {
         let op = self.fd.new_op(Opcode::Return, addr);
         let one = self.fd.new_constant(4, 1);
-        self.fd.op_mut(op).ins = vec![one];
-        op
+        self.fd.op_set_all_input(op, &[one])?;
+        self.fd.op_mut(op).halt = halt;
+        Ok(op)
     }
 
     /// Port of `FlowInfo::setupCallSpecs` with `queryCall` and `checkForFlowModification`: name
@@ -453,7 +456,7 @@ impl Flow<'_> {
         let inline = spec.proto.inject.is_some();
         let call = self.new_call(spec);
         let vn = self.fd.new_varnode_callspecs(call);
-        self.fd.op_mut(op).ins[0] = vn;
+        self.fd.op_set_input(op, vn, 0)?;
         if inline {
             self.injectlist.push(call);
         }
@@ -482,7 +485,7 @@ impl Flow<'_> {
                     tables.push(self.fd.jumptables.len());
                     self.fd.jumptables.push(JumpTable { op, targets });
                 }
-                None => self.truncate_indirect_jump(op),
+                None => self.truncate_indirect_jump(op)?,
             }
         }
         Ok(tables)
@@ -490,11 +493,12 @@ impl Flow<'_> {
 
     /// Port of `FlowInfo::truncateIndirectJump` for a failed recovery (`fail_normal`,
     /// `fail_thunk`): the jump becomes a call followed by a halt.
-    fn truncate_indirect_jump(&mut self, op: OpId) {
+    fn truncate_indirect_jump(&mut self, op: OpId) -> Result<()> {
         self.fd.op_mut(op).opc = Opcode::Callind;
         self.setup_callind_specs(op);
-        let halt = self.artificial_halt(self.fd.op(op).seq.addr);
+        let halt = self.artificial_halt(self.fd.op(op).seq.addr, None)?;
         self.fd.op_dead_insert_after(halt, op);
+        Ok(())
     }
 
     /// Stand-in for jump-table recovery (`Funcdata::recoverJumpTable`, stage S3), which needs a
@@ -591,7 +595,7 @@ impl Flow<'_> {
                 self.mark(next, OpFlags::START_BASIC);
             }
             let vn = self.fd.new_varnode(4, Space::Sleigh(self.arch.sleigh.code_space()), addr);
-            self.fd.op_mut(op).ins[0] = vn;
+            self.fd.op_set_input(op, vn, 0)?;
             // C++ `iter = qlst.erase(iter)` followed by the loop's `++iter` skips the next call; kept
             self.fd.qlst.remove(i - 1);
             i += 1;

@@ -10,7 +10,8 @@
 use super::cspec::SleighNames;
 use super::inject::InjectId;
 use super::op::OpId;
-use super::{err, LowlevelError, Result};
+use super::varnode::Space;
+use super::{err, Arch, LowlevelError, Result};
 use crate::xml::Element;
 
 /// Index of a model in [`Models::list`].
@@ -209,6 +210,8 @@ impl ParamEntry {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ParamList {
     pub(crate) entries: Vec<ParamEntry>,
+    /// `killedbycall="true"`: a possible output is killed by the call (`autoKilledByCall`)
+    pub(crate) killed_by_call: bool,
 }
 
 impl ParamList {
@@ -227,7 +230,7 @@ impl ParamList {
             effects
                 .extend(entries.iter().map(|e| Effect { storage: e.storage.clone(), kind: EffectKind::KilledByCall }));
         }
-        Ok(ParamList { entries })
+        Ok(ParamList { entries, killed_by_call: el.flag("killedbycall") })
     }
 
     /// Port of `ParamListStandard::getSpacebase` (`getStackEntry`): whether the last entry is
@@ -279,7 +282,6 @@ pub(crate) struct ProtoModel {
     pub(crate) name: String,
     pub(crate) extrapop: ExtraPop,
     pub(crate) input: ParamList,
-    #[expect(dead_code, reason = "read by return recovery (stage S4)")]
     pub(crate) output: ParamList,
     /// sorted by address (`EffectRecord::compareByAddress`)
     pub(crate) effects: Vec<Effect>,
@@ -455,16 +457,164 @@ pub(crate) struct CallSpec {
     pub(crate) proto: FuncProto,
     /// the CALL's input slot holding the stack-pointer placeholder (`stackPlaceholderSlot`)
     pub(crate) stack_placeholder_slot: Option<usize>,
+    /// the parameter trials (`activeinput`, `isinputactive`), from `ActionFuncLink` on
+    pub(crate) active_input: Option<ParamActive>,
+    /// the return-value trials (`activeoutput`, `isoutputactive`), from `ActionFuncLink` on
+    pub(crate) active_output: Option<ParamActive>,
 }
 
 impl CallSpec {
     /// A call site before analysis (the `FuncCallSpecs` constructor).
     pub(crate) fn new(op: OpId, entry: Option<u64>, known: bool) -> CallSpec {
-        CallSpec { op, entry, known, proto: FuncProto::default(), stack_placeholder_slot: None }
+        CallSpec {
+            op,
+            entry,
+            known,
+            proto: FuncProto::default(),
+            stack_placeholder_slot: None,
+            active_input: None,
+            active_output: None,
+        }
     }
 
     /// The callee's entry when the scope knows a function there (`getFuncdata`).
     pub(crate) fn callee(&self) -> Option<u64> {
         self.entry.filter(|_| self.known)
+    }
+}
+
+/// `ParamEntry::no_containment` .. `contained_by`: how a storage range relates to the
+/// parameter entries of a list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Containment {
+    None,
+    /// an entry contains the range, justified at its start
+    ContainsJustified,
+    /// an entry contains the range, not justified
+    ContainsUnjustified,
+    /// the range contains an exclusive entry
+    ContainedBy,
+}
+
+impl ParamList {
+    /// Port of `ParamListStandard::characterizeAsParam` for a range of a SLEIGH space (join and
+    /// stack entries live in other spaces). The C++ walks a range map; the answer only depends
+    /// on which entries overlap, so this scans them.
+    pub(crate) fn characterize(&self, space: u32, off: u64, size: u32) -> Containment {
+        let (mut contains, mut contained_by) = (false, false);
+        let end = off + u64::from(size) - 1;
+        for e in &self.entries {
+            if let Storage::Join(pieces) = &e.storage {
+                // the resolver lists a join entry under each piece; justifiedContain counts the
+                // bytes of the less significant pieces it skips (a join is never contained by)
+                let mut skipped = 0;
+                for &(s, base, psize) in pieces.iter().rev() {
+                    if s == space && base <= off && end < base + u64::from(psize) {
+                        if skipped + off - base == 0 {
+                            return Containment::ContainsJustified;
+                        }
+                        contains = true;
+                        break;
+                    }
+                    skipped += u64::from(psize);
+                }
+                continue;
+            }
+            let Storage::Space { space: s, offset: base, .. } = e.storage else { continue };
+            let eend = base + e.size as u64 - 1;
+            if s != space || eend < off || base > end {
+                continue;
+            }
+            // justifiedContain, little endian and alignment 0 (register entries)
+            if e.align == 0 && base <= off && end <= eend {
+                if off == base {
+                    return Containment::ContainsJustified;
+                }
+                contains = true;
+            }
+            // isExclusion && containedBy
+            if e.align == 0 && base >= off && eend <= end {
+                contained_by = true;
+            }
+        }
+        if contains {
+            Containment::ContainsUnjustified
+        } else if contained_by {
+            Containment::ContainedBy
+        } else {
+            Containment::None
+        }
+    }
+}
+
+impl ProtoModel {
+    /// Port of `ProtoModel::lookupEffect` for a range of a SLEIGH space: the effect of the
+    /// last record at or before the range when it holds the whole range, else unknown (`None`).
+    /// `uniq` is the unique space, always local to the function.
+    pub(crate) fn lookup_effect(&self, uniq: u32, space: u32, off: u64, size: u32) -> Option<EffectKind> {
+        if space == uniq {
+            return Some(EffectKind::Unaffected);
+        }
+        let at = self.effects.partition_point(|e| e.storage.address_key() <= (space, off));
+        let e = self.effects.get(at.checked_sub(1)?)?;
+        let Storage::Space { space: s, offset: hit, size: sz } = e.storage else { return None };
+        if sz == 0 && s == space {
+            return Some(EffectKind::Unaffected);
+        }
+        let dist = off.checked_sub(hit).filter(|_| s == space)?;
+        (dist + u64::from(size) <= u64::from(sz)).then_some(e.kind)
+    }
+}
+
+/// Port of the trial list of `ParamActive`: the storage ranges seen as possible parameters or
+/// return values. Stage S4 analyzes them; heritage only registers them.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ParamActive {
+    trials: Vec<(Space, u64, u32)>,
+}
+
+impl ParamActive {
+    /// Port of `ParamActive::whichTrial` (as a test): a trial at exactly this range.
+    pub(crate) fn has_trial(&self, space: Space, off: u64, size: u32) -> bool {
+        self.trials.contains(&(space, off, size))
+    }
+    /// Port of `ParamActive::registerTrial`.
+    pub(crate) fn register_trial(&mut self, space: Space, off: u64, size: u32) {
+        self.trials.push((space, off, size));
+    }
+}
+
+impl FuncProto {
+    /// Port of `FuncProto::hasEffect` (an unlocked prototype has no effect list of its own, so
+    /// the model's): `None` is `unknown_effect`.
+    pub(crate) fn has_effect(&self, arch: &Arch, space: Space, off: u64, size: u32) -> Option<EffectKind> {
+        let Space::Sleigh(s) = space else { return None };
+        self.model_of(arch)?.lookup_effect(arch.sleigh.uniq_space(), s, off, size)
+    }
+
+    /// The model of an unlocked prototype, as `characterizeAs*` read it.
+    fn model_of<'a>(&self, arch: &'a Arch) -> Option<&'a ProtoModel> {
+        self.model.map(|m| arch.spec.models.get(m))
+    }
+
+    /// Port of `FuncProto::characterizeAsOutput` for an unlocked prototype.
+    pub(crate) fn characterize_as_output(&self, arch: &Arch, space: Space, off: u64, size: u32) -> Containment {
+        match (self.model_of(arch), space) {
+            (Some(m), Space::Sleigh(s)) => m.output.characterize(s, off, size),
+            _ => Containment::None,
+        }
+    }
+
+    /// Port of `FuncProto::characterizeAsInputParam` for an unlocked prototype.
+    pub(crate) fn characterize_as_input(&self, arch: &Arch, space: Space, off: u64, size: u32) -> Containment {
+        match (self.model_of(arch), space) {
+            (Some(m), Space::Sleigh(s)) => m.input.characterize(s, off, size),
+            _ => Containment::None,
+        }
+    }
+
+    /// Port of `FuncProto::isAutoKilledByCall`.
+    pub(crate) fn is_auto_killed_by_call(&self, arch: &Arch) -> bool {
+        self.model_of(arch).is_some_and(|m| m.output.killed_by_call)
     }
 }

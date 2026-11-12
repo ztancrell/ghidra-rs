@@ -1,5 +1,5 @@
-//! P-code ops (port of the parts of `op.cc` and `funcdata_op.cc` that flow and raw printing
-//! need). Ops live in an arena in [`super::Funcdata`], addressed by [`OpId`].
+//! P-code ops (port of the parts of `op.cc` and `funcdata_op.cc` the stages so far need). Ops
+//! live in an arena in [`super::Funcdata`], addressed by [`OpId`].
 
 use super::block::BlockId;
 use super::opcode::Opcode;
@@ -17,7 +17,7 @@ pub(crate) struct SeqNum {
     pub(crate) time: u32,
 }
 
-/// Port of the `PcodeOp::flags` bits flow uses.
+/// Port of the `PcodeOp::flags` bits the stages so far use.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct OpFlags(u8);
 
@@ -26,6 +26,10 @@ impl OpFlags {
     pub(crate) const START_BASIC: OpFlags = OpFlags(1);
     /// `startmark`: the op is the first of its instruction
     pub(crate) const START_INSTRUCTION: OpFlags = OpFlags(2);
+    /// `indirect_creation`: an INDIRECT whose output the call creates (`[create]`)
+    pub(crate) const INDIRECT_CREATION: OpFlags = OpFlags(4);
+    /// `return_copy`: a COPY guarding a global at a RETURN (`Funcdata::markReturnCopy`)
+    pub(crate) const RETURN_COPY: OpFlags = OpFlags(16);
 
     pub(crate) fn has(self, f: OpFlags) -> bool {
         self.0 & f.0 != 0
@@ -35,7 +39,14 @@ impl OpFlags {
     }
 }
 
-/// Port of `PcodeOp`, the fields the early stages use.
+/// The special halts a RETURN can stand for (the `PcodeOp` flags `getHaltType` returns).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Halt {
+    BadInstruction,
+    Unimplemented,
+}
+
+/// Port of `PcodeOp`, the fields the stages so far use.
 #[derive(Debug, Clone)]
 pub(crate) struct PcodeOp {
     pub(crate) opc: Opcode,
@@ -47,4 +58,21 @@ pub(crate) struct PcodeOp {
     /// the position key within the block (`SeqNum::order`), see `Funcdata::op_insert`
     pub(crate) order: u32,
     pub(crate) flags: OpFlags,
+    /// the special halt this RETURN stands for (`getHaltType`), if any
+    pub(crate) halt: Option<Halt>,
+}
+
+impl PcodeOp {
+    /// `isDead`: not in a basic block
+    pub(crate) fn is_dead(&self) -> bool {
+        self.parent.is_none()
+    }
+    /// `isCall`: CALL, CALLIND, CALLOTHER and NEW
+    pub(crate) fn is_call(&self) -> bool {
+        matches!(self.opc, Opcode::Call | Opcode::Callind | Opcode::Callother | Opcode::New)
+    }
+    /// `isMarker`: MULTIEQUAL and INDIRECT
+    pub(crate) fn is_marker(&self) -> bool {
+        matches!(self.opc, Opcode::Multiequal | Opcode::Indirect)
+    }
 }
