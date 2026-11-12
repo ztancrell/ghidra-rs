@@ -31,12 +31,18 @@ impl Image {
         let base = opt.image_base() as u32;
         let hdr = opt.size_of_headers() as usize;
         let mut img = Image::default();
-        img.sections.push(Section { name: "Headers".into(), exec: false, addr: base, data: bytes[..hdr.min(bytes.len())].to_vec() });
+        img.sections.push(Section {
+            name: "Headers".into(),
+            exec: false,
+            addr: base,
+            data: bytes[..hdr.min(bytes.len())].to_vec(),
+        });
         for s in pe.section_table().iter() {
             let name = String::from_utf8_lossy(s.raw_name()).trim_end_matches('\0').to_string();
             let mut data = s.pe_data(bytes).map_err(|e| e.to_string())?.to_vec();
             data.resize(s.virtual_size.get(LE) as usize, 0);
-            let exec = s.characteristics.get(LE) & (object::pe::IMAGE_SCN_CNT_CODE | object::pe::IMAGE_SCN_MEM_EXECUTE) != 0;
+            let exec =
+                s.characteristics.get(LE) & (object::pe::IMAGE_SCN_CNT_CODE | object::pe::IMAGE_SCN_MEM_EXECUTE) != 0;
             img.sections.push(Section { name, exec, addr: base + s.virtual_address.get(LE), data });
         }
         let entry = opt.address_of_entry_point();
@@ -72,8 +78,11 @@ impl Image {
             let mut i = 0;
             let names = if orig != 0 { orig } else { first };
             while let Some(th) = img.read_u32(base + names + 4 * i).filter(|&t| t != 0) {
-                let name =
-                    if th & 0x8000_0000 != 0 { format!("Ordinal_{}", th & 0xffff) } else { img.c_string(base + th + 2) };
+                let name = if th & 0x8000_0000 != 0 {
+                    format!("Ordinal_{}", th & 0xffff)
+                } else {
+                    img.c_string(base + th + 2)
+                };
                 img.imports.insert(base + first + 4 * i, (lib.clone(), name));
                 i += 1;
             }
@@ -118,11 +127,11 @@ pub enum Flow {
 pub struct Ins {
     pub len: u8,
     pub flow: Flow,
-    pub target: Option<u32>, // direct flow target
-    pub slot: Option<u32>,   // memory operand of an indirect call/jump through a constant address
+    pub target: Option<u32>,   // direct flow target
+    pub slot: Option<u32>,     // memory operand of an indirect call/jump through a constant address
     pub computed: Option<u32>, // code target of another indirect call/jump, from the local fold
-    pub refs: Vec<u32>,      // data references: constant addresses inside the image
-    pub code_imms: Vec<u32>, // immediates that point into an executable section
+    pub refs: Vec<u32>,        // data references: constant addresses inside the image
+    pub code_imms: Vec<u32>,   // immediates that point into an executable section
 }
 
 /// A value of the local fold: a constant, or what a 4-byte register held where the fold
@@ -169,8 +178,17 @@ pub struct Analysis {
 const MAX_STACK: [usize; 2] = [16, 1024]; // local fold, whole-function walk
 const MAX_MEM: [usize; 2] = [64, 1024];
 
-const KNOWN_NORETURN: [&str; 9] =
-    ["ExitProcess", "ExitThread", "exit", "_exit", "abort", "_amsg_exit", "RaiseException", "_CxxThrowException", "FatalAppExitA"];
+const KNOWN_NORETURN: [&str; 9] = [
+    "ExitProcess",
+    "ExitThread",
+    "exit",
+    "_exit",
+    "abort",
+    "_amsg_exit",
+    "RaiseException",
+    "_CxxThrowException",
+    "FatalAppExitA",
+];
 
 // x86win_patterns.xml, the two <patternpairs> whose matches are definite function starts.
 // Pattern bytes are (value, mask); prepatterns end right before the candidate.
@@ -188,7 +206,21 @@ const POST_ALL: [Pat; 18] = [
     &[(0x55, 0xff), (0x8b, 0xff), (0xec, 0xff)],
     &[(0x55, 0xff), (0x89, 0xff), (0xe5, 0xff)],
     &[(0x83, 0xff), (0xec, 0xff), (0x00, 0x83)],
-    &[(0x6a, 0xff), (0xff, 0xff), (0x68, 0xff), (0, 0), (0, 0), (0, 0), (0, 0), (0x64, 0xff), (0xa1, 0xff), (0, 0xff), (0, 0xff), (0, 0xff), (0, 0xff)],
+    &[
+        (0x6a, 0xff),
+        (0xff, 0xff),
+        (0x68, 0xff),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0x64, 0xff),
+        (0xa1, 0xff),
+        (0, 0xff),
+        (0, 0xff),
+        (0, 0xff),
+        (0, 0xff),
+    ],
     &[(0x56, 0xff), (0x8b, 0xff), (0xf1, 0xff)],
     &[(0xb8, 0xff), (0, 0), (0, 0), (0, 0), (0, 0), (0xe8, 0xff)],
     &[(0x8b, 0xff), (0xff, 0xff), (0x55, 0xff), (0x8b, 0xff), (0xec, 0xff)],
@@ -249,7 +281,8 @@ impl Analysis {
                 an.noreturn.insert(*slot);
             }
         }
-        let mut seeds: Vec<u32> = img.exports.iter().map(|e| e.0).chain(img.entry).chain(extra.iter().copied()).collect();
+        let mut seeds: Vec<u32> =
+            img.exports.iter().map(|e| e.0).chain(img.entry).chain(extra.iter().copied()).collect();
         // RTTI vftable slots (the RTTI analyzer makes a function of each)
         let tables = crate::scripts::vftables(img);
         for &v in tables.keys() {
@@ -335,8 +368,11 @@ impl Analysis {
                         let i = &an.insns[a];
                         // a JMP [slot] thunk to a non-returning import does not return either
                         i.flow == Flow::Return
-                            || i.flow == Flow::JumpInd && !an.tables.contains_key(a) && !i.slot.is_some_and(|s| an.noreturn.contains(&s))
-                            || i.flow == Flow::Jump && i.target.is_some_and(|t| an.funcs.contains(&t) && !an.noreturn.contains(&t))
+                            || i.flow == Flow::JumpInd
+                                && !an.tables.contains_key(a)
+                                && !i.slot.is_some_and(|s| an.noreturn.contains(&s))
+                            || i.flow == Flow::Jump
+                                && i.target.is_some_and(|t| an.funcs.contains(&t) && !an.noreturn.contains(&t))
                     })
                 })
                 .map(|(&f, _)| f)
@@ -383,7 +419,11 @@ impl Analysis {
             match v.space {
                 0 => Some((Val::C(v.offset as u32), false)),
                 s if s == code => (v.size == 4).then(|| mem(v.offset as u32)).flatten(),
-                s => match fold.regs.iter().find(|f| f.0 == s && f.1 < v.offset + v.size as u64 && v.offset < f.1 + f.2 as u64) {
+                s => match fold
+                    .regs
+                    .iter()
+                    .find(|f| f.0 == s && f.1 < v.offset + v.size as u64 && v.offset < f.1 + f.2 as u64)
+                {
                     Some(f) if f.1 == v.offset && f.2 == v.size => f.3.map(|x| (x, f.4)),
                     // a constant's low bytes, `ROL EDX,CL` after `MOV ECX,[a]`
                     Some(f) if f.1 <= v.offset && v.offset + v.size as u64 <= f.1 + f.2 as u64 => match f.3 {
@@ -466,28 +506,38 @@ impl Analysis {
                         Some((Val::C(x), _)) => Some((Val::C(if op.opc == 24 { x.wrapping_neg() } else { !x }), true)),
                         _ => None,
                     },
-                    (19 | 20 | 26 | 27 | 28 | 29 | 30 | 31 | 32, [x, y]) if o.size <= 4 && y.size <= 4 && (o.size == 4 || op.opc != 31) => val(x, fold).zip(val(y, fold)).and_then(|((x, _), (y, _))| {
-                        let r = match (op.opc, x, y) {
-                            (_, Val::C(x), Val::C(y)) => Val::C(mask(match op.opc {
-                                19 => x.wrapping_add(y),
-                                20 => x.wrapping_sub(y),
-                                26 => x ^ y,
-                                27 => x & y,
-                                28 => x | y,
-                                29 => x.checked_shl(y).unwrap_or(0),
-                                30 => x.checked_shr(y).unwrap_or(0),
-                                31 => (x as i32).checked_shr(y).unwrap_or(if (x as i32) < 0 { -1 } else { 0 }) as u32,
-                                _ => x.wrapping_mul(y),
-                            }, o.size)),
-                            _ if o.size < 4 => return None,
-                            (19, Val::S(b, d), Val::C(c)) | (19, Val::C(c), Val::S(b, d)) => Val::S(b, d.wrapping_add(c)),
-                            (20, Val::S(b, d), Val::C(c)) => Val::S(b, d.wrapping_sub(c)),
-                            (20 | 26, x, y) if x == y => Val::C(0), // `XOR EDI,EDI`
-                            (20, Val::S(b, d), Val::S(b2, d2)) if b == b2 => Val::C(d.wrapping_sub(d2)),
-                            _ => return None,
-                        };
-                        Some((r, true))
-                    }),
+                    (19 | 20 | 26 | 27 | 28 | 29 | 30 | 31 | 32, [x, y])
+                        if o.size <= 4 && y.size <= 4 && (o.size == 4 || op.opc != 31) =>
+                    {
+                        val(x, fold).zip(val(y, fold)).and_then(|((x, _), (y, _))| {
+                            let r = match (op.opc, x, y) {
+                                (_, Val::C(x), Val::C(y)) => Val::C(mask(
+                                    match op.opc {
+                                        19 => x.wrapping_add(y),
+                                        20 => x.wrapping_sub(y),
+                                        26 => x ^ y,
+                                        27 => x & y,
+                                        28 => x | y,
+                                        29 => x.checked_shl(y).unwrap_or(0),
+                                        30 => x.checked_shr(y).unwrap_or(0),
+                                        31 => (x as i32).checked_shr(y).unwrap_or(if (x as i32) < 0 { -1 } else { 0 })
+                                            as u32,
+                                        _ => x.wrapping_mul(y),
+                                    },
+                                    o.size,
+                                )),
+                                _ if o.size < 4 => return None,
+                                (19, Val::S(b, d), Val::C(c)) | (19, Val::C(c), Val::S(b, d)) => {
+                                    Val::S(b, d.wrapping_add(c))
+                                }
+                                (20, Val::S(b, d), Val::C(c)) => Val::S(b, d.wrapping_sub(c)),
+                                (20 | 26, x, y) if x == y => Val::C(0), // `XOR EDI,EDI`
+                                (20, Val::S(b, d), Val::S(b2, d2)) if b == b2 => Val::C(d.wrapping_sub(d2)),
+                                _ => return None,
+                            };
+                            Some((r, true))
+                        })
+                    }
                     _ => None,
                 };
                 if o.space == code {
@@ -555,7 +605,13 @@ impl Analysis {
             for v in op.ins.iter().skip(skip).chain(op.out.as_ref()) {
                 // e.g. PUSH offset callback (not CALL's pushed return address)
                 let imm = v.offset as u32;
-                if v.space == 0 && v.size == 4 && v.offset != next && !fpu_ip && self.is_code(img, imm) && !code_imms.contains(&imm) {
+                if v.space == 0
+                    && v.size == 4
+                    && v.offset != next
+                    && !fpu_ip
+                    && self.is_code(img, imm)
+                    && !code_imms.contains(&imm)
+                {
                     code_imms.push(imm);
                 }
                 let is_ref = match v.space {
@@ -597,7 +653,10 @@ impl Analysis {
         while constants && !log.is_empty() {
             let mut queue: Vec<u32> = Vec::new();
             for t in log.iter().flat_map(|a| self.insns[a].code_imms.iter().copied()).collect::<Vec<_>>() {
-                if owner[(t - self.code_lo) as usize] == 0 && checked.insert(t) && self.valid_subroutine(img, sl, &mut p, &owner, t) {
+                if owner[(t - self.code_lo) as usize] == 0
+                    && checked.insert(t)
+                    && self.valid_subroutine(img, sl, &mut p, &owner, t)
+                {
                     queue.push(t);
                 }
             }
@@ -620,7 +679,14 @@ impl Analysis {
     /// into no existing code, jumps only to instruction starts, never branches conditionally
     /// to its own fallthrough, and returns, jumps through a register or reaches a function;
     /// a single instruction must reach a function. Not modelled: references into the body.
-    fn valid_subroutine(&self, img: &Image, sl: &Sleigh, p: &mut crate::sleigh::Parse, owner: &[u8], entry: u32) -> bool {
+    fn valid_subroutine(
+        &self,
+        img: &Image,
+        sl: &Sleigh,
+        p: &mut crate::sleigh::Parse,
+        owner: &[u8],
+        entry: u32,
+    ) -> bool {
         if img.read_u32(entry) == Some(0) && img.read_u32(entry + 4) == Some(0) {
             return false;
         }
@@ -717,7 +783,8 @@ impl Analysis {
                 let mut cur = top;
                 while cur + 4 <= end {
                     let v = word(cur);
-                    if v < 1024 || img.block_of(v).is_none() || (elems.len() > 1 && refs.contains(&cur)) || collides(v) {
+                    if v < 1024 || img.block_of(v).is_none() || (elems.len() > 1 && refs.contains(&cur)) || collides(v)
+                    {
                         break;
                     }
                     elems.push(v);
@@ -773,12 +840,20 @@ impl Analysis {
     }
 
     /// Recursive descent from every queued address. Call targets in .text become functions.
-    fn descend(&mut self, img: &Image, sl: &Sleigh, p: &mut crate::sleigh::Parse, owner: &mut [u8], queue: &mut Vec<u32>, log: &mut Vec<u32>) {
+    fn descend(
+        &mut self,
+        img: &Image,
+        sl: &Sleigh,
+        p: &mut crate::sleigh::Parse,
+        owner: &mut [u8],
+        queue: &mut Vec<u32>,
+        log: &mut Vec<u32>,
+    ) {
         let mut pending: HashMap<u32, Fold> = HashMap::new();
         while let Some(start) = queue.pop() {
             let mut a = start;
             let mut recent: Vec<u32> = Vec::new(); // straight-line history, for switch bounds
-            // the fold of the first jump that reached `start` (Ghidra: first flow wins)
+                                                   // the fold of the first jump that reached `start` (Ghidra: first flow wins)
             let mut fold = pending.remove(&start).unwrap_or_default();
             while self.is_code(img, a) && owner[(a - self.code_lo) as usize] == 0 {
                 let Some(ins) = self.decode(img, sl, p, a, &mut fold) else { break };
@@ -792,10 +867,9 @@ impl Analysis {
                     if ins.flow == Flow::Call {
                         self.funcs.insert(t);
                     }
-                    if ins.flow != Flow::Call
-                        && owner[(t - self.code_lo) as usize] == 0 {
-                            pending.entry(t).or_insert_with(|| fold.clone());
-                        }
+                    if ins.flow != Flow::Call && owner[(t - self.code_lo) as usize] == 0 {
+                        pending.entry(t).or_insert_with(|| fold.clone());
+                    }
                     queue.push(t);
                 }
                 if ins.flow == Flow::JumpInd {
@@ -951,7 +1025,8 @@ impl Analysis {
         for (&f, body) in &self.bodies {
             let mut pops = body.iter().filter(|a| self.insns[a].flow == Flow::Return).map(|&a| {
                 let s = img.block_of(a).unwrap();
-                match s.data[(a - s.addr) as usize..].strip_prefix(&[0xf3]).unwrap_or(&s.data[(a - s.addr) as usize..]) {
+                match s.data[(a - s.addr) as usize..].strip_prefix(&[0xf3]).unwrap_or(&s.data[(a - s.addr) as usize..])
+                {
                     [0xc3, ..] => Some(0),
                     [0xc2, lo, hi, ..] => Some(u16::from_le_bytes([*lo, *hi]) as u32),
                     _ => None,
@@ -989,7 +1064,12 @@ impl Analysis {
                     let funcs = &funcs;
                     s.spawn(move || {
                         let mut p = sl.new_parse();
-                        funcs.iter().skip(t).step_by(n).map(|&f| this.flow_constants(img, sl, &mut p, f)).collect::<Vec<_>>()
+                        funcs
+                            .iter()
+                            .skip(t)
+                            .step_by(n)
+                            .map(|&f| this.flow_constants(img, sl, &mut p, f))
+                            .collect::<Vec<_>>()
                     })
                 })
                 .collect();
@@ -999,7 +1079,12 @@ impl Analysis {
         let mut merged: HashMap<u32, Ins> = HashMap::new();
         for i in 0..funcs.len() {
             for (a, d) in &found[i % n][i / n] {
-                let m = merged.entry(*a).or_insert_with(|| Ins { refs: Vec::new(), code_imms: Vec::new(), computed: None, ..d.clone() });
+                let m = merged.entry(*a).or_insert_with(|| Ins {
+                    refs: Vec::new(),
+                    code_imms: Vec::new(),
+                    computed: None,
+                    ..d.clone()
+                });
                 for &r in &d.refs {
                     if !m.refs.contains(&r) {
                         m.refs.push(r);
@@ -1056,7 +1141,9 @@ impl Analysis {
                 match ins.flow {
                     Flow::CondJump => stack.extend(ins.target.map(|t| (t, a, fold.clone(), extra))),
                     Flow::Jump => {
-                        stack.extend(ins.target.filter(|t| !self.funcs.contains(t)).map(|t| (t, a, fold.clone(), extra)));
+                        stack.extend(
+                            ins.target.filter(|t| !self.funcs.contains(t)).map(|t| (t, a, fold.clone(), extra)),
+                        );
                         break;
                     }
                     Flow::JumpInd => {
@@ -1097,12 +1184,17 @@ impl Analysis {
 /// AddressTableAnalyzer.findPossibleStrings over `[from, to)`: the ranges of UTF-16 strings
 /// longer than 4 characters (tab, CR, LF and 0x20..0x7e, up to a 0 or half the range).
 fn mask(x: u32, size: u32) -> u32 {
-    if size >= 4 { x } else { x & ((1 << (8 * size)) - 1) }
+    if size >= 4 {
+        x
+    } else {
+        x & ((1 << (8 * size)) - 1)
+    }
 }
 
 fn utf16_strings(s: &Section, from: u32, to: u32) -> Vec<std::ops::RangeInclusive<u32>> {
     let max = (to - from) / 2;
-    let short = |a: u32| s.data.get((a - s.addr) as usize..(a - s.addr) as usize + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+    let short =
+        |a: u32| s.data.get((a - s.addr) as usize..(a - s.addr) as usize + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
     let mut out = Vec::new();
     let mut a = from;
     while a < to {

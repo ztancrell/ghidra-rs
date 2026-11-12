@@ -67,7 +67,10 @@ fn code_constants_x86_32() {
     text.resize(0x20, 0xcc);
     text.extend([0x33, 0xc0, 0xc3]); // 401020 XOR EAX,EAX; RET
     text.resize(0x30, 0xcc);
-    let img = Image { sections: vec![Section { name: ".text".into(), exec: true, addr: 0x401000, data: text }], ..Image::default() };
+    let img = Image {
+        sections: vec![Section { name: ".text".into(), exec: true, addr: 0x401000, data: text }],
+        ..Image::default()
+    };
     let mut an = Analysis::run(&img, &sl, &[0x401000], true).unwrap();
     assert!(an.insns[&0x401000].code_imms.is_empty());
     assert!(!an.insns.contains_key(&0x401010) && !an.insns.contains_key(&0x401020));

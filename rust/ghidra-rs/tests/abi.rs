@@ -20,7 +20,12 @@ fn register_reads_writes_x86_32() {
         (&[0x00, 0xe2], "ADD DL,AH", "EAX#1 EDX#0", "CF#0 EDX#0 OF#0 PF#0 SF#0 ZF#0"),
         (&[0x8a, 0x01], "MOV AL,byte ptr [ECX]", "ECX#0 ECX#1 ECX#2 ECX#3", "EAX#0"),
         // ECX is written before it is read again: one input, as in Ghidra
-        (&[0x87, 0xca], "XCHG EDX,ECX", "ECX#0 ECX#1 ECX#2 ECX#3 EDX#0 EDX#1 EDX#2 EDX#3", "ECX#0 ECX#1 ECX#2 ECX#3 EDX#0 EDX#1 EDX#2 EDX#3"),
+        (
+            &[0x87, 0xca],
+            "XCHG EDX,ECX",
+            "ECX#0 ECX#1 ECX#2 ECX#3 EDX#0 EDX#1 EDX#2 EDX#3",
+            "ECX#0 ECX#1 ECX#2 ECX#3 EDX#0 EDX#1 EDX#2 EDX#3",
+        ),
         (&[0xf3, 0x0f, 0x10, 0xc1], "MOVSS XMM0, XMM1", "ZMM1#0 ZMM1#1 ZMM1#2 ZMM1#3", "ZMM0#0 ZMM0#1 ZMM0#2 ZMM0#3"),
     ];
     for (bytes, text, reads, writes) in cases {

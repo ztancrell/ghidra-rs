@@ -100,7 +100,10 @@ impl Console {
             // `map function <addr> [<name>] [nocode]`: remembered for `load function`
             ["map", "function", a, rest @ ..] if self.loaded => {
                 let a = addr(Some(a))?;
-                let name = rest.first().filter(|n| **n != "nocode").map_or_else(|| format!("func_0x{a:08x}"), |n| n.to_string());
+                let name = rest
+                    .first()
+                    .filter(|n| **n != "nocode")
+                    .map_or_else(|| format!("func_0x{a:08x}"), |n| n.to_string());
                 self.functions.insert(name, a);
             }
             ["load", "function", name] if self.loaded => {
@@ -229,9 +232,11 @@ pub mod datatest {
 
     pub fn load(path: &Path) -> Result<Test, String> {
         let xml = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let script = elements(&xml, "script").into_iter().next().ok_or("Did not see <script> tag in <decompilertest>")?.1;
+        let script =
+            elements(&xml, "script").into_iter().next().ok_or("Did not see <script> tag in <decompilertest>")?.1;
         // stripNewlines: CR removed, LF made a space
-        let commands = elements(script, "com").iter().map(|(_, c)| unescape(c).replace('\r', "").replace('\n', " ")).collect();
+        let commands =
+            elements(script, "com").iter().map(|(_, c)| unescape(c).replace('\r', "").replace('\n', " ")).collect();
         let mut checks = Vec::new();
         for (tag, content) in elements(&xml, "stringmatch") {
             let num = |n| attr(tag, n).and_then(|v| v.trim().parse().ok()).ok_or(format!("stringmatch: bad {n}"));
@@ -243,7 +248,12 @@ pub mod datatest {
                     patterns.push(regex_lite::Regex::new(&ecmascript(line)).map_err(|e| format!("{line}: {e}"))?);
                 }
             }
-            checks.push(Check { name: attr(tag, "name").unwrap_or_default(), min: num("min")?, max: num("max")?, patterns });
+            checks.push(Check {
+                name: attr(tag, "name").unwrap_or_default(),
+                min: num("min")?,
+                max: num("max")?,
+                patterns,
+            });
         }
         if checks.is_empty() {
             return Err("Did not see any <stringmatch> tags in <decompilertest>".into());
@@ -289,14 +299,18 @@ pub mod datatest {
             .output()
             .map_err(|e| format!("{}: {e}", decomp_dbg.display()))?;
         let stdout = String::from_utf8_lossy(&out.stdout);
-        if let Some(e) = stdout.lines().find(|l| l.starts_with("Execution error") || l.starts_with("Command parsing error")) {
+        if let Some(e) =
+            stdout.lines().find(|l| l.starts_with("Execution error") || l.starts_with("Command parsing error"))
+        {
             return Err(e.to_string());
         }
         // no bulk output: decomp_dbg died early (e.g. "Could not discover root of Ghidra
         // installation" without SLEIGHHOME); show what it said
-        std::fs::read_to_string(&bulk).map_err(|e| match stdout.lines().find(|l| !l.is_empty() && !l.starts_with("init>")) {
-            Some(l) => format!("decomp_dbg: {l}"),
-            None => format!("{}: {e}", bulk.display()),
+        std::fs::read_to_string(&bulk).map_err(|e| {
+            match stdout.lines().find(|l| !l.is_empty() && !l.starts_with("init>")) {
+                Some(l) => format!("decomp_dbg: {l}"),
+                None => format!("{}: {e}", bulk.display()),
+            }
         })
     }
 

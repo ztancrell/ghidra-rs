@@ -15,7 +15,8 @@ fn console_unported_commands_fail() {
 
 #[test]
 fn datatest_parse_and_match() {
-    let xml = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Ghidra/Features/Decompiler/src/decompile/datatests/zerotop.xml");
+    let xml = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../Ghidra/Features/Decompiler/src/decompile/datatests/zerotop.xml");
     let t = datatest::load(&xml).unwrap();
     assert!(!t.commands.is_empty() && !t.checks.is_empty());
     assert_eq!(datatest::ecmascript(r"a\<b\>\.c"), r"a<b>\.c");

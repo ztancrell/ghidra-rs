@@ -6,8 +6,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 
 // ExportFunctions.LUA_MARKERS
-const LUA_MARKERS: [&str; 5] =
-    ["attempt to %s a %s value", "attempt to compare two %s values", "attempt to compare %s with %s", "C stack overflow", "%s expected, got %s"];
+const LUA_MARKERS: [&str; 5] = [
+    "attempt to %s a %s value",
+    "attempt to compare two %s values",
+    "attempt to compare %s with %s",
+    "C stack overflow",
+    "%s expected, got %s",
+];
 
 fn quote(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
@@ -44,7 +49,15 @@ fn component(s: &str) -> Option<(String, &str)> {
 }
 
 fn template_arg(s: &str) -> Option<(String, &str)> {
-    let simple = [("H", "int"), ("I", "unsigned_int"), ("M", "float"), ("N", "double"), ("_N", "bool"), ("D", "char"), ("E", "unsigned_char")];
+    let simple = [
+        ("H", "int"),
+        ("I", "unsigned_int"),
+        ("M", "float"),
+        ("N", "double"),
+        ("_N", "bool"),
+        ("D", "char"),
+        ("E", "unsigned_char"),
+    ];
     if let Some(r) = s.strip_prefix('V').or_else(|| s.strip_prefix('U')) {
         return qualified(r);
     }
@@ -204,8 +217,7 @@ pub fn export_functions(
         if !an.is_text(f) {
             continue;
         }
-        let callees: HashSet<u32> =
-            body.iter().filter_map(|a| callee(&an.insns[a])).collect();
+        let callees: HashSet<u32> = body.iter().filter_map(|a| callee(&an.insns[a])).collect();
         // Ghidra's references to code constants (`PUSH offset callback`) are data references too
         let data_refs: usize = body.iter().map(|a| an.insns[a].refs.len() + an.insns[a].code_imms.len()).sum();
         let name = match (exports.get(&f), fid.get(&f)) {
