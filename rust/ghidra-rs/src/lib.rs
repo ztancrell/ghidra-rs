@@ -4,3 +4,4 @@ pub mod sleigh;
 pub mod analysis;
 pub mod scripts;
 pub mod abi;
+pub mod fid;

@@ -24,6 +24,10 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   code constants (no x87 self-reference; a disguised call `PUSH next; PUSH callee; RET`); a
   code pointer hidden as two XORed dwords (`MOV EDI,[a]; XOR EDI,[b]; PUSH EDI`); a call through
   an object's vtable, resolved through a value stored via a symbolic register.
+- `ghidra-rs/src/fid.rs`: Function ID: the FID hasher, a reader for Ghidra's `.fidbf`
+  databases, and FID's matching and naming.
+- `ghidra-rs/tests/fid.rs`: the FID hash of a known CRT function, and its record in Ghidra's
+  databases (skipped when they are not installed).
 - `ghidra-rs/tests/abi.rs`: register reads and writes (sub-registers as base-register bytes)
   of a few fixed instructions.
 - `build-sla.sh`: builds Ghidra's SLEIGH compiler and compiles `x86-64.sla` and `x86.sla`.
@@ -167,11 +171,10 @@ ClearFalseNoReturn and AddRelocatedEntries); the pipeline's `build/functions*.cs
 | `--functions-from` fresh export | fresh export (functions and gaps) | 37,633 of 37,635 | 99.1% | 94.6% | 97.2% | 82.9% | 39,243 of 39,557 identical (ours: 39,368 rows) |
 
 `name`, `exported`, `vtable_class` and `lua` match on 99.9% or more of the rows; `fid` is
-always 0.
+always 0. Superseded (branch `fid`): `fid` and the library names come from Function ID, see
+below.
 
 Known differences:
-
-- Function ID (FID) is not implemented: `fid` is 0 and FID library names are missing.
 - Indirect calls and memory operands that Ghidra resolves by constant propagation (`CALL EDX`
   after `MOV EDX,[vtable+n]`, `[ESI+n]` with known ESI) are resolved only by the local fold
   (see CheckAbiCallers below): fewer `callees` and `data_refs`. Calls it resolves are not
@@ -188,7 +191,67 @@ Known differences:
 
 Time on the same machine: ghidra-rs `analyze` takes about 9.5 s wall (8.3 s analysis, one
 thread). Ghidra's auto-analysis of the same game (`Mercenaries2.exe`, mercs2
-`build/ghidra-import.log`) took 723 s, before the post-scripts.
+`build/ghidra-import.log`) took 723 s, before the post-scripts. Function ID adds about 3 s
+(see below).
+
+### Function ID
+
+`--functions` runs Function ID first, as Ghidra's FidAnalyzer does with its default options,
+and writes its results to the `fid` and `name` columns (`ghidra-rs/src/fid.rs`):
+
+- Databases: every `*_x86.fidbf` (vs2012, vs2015, vs2017, vs2019, vsOlder) in
+  `/opt/ghidra/Ghidra/Features/FunctionID/data`, or in the directory `GHIDRA_RS_FID` names.
+  They are read in place: a `.fidbf` is a Ghidra buffer file (`LocalBufferFile`: a header
+  block, then 16 KB blocks with a 5-byte prefix) holding Ghidra DB tables (`DBParms` gives the
+  master table, whose records give each table's B-tree root; long-key interior, fixed- and
+  variable-length record nodes). The Functions, Strings, Superior and Inferior tables are
+  loaded; their index tables are not used (ghidra-rs builds its own map by full hash).
+- Hash (`MessageDigestFidHasher`): FNV-1a 64 over each instruction of the function body, its
+  bytes masked by the instruction mask, plus a per-operand sum of its registers (offset in the
+  register space) and constants (a small or whole-operand constant goes into the specific
+  hash, an address never). The masks are SleighDebugLogger's: the instruction bits the SLEIGH
+  decode matched on (decision-tree bits and matched instruction patterns, recorded by
+  `Sleigh::decode` when `Parse::fid` is set), less each operand's value bits
+  (`Sleigh::fid_parts`). NOPs and `MOV r,r` fillers (`X86InstructionSkipper`) are left out.
+  A constant counts as an address where the instruction has a reference to it (ghidra-rs's
+  `refs` and `code_imms`); the mercs2 image has no relocations, so Ghidra's relocation check
+  is not ported.
+- Matching (`FidProgramSeeker`): records with the same full hash, scored by their code
+  units, 0.67 per specific constant if the specific hash matches, and the code units of
+  children (call targets) and parents (callers) the database relates to them; at least 14.6
+  to match, and the best score wins (ties are all kept). A CALL and a JMP to a function entry
+  are calls, as in the rest of the analysis.
+- Naming (`ApplyFidEntriesCommand`, `MatchNameAnalysis`): one name (up to leading `_`) is
+  applied; several need a score of 30 and give the function each name no other function
+  holds, and `FID_conflict:<base name>` when more than one is left (the first of them in
+  Java `HashSet` order is the base). Exported functions keep their names and are not marked.
+  Names are demangled for the CSV (`@name@4` fastcall names, and `` `vector_deleting_destructor' ``
+  and the other compiler helpers, added to `scripts::demangle`).
+
+Not ported: the demangled-name variants of MatchNameAnalysis (`demangledNoTemplate`,
+`demangledBaseName`), removing a conflicting label when a later function matches it alone,
+thunks, and the library names in plate comments and bookmarks.
+
+Result on 2026-11-12 against the `fid` column of Ghidra's own exports (no new Ghidra run was
+needed):
+
+| run | reference | Ghidra's FID rows | identical | other name | missing | extra |
+|---|---|---|---|---|---|---|
+| `--functions-from build/functions.csv` | `build/functions.csv` | 26 | 24 | 2 | 0 | 0 |
+| plain discovery | `functions-analysis.csv` (import only) | 26 | 24 | 2 | 0 | 1 |
+
+The two other names: 0x89c510, a templated `CStringT` constructor that the small demangler
+leaves mangled (Ghidra: `ATL::CStringT<wchar_t,...>::CStringT<...>`); and 0x9ee940, which
+ghidra-rs names `__chkstk` and Ghidra `__alloca_probe`: the databases hold both names for this
+hash, and the `__alloca_probe` record scores lower in ghidra-rs (parent relations; ghidra-rs
+finds 101 hashed callers, Ghidra 108). The extra row with plain discovery, 0x9eef98
+`__setdefaultprecision`, is a function Ghidra did not make. Plain discovery also names about 1,545
+functions outside `.text` (the SecuROM sections), which the CSV does not list; they are not
+checked against Ghidra.
+
+Hashes are checked exactly: the hash of `@__security_check_cookie@4` (0x9eec5e) equals its
+database record (`tests/fid.rs`). Time: about 3 s (2.5 s with plain discovery, 3.8 s with the
+37,596 functions of `--functions-from`), most of it loading the five databases (112 MB).
 
 ### CheckAbiCallers (`--abi-callers`)
 

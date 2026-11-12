@@ -195,7 +195,12 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     );
     let create = |p: &str| std::fs::File::create(p).map(std::io::BufWriter::new).map_err(|e| format!("{p}: {e}"));
     if let Some(p) = functions {
-        let n = scripts::export_functions(&img, &an, &mut create(&p)?).map_err(|e| e.to_string())?;
+        let t = std::time::Instant::now();
+        let files = ghidra_rs::fid::default_files();
+        let dbs = files.iter().map(|f| ghidra_rs::fid::FidDb::open(f)).collect::<Result<Vec<_>, _>>()?;
+        let fid = ghidra_rs::fid::apply(&img, &an, &sl, &dbs, &scripts::demangle);
+        eprintln!("function id: {} functions named from {} databases in {:.1}s", fid.len(), dbs.len(), t.elapsed().as_secs_f64());
+        let n = scripts::export_functions(&img, &an, &fid, &mut create(&p)?).map_err(|e| e.to_string())?;
         println!("exported {n} functions");
     }
     if let Some(p) = gaps {
