@@ -43,6 +43,8 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   No FFI stopgap. Confirmed by the user. The plan and its other decisions (Windows types from
   a one-time C header export, mercs2's register ABI as locked prototypes in milestone 3, a
   small `print raw` patch on the reference) are in `docs/plans/m3-decompiler.md`.
+- 2026-11-12: CLI only for now: no server or other way for Ghidra's GUI to use this core. User's
+  decision; may be revisited later.
 
 ## Milestones
 
@@ -84,5 +86,4 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
 
 ## Open questions
 
-- Should Ghidra's GUI ever be able to use this core (e.g. via a server), or does it stay CLI-only?
 - Project DB format: does it need to read or write Ghidra `.gpr` projects?
