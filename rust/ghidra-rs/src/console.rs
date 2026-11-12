@@ -10,6 +10,8 @@
 //!   on either engine and checks their `<stringmatch>` patterns.
 
 use crate::analysis::{Analysis, Image};
+use crate::decomp::{action, Arch, Funcdata};
+use crate::sleigh::Sleigh;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::Write;
@@ -50,10 +52,22 @@ pub fn prelude(img: &Image, an: &Analysis, fid: &BTreeMap<u32, crate::fid::Appli
 /// The Rust console. It echoes each command after the `init> ` prompt, as `decomp_dbg -i` does.
 #[derive(Default)]
 pub struct Console {
-    loaded: bool,
+    /// the program from `load file`
+    arch: Option<Arch>,
     function: Option<(u32, String)>,
     /// functions from `map function`, by name
     functions: std::collections::HashMap<String, u32>,
+    /// the action `break start` stops before
+    break_start: Option<String>,
+    /// the function `decompile` worked on last
+    fd: Option<Funcdata>,
+}
+
+/// The `.sla` for a 32-bit PE: `GHIDRA_RS_SLA`, else x86.sla built by `build-sla.sh`.
+fn x86_sleigh() -> Result<Sleigh, String> {
+    let path =
+        std::env::var_os("GHIDRA_RS_SLA").map(std::path::PathBuf::from).unwrap_or_else(|| Sleigh::sla_path("x86"));
+    Sleigh::load(&path)
 }
 
 impl Console {
@@ -87,41 +101,59 @@ impl Console {
             ["source", file] => return self.run_file(file, out),
             ["load", "file", path] => {
                 let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-                Image::from_pe(&data).map_err(|e| format!("{path}: {e}"))?;
-                self.loaded = true;
+                let image = Image::from_pe(&data).map_err(|e| format!("{path}: {e}"))?;
+                self.arch = Some(Arch::new(x86_sleigh()?, image).map_err(|e| e.to_string())?);
                 writeln!(out, "{path} successfully loaded: Intel/AMD 32-bit x86").map_err(io)?;
             }
-            ["load", "addr", rest @ ..] if self.loaded => {
+            ["load", "addr", rest @ ..] if self.arch.is_some() => {
                 let a = addr(rest.first())?;
                 let name = rest.get(1).map_or_else(|| format!("func_0x{a:08x}"), |n| n.to_string());
                 writeln!(out, "Function {name}: 0x{a:08x}").map_err(io)?;
                 self.function = Some((a, name));
             }
             // `map function <addr> [<name>] [nocode]`: remembered for `load function`
-            ["map", "function", a, rest @ ..] if self.loaded => {
+            ["map", "function", a, rest @ ..] => {
+                let arch = self.arch.as_mut().ok_or("map function: no program loaded")?;
                 let a = addr(Some(a))?;
-                let name = rest.first().filter(|n| **n != "nocode").map_or_else(|| format!("func_0x{a:08x}"), |n| n.to_string());
+                let name = rest
+                    .first()
+                    .filter(|n| **n != "nocode")
+                    .map_or_else(|| format!("func_0x{a:08x}"), |n| n.to_string());
+                arch.functions.insert(u64::from(a), name.clone());
                 self.functions.insert(name, a);
             }
-            ["load", "function", name] if self.loaded => {
+            ["load", "function", name] if self.arch.is_some() => {
                 let a = *self.functions.get(*name).ok_or(format!("Unknown function name: {name}"))?;
                 writeln!(out, "Function {name}: 0x{a:08x}").map_err(io)?;
                 self.function = Some((a, name.to_string()));
             }
-            // symbols and options only matter to the decompiler, which is not ported yet
-            ["map", "externalref", ..] | ["option", ..] | ["break", "start", _] if self.loaded => {}
-            ["readonly", rest @ ..] if self.loaded => {
+            ["break", "start", action] if self.arch.is_some() => self.break_start = Some(action.to_string()),
+            // the stages so far read no symbols or options
+            ["map", "externalref", ..] | ["option", ..] if self.arch.is_some() => {}
+            ["readonly", rest @ ..] if self.arch.is_some() => {
                 addr(rest.first())?;
                 writeln!(out, "Successfully marked range as readonly").map_err(io)?;
             }
             ["decompile"] => {
-                let (_, name) = self.function.as_ref().ok_or("decompile: no function selected")?;
+                let arch = self.arch.as_ref().ok_or("decompile: no program loaded")?;
+                let (a, name) = self.function.as_ref().ok_or("decompile: no function selected")?;
                 writeln!(out, "Decompiling {name}").map_err(io)?;
-                return Err("decompile: not implemented in ghidra-rs yet (milestone 3, stage S1a)".into());
+                let mut fd = Funcdata::new(u64::from(*a));
+                action::perform(&mut fd, arch, self.break_start.as_deref()).map_err(|e| e.to_string())?;
+                if let Some(b) = &self.break_start {
+                    writeln!(out, "Break at {}:{b} start", action::ROOT).map_err(io)?;
+                }
+                self.fd = Some(fd);
             }
-            // read by the corpora but needing the decompiler (or, for `parse line`, the types of S6)
-            ["continue"] | ["print", "raw" | "C"] | ["print", "tree", "block"] | ["parse", "line", ..] => {
-                return Err(format!("{line}: not implemented in ghidra-rs yet (milestone 3, stage S1a and later)"));
+            ["print", "raw"] => {
+                let (Some(arch), Some(fd)) = (&self.arch, &self.fd) else {
+                    return Err("print raw: no function decompiled".into());
+                };
+                write!(out, "{}", crate::decomp::print_raw(fd, arch).map_err(|e| e.to_string())?).map_err(io)?;
+            }
+            // read by the corpora but needing later stages (`parse line`: the types of S6)
+            ["continue"] | ["print", "C"] | ["print", "tree", "block"] | ["parse", "line", ..] => {
+                return Err(format!("{line}: not implemented in ghidra-rs yet (milestone 3, stage S1b and later)"));
             }
             _ => return Err(format!("not implemented in ghidra-rs: {line}")),
         }
@@ -229,9 +261,11 @@ pub mod datatest {
 
     pub fn load(path: &Path) -> Result<Test, String> {
         let xml = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let script = elements(&xml, "script").into_iter().next().ok_or("Did not see <script> tag in <decompilertest>")?.1;
+        let script =
+            elements(&xml, "script").into_iter().next().ok_or("Did not see <script> tag in <decompilertest>")?.1;
         // stripNewlines: CR removed, LF made a space
-        let commands = elements(script, "com").iter().map(|(_, c)| unescape(c).replace('\r', "").replace('\n', " ")).collect();
+        let commands =
+            elements(script, "com").iter().map(|(_, c)| unescape(c).replace('\r', "").replace('\n', " ")).collect();
         let mut checks = Vec::new();
         for (tag, content) in elements(&xml, "stringmatch") {
             let num = |n| attr(tag, n).and_then(|v| v.trim().parse().ok()).ok_or(format!("stringmatch: bad {n}"));
@@ -243,7 +277,12 @@ pub mod datatest {
                     patterns.push(regex_lite::Regex::new(&ecmascript(line)).map_err(|e| format!("{line}: {e}"))?);
                 }
             }
-            checks.push(Check { name: attr(tag, "name").unwrap_or_default(), min: num("min")?, max: num("max")?, patterns });
+            checks.push(Check {
+                name: attr(tag, "name").unwrap_or_default(),
+                min: num("min")?,
+                max: num("max")?,
+                patterns,
+            });
         }
         if checks.is_empty() {
             return Err("Did not see any <stringmatch> tags in <decompilertest>".into());
@@ -289,14 +328,18 @@ pub mod datatest {
             .output()
             .map_err(|e| format!("{}: {e}", decomp_dbg.display()))?;
         let stdout = String::from_utf8_lossy(&out.stdout);
-        if let Some(e) = stdout.lines().find(|l| l.starts_with("Execution error") || l.starts_with("Command parsing error")) {
+        if let Some(e) =
+            stdout.lines().find(|l| l.starts_with("Execution error") || l.starts_with("Command parsing error"))
+        {
             return Err(e.to_string());
         }
         // no bulk output: decomp_dbg died early (e.g. "Could not discover root of Ghidra
         // installation" without SLEIGHHOME); show what it said
-        std::fs::read_to_string(&bulk).map_err(|e| match stdout.lines().find(|l| !l.is_empty() && !l.starts_with("init>")) {
-            Some(l) => format!("decomp_dbg: {l}"),
-            None => format!("{}: {e}", bulk.display()),
+        std::fs::read_to_string(&bulk).map_err(|e| {
+            match stdout.lines().find(|l| !l.is_empty() && !l.starts_with("init>")) {
+                Some(l) => format!("decomp_dbg: {l}"),
+                None => format!("{}: {e}", bulk.display()),
+            }
         })
     }
 

@@ -27,23 +27,92 @@ const OP_INT_ADD: u8 = 19;
 const RUNTIME_BITRANGE_EA: u64 = 0x100; // Translate::RUNTIME_BITRANGE_EA
 
 pub const OPCODE_NAMES: [&str; 75] = [
-    "BLANK", "COPY", "LOAD", "STORE", "BRANCH", "CBRANCH", "BRANCHIND", "CALL", "CALLIND",
-    "CALLOTHER", "RETURN", "INT_EQUAL", "INT_NOTEQUAL", "INT_SLESS", "INT_SLESSEQUAL", "INT_LESS",
-    "INT_LESSEQUAL", "INT_ZEXT", "INT_SEXT", "INT_ADD", "INT_SUB", "INT_CARRY", "INT_SCARRY",
-    "INT_SBORROW", "INT_2COMP", "INT_NEGATE", "INT_XOR", "INT_AND", "INT_OR", "INT_LEFT",
-    "INT_RIGHT", "INT_SRIGHT", "INT_MULT", "INT_DIV", "INT_SDIV", "INT_REM", "INT_SREM",
-    "BOOL_NEGATE", "BOOL_XOR", "BOOL_AND", "BOOL_OR", "FLOAT_EQUAL", "FLOAT_NOTEQUAL",
-    "FLOAT_LESS", "FLOAT_LESSEQUAL", "UNUSED1", "FLOAT_NAN", "FLOAT_ADD", "FLOAT_DIV",
-    "FLOAT_MULT", "FLOAT_SUB", "FLOAT_NEG", "FLOAT_ABS", "FLOAT_SQRT", "INT2FLOAT",
-    "FLOAT2FLOAT", "TRUNC", "CEIL", "FLOOR", "ROUND", "MULTIEQUAL", "INDIRECT", "PIECE",
-    "SUBPIECE", "CAST", "PTRADD", "PTRSUB", "SEGMENTOP", "CPOOLREF", "NEW", "INSERT", "ZPULL",
-    "POPCOUNT", "LZCOUNT", "SPULL",
+    "BLANK",
+    "COPY",
+    "LOAD",
+    "STORE",
+    "BRANCH",
+    "CBRANCH",
+    "BRANCHIND",
+    "CALL",
+    "CALLIND",
+    "CALLOTHER",
+    "RETURN",
+    "INT_EQUAL",
+    "INT_NOTEQUAL",
+    "INT_SLESS",
+    "INT_SLESSEQUAL",
+    "INT_LESS",
+    "INT_LESSEQUAL",
+    "INT_ZEXT",
+    "INT_SEXT",
+    "INT_ADD",
+    "INT_SUB",
+    "INT_CARRY",
+    "INT_SCARRY",
+    "INT_SBORROW",
+    "INT_2COMP",
+    "INT_NEGATE",
+    "INT_XOR",
+    "INT_AND",
+    "INT_OR",
+    "INT_LEFT",
+    "INT_RIGHT",
+    "INT_SRIGHT",
+    "INT_MULT",
+    "INT_DIV",
+    "INT_SDIV",
+    "INT_REM",
+    "INT_SREM",
+    "BOOL_NEGATE",
+    "BOOL_XOR",
+    "BOOL_AND",
+    "BOOL_OR",
+    "FLOAT_EQUAL",
+    "FLOAT_NOTEQUAL",
+    "FLOAT_LESS",
+    "FLOAT_LESSEQUAL",
+    "UNUSED1",
+    "FLOAT_NAN",
+    "FLOAT_ADD",
+    "FLOAT_DIV",
+    "FLOAT_MULT",
+    "FLOAT_SUB",
+    "FLOAT_NEG",
+    "FLOAT_ABS",
+    "FLOAT_SQRT",
+    "INT2FLOAT",
+    "FLOAT2FLOAT",
+    "TRUNC",
+    "CEIL",
+    "FLOOR",
+    "ROUND",
+    "MULTIEQUAL",
+    "INDIRECT",
+    "PIECE",
+    "SUBPIECE",
+    "CAST",
+    "PTRADD",
+    "PTRSUB",
+    "SEGMENTOP",
+    "CPOOLREF",
+    "NEW",
+    "INSERT",
+    "ZPULL",
+    "POPCOUNT",
+    "LZCOUNT",
+    "SPULL",
 ];
 
 /// `<set name=".." val=".."/>` entries of a .pspec `<context_set>`: the context defaults.
 fn pspec_context(text: &str) -> Vec<(String, u32)> {
-    let Some(start) = text.find("<context_set") else { return Vec::new() };
-    let end = text[start..].find("</context_set>").map_or(text.len(), |e| start + e);
+    pspec_sets(text, "context_set")
+}
+
+/// `<set name=".." val=".."/>` entries of the .pspec element `tag` (`context_set`, `tracked_set`).
+fn pspec_sets(text: &str, tag: &str) -> Vec<(String, u32)> {
+    let Some(start) = text.find(&format!("<{tag}")) else { return Vec::new() };
+    let end = text[start..].find(&format!("</{tag}>")).map_or(text.len(), |e| start + e);
     let attr = |tag: &str, name: &str| {
         let i = tag.find(&format!("{name}=\""))? + name.len() + 2;
         Some(tag[i..i + tag[i..].find('"')?].to_string())
@@ -53,7 +122,10 @@ fn pspec_context(text: &str) -> Vec<(String, u32)> {
         .skip(1)
         .filter_map(|tag| {
             let v = attr(tag, "val")?;
-            let v = match v.strip_prefix("0x") { Some(h) => u32::from_str_radix(h, 16).ok()?, None => v.parse().ok()? };
+            let v = match v.strip_prefix("0x") {
+                Some(h) => u32::from_str_radix(h, 16).ok()?,
+                None => v.parse().ok()?,
+            };
             Some((attr(tag, "name")?, v))
         })
         .collect()
@@ -88,7 +160,7 @@ struct Operand {
 #[derive(Debug)]
 enum Kind {
     None,
-    UserOp,
+    UserOp(u32),
     Epsilon,
     Value(Expr),
     ValueMap(Expr, Vec<i64>),
@@ -219,6 +291,8 @@ pub struct Sleigh {
     uniq_mask: u64,
     ctx_default: Vec<u32>,
     regnames: HashMap<(u32, u64, u32), usize>,
+    /// the .pspec `<tracked_set>`: registers with a known value at every address (x86: DF = 0)
+    pub tracked: Vec<(String, u32)>,
 }
 
 // ---------------------------------------------------------------- parse state
@@ -236,7 +310,15 @@ struct Handle {
 
 impl Default for Handle {
     fn default() -> Self {
-        Handle { space: CONST_SPACE, size: 0, offset_space: NONE, offset_offset: 0, offset_size: 0, temp_space: 0, temp_offset: 0 }
+        Handle {
+            space: CONST_SPACE,
+            size: 0,
+            offset_space: NONE,
+            offset_offset: 0,
+            offset_size: 0,
+            temp_space: 0,
+            temp_offset: 0,
+        }
     }
 }
 
@@ -363,7 +445,11 @@ pub struct FidParts {
 }
 
 fn calc_mask(size: u32) -> u64 {
-    if size >= 8 { u64::MAX } else { (1u64 << (8 * size)) - 1 }
+    if size >= 8 {
+        u64::MAX
+    } else {
+        (1u64 << (8 * size)) - 1
+    }
 }
 
 fn sign_extend(v: i64, bit: i32) -> i64 {
@@ -415,8 +501,15 @@ fn expr(el: &Elem) -> Result<Expr> {
         e::NEXT2_EXP => Expr::Next2,
         e::MINUS_EXP => Expr::Neg(kid(0)?),
         e::NOT_EXP => Expr::Not(kid(0)?),
-        e::AND_EXP | e::DIV_EXP | e::LSHIFT_EXP | e::MULT_EXP | e::OR_EXP | e::PLUS_EXP
-        | e::RSHIFT_EXP | e::SUB_EXP | e::XOR_EXP => Expr::Bin(el.id, kid(0)?, kid(1)?),
+        e::AND_EXP
+        | e::DIV_EXP
+        | e::LSHIFT_EXP
+        | e::MULT_EXP
+        | e::OR_EXP
+        | e::PLUS_EXP
+        | e::RSHIFT_EXP
+        | e::SUB_EXP
+        | e::XOR_EXP => Expr::Bin(el.id, kid(0)?, kid(1)?),
         id => return Err(format!("bad pattern expression element {id}")),
     })
 }
@@ -459,7 +552,15 @@ fn tpl(el: &Elem) -> Result<(Tpl, i64)> {
             if c.len() != 7 {
                 return Err("bad handle_tpl".into());
             }
-            Some(HandleTpl { space: c[0], size: c[1], ptrspace: c[2], ptroffset: c[3], ptrsize: c[4], temp_space: c[5], temp_offset: c[6] })
+            Some(HandleTpl {
+                space: c[0],
+                size: c[1],
+                ptrspace: c[2],
+                ptroffset: c[3],
+                ptrsize: c[4],
+                temp_space: c[5],
+                temp_offset: c[6],
+            })
         }
         _ => None,
     };
@@ -575,7 +676,9 @@ impl Sleigh {
     /// Load a `.sla`; context defaults come from the `.pspec` of the same name next to it, if any.
     pub fn load(path: &Path) -> Result<Sleigh> {
         let pspec = std::fs::read_to_string(path.with_extension("pspec")).unwrap_or_default();
-        Self::load_with_context(path, &pspec_context(&pspec))
+        let mut sl = Self::load_with_context(path, &pspec_context(&pspec))?;
+        sl.tracked = pspec_sets(&pspec, "tracked_set");
+        Ok(sl)
     }
 
     pub fn load_with_context(path: &Path, context: &[(String, u32)]) -> Result<Sleigh> {
@@ -617,27 +720,22 @@ impl Sleigh {
         for k in &st.kids {
             let first = || k.kids.first().ok_or_else(|| format!("symbol element {} without expression", k.id));
             let kind = match k.id {
-                e::USEROP => Kind::UserOp,
+                e::USEROP => Kind::UserOp(k.int(a::INDEX)? as u32),
                 e::EPSILON_SYM => Kind::Epsilon,
                 e::VALUE_SYM => Kind::Value(expr(first()?)?),
-                e::VALUEMAP_SYM => Kind::ValueMap(
-                    expr(first()?)?,
-                    k.kids[1..].iter().map(|v| v.int(a::VAL)).collect::<Result<_>>()?,
-                ),
+                e::VALUEMAP_SYM => {
+                    Kind::ValueMap(expr(first()?)?, k.kids[1..].iter().map(|v| v.int(a::VAL)).collect::<Result<_>>()?)
+                }
                 e::NAME_SYM => Kind::Name(
                     expr(first()?)?,
                     k.kids[1..].iter().map(|v| v.string(a::NAME).unwrap_or("\t").to_string()).collect(),
                 ),
-                e::VARNODE_SYM => Kind::Varnode {
-                    space: k.int(a::SPACE)? as u32,
-                    off: k.uint(a::OFF)?,
-                    size: k.int(a::SIZE)? as u32,
-                },
-                e::CONTEXT_SYM => Kind::Context {
-                    exp: expr(first()?)?,
-                    low: k.int(a::LOW)? as u32,
-                    high: k.int(a::HIGH)? as u32,
-                },
+                e::VARNODE_SYM => {
+                    Kind::Varnode { space: k.int(a::SPACE)? as u32, off: k.uint(a::OFF)?, size: k.int(a::SIZE)? as u32 }
+                }
+                e::CONTEXT_SYM => {
+                    Kind::Context { exp: expr(first()?)?, low: k.int(a::LOW)? as u32, high: k.int(a::HIGH)? as u32 }
+                }
                 e::VARLIST_SYM => Kind::VarList(
                     expr(first()?)?,
                     k.kids[1..]
@@ -716,6 +814,7 @@ impl Sleigh {
             uniq_mask: root.uint(a::UNIQMASK).unwrap_or(0),
             ctx_default,
             regnames,
+            tracked: Vec::new(),
         })
     }
 
@@ -781,7 +880,11 @@ impl Sleigh {
                     res = res.swap_bytes() >> (64 - 8 * size);
                 }
                 let v = (res as i64) >> shift;
-                if *sign { sign_extend(v, bitend - bitstart) } else { zero_extend(v, bitend - bitstart) }
+                if *sign {
+                    sign_extend(v, bitend - bitstart)
+                } else {
+                    zero_extend(v, bitend - bitstart)
+                }
             }
             Expr::Ctx { sign, startbit, endbit, startbyte, endbyte, shift } => {
                 let mut res: u64 = 0;
@@ -792,7 +895,11 @@ impl Sleigh {
                     b += n;
                 }
                 let v = (res as i64) >> shift;
-                if *sign { sign_extend(v, endbit - startbit) } else { zero_extend(v, endbit - startbit) }
+                if *sign {
+                    sign_extend(v, endbit - startbit)
+                } else {
+                    zero_extend(v, endbit - startbit)
+                }
             }
             Expr::Const(v) => *v,
             Expr::Operand { index, table, ct } => self.eval_operand(*index, *table, *ct, p, point)?,
@@ -857,9 +964,11 @@ impl Sleigh {
     /// Value of a symbol's pattern expression (TripleSymbol::getPatternExpression()->getValue).
     fn sym_value(&self, sym: usize, p: &Parse, point: u32, off: u32) -> Result<i64> {
         match &self.syms[sym].kind {
-            Kind::Value(x) | Kind::ValueMap(x, _) | Kind::Name(x, _) | Kind::VarList(x, _) | Kind::Context { exp: x, .. } => {
-                self.eval(x, p, point, off)
-            }
+            Kind::Value(x)
+            | Kind::ValueMap(x, _)
+            | Kind::Name(x, _)
+            | Kind::VarList(x, _)
+            | Kind::Context { exp: x, .. } => self.eval(x, p, point, off),
             Kind::Epsilon | Kind::Varnode { .. } => Ok(0),
             Kind::Start => Ok(p.addr as i64),
             Kind::End => Ok(p.naddr as i64),
@@ -1072,9 +1181,13 @@ impl Sleigh {
     fn sym_handle(&self, sym: usize, p: &Parse, point: u32) -> Result<Handle> {
         let off = p.states[point as usize].offset;
         Ok(match &self.syms[sym].kind {
-            Kind::Value(x) | Kind::Name(x, _) | Kind::Context { exp: x, .. } => const_handle(self.eval(x, p, point, off)? as u64),
+            Kind::Value(x) | Kind::Name(x, _) | Kind::Context { exp: x, .. } => {
+                const_handle(self.eval(x, p, point, off)? as u64)
+            }
             Kind::ValueMap(x, t) => const_handle(t[self.table_index(x, t.len(), p, point)?] as u64),
-            Kind::Varnode { space, off, size } => Handle { space: *space, size: *size, offset_offset: *off, ..Handle::default() },
+            Kind::Varnode { space, off, size } => {
+                Handle { space: *space, size: *size, offset_offset: *off, ..Handle::default() }
+            }
             Kind::VarList(x, t) => match t[self.table_index(x, t.len(), p, point)?].map(|v| &self.syms[v].kind) {
                 Some(Kind::Varnode { space, off, size }) => {
                     Handle { space: *space, size: *size, offset_offset: *off, ..Handle::default() }
@@ -1113,7 +1226,13 @@ impl Sleigh {
                 let dynamic = h.offset_space != NONE;
                 match sel {
                     0 => (if dynamic { h.temp_space } else { h.space }) as u64,
-                    1 => if dynamic { h.temp_offset } else { h.offset_offset },
+                    1 => {
+                        if dynamic {
+                            h.temp_offset
+                        } else {
+                            h.offset_offset
+                        }
+                    }
                     2 => h.size as u64,
                     _ => {
                         let v = if dynamic { h.temp_offset } else { h.offset_offset };
@@ -1218,7 +1337,14 @@ impl Sleigh {
 
     // ------------------------------------------------------------ printing
 
-    fn print_pieces(&self, ct: usize, range: std::ops::Range<usize>, p: &Parse, point: u32, out: &mut String) -> Result<()> {
+    fn print_pieces(
+        &self,
+        ct: usize,
+        range: std::ops::Range<usize>,
+        p: &Parse,
+        point: u32,
+        out: &mut String,
+    ) -> Result<()> {
         for piece in &self.ctors[ct].pieces[range] {
             match piece {
                 Piece::Lit(s) => out.push_str(s),
@@ -1344,7 +1470,12 @@ impl Sleigh {
         let c = &self.ctors[ct];
         let order: Vec<usize> = match c.firstws {
             -1 => vec![],
-            w => c.pieces.iter().skip(w as usize + 1).filter_map(|x| if let Piece::Op(i) = x { Some(*i) } else { None }).collect(),
+            w => c
+                .pieces
+                .iter()
+                .skip(w as usize + 1)
+                .filter_map(|x| if let Piece::Op(i) = x { Some(*i) } else { None })
+                .collect(),
         };
         let root = &self.ctors[p.states[0].ct];
         let mut ops = Vec::new();
@@ -1391,7 +1522,11 @@ impl Sleigh {
                 None
             }
             Some(t) => match &self.syms[t].kind {
-                Kind::Value(x) | Kind::ValueMap(x, _) | Kind::Name(x, _) | Kind::VarList(x, _) | Kind::Context { exp: x, .. } => Some(x),
+                Kind::Value(x)
+                | Kind::ValueMap(x, _)
+                | Kind::Name(x, _)
+                | Kind::VarList(x, _)
+                | Kind::Context { exp: x, .. } => Some(x),
                 _ => None,
             },
             None => op.defexp.as_ref(),
@@ -1454,7 +1589,7 @@ impl Sleigh {
                         out.extend(names[i].chars().map(|_| None));
                     }
                 }
-                Kind::Operand(_) | Kind::Subtable { .. } | Kind::None | Kind::UserOp => {}
+                Kind::Operand(_) | Kind::Subtable { .. } | Kind::None | Kind::UserOp(_) => {}
                 _ => out.push(Some(st.hand)),
             },
             None => {
@@ -1516,12 +1651,17 @@ impl Sleigh {
     fn fid_obj(&self, h: &Handle) -> Option<FidObj> {
         let name = self.spaces.get(h.space as usize).map(|s| s.name.as_str());
         if h.space == CONST_SPACE {
-            let size = [h.size, h.offset_size, self.spaces[self.code_space as usize].size].into_iter().find(|&s| s != 0).unwrap();
+            let size = [h.size, h.offset_size, self.spaces[self.code_space as usize].size]
+                .into_iter()
+                .find(|&s| s != 0)
+                .unwrap();
             let v = h.offset_offset as i64;
             return Some(FidObj::Scalar(if size >= 8 { v } else { sign_extend(v, 8 * size as i32 - 1) }));
         }
         match name {
-            Some("register") => self.regnames.get(&(h.space, h.offset_offset, h.size)).map(|_| FidObj::Reg(h.offset_offset)),
+            Some("register") => {
+                self.regnames.get(&(h.space, h.offset_offset, h.size)).map(|_| FidObj::Reg(h.offset_offset))
+            }
             Some(_) if h.space == self.code_space => {
                 if h.offset_space == NONE {
                     Some(FidObj::Addr)
@@ -1553,7 +1693,8 @@ impl Sleigh {
         b.build(t, -1, 0)?;
         for &i in &b.label_refs {
             let vn = &mut b.ops[i].ins[0];
-            let target = *b.labels.get(vn.offset as usize).filter(|&&l| l != NONE).ok_or("reference to missing sleigh label")?;
+            let target =
+                *b.labels.get(vn.offset as usize).filter(|&&l| l != NONE).ok_or("reference to missing sleigh label")?;
             vn.offset = (target as u64).wrapping_sub(i as u64) & calc_mask(vn.size);
         }
         Ok(b.ops)
@@ -1572,6 +1713,22 @@ impl Sleigh {
             })
             .collect();
         (reg, list)
+    }
+
+    /// Every varnode symbol (registers): (name, space, offset, size).
+    pub fn varnode_syms(&self) -> Vec<(&str, u32, u64, u32)> {
+        self.syms
+            .iter()
+            .filter_map(|s| match s.kind {
+                Kind::Varnode { space, off, size } => Some((s.name.as_str(), space, off, size)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The name of user-defined p-code op `index` (CALLOTHER's first input).
+    pub fn userop_name(&self, index: u64) -> Option<&str> {
+        self.syms.iter().find(|s| matches!(s.kind, Kind::UserOp(i) if i as u64 == index)).map(|s| s.name.as_str())
     }
 
     pub fn fmt_varnode(&self, v: &Varnode) -> String {
