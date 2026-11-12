@@ -35,6 +35,13 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
 - `build-sla.sh`: builds Ghidra's SLEIGH compiler and compiles `x86-64.sla` and `x86.sla`.
 - `tools/sleigh_ref.cc`: a reference disassembler on Ghidra's C++ engine, printing in the
   same format, used to verify the Rust port.
+- `ghidra-rs/src/console.rs`: the milestone 3 harness: the decompiler prelude, the Rust side of
+  Ghidra's console decompiler (`decompile -i`) and the datatest runner (port of
+  `testfunction.cc`). See "Decompiler harness (Milestone 3, stage S0)" below.
+- `ghidra-rs/tests/console.rs`: console commands not ported yet fail; a datatest XML parses.
+- `tools/decomp-ref.sh`, `tools/decomp-ref.patch`: build the reference decompiler `decomp_dbg`.
+- `tools/decomp-diff.sh`: runs a corpus on both decompilers and compares.
+- `tools/decomp-corpus.sh`, `tools/corpus/m8.txt`, `tools/corpus/m500.txt`: the mercs2 corpora.
 
 ## Build
 
@@ -100,7 +107,7 @@ Varnodes print as a register name when one matches exactly, `0x5:4` for constant
 
 ```sh
 ghidra-rs analyze <pe32> [--functions <csv>] [--gaps <csv>] [--abi-callers <register_abi.csv> <out.csv> [--data-pointers]]
-                         [--seeds <csv> | --functions-from <csv>]... [--sla <file>]
+                         [--decomp-prelude <out>] [--seeds <csv> | --functions-from <csv>]... [--sla <file>]
 ```
 
 Analyzes a 32-bit x86 PE and writes the files of three headless Ghidra scripts of the mercs2
@@ -450,6 +457,62 @@ whole-function propagation). Before 2026-11-11 the check took 38 s on one
 thread: each walk step copied and hashed the whole live set (a set of `String`s) to detect
 revisits; live keys are now inline (`Key`) and a walk numbers each distinct live set once. The
 script's own run time in Ghidra was not measured here.
+
+## Decompiler harness (Milestone 3, stage S0)
+
+The decompiler is checked stage by stage against Ghidra's C++ console decompiler `decomp_dbg`
+(plan: `docs/plans/m3-decompiler.md`). Nothing of the decompiler is ported yet: this is the
+harness the stages are measured with.
+
+```sh
+rust/tools/decomp-ref.sh                       # builds rust/target/decomp-build/{decomp_dbg,decomp_test_dbg}
+ghidra-rs analyze <pe32> --decomp-prelude <out> # the shared prelude (also built by decomp-diff.sh)
+ghidra-rs decompile -i <script>                # the Rust console, same scripts as decomp_dbg -i
+ghidra-rs datatest [--ref <decomp_dbg>] <test.xml|dir>...
+rust/tools/decomp-diff.sh m8|m500|<address file>|d
+rust/tools/decomp-diff.sh --script <file>      # one script on both engines, full diff
+```
+
+- `decomp-ref.sh` copies the C++ sources into `rust/target/decomp-build` (the upstream tree is
+  not touched), applies `tools/decomp-ref.patch` and builds both programs. The patch adds the
+  data-type (`<type>`) and the high variable (`{hN}`) to each varnode of `print raw` when the
+  environment variable `DECOMP_RAW_EXTRA` is set; without it the output is upstream's. Run
+  `decomp_dbg` by absolute path with `SLEIGHHOME=<repository root>`.
+- `--decomp-prelude` writes console commands both engines `source` before a function:
+  `option readonly on`, `readonly` over `.rdata` (so `.rdata` constants such as floats fold
+  instead of printing as `fRam...`), for each IAT slot a `nocode` function named after the
+  import plus `map externalref` from the slot to it (so `CALL [slot]` calls the import instead
+  of decoding the bound address in the slot, which made 0x40a110 fail), and `map function` for
+  every function with its FID or export name. For mercs2: 30,262 `map function` lines (1,022 of
+  them import slots), 1,022 `map externalref`.
+- `decompile -i` reads `load file`, `source`, `map function`, `map externalref`, `readonly`,
+  `option`, `load function`, `load addr`, `break start` and `quit`, and echoes them as
+  `decomp_dbg -i` does. `decompile`, `continue`, `print raw|C|tree block` and `parse line` fail
+  with "not implemented in ghidra-rs yet (milestone 3, stage S1a ...)"; any other command fails
+  with "not implemented in ghidra-rs".
+- `datatest` is the port of `testfunction.cc`: it reads an upstream XML test (`<script>`,
+  `<stringmatch>` regexes with `min`/`max`) and checks the script's bulk output. With `--ref` it
+  runs the script on `decomp_dbg` (needs `SLEIGHHOME`); without, on the Rust console, which
+  cannot load a test's `<binaryimage>` yet, so every file is reported "not run".
+- `decomp-diff.sh <corpus>` writes one script per function (`load file`, `source` the prelude,
+  `OPTIONS`, `load function <name>`, `break start $BREAK`, `decompile`, `$PRINT`, `quit`) and both
+  outputs under `rust/target/decomp-check/<corpus>/`, then prints the functions the reference
+  could not decompile, the first differing line of each mismatch and `identical N / M`.
+  Corpus `d` runs the datatests on both engines.
+- Corpora: `tools/corpus/m8.txt` (the plan's eight hand-picked mercs2 functions; the switch
+  function is 0x4042e0, byte table read at 0x4043d5 and jump table at 0x4043dc; the vtable call
+  at 0x73b4d1 is in 0x73a340) and `tools/corpus/m500.txt` (500 `.text` functions of mercs2
+  `build/functions.csv`, drawn by `tools/decomp-corpus.sh` with seed 20261112; the script
+  reproduces the list).
+
+Results on 2026-11-12 (branch `m3-s0`):
+
+| check | reference | ghidra-rs |
+|---|---|---|
+| `decomp_test_dbg ... datatests` | 665 / 665 checks in 77 files; 16 non-x86 files lack a `.sla` | – |
+| corpus d (`ghidra-rs datatest`) | 665 / 665 checks; 16 files not run (non-x86) | 0 checks run; 93 files not run (not ported) |
+| corpus m8 | decompiles 8 / 8 | identical 0 / 8 (`decompile` not ported) |
+| corpus m500 | decompiles 500 / 500 | identical 0 / 500 |
 
 ## Speed
 

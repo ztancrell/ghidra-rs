@@ -78,6 +78,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    0x73b4d1 resolves.
 3. Decompilation: a Rust decompiler, checked against Ghidra's C++ one.
    Plan: `docs/plans/m3-decompiler.md` (stages, reference checks, decisions).
+   S0 (harness) done on branch `m3-s0`: the reference `decomp_dbg` builds with the `print raw`
+   patch and passes all 665 datatest checks, also through our runner (`ghidra-rs datatest`);
+   the prelude (`analyze --decomp-prelude`) lets it decompile all of corpus M8; `ghidra-rs
+   decompile -i` runs the same scripts and stops at `decompile` (not ported: identical 0 / 8).
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.

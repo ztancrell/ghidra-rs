@@ -8,3 +8,4 @@ license = "Apache-2.0"
 [dependencies]
 object = { version = "0.36", default-features = false, features = ["read", "std"] }
 flate2 = "1"
+regex-lite = "0.1"
