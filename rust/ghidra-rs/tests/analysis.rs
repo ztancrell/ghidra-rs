@@ -138,6 +138,15 @@ fn vtable_call_through_symbolic_store_x86_32() {
     let an = Analysis::run(&img, &sl, &[0x401000], true).unwrap();
     assert!(an.insns[&0x40100c].refs.contains(&0x402004));
     assert_eq!(an.insns[&0x40100f].computed, Some(0x401020));
+
+    // With 0x401020 a function, ExportFunctions counts the computed call (callees, callers).
+    let mut an = Analysis::run(&img, &sl, &[0x401000, 0x401020], true).unwrap();
+    an.propagate(&img, &sl);
+    let mut out = Vec::new();
+    export_functions(&img, &an, &Default::default(), &mut out).unwrap();
+    let rows = String::from_utf8(out).unwrap();
+    assert!(rows.contains("0x00401000,18,\"\",0,0,\"\",0,1,0,"), "{rows}");
+    assert!(rows.contains("0x00401020,3,\"\",0,0,\"\",0,0,1,0"), "{rows}");
 }
 
 // Whole-function constant propagation: a vtable stored to the stack must survive a call to a

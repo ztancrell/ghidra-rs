@@ -150,6 +150,12 @@ pub fn export_functions(
     out: &mut dyn Write,
 ) -> std::io::Result<usize> {
     let owner = containing(an);
+    // getCalledFunctions counts every call reference to a function entry, so also the
+    // COMPUTED_CALL of an indirect call whose target constant propagation found.
+    let callee = |i: &crate::analysis::Ins| {
+        an.call_target(img, i)
+            .or(i.computed.filter(|t| i.flow == crate::analysis::Flow::CallInd && an.funcs.contains(t)))
+    };
     // vftable slots -> class; a walk stops at the next labelled or referenced slot
     let tables = vftables(img);
     let mut labelled: HashSet<u32> = an.insns.values().flat_map(|i| i.refs.iter().copied()).collect();
@@ -187,7 +193,7 @@ pub fn export_functions(
         if i.refs.iter().any(|r| lua_strings.contains(r)) {
             lua.insert(f);
         }
-        if let Some(t) = an.call_target(img, i) {
+        if let Some(t) = callee(i) {
             callers.entry(t).or_default().insert(f);
         }
     }
@@ -199,8 +205,9 @@ pub fn export_functions(
             continue;
         }
         let callees: HashSet<u32> =
-            body.iter().filter_map(|a| an.call_target(img, &an.insns[a])).collect();
-        let data_refs: usize = body.iter().map(|a| an.insns[a].refs.len()).sum();
+            body.iter().filter_map(|a| callee(&an.insns[a])).collect();
+        // Ghidra's references to code constants (`PUSH offset callback`) are data references too
+        let data_refs: usize = body.iter().map(|a| an.insns[a].refs.len() + an.insns[a].code_imms.len()).sum();
         let name = match (exports.get(&f), fid.get(&f)) {
             (Some(s), _) => demangle(s),
             (None, Some(a)) if a.conflict => a.name.clone(),

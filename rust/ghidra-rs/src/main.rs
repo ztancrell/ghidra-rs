@@ -185,6 +185,11 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
             .filter(|a| !an.insns.contains_key(a))
             .collect();
         an.disassemble(&img, &sl, &entries, true);
+    } else if functions.is_some() {
+        // Ghidra's ConstantPropagationAnalyzer, which `disassemble` above runs too: its
+        // references and computed calls count in `callees`, `callers` and `data_refs`. It
+        // leaves the bodies, so --gaps does not need it.
+        an.propagate(&img, &sl);
     }
     eprintln!(
         "analyzed {} instructions, {} functions ({} imports) in {:.1}s",

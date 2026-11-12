@@ -60,8 +60,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    hasher, Ghidra's `.fidbf` databases read in place, matching and naming): of Ghidra's 26 FID
    functions in mercs2's `.text`, 24 get the same name, 2 another, none missing (details in
    `rust/README.md`). On branch `constprop`: Ghidra's constant propagation
-   (`Analysis::propagate`, whole-function walks with callee purges), used by `--abi-callers`
-   only so far. Not done yet: constant propagation for `--functions` (its `callees`/`data_refs`).
+   (`Analysis::propagate`, whole-function walks with callee purges), used by `--abi-callers`.
+   On branch `constprop-functions`: it also feeds `--functions` (computed calls in
+   `callees`/`callers`, code constants in `data_refs`): against the fresh ExportFunctions
+   export, `callees` 97.2% (94.6% before), `callers` 97.5% (97.2%), `data_refs` 89.9% (83.1%).
 2b. CheckAbiCallers.java (register liveness over p-code), the mercs2 pipeline's per-batch
    check: `ghidra-rs analyze --abi-callers`. On branch `m2b-abi-callers`: 96.5% of the
    reference rows identical. On branch `abi-dropin` (a drop-in for the script, judged by the

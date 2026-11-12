@@ -25,7 +25,7 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   code pointer hidden as two XORed dwords (`MOV EDI,[a]; XOR EDI,[b]; PUSH EDI`); a call through
   an object's vtable, resolved through a value stored via a symbolic register; whole-function
   propagation, where a vtable stored to the stack survives a call to a `RET 4` function and a
-  join.
+  join; ExportFunctions counting a computed call in `callees` and `callers`.
 - `ghidra-rs/src/fid.rs`: Function ID: the FID hasher, a reader for Ghidra's `.fidbf`
   databases, and FID's matching and naming.
 - `ghidra-rs/tests/fid.rs`: the FID hash of a known CRT function, and its record in Ghidra's
@@ -152,36 +152,39 @@ What discovery does, after Ghidra's analyzers:
   its IAT in `.rdata` and the directory in `.securom`);
 - `callees`/`callers` count, like Ghidra's `getCalledFunctions`: direct CALLs, JMPs to a
   function entry, `CALL [slot]` through an import slot (one callee per slot) and
-  `CALL [global]` whose initial value is a function entry;
+  `CALL [global]` whose initial value is a function entry, and indirect calls whose target
+  constant propagation finds (Ghidra's `COMPUTED_CALL` references);
 - non-returning functions: known imports (ExitProcess, exit, abort, ...), functions whose
   body has no return, and `JMP [slot]` thunks to non-returning imports; calls to them end the
   flow;
 - REP string instructions fall through (their p-code branches to themselves);
-- data references: direct memory operands, and immediates that point into a non-executable
-  section.
+- data references (`data_refs`): direct memory operands, immediates that point into a
+  non-executable section, and code constants (immediates and computed values that point into
+  an executable section, e.g. `PUSH offset callback`), as found by constant propagation
+  (`Analysis::propagate`, Ghidra's ConstantPropagationAnalyzer, which `--functions` runs).
 
 ### Match against Ghidra (Mercenaries2.analysis.exe)
 
-Compared on 2026-11-11 (7.4 MB `.text`). The `--functions-from` reference is a fresh
-ExportFunctions/ExportGaps run on the current mercs2 analysis project (37,635 functions, after
-ClearFalseNoReturn and AddRelocatedEntries); the pipeline's `build/functions*.csv` from
-2026-10-14 predate those steps. Column rates are over the functions both sides have.
+Compared on 2026-11-12 (7.4 MB `.text`), with constant propagation feeding `callees`,
+`callers` and `data_refs` (before it, from master 30a12f881a, in brackets). The
+`--functions-from` reference is a fresh ExportFunctions/ExportGaps run on the current mercs2
+analysis project (37,635 functions, after ClearFalseNoReturn and AddRelocatedEntries); the
+pipeline's `build/functions*.csv` from 2026-10-14 predate those steps. Column rates are over the functions both sides have.
 
 | run | reference | functions | size | callees | callers | data_refs | gaps rows |
 |---|---|---|---|---|---|---|---|
-| plain discovery | `functions-analysis.csv` (import only, 23,323) | 22,388 common, 935 missing, 365 extra | 95.7% | 87.6% | 88.4% | 76.3% | (no reference) |
-| `--functions-from` fresh export | fresh export (functions and gaps) | 37,633 of 37,635 | 99.1% | 94.6% | 97.2% | 82.9% | 39,243 of 39,557 identical (ours: 39,368 rows) |
+| plain discovery | `functions-analysis.csv` (import only, 23,323) | 22,388 common, 935 missing, 365 extra | 95.7% | 87.7% (87.6%) | 88.5% (88.4%) | 87.6% (80.4%) | (no reference) |
+| `--functions-from` fresh export | fresh export (functions and gaps) | 37,633 of 37,635 | 99.1% | 97.2% (94.6%) | 97.5% (97.2%) | 89.9% (83.1%) | 39,243 of 39,557 identical (ours: 39,368 rows) |
 
 `name`, `exported`, `vtable_class` and `lua` match on 99.9% or more of the rows; `fid` is
 always 0. Superseded (branch `fid`): `fid` and the library names come from Function ID, see
 below.
 
 Known differences:
-- Indirect calls and memory operands that Ghidra resolves by constant propagation (`CALL EDX`
-  after `MOV EDX,[vtable+n]`, `[ESI+n]` with known ESI) are resolved only by the local fold
-  here: fewer `callees` and `data_refs`. The whole-function propagation (see CheckAbiCallers
-  below) runs only with `--abi-callers`, so these rates are unchanged by it. Calls it resolves
-  are not counted as `callees`.
+- Constant propagation still differs from Ghidra's in places (see CheckAbiCallers below):
+  with `--functions-from`, `data_refs` is lower than Ghidra's on 2,251 rows and higher on
+  1,556; `callees` lower on 444 and higher on 603. Counting the propagation fixed 2,630
+  `data_refs` rows and broke 87 (e.g. SecuROM-split bodies such as 0x407960).
 - Ghidra leaves some JMPs to a function entry as jumps (e.g. 0x72cc00 -> 0x4ddaab, a target
   recovered after auto-analysis); ghidra-rs counts every one as a call, which matches Ghidra
   on more rows than counting none.
@@ -193,9 +196,10 @@ Known differences:
   keeps the first decode and drops the entry.
 
 Time on the same machine: ghidra-rs `analyze` takes about 9.5 s wall (8.3 s analysis, one
-thread). Ghidra's auto-analysis of the same game (`Mercenaries2.exe`, mercs2
-`build/ghidra-import.log`) took 723 s, before the post-scripts. Function ID adds about 3 s
-(see below).
+thread), measured before `--functions` ran the whole-function propagation, which adds about
+1.5 s on 12 threads (10.5 s to 12.1 s analysis with `--functions-from`). Ghidra's
+auto-analysis of the same game (`Mercenaries2.exe`, mercs2 `build/ghidra-import.log`) took
+723 s, before the post-scripts. Function ID adds about 3 s (see below).
 
 ### Function ID
 
