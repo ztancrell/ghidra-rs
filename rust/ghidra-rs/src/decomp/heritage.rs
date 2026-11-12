@@ -18,20 +18,32 @@ use super::op::{OpFlags, OpId};
 use super::opcode::Opcode;
 use super::varnode::{overlap, Space, VarnodeId, VnFlags};
 use super::{err, Arch, Funcdata, Result};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
-/// `MemRange::new_addresses`: the range holds storage not heritaged before.
-const NEW_ADDRESSES: u8 = 1;
-/// `MemRange::old_addresses`: the range holds storage heritaged in an earlier pass.
-const OLD_ADDRESSES: u8 = 2;
+/// The marks phi placement keeps per block (`Heritage::boundary_node`, `mark_node`,
+/// `merged_node`).
+#[derive(Debug, Clone, Copy, Default)]
+struct NodeMarks {
+    /// a boundary node of the augmented dominator tree
+    boundary: bool,
+    /// queued (or visited) for the current range
+    mark: bool,
+    /// in the merge list for the current range
+    merged: bool,
+}
 
-/// `Heritage::boundary_node`, `mark_node`, `merged_node`.
-const BOUNDARY_NODE: u8 = 1;
-const MARK_NODE: u8 = 2;
-const MERGED_NODE: u8 = 4;
-
-/// Offsets are 32 bits wide in the x86-32 spaces (`AddrSpace::wrapOffset`).
-const OFFSET_MASK: u64 = 0xffff_ffff;
+/// The offset mask of a SLEIGH space (`AddrSpace::wrapOffset`), from its address size.
+fn space_mask(arch: &Arch, space: Space) -> u64 {
+    let size = match space {
+        Space::Sleigh(i) => arch.sleigh.spaces.get(i as usize).map_or(8, |s| s.size),
+        _ => 8,
+    };
+    if size >= 8 {
+        u64::MAX
+    } else {
+        (1u64 << (8 * size)) - 1
+    }
+}
 
 /// Port of `MemRange`: one range of storage to link this pass.
 #[derive(Debug, Clone, Copy)]
@@ -39,7 +51,12 @@ struct MemRange {
     space: Space,
     off: u64,
     size: u32,
-    flags: u8,
+    /// the space's offset mask
+    mask: u64,
+    /// `new_addresses`: holds storage not heritaged before
+    new_addresses: bool,
+    /// `old_addresses`: holds storage heritaged in an earlier pass
+    old_addresses: bool,
 }
 
 /// Port of `LocationMap`: the disjoint ranges heritaged so far and the pass each was first
@@ -67,16 +84,16 @@ impl LocationMap {
     ///
     /// Kept from the C++: when no element starts before the range and the first one starts
     /// after its start, the first element is skipped even if the range overlaps it.
-    fn add(&mut self, space: Space, mut off: u64, mut size: u32, mut pass: i32) -> (u64, u32, Intersect) {
+    fn add(&mut self, space: Space, mask: u64, mut off: u64, mut size: u32, mut pass: i32) -> (u64, u32, Intersect) {
         let s = space.index();
         let lower = self.map.partition_point(|e| (e.0, e.1) < (s, off));
         let mut at = lower.saturating_sub(1);
-        if self.map.get(at).is_some_and(|e| overlap(space, off, Space::Sleigh(e.0), e.1, e.2).is_none()) {
+        if self.map.get(at).is_some_and(|e| overlap(space, off, Space::Sleigh(e.0), e.1, e.2, mask).is_none()) {
             at += 1;
         }
         let mut intersect = Intersect::New;
         if let Some(&(es, eoff, esize, epass)) = self.map.get(at) {
-            if let Some(w) = overlap(space, off, Space::Sleigh(es), eoff, esize) {
+            if let Some(w) = overlap(space, off, Space::Sleigh(es), eoff, esize, mask) {
                 if w + size <= esize {
                     let i = if epass < pass { Intersect::Old } else { Intersect::New };
                     return (eoff, esize, i);
@@ -91,7 +108,7 @@ impl LocationMap {
             }
         }
         while let Some(&(es, eoff, esize, epass)) = self.map.get(at) {
-            let Some(w) = overlap(Space::Sleigh(es), eoff, space, off, size) else { break };
+            let Some(w) = overlap(Space::Sleigh(es), eoff, space, off, size, mask) else { break };
             size = size.max(w + esize);
             if epass < pass {
                 intersect = Intersect::Partial;
@@ -107,11 +124,11 @@ impl LocationMap {
     }
 
     /// Port of `LocationMap::find`, returning the element's position.
-    fn find(&self, space: Space, off: u64) -> Option<usize> {
+    fn find(&self, space: Space, mask: u64, off: u64) -> Option<usize> {
         let s = space.index();
         let at = self.map.partition_point(|e| (e.0, e.1) <= (s, off)).checked_sub(1)?;
         let e = self.map[at];
-        overlap(space, off, Space::Sleigh(e.0), e.1, e.2).map(|_| at)
+        overlap(space, off, Space::Sleigh(e.0), e.1, e.2, mask).map(|_| at)
     }
 }
 
@@ -123,9 +140,10 @@ struct PriorityQueue {
 }
 
 impl PriorityQueue {
+    /// Empty the stacks (keeping their storage) and make one per depth up to `maxdepth`.
     fn reset(&mut self, maxdepth: i32) {
-        self.queue.clear();
-        self.queue.resize(maxdepth as usize + 1, Vec::new());
+        self.queue.iter_mut().for_each(Vec::clear);
+        self.queue.resize_with(usize::try_from(maxdepth).unwrap_or(0) + 1, Vec::new);
         self.curdepth = -1;
     }
     fn insert(&mut self, bl: usize, depth: i32) {
@@ -162,7 +180,8 @@ pub(crate) struct Heritage {
     domchild: Vec<Vec<usize>>,
     /// by block index: the blocks of the augmented dominator tree (`augment`)
     augment: Vec<Vec<usize>>,
-    flags: Vec<u8>,
+    /// by block index
+    marks: Vec<NodeMarks>,
     depth: Vec<i32>,
     /// the dominator tree's depth; -1 until it is built (`maxdepth`)
     maxdepth: i32,
@@ -178,7 +197,7 @@ impl Default for Heritage {
             disjoint: Vec::new(),
             domchild: Vec::new(),
             augment: Vec::new(),
-            flags: Vec::new(),
+            marks: Vec::new(),
             depth: Vec::new(),
             maxdepth: -1,
             merge: Vec::new(),
@@ -187,19 +206,9 @@ impl Default for Heritage {
     }
 }
 
-/// The heritage delay of a SLEIGH space (`AddrSpace::getDelay`), or `None` when it is not
-/// heritaged: SLEIGH gives register spaces 0 and other processor spaces 1; `unique` is 0;
-/// `const` and `OTHER` are not heritaged.
-fn space_delay(name: &str) -> Option<i32> {
-    match name {
-        "const" | "OTHER" => None,
-        "register" | "unique" => Some(0),
-        _ => Some(1),
-    }
-}
-
 /// Port of `Funcdata::opHeritage` (`Heritage::heritage`): one heritage pass.
 pub(crate) fn heritage(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
+    fd.build_loc();
     if fd.heritage.maxdepth == -1 {
         build_adt(fd);
     }
@@ -207,7 +216,8 @@ pub(crate) fn heritage(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
     // no <prefersplit> ranges
     let pass = fd.heritage.pass;
     for (i, sp) in arch.sleigh.spaces.iter().enumerate() {
-        let Some(delay) = space_delay(&sp.name) else { continue };
+        // the space's heritage delay from the .sla (`AddrSpace::getDelay`), none if not heritaged
+        let Some(delay) = sp.delay else { continue };
         if pass < delay {
             continue;
         }
@@ -219,7 +229,8 @@ pub(crate) fn heritage(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
         }
         // the register and unique spaces hold no stack pointer (discoverIndexedStackPointers)
         // and no call placeholders
-        add_space_ranges(fd, Space::Sleigh(i as u32));
+        let space = Space::Sleigh(i as u32);
+        add_space_ranges(fd, space, space_mask(arch, space));
     }
     if !fd.heritage.disjoint.is_empty() {
         place_multiequals(fd, arch)?;
@@ -232,39 +243,42 @@ pub(crate) fn heritage(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
 
 /// The space loop of `Heritage::heritage`: every varnode of the space that is read, written or
 /// an input joins a disjoint range to link.
-fn add_space_ranges(fd: &mut Funcdata, space: Space) {
+fn add_space_ranges(fd: &mut Funcdata, space: Space, mask: u64) {
     let pass = fd.heritage.pass;
     for vn in fd.loc_range(space, 0, None) {
         let v = fd.vn(vn);
-        if v.def.is_none() && v.descend.is_empty() && !v.has(VnFlags::UNAFFECTED) && !v.input {
+        if v.def.is_none() && v.descend.is_empty() && !v.has(VnFlags::UNAFFECTED) && !v.is_input() {
             continue;
         }
         if v.has(VnFlags::WRITEMASK) {
             continue;
         }
         let (known, nodescend) = (v.is_heritage_known(), v.descend.is_empty());
-        let (off, size, intersect) = fd.heritage.globaldisjoint.add(space, v.offset, v.size, pass);
-        let flags = match intersect {
-            Intersect::New => NEW_ADDRESSES,
+        let (off, size, intersect) = fd.heritage.globaldisjoint.add(space, mask, v.offset, v.size, pass);
+        // (new, old) addresses
+        let (new_addresses, old_addresses) = match intersect {
+            Intersect::New => (true, false),
             // no dead code has been removed before the first passes, so no warning
             Intersect::Old if known || nodescend => continue,
-            Intersect::Old => OLD_ADDRESSES,
-            Intersect::Partial => OLD_ADDRESSES | NEW_ADDRESSES,
+            Intersect::Old => (false, true),
+            Intersect::Partial => (true, true),
         };
-        task_add(&mut fd.heritage.disjoint, space, off, size, flags);
+        let range = MemRange { space, off, size, mask, new_addresses, old_addresses };
+        task_add(&mut fd.heritage.disjoint, range);
     }
 }
 
 /// Port of `TaskList::add`: ranges come sorted; one overlapping the last is merged into it.
-fn task_add(list: &mut Vec<MemRange>, space: Space, off: u64, size: u32, flags: u8) {
+fn task_add(list: &mut Vec<MemRange>, r: MemRange) {
     if let Some(last) = list.last_mut() {
-        if let Some(over) = overlap(space, off, last.space, last.off, last.size) {
-            last.size = last.size.max(size + over);
-            last.flags |= flags;
+        if let Some(over) = overlap(r.space, r.off, last.space, last.off, last.size, r.mask) {
+            last.size = last.size.max(r.size + over);
+            last.new_addresses |= r.new_addresses;
+            last.old_addresses |= r.old_addresses;
             return;
         }
     }
-    list.push(MemRange { space, off, size, flags });
+    list.push(r);
 }
 
 /// Port of `Heritage::buildADT`: the dominator tree, each block's depth in it, and the
@@ -281,7 +295,7 @@ fn build_adt(fd: &mut Funcdata) {
     let mut t = vec![0i32; size];
     let mut z = vec![0i32; size];
     let mut up: Vec<(usize, usize)> = Vec::new();
-    let mut flags = vec![0u8; size];
+    let mut marks = vec![NodeMarks::default(); size];
     for x in 0..size {
         for &v in &domchild[x] {
             for e in &bb.block(bb.list[v]).ins {
@@ -300,7 +314,7 @@ fn build_adt(fd: &mut Funcdata) {
         a[i] = b[i] - t[i] + k;
         z[i] = 1 + l;
         if domchild[i].is_empty() || z[i] > a[i] + 1 {
-            flags[i] |= BOUNDARY_NODE;
+            marks[i].boundary = true;
             z[i] = 1;
         }
     }
@@ -309,7 +323,7 @@ fn build_adt(fd: &mut Funcdata) {
     }
     for i in 1..size {
         let j = idom(i).unwrap_or(0);
-        z[i] = if flags[j] & BOUNDARY_NODE != 0 { j as i32 } else { z[j] };
+        z[i] = if marks[j].boundary { j as i32 } else { z[j] };
     }
     let mut augment = vec![Vec::new(); size];
     for &(u, v) in &up {
@@ -326,7 +340,7 @@ fn build_adt(fd: &mut Funcdata) {
     h.depth = depth;
     h.maxdepth = maxdepth;
     h.augment = augment;
-    h.flags = flags;
+    h.marks = marks;
 }
 
 /// Port of `Heritage::visitIncr`: walk the dominator subtree of `vnode`, adding to the merge
@@ -338,7 +352,7 @@ fn visit_incr(fd: &mut Funcdata, qnode: usize, vnode: usize) {
     while let Some((i, root)) = todo.pop() {
         let bb = &fd.blocks;
         let h = &mut fd.heritage;
-        if !root && h.flags[i] & MARK_NODE != 0 {
+        if !root && h.marks[i].mark {
             continue;
         }
         for &v in &h.augment[i] {
@@ -346,16 +360,16 @@ fn visit_incr(fd: &mut Funcdata, qnode: usize, vnode: usize) {
             if vidom >= qnode as i32 {
                 break;
             }
-            if h.flags[v] & MERGED_NODE == 0 {
+            if !h.marks[v].merged {
                 h.merge.push(v);
-                h.flags[v] |= MERGED_NODE;
+                h.marks[v].merged = true;
             }
-            if h.flags[v] & MARK_NODE == 0 {
-                h.flags[v] |= MARK_NODE;
+            if !h.marks[v].mark {
+                h.marks[v].mark = true;
                 h.pq.insert(v, h.depth[v]);
             }
         }
-        if h.flags[i] & BOUNDARY_NODE == 0 {
+        if !h.marks[i].boundary {
             todo.extend(h.domchild[i].iter().rev().map(|&c| (c, false)));
         }
     }
@@ -371,23 +385,24 @@ fn calc_multiequals(fd: &mut Funcdata, write: &[VarnodeId]) {
         let Some(bl) = fd.vn(w).def.and_then(|d| fd.op(d).parent) else { continue };
         let j = fd.blocks.block(bl).index as usize;
         let h = &mut fd.heritage;
-        if h.flags[j] & MARK_NODE != 0 {
+        if h.marks[j].mark {
             continue;
         }
         h.pq.insert(j, h.depth[j]);
-        h.flags[j] |= MARK_NODE;
+        h.marks[j].mark = true;
     }
     let h = &mut fd.heritage;
-    if h.flags.first().is_some_and(|f| f & MARK_NODE == 0) {
+    if h.marks.first().is_some_and(|m| !m.mark) {
         h.pq.insert(0, h.depth[0]);
-        h.flags[0] |= MARK_NODE;
+        h.marks[0].mark = true;
     }
     while let Some(bl) = fd.heritage.pq.extract() {
         visit_incr(fd, bl, bl);
         // a node is not revisited from deeper ones: visitIncr checks the mark, not the queue
     }
-    for f in &mut fd.heritage.flags {
-        *f &= !(MARK_NODE | MERGED_NODE);
+    for m in &mut fd.heritage.marks {
+        m.mark = false;
+        m.merged = false;
     }
 }
 
@@ -395,7 +410,7 @@ fn calc_multiequals(fd: &mut Funcdata, write: &[VarnodeId]) {
 /// writes, inputs and the markers of an earlier pass to remove. A write by a marker or a
 /// return COPY covering the range means an earlier pass linked it all.
 fn collect(fd: &Funcdata, range: &mut MemRange) -> Collected {
-    let end = (range.off + u64::from(range.size)) & OFFSET_MASK;
+    let end = (range.off + u64::from(range.size)) & range.mask;
     let end = (end >= range.off).then_some(end);
     let mut c = Collected::default();
     for vn in fd.loc_range(range.space, range.off, end) {
@@ -410,13 +425,13 @@ fn collect(fd: &Funcdata, range: &mut MemRange) -> Collected {
                     c.remove.push(vn);
                     continue;
                 }
-                range.flags &= !NEW_ADDRESSES;
+                range.new_addresses = false;
             }
             c.max = c.max.max(v.size);
             c.write.push(vn);
         } else if !v.is_heritage_known() && !v.descend.is_empty() {
             c.read.push(vn);
-        } else if v.input {
+        } else if v.is_input() {
             c.input.push(vn);
         }
     }
@@ -439,7 +454,7 @@ fn place_multiequals(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
         i += 1;
         if c.read.is_empty() {
             let internal = range.space == Space::Sleigh(arch.sleigh.uniq_space());
-            if (c.write.is_empty() && c.input.is_empty()) || internal || range.flags & OLD_ADDRESSES != 0 {
+            if (c.write.is_empty() && c.input.is_empty()) || internal || range.old_addresses {
                 continue;
             }
         }
@@ -523,7 +538,7 @@ fn guard(fd: &mut Funcdata, arch: &Arch, range: &MemRange, c: &mut Collected) ->
         }
         fd.vn_set(*w, VnFlags::ACTIVE_HERITAGE);
     }
-    if range.flags & NEW_ADDRESSES != 0 {
+    if range.new_addresses {
         // the scope gives no properties (addrtied, persist) to register or unique storage, and
         // STOREs and LOADs reach neither space (guardStores, guardLoads)
         guard_calls(fd, arch, range, &mut c.write)?;
@@ -537,7 +552,7 @@ fn guard(fd: &mut Funcdata, arch: &Arch, range: &MemRange, c: &mut Collected) ->
 fn normalize_read_size(fd: &mut Funcdata, vn: VarnodeId, op: OpId, range: &MemRange) -> Result<VarnodeId> {
     let newop = fd.new_op(Opcode::Subpiece, fd.op(op).seq.addr);
     let vn1 = fd.new_varnode(range.size, range.space, range.off);
-    let over = fd.vn(vn).overlap(range.space, range.off, range.size).unwrap_or(0);
+    let over = fd.vn(vn).overlap(range.space, range.off, range.size, range.mask).unwrap_or(0);
     let vn2 = fd.new_constant(4, u64::from(over));
     fd.op_set_input(newop, vn1, 0)?;
     fd.op_set_input(newop, vn2, 1)?;
@@ -588,9 +603,12 @@ fn write_piece(
 /// joined with the rest of the range by PIECE ops into a write of the whole range.
 fn normalize_write_size(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, range: &MemRange) -> Result<VarnodeId> {
     let op = fd.vn(vn).def.ok_or_else(|| super::LowlevelError("normalizeWriteSize: unwritten varnode".into()))?;
-    let over = fd.vn(vn).overlap(range.space, range.off, range.size).unwrap_or(0);
+    let over = fd.vn(vn).overlap(range.space, range.off, range.size, range.mask).unwrap_or(0);
     let vsize = fd.vn(vn).size;
-    let mostsigsize = range.size - (over + vsize);
+    let mostsigsize = range
+        .size
+        .checked_sub(over + vsize)
+        .ok_or_else(|| super::LowlevelError("normalizeWriteSize: write larger than its range".into()))?;
     let mostvn = if mostsigsize != 0 {
         let off = range.off + u64::from(over + vsize);
         Some(write_piece(fd, arch, op, range, off, mostsigsize, u64::from(over + vsize))?)
@@ -630,6 +648,11 @@ fn normalize_write_size(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, range: &M
 /// parameter an extra input of the call.
 fn guard_calls(fd: &mut Funcdata, arch: &Arch, range: &MemRange, write: &mut Vec<VarnodeId>) -> Result<()> {
     let (space, off, size) = (range.space, range.off, range.size);
+    // a call leaves the unique space alone (`lookupEffect`) and no parameter list holds it, so
+    // no call guards it
+    if space == Space::Sleigh(arch.sleigh.uniq_space()) {
+        return Ok(());
+    }
     for i in 0..fd.qlst.len() {
         let c = fd.qlst[i];
         let op = fd.call(c).op;
@@ -652,10 +675,11 @@ fn guard_calls(fd: &mut Funcdata, arch: &Arch, range: &MemRange, write: &mut Vec
                     if effect != Some(EffectKind::KilledByCall) && call.proto.is_auto_killed_by_call(arch) {
                         effect = Some(EffectKind::KilledByCall);
                     }
-                    let active = fd.call_mut(c).active_output.get_or_insert_with(Default::default);
-                    if !active.has_trial(space, off, size) {
-                        active.register_trial(space, off, size);
-                        possibleoutput = true;
+                    if let Some(active) = &mut fd.call_mut(c).active_output {
+                        if !active.has_trial(space, off, size) {
+                            active.register_trial(space, off, size);
+                            possibleoutput = true;
+                        }
                     }
                 }
             }
@@ -664,9 +688,14 @@ fn guard_calls(fd: &mut Funcdata, arch: &Arch, range: &MemRange, write: &mut Vec
         if call.active_input.is_some() {
             match call.proto.characterize_as_input(arch, space, off, size) {
                 Containment::ContainsJustified => {
-                    let active = fd.call_mut(c).active_input.get_or_insert_with(Default::default);
-                    if !active.has_trial(space, off, size) {
-                        active.register_trial(space, off, size);
+                    let fresh = match &mut fd.call_mut(c).active_input {
+                        Some(active) if !active.has_trial(space, off, size) => {
+                            active.register_trial(space, off, size);
+                            true
+                        }
+                        _ => false,
+                    };
+                    if fresh {
                         let vn = fd.new_varnode(size, space, off);
                         fd.vn_set(vn, VnFlags::ACTIVE_HERITAGE);
                         let slot = fd.op(op).ins.len();
@@ -752,8 +781,8 @@ fn insert_point(fd: &Funcdata, insertop: Option<OpId>, after: bool) -> Result<(B
     }
 }
 
-/// Port of `Heritage::concatPieces` (little endian): PIECE ops joining `vnlist` (most
-/// significant first) into `finalvn`, before `insertop` or at the start of the function.
+/// Port of `Heritage::concatPieces` (little endian): PIECE ops joining `vnlist` (least
+/// significant first: each next piece is the more significant input) into `finalvn`, before `insertop` or at the start of the function.
 fn concat_pieces(
     fd: &mut Funcdata,
     arch: &Arch,
@@ -806,21 +835,26 @@ fn split_pieces(
 
 /// Port of `Heritage::splitByRefinement`: new free varnodes covering `vn` along the cut
 /// points of `refine` (empty when it is not cut).
-fn split_by_refinement(fd: &mut Funcdata, vn: VarnodeId, range: &MemRange, refine: &[u32]) -> Vec<VarnodeId> {
+fn split_by_refinement(fd: &mut Funcdata, vn: VarnodeId, range: &MemRange, refine: &[u32]) -> Result<Vec<VarnodeId>> {
     let (space, mut cur, mut sz) = (fd.vn(vn).space, fd.vn(vn).offset, fd.vn(vn).size);
-    let mut cutsz = refine[((cur.wrapping_sub(range.off)) & OFFSET_MASK) as usize];
+    // the piece size at `cur`; every piece starts on a cut point, so it is never 0
+    let cut_at = |cur: u64| match refine.get((cur.wrapping_sub(range.off) & range.mask) as usize) {
+        Some(&c) if c > 0 => Ok(c),
+        _ => err("splitByRefinement: varnode outside its refined range"),
+    };
+    let mut cutsz = cut_at(cur)?;
     if sz <= cutsz {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let mut split = vec![fd.new_varnode(cutsz, space, cur)];
     sz -= cutsz;
     while sz > 0 {
         cur += u64::from(cutsz);
-        cutsz = refine[((cur.wrapping_sub(range.off)) & OFFSET_MASK) as usize].min(sz);
+        cutsz = cut_at(cur)?.min(sz);
         split.push(fd.new_varnode(cutsz, space, cur));
         sz -= cutsz;
     }
-    split
+    Ok(split)
 }
 
 /// Port of `Heritage::remove13Refinement`: a 1-3 or 3-1 split of 4 bytes becomes one piece.
@@ -853,9 +887,13 @@ fn refinement(fd: &mut Funcdata, arch: &Arch, at: usize, c: &Collected) -> Resul
     }
     let mut refine = vec![0u32; size + 1];
     for &vn in c.read.iter().chain(&c.write).chain(&c.input) {
-        let diff = (fd.vn(vn).offset.wrapping_sub(range.off) & OFFSET_MASK) as usize;
+        let diff = (fd.vn(vn).offset.wrapping_sub(range.off) & range.mask) as usize;
+        let end = diff + fd.vn(vn).size as usize;
+        if end > size {
+            return err("refinement: varnode outside its range");
+        }
         refine[diff] = 1;
-        refine[diff + fd.vn(vn).size as usize] = 1;
+        refine[end] = 1;
     }
     refine.pop();
     let mut lastpos = 0;
@@ -877,7 +915,7 @@ fn refinement(fd: &mut Funcdata, arch: &Arch, at: usize, c: &Collected) -> Resul
         refine_write(fd, arch, vn, &range, &refine)?;
     }
     for &vn in &c.input {
-        let pieces = split_by_refinement(fd, vn, &range, &refine);
+        let pieces = split_by_refinement(fd, vn, &range, &refine)?;
         if !pieces.is_empty() {
             let base = fd.vn(vn).offset;
             split_pieces(fd, &pieces, None, base, vn)?;
@@ -887,7 +925,7 @@ fn refinement(fd: &mut Funcdata, arch: &Arch, at: usize, c: &Collected) -> Resul
     // the cover, here and in the global map, takes the pieces
     let h = &mut fd.heritage;
     h.disjoint.remove(at);
-    let cur_pass = match h.globaldisjoint.find(range.space, range.off) {
+    let cur_pass = match h.globaldisjoint.find(range.space, range.mask, range.off) {
         Some(g) => h.globaldisjoint.map.remove(g).3,
         None => h.pass,
     };
@@ -896,8 +934,11 @@ fn refinement(fd: &mut Funcdata, arch: &Arch, at: usize, c: &Collected) -> Resul
     while cut < size {
         let sz = refine[cut];
         let off = range.off + cut as u64;
-        h.disjoint.insert(k, MemRange { space: range.space, off, size: sz, flags: range.flags });
-        h.globaldisjoint.add(range.space, off, sz, cur_pass);
+        if sz == 0 {
+            return err("refinement: empty piece");
+        }
+        h.disjoint.insert(k, MemRange { off, size: sz, ..range });
+        h.globaldisjoint.add(range.space, range.mask, off, sz, cur_pass);
         cut += sz as usize;
         k += 1;
     }
@@ -907,7 +948,7 @@ fn refinement(fd: &mut Funcdata, arch: &Arch, at: usize, c: &Collected) -> Resul
 /// Port of `Heritage::refineRead`: a free read cut by the refinement is rebuilt from its
 /// pieces by PIECE ops into a new unique varnode its reader takes.
 fn refine_read(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, range: &MemRange, refine: &[u32]) -> Result<()> {
-    let pieces = split_by_refinement(fd, vn, range, refine);
+    let pieces = split_by_refinement(fd, vn, range, refine)?;
     if pieces.is_empty() {
         return Ok(());
     }
@@ -926,7 +967,7 @@ fn refine_read(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, range: &MemRange, 
 /// Port of `Heritage::refineWrite`: a write cut by the refinement goes to a new unique varnode,
 /// SUBPIECEs of which define the pieces.
 fn refine_write(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, range: &MemRange, refine: &[u32]) -> Result<()> {
-    let pieces = split_by_refinement(fd, vn, range, refine);
+    let pieces = split_by_refinement(fd, vn, range, refine)?;
     if pieces.is_empty() {
         return Ok(());
     }
@@ -940,20 +981,32 @@ fn refine_write(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, range: &MemRange,
     Ok(())
 }
 
-/// The renaming stacks (`VariableStack`): the live write of each address, last on top.
-type VarStack = HashMap<(Space, u64), Vec<VarnodeId>>;
+/// The renaming stacks (`VariableStack`, a map by address): the live write of each address,
+/// last on top. Keyed by space index and offset; only lookups by key, so the order is free.
+type VarStack = BTreeMap<(u32, u64), Vec<VarnodeId>>;
+
+/// The stack key of a varnode's address.
+fn stack_key(fd: &Funcdata, vn: VarnodeId) -> (u32, u64) {
+    let v = fd.vn(vn);
+    (v.space.index(), v.offset)
+}
+
+/// A new input of the function at `vn`'s storage.
+fn new_input_like(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId) -> Result<VarnodeId> {
+    let (space, off, size) = (fd.vn(vn).space, fd.vn(vn).offset, fd.vn(vn).size);
+    let v = fd.new_varnode(size, space, off);
+    fd.set_input_varnode(v, arch)
+}
 
 /// The value a read at `vn`'s address sees: the top of its stack, or a new input of the
 /// function when nothing was written on the way.
 fn top_or_input(fd: &mut Funcdata, arch: &Arch, stacks: &mut VarStack, vn: VarnodeId) -> Result<VarnodeId> {
-    let (space, off, size) = (fd.vn(vn).space, fd.vn(vn).offset, fd.vn(vn).size);
-    let stack = stacks.entry((space, off)).or_default();
+    let stack = stacks.entry(stack_key(fd, vn)).or_default();
     if let Some(&top) = stack.last() {
         return Ok(top);
     }
-    let v = fd.new_varnode(size, space, off);
-    let v = fd.set_input_varnode(v, arch)?;
-    stacks.entry((space, off)).or_default().push(v);
+    let v = new_input_like(fd, arch, vn)?;
+    stack.push(v);
     Ok(v)
 }
 
@@ -976,8 +1029,7 @@ fn rename(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
             }
             Step::Leave(writes) => {
                 for w in writes {
-                    let v = fd.vn(w);
-                    if let Some(s) = stacks.get_mut(&(v.space, v.offset)) {
+                    if let Some(s) = stacks.get_mut(&stack_key(fd, w)) {
                         s.pop();
                     }
                 }
@@ -990,11 +1042,13 @@ fn rename(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
 
 /// The body of `Heritage::renameRecurse` for block `i`: free reads take the live write, new
 /// writes go on the stacks, and the MULTIEQUALs of the successors take their input for the edge
-/// from this block. Returns the writes pushed.
+/// from this block. Returns the writes pushed. Renaming adds no ops and no edges, so the block's
+/// op and edge lists are walked by position.
 fn rename_block(fd: &mut Funcdata, arch: &Arch, stacks: &mut VarStack, i: usize) -> Result<Vec<VarnodeId>> {
     let bl = fd.blocks.list[i];
     let mut writelist = Vec::new();
-    for op in fd.blocks.block(bl).ops.clone() {
+    for k in 0..fd.blocks.block(bl).ops.len() {
+        let op = fd.blocks.block(bl).ops[k];
         if fd.op(op).opc != Opcode::Multiequal {
             for slot in 0..fd.op(op).ins.len() {
                 let vnin = fd.op(op).ins[slot];
@@ -1009,13 +1063,12 @@ fn rename_block(fd: &mut Funcdata, arch: &Arch, stacks: &mut VarStack, i: usize)
                 if let Some(d) = ind {
                     let iop = fd.input(d, 1)?;
                     if fd.vn(iop).space == Space::Iop && fd.vn(iop).offset == u64::from(op.0) {
-                        let (space, off, size) = (fd.vn(vnin).space, fd.vn(vnin).offset, fd.vn(vnin).size);
-                        let depth = stacks.get(&(space, off)).map_or(0, Vec::len);
+                        let key = stack_key(fd, vnin);
+                        let depth = stacks.get(&key).map_or(0, Vec::len);
                         if depth == 1 {
-                            let v = fd.new_varnode(size, space, off);
-                            vnnew = fd.set_input_varnode(v, arch)?;
-                            stacks.entry((space, off)).or_default().insert(0, vnnew);
-                        } else if let Some(s) = stacks.get(&(space, off)) {
+                            vnnew = new_input_like(fd, arch, vnin)?;
+                            stacks.entry(key).or_default().insert(0, vnnew);
+                        } else if let Some(s) = stacks.get(&key) {
                             vnnew = s[s.len() - 2];
                         }
                     }
@@ -1031,13 +1084,14 @@ fn rename_block(fd: &mut Funcdata, arch: &Arch, stacks: &mut VarStack, i: usize)
             continue;
         }
         fd.vn_clear(out, VnFlags::ACTIVE_HERITAGE);
-        let v = fd.vn(out);
-        stacks.entry((v.space, v.offset)).or_default().push(out);
+        stacks.entry(stack_key(fd, out)).or_default().push(out);
         writelist.push(out);
     }
-    for e in fd.blocks.block(bl).outs.clone() {
-        let (sub, slot) = (e.point, e.reverse);
-        for multiop in fd.blocks.block(sub).ops.clone() {
+    for e in 0..fd.blocks.block(bl).outs.len() {
+        let edge = fd.blocks.block(bl).outs[e];
+        let (sub, slot) = (edge.point, edge.reverse);
+        for k in 0..fd.blocks.block(sub).ops.len() {
+            let multiop = fd.blocks.block(sub).ops[k];
             if fd.op(multiop).opc != Opcode::Multiequal {
                 break;
             }

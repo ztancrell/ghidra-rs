@@ -35,8 +35,11 @@ pub struct Funcdata {
     pub(crate) entry: u64,
     pub(crate) ops: Vec<PcodeOp>,
     pub(crate) vns: Vec<Varnode>,
-    /// the live varnodes in location order (`VarnodeBank::loc_tree`)
+    /// the live varnodes in location order (`VarnodeBank::loc_tree`), once heritage needs it
     loc: BTreeSet<LocKey>,
+    /// whether `loc` is built and kept: nothing reads it before the first heritage pass, so it
+    /// is built there in one go ([`Funcdata::build_loc`])
+    loc_on: bool,
     /// the input varnodes by address and size (the inputs of `VarnodeBank::def_tree`)
     inputs: BTreeSet<(u32, u64, u32, VarnodeId)>,
     /// the live ops by sequence number (`PcodeOpBank::optree`)
@@ -71,6 +74,7 @@ impl Funcdata {
             ops: Vec::new(),
             vns: Vec::new(),
             loc: BTreeSet::new(),
+            loc_on: false,
             inputs: BTreeSet::new(),
             seqs: BTreeMap::new(),
             dead: Vec::new(),
@@ -113,6 +117,34 @@ impl Funcdata {
     /// Clear varnode flags (`Varnode::clearFlags`).
     pub(crate) fn vn_clear(&mut self, id: VarnodeId, f: VnFlags) {
         self.vn_mut(id).flags.clear(f);
+    }
+
+    /// Puts `id` into the location set, once it is kept.
+    fn loc_add(&mut self, id: VarnodeId) {
+        if self.loc_on {
+            self.loc.insert(self.loc_key(id));
+        }
+    }
+
+    /// Takes `id` out of the location set (before its key changes).
+    fn loc_del(&mut self, id: VarnodeId) {
+        if self.loc_on {
+            self.loc.remove(&self.loc_key(id));
+        }
+    }
+
+    /// Builds the location set from the live varnodes and keeps it from then on. The set holds
+    /// the same keys as one kept from the start, since a key depends only on the varnode.
+    pub(crate) fn build_loc(&mut self) {
+        if self.loc_on {
+            return;
+        }
+        self.loc = (0..self.vns.len() as u32)
+            .map(VarnodeId)
+            .filter(|&v| !self.vn(v).is_dead())
+            .map(|v| self.loc_key(v))
+            .collect();
+        self.loc_on = true;
     }
 
     /// The varnode's key in the location set.
@@ -161,7 +193,7 @@ impl Funcdata {
     pub(crate) fn new_varnode(&mut self, size: u32, space: Space, offset: u64) -> VarnodeId {
         let id = VarnodeId(self.vns.len() as u32);
         self.vns.push(Varnode::new(space, offset, size));
-        self.loc.insert(self.loc_key(id));
+        self.loc_add(id);
         id
     }
 
@@ -175,7 +207,7 @@ impl Funcdata {
         let mut v = Varnode::new(space, offset, size);
         v.def = Some(op);
         self.vns.push(v);
-        self.loc.insert(self.loc_key(id));
+        self.loc_add(id);
         self.op_mut(op).out = Some(id);
         id
     }
@@ -309,12 +341,16 @@ impl Funcdata {
 
     /// Port of `VarnodeBank::setDef`: a free varnode becomes written by `op`.
     fn set_def(&mut self, vn: VarnodeId, op: OpId) -> Result<()> {
+        // Varnode::setDef
+        if self.vn(vn).is_constant() {
+            return err(format!("Assignment to constant at r0x{:08x}", self.op(op).seq.addr));
+        }
         if !self.vn(vn).is_free() {
             return err(format!("Defining varnode which is not free at 0x{:08x}", self.op(op).seq.addr));
         }
-        self.loc.remove(&self.loc_key(vn));
+        self.loc_del(vn);
         self.vn_mut(vn).def = Some(op);
-        self.loc.insert(self.loc_key(vn));
+        self.loc_add(vn);
         Ok(())
     }
 
@@ -337,26 +373,28 @@ impl Funcdata {
     /// Port of `Funcdata::opUnsetOutput` (`VarnodeBank::makeFree`).
     fn op_unset_output(&mut self, op: OpId) {
         let Some(vn) = self.op_mut(op).out.take() else { return };
-        self.loc.remove(&self.loc_key(vn));
+        self.loc_del(vn);
         let v = self.vn_mut(vn);
         v.def = None;
         v.flags.clear(VnFlags::INDIRECT_CREATION);
-        self.loc.insert(self.loc_key(vn));
+        self.loc_add(vn);
     }
 
     /// Port of `Funcdata::deleteVarnode` (`VarnodeBank::destroy`).
     pub(crate) fn delete_varnode(&mut self, vn: VarnodeId) {
-        self.loc.remove(&self.loc_key(vn));
+        self.loc_del(vn);
         let v = self.vn(vn);
-        self.inputs.remove(&(v.space.index(), v.offset, v.size, vn));
-        self.vn_mut(vn).dead = true;
+        if v.is_input() {
+            self.inputs.remove(&(v.space.index(), v.offset, v.size, vn));
+        }
+        self.vn_set(vn, VnFlags::DEAD);
     }
 
     /// Port of `Funcdata::setInputVarnode`: `vn` becomes an input of the function, or the input
     /// already there is returned. Inputs the prototype leaves unaffected are marked so.
     pub(crate) fn set_input_varnode(&mut self, vn: VarnodeId, arch: &Arch) -> Result<VarnodeId> {
         let v = self.vn(vn);
-        if v.input {
+        if v.is_input() {
             return Ok(vn);
         }
         let (s, off, size) = (v.space.index(), v.offset, v.size);
@@ -376,9 +414,9 @@ impl Funcdata {
         if !self.vn(vn).is_free() || self.vn(vn).is_constant() {
             return err("Making input out of varnode which is not free");
         }
-        self.loc.remove(&self.loc_key(vn));
-        self.vn_mut(vn).input = true;
-        self.loc.insert(self.loc_key(vn));
+        self.loc_del(vn);
+        self.vn_set(vn, VnFlags::INPUT);
+        self.loc_add(vn);
         self.inputs.insert((s, off, size, vn));
         let v = self.vn(vn);
         match self.proto.has_effect(arch, v.space, v.offset, v.size) {

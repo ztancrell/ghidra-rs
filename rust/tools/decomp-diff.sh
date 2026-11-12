@@ -47,7 +47,9 @@ fi
 
 if [ ! -f "$PRELUDE" ]; then
     mkdir -p "$(dirname "$PRELUDE")"
-    "$GHIDRA_RS" analyze "$BIN" --decomp-prelude "$PRELUDE" >&2
+    # written to a temporary file and renamed, so parallel runs (decomp-bisect.sh) never read half of it
+    "$GHIDRA_RS" analyze "$BIN" --decomp-prelude "$PRELUDE.$$" >&2
+    mv "$PRELUDE.$$" "$PRELUDE"
 fi
 
 if [ "$1" = --script ]; then
@@ -97,7 +99,7 @@ if [ -n "$STOP" ]; then
         refbad "$out/ref/$a" || cmp -s "$out/ref/$a" "$out/rust/$a" || { echo "stopped at $a"; break; }
     done
 else
-    xargs -P "${JOBS:-$(nproc)}" -I{} bash -c 'one {}' <<<"$list"
+    xargs -P "${JOBS:-$(nproc)}" -I{} bash -c 'one "$1"' _ {} <<<"$list"
 fi
 
 total=0 same=0 refok=0

@@ -294,7 +294,8 @@ tools". Where it differs from the table row:
   properties), and `cover` (nothing before merging, S7, uses it).
 - The action framework (`actiontree.rs`) is ported in full except rule pools: statuses,
   repeat, restart (nothing asks for one yet), breakpoints, `continue`.
-- The varnode bank keeps readers and the location order for every edit (S1 code now edits
+- The varnode bank keeps readers for every edit and the location order from the first
+  heritage pass on (built there in one go; S1 code now edits
   through `op_set_input`/`op_set_output`), as heritage reads both.
 - The S1b required item (prototype state across decompiles) moves to S4: `fillinExtrapop` is
   in `ActionStackPtrFlow`, after `paramdouble`, and the 21 multi-function datatests need the

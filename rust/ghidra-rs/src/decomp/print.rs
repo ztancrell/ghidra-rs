@@ -156,14 +156,14 @@ impl<'a> Printer<'a> {
             self.out.str(":");
             self.out.num(u64::from(v.size));
         }
-        if v.input {
+        if v.is_input() {
             self.out.str("(i)");
         }
         if let Some(def) = v.def {
             self.out.str("(");
             self.out.seq(self.fd().op(def).seq);
             self.out.str(")");
-        } else if !v.input && !v.is_constant() {
+        } else if !v.is_input() && !v.is_constant() {
             self.out.str("(free)");
         }
     }

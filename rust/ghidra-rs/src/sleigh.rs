@@ -264,6 +264,9 @@ struct Decision {
 pub struct Space {
     pub name: String,
     pub size: u32,
+    /// the heritage delay (`AddrSpace::getDelay`): passes before the decompiler links the space;
+    /// `None` for spaces it never links (`const`, `OTHER`)
+    pub delay: Option<i32>,
 }
 
 pub struct Sleigh {
@@ -708,7 +711,7 @@ impl Sleigh {
         }
         let kid = |id| root.kids.iter().find(|k| k.id == id).ok_or(format!("missing element {id}"));
         let sp = kid(e::SPACES)?;
-        let mut spaces = vec![Space { name: "const".into(), size: 8 }];
+        let mut spaces = vec![Space { name: "const".into(), size: 8, delay: None }];
         let mut uniq_space = NONE;
         for s in &sp.kids {
             let idx = s.int(a::INDEX)? as usize;
@@ -721,8 +724,14 @@ impl Sleigh {
             if s.id == e::SPACE_UNIQUE {
                 uniq_space = idx as u32;
             }
-            spaces.resize_with(spaces.len().max(idx + 1), || Space { name: String::new(), size: 8 });
-            spaces[idx] = Space { name, size };
+            spaces.resize_with(spaces.len().max(idx + 1), || Space { name: String::new(), size: 8, delay: None });
+            // the heritage delay (`AddrSpace::delay`): `OTHER` is not heritaged, `unique` has none
+            let delay = match s.id {
+                e::SPACE_OTHER => None,
+                e::SPACE_UNIQUE => Some(0),
+                _ => Some(if s.has(a::DELAY) { s.int(a::DELAY)? as i32 } else { 0 }),
+            };
+            spaces[idx] = Space { name, size, delay };
         }
         let defname = sp.string(a::DEFAULTSPACE)?;
         let code_space = spaces.iter().position(|s| s.name == defname).ok_or("bad defaultspace")? as u32;

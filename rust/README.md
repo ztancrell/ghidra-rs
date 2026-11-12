@@ -756,7 +756,7 @@ Modules:
   dominator tree and depths. `funcdata.rs`: every input/output edit goes through
   `op_set_input`/`op_set_output`/... which keep the readers (`descend`) and the
   location-sorted varnode set (`loc_tree`: address, size, inputs, written by sequence number,
-  free by creation), input varnodes (`setInputVarnode`), INDIRECT ops (`newIndirectOp`,
+  free by creation; built at the first heritage pass, kept from then on), input varnodes (`setInputVarnode`), INDIRECT ops (`newIndirectOp`,
   `newIndirectCreation`). `fspec.rs`: effect lookup (`lookupEffect`), `characterizeAsParam`
   (joins included: `EDX` is part of the `EDX:EAX` output), the trial lists (`ParamActive`).
 - `print raw` shows inputs (`(i)`) and `[create]`.
@@ -781,10 +781,12 @@ pins a loop function; unit tests in `heritage.rs` check phi placement on hand-bu
 (diamond, loop, nested loops) and `actiontree.rs` a break inside a repeating group.
 
 Mall (29,240 functions, one script, one thread, release build, 2026-11-12): to
-`break start paramdouble` in 24.4 s including loading (about 1,200 functions per second), to
-`heritage` in 11.2 s; peak RSS about 1 GB, reached by one function in garbage code that decodes
-100,000 instructions before it fails (the readers and the location set cost memory per
-varnode; the run stays near 200 MB otherwise); no panics. 29,131 reach the break, 8 are
+`break start paramdouble` in 21.2 s including loading (about 1,400 functions per second), to
+`heritage` in 6.2 s; peak RSS 682 MB, reached by one function in garbage code that decodes
+100,000 instructions before it fails (the reader lists cost memory per varnode; the run stays
+near 200 MB otherwise); no panics. The location-sorted set is built at the first heritage
+pass, since nothing reads it before. Superseded: S2's first commit kept it from varnode
+creation on (24.4 s, 11.2 s, 1 GB). 29,131 reach the break, 8 are
 `nocode` imports a duplicate name picks first (`No code for`, as the reference), 101 fail. The
 101 against decomp_dbg (one run each): 97 fail with the same message. The other 4, all in
 the garbage code past 0x2300000, differ in flow: 0x232f745 and 0x2384399 fail on a different

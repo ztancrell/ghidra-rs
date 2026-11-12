@@ -48,13 +48,13 @@ struct Node {
     lcount: i32,
     /// the group's current member (`ActionGroup::state`)
     state: usize,
-    /// `ActionRestartGroup::curstart`: -1 once finished
-    curstart: i32,
+    /// `ActionRestartGroup::curstart == -1`: the restart group has finished
+    finished: bool,
     /// `break_start`
     break_start: bool,
 }
 
-/// An action tree: the root is the first node added.
+/// An action tree: the root is the last node added (groups are added after their members).
 #[derive(Debug, Clone, Default)]
 pub struct ActionTree {
     nodes: Vec<Node>,
@@ -80,7 +80,7 @@ impl ActionTree {
             count: 0,
             lcount: 0,
             state: 0,
-            curstart: 0,
+            finished: false,
             break_start: false,
         });
         ActionId(self.nodes.len() - 1)
@@ -165,21 +165,24 @@ impl ActionTree {
     /// `ActionRestartGroup::apply` runs once more while the function asks for a restart (nothing
     /// ported asks yet, so it finishes after one run).
     fn apply(&mut self, id: ActionId, fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
-        let (kids, restart) = match &self.nodes[id.0].kind {
+        let restart = match &self.nodes[id.0].kind {
             Kind::Leaf(f) => {
                 let changes = f(fd, arch)?;
                 self.nodes[id.0].count += changes;
                 return Ok(0);
             }
-            Kind::Group { kids, restart } => (kids.clone(), *restart),
+            Kind::Group { restart, .. } => *restart,
         };
-        if restart && self.nodes[id.0].curstart == -1 {
+        if restart && self.nodes[id.0].finished {
             return Ok(0);
         }
         if self.nodes[id.0].status != Status::Mid {
             self.nodes[id.0].state = 0;
         }
-        while let Some(&kid) = kids.get(self.nodes[id.0].state) {
+        loop {
+            let n = &self.nodes[id.0];
+            let Kind::Group { kids, .. } = &n.kind else { break };
+            let Some(&kid) = kids.get(n.state) else { break };
             let res = self.perform_node(kid, fd, arch)?;
             if res > 0 {
                 self.nodes[id.0].count += res;
@@ -189,7 +192,7 @@ impl ActionTree {
             self.nodes[id.0].state += 1;
         }
         if restart {
-            self.nodes[id.0].curstart = -1;
+            self.nodes[id.0].finished = true;
         }
         Ok(0)
     }
@@ -227,10 +230,10 @@ mod tests {
     /// A break inside a repeating group stops there on each pass; `continue` resumes it.
     #[test]
     fn break_and_continue_in_a_repeating_group() {
-        let Ok(sleigh) = crate::sleigh::Sleigh::load(&crate::sleigh::Sleigh::sla_path("x86")) else { return };
-        let cspec = std::fs::read_to_string(crate::sleigh::Sleigh::sla_path("x86").with_file_name("x86win.cspec"));
-        let Ok(cspec) = cspec else { return };
-        let Ok(arch) = Arch::new(sleigh, Image::default(), &cspec) else { return };
+        let path = crate::sleigh::Sleigh::sla_path("x86");
+        assert!(path.exists(), "{} is missing: run rust/build-sla.sh first", path.display());
+        let cspec = std::fs::read_to_string(path.with_file_name("x86win.cspec")).unwrap();
+        let arch = Arch::new(crate::sleigh::Sleigh::load(&path).unwrap(), Image::default(), &cspec).unwrap();
         let mut t = ActionTree::default();
         let a = t.leaf("a", nothing);
         let b = t.leaf("b", change);
