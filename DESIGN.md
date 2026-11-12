@@ -38,9 +38,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
 - 2026-11-11: Change of direction: the goal is a full headless Rust Ghidra for decompiling
   and rewriting old video games (mercs2 first), through milestone 4. This supersedes "a
   headless Rust core, not a full rewrite" above. Still no GUI.
-- 2026-11-11 (Claude's call, not yet confirmed): the decompiler (milestone 3) is written in
-  Rust, and Ghidra's C++ decompiler is the reference its output is checked against, as
-  `rust/tools/sleigh_ref.cc` was for SLEIGH. No FFI stopgap.
+- 2026-11-12: The decompiler (milestone 3) is written in Rust, and Ghidra's C++ decompiler is
+  the reference its output is checked against, as `rust/tools/sleigh_ref.cc` was for SLEIGH.
+  No FFI stopgap. Confirmed by the user. The plan and its other decisions (Windows types from
+  a one-time C header export, mercs2's register ABI as locked prototypes in milestone 3, a
+  small `print raw` patch on the reference) are in `docs/plans/m3-decompiler.md`.
 
 ## Milestones
 

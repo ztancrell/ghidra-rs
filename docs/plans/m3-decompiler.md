@@ -276,19 +276,16 @@ Diverge where it costs nothing in output:
 Later, behind options, never by default: improvements over Ghidra (for example x87 or
 custom-ABI handling). They come after the port matches, so every difference is a choice.
 
-## Open decisions
+## Decisions (2026-11-12)
 
-1. **Confirm the direction.** `DESIGN.md` still marks "Rust decompiler, C++ as reference, no
-   FFI" as Claude's call, not yet confirmed.
-2. **Gate.** Use `decomp_dbg` (fast, exact) as the gate for every stage, and Ghidra headless
-   only for S10 and final acceptance? (Recommended.)
-3. **Exactness.** Require identical `print raw`, sequence numbers included (as in milestone 1),
-   or allow differences in numbering only? (Recommended: identical.)
-4. **Windows types.** Export `windows_vs12_32.gdt` once to a C header with a headless Ghidra
-   script (needs Ghidra at development time only), or write a `.gdt` reader in Rust?
-5. **Default names.** Print Ghidra's names (`FUN_00401000`, `undefined4`) by default, or the C++
-   core's (`func_0x00401000`, `xunknown4`)? (Recommended: Ghidra's.)
-6. **mercs2 register ABI.** Turn `register_abi.csv` into locked custom-storage prototypes in
-   milestone 3, or wait for the project DB in milestone 4?
-7. **Reference patch.** Keep the 20-line `print raw` patch for types and high variables under
-   `rust/tools/`, or check S6 and S7 only through the final C?
+1. **Direction:** Rust decompiler, C++ as reference, no FFI. Confirmed by the user.
+2. **Gate:** `decomp_dbg` gates every stage; Ghidra headless only for S10 and final acceptance.
+   (Claude's call, following the recommendation.)
+3. **Exactness:** identical `print raw`, sequence numbers included. (Claude's call.)
+4. **Windows types:** export `windows_vs12_32.gdt` once to a C header with a headless Ghidra
+   script and read it with the S6 declaration parser. User's decision.
+5. **Default names:** Ghidra's (`FUN_00401000`, `undefined4`). (Claude's call.)
+6. **mercs2 register ABI:** `register_abi.csv` becomes locked custom-storage prototypes in
+   milestone 3. User's decision.
+7. **Reference patch:** keep the 20-line `print raw` patch for types and high variables under
+   `rust/tools/`, so S6 and S7 are checked directly. User's decision.
