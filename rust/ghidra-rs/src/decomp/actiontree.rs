@@ -91,6 +91,11 @@ impl ActionTree {
         self.add(name, Kind::Leaf(apply), false, false)
     }
 
+    /// A single action with `rule_repeatapply`.
+    pub(crate) fn leaf_repeat(&mut self, name: &'static str, apply: ApplyFn) -> ActionId {
+        self.add(name, Kind::Leaf(apply), true, false)
+    }
+
     /// An `ActionGroup` (`repeat`: `rule_repeatapply`).
     pub(crate) fn group(&mut self, name: &'static str, kids: Vec<ActionId>, repeat: bool) -> ActionId {
         self.add(name, Kind::Group { kids, restart: false }, repeat, false)
@@ -112,7 +117,7 @@ impl ActionTree {
                 n.break_start = true;
                 Ok(())
             }
-            None => err(format!("break start {name}: action not ported yet (stage S2 ends at paramdouble)")),
+            None => err(format!("break start {name}: no such action in ghidra-rs yet (stage S4 ends at assignhigh)")),
         }
     }
 

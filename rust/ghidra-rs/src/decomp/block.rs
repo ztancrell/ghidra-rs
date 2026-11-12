@@ -68,6 +68,8 @@ pub(crate) struct BlockBasic {
 pub(crate) struct BlockGraph {
     blocks: Vec<BlockBasic>,
     pub(crate) list: Vec<BlockId>,
+    /// the last `structureLoops` found more than one root (`Funcdata::blocks_unreachable`)
+    pub(crate) unreachable: bool,
 }
 
 impl BlockGraph {
@@ -127,6 +129,104 @@ impl BlockGraph {
         self.block_mut(bl).entry_point = true;
     }
 
+    pub(crate) fn is_entry_point(&self, bl: BlockId) -> bool {
+        self.block(bl).entry_point
+    }
+
+    /// Port of `FlowBlock::halfDeleteInEdge`: drop in-edge `slot`, renumbering the reverse
+    /// indices of the edges after it.
+    fn half_delete_in_edge(&mut self, bl: BlockId, slot: usize) {
+        self.block_mut(bl).ins.remove(slot);
+        for i in slot..self.block(bl).ins.len() {
+            let Edge { point, reverse, .. } = self.block(bl).ins[i];
+            self.block_mut(point).outs[reverse].reverse -= 1;
+        }
+    }
+
+    /// Port of `FlowBlock::halfDeleteOutEdge`.
+    fn half_delete_out_edge(&mut self, bl: BlockId, slot: usize) {
+        self.block_mut(bl).outs.remove(slot);
+        for i in slot..self.block(bl).outs.len() {
+            let Edge { point, reverse, .. } = self.block(bl).outs[i];
+            self.block_mut(point).ins[reverse].reverse -= 1;
+        }
+    }
+
+    /// Port of `FlowBlock::removeInEdge`.
+    pub(crate) fn remove_in_edge(&mut self, bl: BlockId, slot: usize) {
+        let Edge { point, reverse, .. } = self.block(bl).ins[slot];
+        self.half_delete_in_edge(bl, slot);
+        self.half_delete_out_edge(point, reverse);
+    }
+
+    /// Port of `FlowBlock::removeOutEdge`.
+    pub(crate) fn remove_out_edge(&mut self, bl: BlockId, slot: usize) {
+        let Edge { point, reverse, .. } = self.block(bl).outs[slot];
+        self.half_delete_out_edge(bl, slot);
+        self.half_delete_in_edge(point, reverse);
+    }
+
+    /// Port of `BlockGraph::removeEdge`: the first edge from `begin` into `end`.
+    pub(crate) fn remove_edge(&mut self, begin: BlockId, end: BlockId) {
+        if let Some(i) = self.block(end).ins.iter().position(|e| e.point == begin) {
+            self.remove_in_edge(end, i);
+        }
+    }
+
+    /// Port of `FlowBlock::replaceInEdge`: in-edge `num` of `bl` now comes from `b`.
+    fn replace_in_edge(&mut self, bl: BlockId, num: usize, b: BlockId) {
+        let Edge { point: oldb, reverse, label } = self.block(bl).ins[num];
+        self.half_delete_out_edge(oldb, reverse);
+        let rev = self.block(b).outs.len();
+        self.block_mut(bl).ins[num] = Edge { point: b, label, reverse: rev };
+        self.block_mut(b).outs.push(Edge { point: bl, label, reverse: num });
+    }
+
+    /// Port of `FlowBlock::replaceOutEdge`: out-edge `num` of `bl` now goes to `b`.
+    fn replace_out_edge(&mut self, bl: BlockId, num: usize, b: BlockId) {
+        let Edge { point: oldb, reverse, label } = self.block(bl).outs[num];
+        self.half_delete_in_edge(oldb, reverse);
+        let rev = self.block(b).ins.len();
+        self.block_mut(bl).outs[num] = Edge { point: b, label, reverse: rev };
+        self.block_mut(b).ins.push(Edge { point: bl, label, reverse: num });
+    }
+
+    /// Port of `BlockGraph::removeFromFlow`: `bl`'s predecessors go straight to its successor.
+    pub(crate) fn remove_from_flow(&mut self, bl: BlockId) {
+        while let Some(last) = self.block(bl).outs.len().checked_sub(1) {
+            let bbout = self.block(bl).outs[last].point;
+            self.remove_out_edge(bl, last);
+            while let Some(&Edge { point: bbin, reverse, .. }) = self.block(bl).ins.first() {
+                self.replace_out_edge(bbin, reverse, bbout);
+            }
+        }
+    }
+
+    /// Port of `BlockGraph::removeBlock`.
+    pub(crate) fn remove_block(&mut self, bl: BlockId) {
+        while let Some(e) = self.block(bl).ins.first().copied() {
+            self.remove_edge(e.point, bl);
+        }
+        while let Some(e) = self.block(bl).outs.first().copied() {
+            self.remove_edge(bl, e.point);
+        }
+        self.list.retain(|&b| b != bl);
+    }
+
+    /// Port of `BlockGraph::spliceBlock`: `bl`'s single successor (with `bl` its single
+    /// predecessor) is merged into it; the successor's out-edges move to `bl`.
+    pub(crate) fn splice_block(&mut self, bl: BlockId) {
+        let outbl = self.block(bl).outs[0].point;
+        let entry = self.block(bl).entry_point;
+        self.remove_out_edge(bl, 0);
+        for _ in 0..self.block(outbl).outs.len() {
+            let Edge { point, reverse, .. } = self.block(outbl).outs[0];
+            self.replace_in_edge(point, reverse, bl);
+        }
+        self.remove_block(outbl);
+        self.block_mut(bl).entry_point = entry;
+    }
+
     fn set_out_edge_flag(&mut self, bl: BlockId, i: usize, f: EdgeFlags) {
         let Edge { point, reverse, .. } = self.block(bl).outs[i];
         self.block_mut(bl).outs[i].label.0 |= f.0;
@@ -154,6 +254,7 @@ impl BlockGraph {
         let edges: usize = self.blocks.iter().map(|b| b.outs.len()).sum();
         for _ in 0..=edges {
             let (preorder, rootlist) = self.find_spanning_tree()?;
+            self.unreachable = rootlist.len() > 1;
             if !self.find_irreducible(&preorder) {
                 self.calc_forward_dominator(&rootlist);
                 return Ok(());

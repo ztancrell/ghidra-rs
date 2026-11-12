@@ -10,6 +10,7 @@
 pub mod action;
 pub mod actiontree;
 mod block;
+mod coreaction;
 mod cspec;
 mod flow;
 mod fspec;
@@ -94,7 +95,8 @@ pub struct Arch {
     /// (`fillinReadOnlyFromLoader`) and the console's `readonly` commands
     readonly: Vec<(u64, u64)>,
     /// `map externalref`: the slots holding a reference to an external function
-    externrefs: HashSet<u64>,
+    /// external-reference slots and the address each refers to (`map externalref`)
+    externrefs: HashMap<u64, u64>,
     /// `option readonly`: read-only memory propagates as constants (`readonlypropagate`)
     pub(crate) readonly_propagate: bool,
 }
@@ -131,7 +133,7 @@ impl Arch {
             registers,
             tracked,
             readonly,
-            externrefs: HashSet::new(),
+            externrefs: HashMap::new(),
             readonly_propagate: false,
         })
     }
@@ -142,8 +144,13 @@ impl Arch {
     }
 
     /// `map externalref <slot> ...`
-    pub(crate) fn add_externref(&mut self, slot: u64) {
-        self.externrefs.insert(slot);
+    pub(crate) fn add_externref(&mut self, slot: u64, target: u64) {
+        self.externrefs.insert(slot, target);
+    }
+
+    /// The address an external-reference slot refers to (`queryExternalRefFunction`).
+    pub(crate) fn externref_target(&self, slot: u64) -> Option<u64> {
+        self.externrefs.get(&slot).copied()
     }
 
     /// `readonly <addr>:<size>` (`Database::setPropertyRange(readonly, ...)`).
@@ -170,7 +177,7 @@ impl Arch {
     pub(crate) fn is_readonly(&self, off: u64, size: u32) -> bool {
         let end = off + u64::from(size);
         let in_externref = (off.saturating_sub(EXTERNREF_SIZE - 1)..=off)
-            .any(|slot| self.externrefs.contains(&slot) && end <= slot + EXTERNREF_SIZE);
+            .any(|slot| self.externrefs.contains_key(&slot) && end <= slot + EXTERNREF_SIZE);
         !in_externref && self.readonly.iter().any(|&(s, e)| s <= off && off < e)
     }
 

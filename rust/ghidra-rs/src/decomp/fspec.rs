@@ -235,6 +235,12 @@ impl ParamList {
 
     /// Port of `ParamListStandard::getSpacebase` (`getStackEntry`): whether the last entry is
     /// a stack spill, the one way parameters reach the stack.
+    /// Port of `ParamListStandard::getMaxDelay`: the largest heritage delay of the entries'
+    /// spaces (the stack's is 1, the register space's 0; x86 entries live in no other).
+    pub(crate) fn max_delay(&self) -> i32 {
+        i32::from(self.entries.iter().any(|e| matches!(e.storage, Storage::Stack { .. })))
+    }
+
     pub(crate) fn has_stack(&self) -> bool {
         self.entries.last().is_some_and(ParamEntry::is_stack_spill)
     }
@@ -414,6 +420,8 @@ pub(crate) struct FuncProto {
     pub(crate) model_locked: bool,
     /// `injectid` (with `is_inline`): the call fixup applied in place of a call to this function
     pub(crate) inject: Option<InjectId>,
+    /// the recovered return storage (`deriveOutputMap`), none until return recovery finishes
+    pub(crate) output: Option<(Space, u64, u32)>,
 }
 
 impl FuncProto {
@@ -461,6 +469,8 @@ pub(crate) struct CallSpec {
     pub(crate) active_input: Option<ParamActive>,
     /// the return-value trials (`activeoutput`, `isoutputactive`), from `ActionFuncLink` on
     pub(crate) active_output: Option<ParamActive>,
+    /// `effective_extrapop`, from `ActionStackPtrFlow`
+    pub(crate) effective_extrapop: Option<i32>,
 }
 
 impl CallSpec {
@@ -474,6 +484,7 @@ impl CallSpec {
             stack_placeholder_slot: None,
             active_input: None,
             active_output: None,
+            effective_extrapop: None,
         }
     }
 
@@ -566,21 +577,305 @@ impl ProtoModel {
     }
 }
 
-/// Port of the trial list of `ParamActive`: the storage ranges seen as possible parameters or
-/// return values. Stage S4 analyzes them; heritage only registers them.
-#[derive(Debug, Clone, Default)]
+/// Port of `ParamTrial`: one storage range seen as a possible parameter or return value.
+#[derive(Debug, Clone)]
+pub(crate) struct ParamTrial {
+    pub(crate) space: Space,
+    pub(crate) off: u64,
+    pub(crate) size: u32,
+    /// the input slot of the call (or RETURN) holding it
+    pub(crate) slot: usize,
+    pub(crate) flags: u32,
+    /// the parameter entry it fits (index into the list) and its justified offset in it
+    pub(crate) entry: Option<usize>,
+    pub(crate) offset: i32,
+}
+
+impl ParamTrial {
+    pub(crate) const CHECKED: u32 = 1;
+    pub(crate) const USED: u32 = 2;
+    pub(crate) const DEFNOUSE: u32 = 4;
+    pub(crate) const ACTIVE: u32 = 8;
+    pub(crate) const UNREF: u32 = 0x10;
+    pub(crate) const KILLEDBYCALL: u32 = 0x20;
+    pub(crate) const REM_FORMED: u32 = 0x40;
+    pub(crate) const INDCREATE_FORMED: u32 = 0x80;
+    pub(crate) const CONDEXE_EFFECT: u32 = 0x100;
+    pub(crate) const ANCESTOR_REALISTIC: u32 = 0x200;
+    pub(crate) const ANCESTOR_SOLID: u32 = 0x400;
+
+    pub(crate) fn has(&self, f: u32) -> bool {
+        self.flags & f != 0
+    }
+    pub(crate) fn set(&mut self, f: u32) {
+        self.flags |= f;
+    }
+    pub(crate) fn mark_active(&mut self) {
+        self.flags |= Self::ACTIVE | Self::CHECKED;
+    }
+    pub(crate) fn mark_inactive(&mut self) {
+        self.flags &= !Self::ACTIVE;
+        self.flags |= Self::CHECKED;
+    }
+    pub(crate) fn mark_no_use(&mut self) {
+        self.flags &= !(Self::ACTIVE | Self::USED);
+        self.flags |= Self::CHECKED | Self::DEFNOUSE;
+    }
+    pub(crate) fn is_used(&self) -> bool {
+        self.has(Self::USED)
+    }
+    pub(crate) fn is_active(&self) -> bool {
+        self.has(Self::ACTIVE)
+    }
+    pub(crate) fn is_checked(&self) -> bool {
+        self.has(Self::CHECKED)
+    }
+}
+
+/// Port of `ParamActive`: the trials of one call (or of the function's returns) and the state
+/// of their analysis across passes.
+#[derive(Debug, Clone)]
 pub(crate) struct ParamActive {
-    trials: Vec<(Space, u64, u32)>,
+    pub(crate) trials: Vec<ParamTrial>,
+    slotbase: usize,
+    /// `stackplaceholder`: -1 none, -2 freed
+    stackplaceholder: i32,
+    pub(crate) numpasses: i32,
+    pub(crate) maxpass: i32,
+    pub(crate) fully_checked: bool,
+    pub(crate) needs_final_check: bool,
 }
 
 impl ParamActive {
-    /// Port of `ParamActive::whichTrial` (as a test): a trial at exactly this range.
-    pub(crate) fn has_trial(&self, space: Space, off: u64, size: u32) -> bool {
-        self.trials.contains(&(space, off, size))
+    /// A trial list with at most `maxdelay` extra passes (`initActiveInput`/`initActiveOutput`:
+    /// a list holding a space heritaged late waits 3 passes).
+    pub(crate) fn new(maxdelay: i32) -> ParamActive {
+        ParamActive {
+            trials: Vec::new(),
+            slotbase: 1,
+            stackplaceholder: -1,
+            numpasses: 0,
+            maxpass: if maxdelay > 0 { 3 } else { 0 },
+            fully_checked: false,
+            needs_final_check: false,
+        }
     }
-    /// Port of `ParamActive::registerTrial`.
+
+    /// Port of `ParamActive::whichTrial`: the first trial overlapping the range.
+    pub(crate) fn which_trial(&self, space: Space, off: u64, size: u32) -> Option<usize> {
+        let ov = |a: u64, t: &ParamTrial| t.space == space && a.wrapping_sub(t.off) < u64::from(t.size);
+        self.trials.iter().position(|t| ov(off, t) || (size > 1 && ov(off + u64::from(size) - 1, t)))
+    }
+    pub(crate) fn has_trial(&self, space: Space, off: u64, size: u32) -> bool {
+        self.which_trial(space, off, size).is_some()
+    }
+    /// Port of `ParamActive::registerTrial`: every trial outside the stack is assumed killed by
+    /// calls.
     pub(crate) fn register_trial(&mut self, space: Space, off: u64, size: u32) {
-        self.trials.push((space, off, size));
+        let flags = if space == Space::Stack { 0 } else { ParamTrial::KILLEDBYCALL };
+        self.trials.push(ParamTrial { space, off, size, slot: self.slotbase, flags, entry: None, offset: -1 });
+        self.slotbase += 1;
+    }
+    /// `setPlaceholderSlot`.
+    pub(crate) fn set_placeholder_slot(&mut self) {
+        self.stackplaceholder = self.slotbase as i32;
+        self.slotbase += 1;
+    }
+    /// Port of `ParamActive::freePlaceholderSlot`.
+    pub(crate) fn free_placeholder_slot(&mut self) {
+        for t in &mut self.trials {
+            if t.slot as i32 > self.stackplaceholder {
+                t.slot -= 1;
+            }
+        }
+        self.stackplaceholder = -2;
+        self.slotbase -= 1;
+        self.maxpass = 0;
+    }
+    /// Port of `ParamActive::deleteUnusedTrials`: the used trials, renumbered from slot 1.
+    pub(crate) fn delete_unused_trials(&mut self) {
+        self.trials.retain(ParamTrial::is_used);
+        for (i, t) in self.trials.iter_mut().enumerate() {
+            t.slot = i + 1;
+        }
+    }
+    /// `ParamActive::getTrialForInputVarnode`.
+    pub(crate) fn trial_for_slot(&self, slot: usize) -> Option<&ParamTrial> {
+        let i = if self.stackplaceholder < 0 || (slot as i32) < self.stackplaceholder { slot } else { slot - 1 };
+        self.trials.get(i.checked_sub(1)?)
+    }
+    /// Port of `ParamActive::sortTrials` (`ParamTrial::operator<`): by the entry's group, then
+    /// address and size; trials without an entry last. (The C++ `std::sort` on these few
+    /// trials is an insertion sort, which keeps ties in order, as this stable sort does.)
+    pub(crate) fn sort_trials(&mut self, list: &ParamList) {
+        self.trials.sort_by(|a, b| match (a.entry, b.entry) {
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (Some(ea), Some(eb)) => list
+                .group(ea)
+                .cmp(&list.group(eb))
+                .then((a.space.index(), a.off).cmp(&(b.space.index(), b.off)))
+                .then(a.size.cmp(&b.size)),
+        });
+    }
+}
+
+impl ParamList {
+    /// `ParamEntry::getGroup`: an entry's resource group (a join takes the group of the first
+    /// earlier entry among its pieces).
+    pub(crate) fn group(&self, i: usize) -> usize {
+        if let Storage::Join(pieces) = &self.entries[i].storage {
+            for &(s, o, z) in pieces {
+                if let Some(j) = self.entries[..i]
+                    .iter()
+                    .position(|e| e.storage == Storage::Space { space: s, offset: o, size: z })
+                {
+                    return self.group(j);
+                }
+            }
+        }
+        i
+    }
+
+    /// `ParamEntry::isFirstInClass`.
+    fn first_in_class(&self, i: usize) -> bool {
+        i == 0 || self.entries[i - 1].class != self.entries[i].class
+    }
+
+    /// `isParamCheckLow`/`isParamCheckHigh` of a join entry: which pieces have an entry of
+    /// their own (piece 0, the most significant, sets `extracheck_low`).
+    fn param_check(&self, i: usize) -> (bool, bool) {
+        let Storage::Join(pieces) = &self.entries[i].storage else { return (false, false) };
+        let (mut low, mut high) = (false, false);
+        for (k, &(s, o, z)) in pieces.iter().enumerate() {
+            if self.entries[..i].iter().any(|e| e.storage == Storage::Space { space: s, offset: o, size: z }) {
+                if k == 0 {
+                    low = true;
+                } else {
+                    high = true;
+                }
+            }
+        }
+        (low, high)
+    }
+
+    /// Port of `ParamEntry::justifiedContain` for register and join entries (little endian,
+    /// no alignment): the offset of the range within the entry, or `None`.
+    pub(crate) fn justified_contain(&self, i: usize, space: Space, off: u64, size: u32) -> Option<i32> {
+        let Space::Sleigh(sp) = space else { return None };
+        let contain = |s: u32, base: u64, esize: u64| -> Option<i32> {
+            (s == sp && base <= off && off + u64::from(size) <= base + esize).then(|| (off - base) as i32)
+        };
+        match &self.entries[i].storage {
+            Storage::Join(pieces) => {
+                let mut res = 0;
+                for &(s, o, z) in pieces.iter().rev() {
+                    match contain(s, o, u64::from(z)) {
+                        Some(cur) => return Some(res + cur),
+                        None => res += z as i32,
+                    }
+                }
+                None
+            }
+            Storage::Space { space: s, offset, .. } if self.entries[i].align == 0 => {
+                contain(*s, *offset, self.entries[i].size as u64)
+            }
+            _ => None,
+        }
+    }
+
+    /// Port of `ParamListStandardOut::fillinMapFallback` with `firstOnly` false (x86 declares no
+    /// model rules, so `fillinMap` falls back): the entry best covered by the active trials
+    /// decides which trials are used.
+    pub(crate) fn fillin_map_output(&self, active: &mut ParamActive) {
+        if active.trials.is_empty() {
+            return;
+        }
+        let mut best: Option<usize> = None;
+        let (mut bestcover, mut bestclass) = (0, TypeClass::Ptr.rank());
+        for e in 0..self.entries.len() {
+            let mut putative = false;
+            for t in &mut active.trials {
+                t.entry = None;
+                t.offset = 0;
+                if t.is_active() {
+                    if let Some(res) = self.justified_contain(e, t.space, t.off, t.size) {
+                        t.entry = Some(e);
+                        t.offset = res;
+                        putative = true;
+                    }
+                }
+            }
+            if !putative {
+                continue;
+            }
+            active.sort_trials(self);
+            let (low, high) = self.param_check(e);
+            let mut offmatch = 0;
+            let mut k = 0;
+            while k < active.trials.len() {
+                let t = &active.trials[k];
+                if t.entry.is_none() {
+                    k += 1;
+                    continue;
+                }
+                if offmatch != t.offset {
+                    break;
+                }
+                if ((offmatch == 0 && low) || (offmatch != 0 && high))
+                    && (t.has(ParamTrial::REM_FORMED) || t.has(ParamTrial::INDCREATE_FORMED))
+                {
+                    break;
+                }
+                offmatch += t.size as i32;
+                k += 1;
+            }
+            if offmatch < self.entries[e].minsize {
+                k = 0;
+            }
+            let class = self.entries[e].class.rank();
+            if k == active.trials.len() && (class < bestclass || offmatch > bestcover) {
+                best = Some(e);
+                bestcover = offmatch;
+                bestclass = class;
+            }
+        }
+        match best {
+            None => active.trials.iter_mut().for_each(ParamTrial::mark_no_use),
+            Some(e) => {
+                for t in &mut active.trials {
+                    let res = if t.is_active() { self.justified_contain(e, t.space, t.off, t.size) } else { None };
+                    match res {
+                        Some(r) => {
+                            t.set(ParamTrial::USED);
+                            t.entry = Some(e);
+                            t.offset = r;
+                        }
+                        None => {
+                            t.mark_no_use();
+                            t.entry = None;
+                            t.offset = 0;
+                        }
+                    }
+                }
+                active.sort_trials(self);
+            }
+        }
+    }
+}
+
+impl TypeClass {
+    /// The `type_class` enum value, as `fillinMapFallback` compares classes.
+    fn rank(self) -> u32 {
+        match self {
+            TypeClass::General => 0,
+            TypeClass::Float => 1,
+            TypeClass::Ptr => 2,
+            TypeClass::HiddenRet => 3,
+            TypeClass::Vector => 4,
+            TypeClass::Class(n) => 4 + u32::from(n),
+        }
     }
 }
 

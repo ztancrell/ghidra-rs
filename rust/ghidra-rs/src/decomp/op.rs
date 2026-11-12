@@ -19,7 +19,7 @@ pub(crate) struct SeqNum {
 
 /// Port of the `PcodeOp::flags` bits the stages so far use.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct OpFlags(u8);
+pub(crate) struct OpFlags(u32);
 
 impl OpFlags {
     /// `startbasic`: the op starts a basic block
@@ -30,12 +30,25 @@ impl OpFlags {
     pub(crate) const INDIRECT_CREATION: OpFlags = OpFlags(4);
     /// `return_copy`: a COPY guarding a global at a RETURN (`Funcdata::markReturnCopy`)
     pub(crate) const RETURN_COPY: OpFlags = OpFlags(16);
+    /// `indirect_store`: an INDIRECT guarding a STORE
+    pub(crate) const INDIRECT_STORE: OpFlags = OpFlags(32);
+    /// `spacebase_ptr`: a LOAD or STORE through the stack pointer
+    pub(crate) const SPACEBASE_PTR: OpFlags = OpFlags(64);
+    /// `indirect_source` (`ActionDeadCode`)
+    pub(crate) const INDIRECT_SOURCE: OpFlags = OpFlags(128);
+    /// `mark` (traversals)
+    pub(crate) const MARK: OpFlags = OpFlags(256);
+    /// `boolean_flip` of a CBRANCH
+    pub(crate) const BOOLEAN_FLIP: OpFlags = OpFlags(512);
 
     pub(crate) fn has(self, f: OpFlags) -> bool {
         self.0 & f.0 != 0
     }
     pub(crate) fn set(&mut self, f: OpFlags) {
         self.0 |= f.0;
+    }
+    pub(crate) fn clear(&mut self, f: OpFlags) {
+        self.0 &= !f.0;
     }
 }
 
@@ -72,6 +85,10 @@ impl PcodeOp {
         matches!(self.opc, Opcode::Call | Opcode::Callind | Opcode::Callother | Opcode::New)
     }
     /// `isMarker`: MULTIEQUAL and INDIRECT
+    /// `PcodeOp::isBranch`.
+    pub(crate) fn is_branch(&self) -> bool {
+        matches!(self.opc, Opcode::Branch | Opcode::Cbranch | Opcode::Branchind)
+    }
     pub(crate) fn is_marker(&self) -> bool {
         matches!(self.opc, Opcode::Multiequal | Opcode::Indirect)
     }

@@ -21,6 +21,9 @@ pub(crate) enum Space {
     Iop,
     /// `fspec`: the offset names a call (the first input of a CALL).
     Fspec,
+    /// the `stack` space the `.cspec`'s `<stackpointer>` makes (no varnode lives in it until
+    /// the `stackvars` rules, stage R5)
+    Stack,
 }
 
 impl Space {
@@ -31,6 +34,7 @@ impl Space {
             Space::Sleigh(i) => i,
             Space::Fspec => u32::MAX - 3,
             Space::Iop => u32::MAX - 2,
+            Space::Stack => u32::MAX - 1,
         }
     }
 }
@@ -41,7 +45,7 @@ pub(crate) const CONST_SPACE: Space = Space::Sleigh(0);
 /// Port of the `Varnode::flags` bits the stages so far use. `written` is kept as
 /// [`Varnode::def`]; `insert` is `written` or `input`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct VnFlags(u16);
+pub(crate) struct VnFlags(u32);
 
 impl VnFlags {
     /// `input`: an input of the function
@@ -58,6 +62,24 @@ impl VnFlags {
     pub(crate) const INDIRECT_CREATION: VnFlags = VnFlags(32);
     /// deleted (`VarnodeBank::destroy`): out of the location set, never read again
     pub(crate) const DEAD: VnFlags = VnFlags(64);
+    /// global storage (`persist`), from the scope: ram
+    pub(crate) const PERSIST: VnFlags = VnFlags(1 << 7);
+    /// `addrtied`, from the scope: ram
+    pub(crate) const ADDRTIED: VnFlags = VnFlags(1 << 8);
+    /// `addrforce`: the value must exist at its address
+    pub(crate) const ADDRFORCE: VnFlags = VnFlags(1 << 9);
+    /// `directwrite` (`ActionDirectWrite`)
+    pub(crate) const DIRECTWRITE: VnFlags = VnFlags(1 << 10);
+    /// `spacebase` (`Funcdata::spacebase`)
+    pub(crate) const SPACEBASE: VnFlags = VnFlags(1 << 11);
+    /// `autolive_hold`
+    pub(crate) const AUTOLIVE_HOLD: VnFlags = VnFlags(1 << 12);
+    /// `consume_list` (`ActionDeadCode`'s work list)
+    pub(crate) const CONSUME_LIST: VnFlags = VnFlags(1 << 13);
+    /// `consume_vacuous`
+    pub(crate) const CONSUME_VACUOUS: VnFlags = VnFlags(1 << 14);
+    /// `mark` (traversals)
+    pub(crate) const MARK: VnFlags = VnFlags(1 << 15);
 
     pub(crate) fn has(self, f: VnFlags) -> bool {
         self.0 & f.0 != 0
@@ -81,11 +103,13 @@ pub(crate) struct Varnode {
     /// the ops reading this varnode, in the order they were added (`descend`)
     pub(crate) descend: Readers,
     pub(crate) flags: VnFlags,
+    /// the bits read by some op (`Varnode::consumed`, `ActionDeadCode`)
+    pub(crate) consume: u64,
 }
 
 impl Varnode {
     pub(crate) fn new(space: Space, offset: u64, size: u32) -> Varnode {
-        Varnode { space, offset, size, def: None, descend: Readers::default(), flags: VnFlags::default() }
+        Varnode { space, offset, size, def: None, descend: Readers::default(), flags: VnFlags::default(), consume: u64::MAX }
     }
 
     pub(crate) fn is_constant(&self) -> bool {
@@ -111,6 +135,25 @@ impl Varnode {
     }
     pub(crate) fn has(&self, f: VnFlags) -> bool {
         self.flags.has(f)
+    }
+    pub(crate) fn is_free_or_input(&self) -> bool {
+        self.def.is_none()
+    }
+    pub(crate) fn is_written(&self) -> bool {
+        self.def.is_some()
+    }
+    /// `Varnode::getNZMask` before `ActionNonzeroMask` (group `analysis`) ever runs: a
+    /// constant's value, else all ones.
+    pub(crate) fn nzmask(&self) -> u64 {
+        if self.is_constant() {
+            self.offset
+        } else {
+            u64::MAX
+        }
+    }
+    /// `Varnode::isAutoLive`.
+    pub(crate) fn is_auto_live(&self) -> bool {
+        self.has(VnFlags::ADDRFORCE) || self.has(VnFlags::AUTOLIVE_HOLD)
     }
 
     /// Port of `Varnode::overlap(const Address &,int4)`: the offset of this varnode within the

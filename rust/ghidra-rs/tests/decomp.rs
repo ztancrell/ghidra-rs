@@ -78,7 +78,7 @@ fn raw_at(img: Image, entry: u64, stop: &str) -> String {
     let cspec = std::fs::read_to_string(path.with_file_name("x86win.cspec")).unwrap();
     let arch = Arch::new(Sleigh::load(&path).unwrap(), img, &cspec).unwrap();
     let mut fd = Funcdata::new(entry);
-    let mut actions = action::universal();
+    let mut actions = action::universal(&Default::default());
     actions.set_break_start(stop).unwrap();
     let brk = actions.perform(&mut fd, &arch).unwrap();
     assert!(matches!(brk, action::Outcome::Break(p) if p.ends_with(&format!("{stop} start"))));

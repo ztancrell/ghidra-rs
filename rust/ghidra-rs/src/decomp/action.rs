@@ -9,48 +9,138 @@ pub use super::actiontree::{ActionTree, Outcome};
 use super::fspec::{ExtraPop, ParamActive};
 use super::funcdata::CallId;
 use super::opcode::Opcode;
-use super::varnode::Space;
+use super::varnode::{Space, VnFlags};
 use super::{err, heritage, Arch, Funcdata, Result};
 
-/// The ported part of `universalAction`: the root `universal` (restart group, once per
-/// function), its first actions, and the repeating groups `fullloop` and `mainloop` up to
-/// `paramdouble`.
-pub fn universal() -> ActionTree {
+/// `universalAction` as the `decompile` root has it, with the groups in `disabled` switched
+/// off (`option currentaction decompile <group> off`): the root `universal` (restart group,
+/// once per function), its first actions, the repeating groups `fullloop`, `mainloop` and
+/// `stackstall`, and the root's actions after `fullloop` up to `assignhigh`. Rule pools hold no
+/// ported rule, so they do nothing: the checks switch every rule off. An action that is not
+/// ported fails when it runs with its group on.
+pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
+    use super::coreaction as c;
     let mut t = ActionTree::default();
-    let root: Vec<_> = [
-        ("start", start as super::actiontree::ApplyFn),
-        ("constbase", constbase),
-        ("defaultparams", default_params),
-        ("extrapopsetup", extrapop_setup),
-        ("prototypetypes", prototype_types),
-        ("funclink", funclink),
-    ]
-    .into_iter()
-    .map(|(name, f)| t.leaf(name, f))
-    .collect();
-    let mainloop = vec![
-        t.leaf("unreachable", unreachable),
-        t.leaf("varnodeprops", varnode_props),
-        t.leaf("heritage", heritage_pass),
-        t.leaf("paramdouble", not_ported),
+    // the groups of the `decompile` root (ActionDatabase::buildDefaultGroups)
+    const DECOMPILE: &[&str] = &[
+        "base", "protorecovery", "protorecovery_a", "deindirect", "localrecovery", "deadcode", "typerecovery",
+        "stackptrflow", "blockrecovery", "stackvars", "deadcontrolflow", "switchnorm", "cleanup", "splitcopy",
+        "splitpointer", "merge", "dynamic", "casts", "analysis", "fixateglobals", "fixateproto", "constsequence",
+        "bitfields", "segment", "returnsplit", "nodejoin", "doubleload", "doubleprecis", "unreachable", "subvar",
+        "floatprecision", "conditionalexe",
     ];
+    let on = |g: &str| DECOMPILE.contains(&g) && !disabled.contains(g);
+    let mut leaves = |t: &mut ActionTree, list: &[(&'static str, &str, super::actiontree::ApplyFn)]| -> Vec<_> {
+        list.iter().filter(|(_, g, _)| on(g)).map(|&(name, _, f)| t.leaf(name, f)).collect()
+    };
+    let mut root = leaves(
+        &mut t,
+        &[
+            ("start", "base", start as super::actiontree::ApplyFn),
+            ("constbase", "base", constbase),
+            ("normalizesetup", "normalanalysis", not_ported),
+            ("defaultparams", "base", default_params),
+            ("extrapopsetup", "base", extrapop_setup),
+            ("prototypetypes", "protorecovery", prototype_types),
+            ("funclink", "protorecovery", funclink),
+            ("funclinkoutonly", "noproto", not_ported),
+        ],
+    );
+    let stackstall = leaves(
+        &mut t,
+        &[
+            ("oppool1", "base", c::nothing),
+            ("lanedivide", "base", c::nothing),
+            ("multicse", "analysis", not_ported),
+            ("shadowvar", "analysis", not_ported),
+            ("deindirect", "deindirect", c::deindirect),
+            ("stackptrflow", "stackptrflow", c::stack_ptr_flow),
+        ],
+    );
+    let stackstall = t.group("stackstall", stackstall, true);
+    let mut mainloop = leaves(
+        &mut t,
+        &[
+            ("unreachable", "base", unreachable),
+            ("varnodeprops", "base", varnode_props),
+            ("heritage", "base", heritage_pass),
+            ("paramdouble", "protorecovery", c::nothing),
+            ("segmentize", "base", c::nothing),
+            ("internalstorage", "base", c::nothing),
+            ("forcegoto", "blockrecovery", c::nothing),
+            ("directwrite", "protorecovery_a", c::direct_write),
+            ("directwrite", "protorecovery_b", not_ported),
+            ("activeparam", "protorecovery", c::active_param),
+            ("returnrecovery", "protorecovery", c::return_recovery),
+            ("restrictlocal", "localrecovery", not_ported),
+            ("deadcode", "deadcode", c::dead_code),
+            ("dynamicmapping", "dynamic", c::nothing),
+            ("spacebase", "base", c::spacebase),
+            ("nonzeromask", "analysis", not_ported),
+            ("infertypes", "typerecovery", not_ported),
+            ("restructurevarnode", "localrecovery", not_ported),
+        ],
+    );
+    mainloop.push(stackstall);
+    mainloop.extend(leaves(
+        &mut t,
+        &[
+            ("redundbranch", "deadcontrolflow", c::redund_branch),
+            ("blockstructure", "blockrecovery", not_ported),
+            ("constantptr", "typerecovery", not_ported),
+            ("oppool2", "base", c::nothing),
+            ("determinedbranch", "unreachable", c::determined_branch),
+            ("unreachable", "unreachable", c::unreachable),
+            ("nodejoin", "nodejoin", c::node_join),
+            ("conditionalexe", "conditionalexe", c::conditional_exe),
+            ("conditionalconst", "analysis", not_ported),
+        ],
+    ));
     let mainloop = t.group("mainloop", mainloop, true);
-    let fullloop = t.group("fullloop", vec![mainloop], true);
-    let mut kids = root;
-    kids.push(fullloop);
-    t.restart_group("universal", kids);
+    let mut fullloop = vec![mainloop];
+    for &(name, g, f) in &[
+        ("likelytrash", "protorecovery", c::likely_trash as super::actiontree::ApplyFn),
+        ("directwrite", "protorecovery_a", c::direct_write),
+        ("directwrite", "protorecovery_b", not_ported),
+        ("deadcode", "deadcode", c::dead_code),
+        ("donothing", "deadcontrolflow", c::do_nothing),
+        ("switchnorm", "switchnorm", not_ported),
+        ("returnsplit", "returnsplit", not_ported),
+        ("unjustifiedparams", "protorecovery", c::unjustified_params),
+        ("starttypes", "typerecovery", not_ported),
+        ("activereturn", "protorecovery", c::active_return),
+    ] {
+        if on(g) {
+            // ActionDoNothing is rule_repeatapply
+            fullloop.push(if name == "donothing" { t.leaf_repeat(name, f) } else { t.leaf(name, f) });
+        }
+    }
+    root.push(t.group("fullloop", fullloop, true));
+    root.extend(leaves(
+        &mut t,
+        &[
+            ("mappedlocalsync", "localrecovery", not_ported),
+            ("startcleanup", "cleanup", not_ported),
+            ("cleanup", "base", c::nothing),
+            ("prefercomplement", "blockrecovery", not_ported),
+            ("structuretransform", "blockrecovery", not_ported),
+            ("normalizebranches", "normalizebranches", not_ported),
+            ("assignhigh", "merge", not_ported),
+        ],
+    ));
+    t.restart_group("universal", root);
     t
+}
+
+/// An action not ported yet: it fails when it runs (with its group on).
+fn not_ported(_: &mut Funcdata, _: &Arch) -> Result<i32> {
+    err("action not implemented in ghidra-rs yet (milestone 3: stage S4 ends before assignhigh, with the rule groups off)")
 }
 
 /// `ActionStart`: `Funcdata::startProcessing`.
 fn start(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     fd.start_processing(arch)?;
     Ok(0)
-}
-
-/// The main loop past `heritage` (`paramdouble` on) is not ported.
-fn not_ported(_: &mut Funcdata, _: &Arch) -> Result<i32> {
-    err("action paramdouble: not implemented in ghidra-rs yet (milestone 3, stage S4)")
 }
 
 /// `ActionHeritage`: one heritage pass. It counts no change.
@@ -146,7 +236,8 @@ fn prototype_types(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     if !fd.proto.model_locked && !fd.proto.has_matching_model(evalfp) {
         fd.proto.set_model(models, evalfp);
     }
-    fd.active_output = Some(ParamActive::default());
+    let delay = arch.spec.models.get(evalfp).output.max_delay();
+    fd.active_output = Some(ParamActive::new(delay));
     for op in fd.ops_with(Opcode::Return) {
         let Some(&in0) = fd.op(op).ins.first() else { continue };
         if !fd.vn(in0).is_constant() {
@@ -166,10 +257,13 @@ fn prototype_types(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
 fn funclink(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     for i in 0..fd.qlst.len() {
         let c = fd.qlst[i];
+        let model = fd.call(c).proto.model;
+        let delays = model.map(|m| arch.spec.models.get(m)).map(|m| (m.input.max_delay(), m.output.max_delay()));
+        let (din, dout) = delays.unwrap_or((0, 0));
         let call = fd.call_mut(c);
-        call.active_input = Some(ParamActive::default());
-        call.active_output = Some(ParamActive::default());
-        let Some(model) = call.proto.model else { continue };
+        call.active_input = Some(ParamActive::new(din));
+        call.active_output = Some(ParamActive::new(dout));
+        let Some(model) = model else { continue };
         if arch.spec.models.get(model).input.has_stack() {
             create_placeholder(fd, arch, c)?;
         }
@@ -187,27 +281,15 @@ fn create_placeholder(fd: &mut Funcdata, arch: &Arch, c: CallId) -> Result<()> {
     let loadval = fd.op_stack_load(spec.stack_pointer, spec.stack_container, uniq, 0, 1, op)?;
     fd.op_insert_input(op, loadval, slot)?;
     fd.call_mut(c).stack_placeholder_slot = Some(slot);
+    if let Some(a) = &mut fd.call_mut(c).active_input {
+        a.set_placeholder_slot();
+    }
     Ok(())
 }
 
-/// `ActionUnreachable` (`Funcdata::removeUnreachableBlocks`). Flow builds only blocks reachable
-/// from the entry, so on the first pass there is nothing to remove; block removal is not ported
-/// (stage S4), so an unreachable block is an error rather than a silent difference.
-fn unreachable(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
-    let Some(&entry) = fd.blocks.list.first() else { return Ok(0) };
-    let mut seen = vec![false; fd.blocks.list.len()];
-    let mut stack = vec![entry];
-    while let Some(b) = stack.pop() {
-        let i = fd.blocks.block(b).index as usize;
-        if std::mem::replace(&mut seen[i], true) {
-            continue;
-        }
-        stack.extend(fd.blocks.block(b).outs.iter().map(|e| e.point));
-    }
-    if seen.contains(&false) {
-        return err("action unreachable: removing unreachable blocks is not implemented in ghidra-rs yet (stage S4)");
-    }
-    Ok(0)
+/// `ActionUnreachable` (`Funcdata::removeUnreachableBlocks`, cached check).
+fn unreachable(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
+    super::coreaction::unreachable(fd, arch)
 }
 
 /// Port of `ActionVarnodeProps::apply` on the first pass (before heritage): with
@@ -219,12 +301,12 @@ fn unreachable(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
 /// free ones) and makes one constant per read; before heritage each free varnode has one
 /// reader, so the reads are visited in that order and the constants made in it.
 fn varnode_props(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
+    let mut changes = varnode_props_late(fd)?;
     if !arch.readonly_propagate {
-        return Ok(0);
+        return Ok(changes);
     }
     let ram = Space::Sleigh(arch.sleigh.code_space());
     let mut reads = Vec::new();
-    let mut changes = 0;
     for op in fd.blocks.ops() {
         for (slot, &vn) in fd.op(op).ins.iter().enumerate() {
             let v = fd.vn(vn);
@@ -263,6 +345,50 @@ fn varnode_props(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     Ok(changes)
 }
 
+/// The parts of `ActionVarnodeProps::apply` that act after dead code ran: an auto-live hold
+/// (`lastChanceLoad`) is released unless its LOAD reads a constant address, and a varnode
+/// nothing consumes but something reads is replaced by zero (with no `nonzeromask`, every mask
+/// is all ones, so only an unconsumed varnode qualifies), which is not ported.
+fn varnode_props_late(fd: &mut Funcdata) -> Result<i32> {
+    let mut changes = 0;
+    let pass = fd.heritage.pass();
+    for vn in fd.loc_all() {
+        let v = fd.vn(vn);
+        if v.is_annotation() || v.is_dead() {
+            continue;
+        }
+        if v.has(VnFlags::AUTOLIVE_HOLD) {
+            if pass > 0 {
+                if let Some(d) = v.def.filter(|&d| fd.op(d).opc == Opcode::Load) {
+                    let mut ptr = fd.op(d).ins[1];
+                    if fd.vn(ptr).is_constant() {
+                        continue;
+                    }
+                    if let Some(c) = fd.vn(ptr).def.filter(|&c| fd.op(c).opc == Opcode::Copy) {
+                        ptr = fd.op(c).ins[0];
+                        if fd.vn(ptr).is_constant() {
+                            continue;
+                        }
+                    }
+                }
+                fd.vn_clear(vn, VnFlags::AUTOLIVE_HOLD);
+                changes += 1;
+            }
+            continue;
+        }
+        if v.consume == 0 && !v.is_constant() && !v.descend.is_empty() {
+            let zero_copy = v.def.is_some_and(|d| {
+                let o = fd.op(d);
+                o.opc == Opcode::Copy && fd.vn(o.ins[0]).is_constant() && fd.vn(o.ins[0]).offset == 0
+            });
+            if !zero_copy {
+                return err("varnodeprops: replacing an unconsumed varnode by zero is not implemented in ghidra-rs yet");
+            }
+        }
+    }
+    Ok(changes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,7 +415,7 @@ mod tests {
 
     fn raw_at_heritage(arch: &Arch, entry: u64) -> String {
         let mut fd = Funcdata::new(entry);
-        let mut t = universal();
+        let mut t = universal(&Default::default());
         t.set_break_start("heritage").unwrap();
         let brk = t.perform(&mut fd, arch).unwrap();
         assert_eq!(brk, Outcome::Break("universal:fullloop:mainloop:heritage start".into()));
@@ -336,7 +462,7 @@ mod tests {
         let mut arch = arch(img);
         arch.readonly_propagate = true;
         for slot in [0xb05210, 0xb05214, 0xb0521c] {
-            arch.add_externref(slot);
+            arch.add_externref(slot, slot);
         }
         arch.add_function(0x9eed28, "__SEH_prolog4".into());
         arch.add_function(0x9eed6d, "__SEH_epilog4".into());

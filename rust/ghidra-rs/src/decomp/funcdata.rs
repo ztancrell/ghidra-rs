@@ -64,6 +64,13 @@ pub struct Funcdata {
     next_unique: u64,
     /// header warnings (`Funcdata::warningHeader`), for `print C`
     pub(crate) warnings: Vec<String>,
+    /// the space the global scope owns (ram): its varnodes are `persist` and `addrtied`
+    /// (`setVarnodeProperties` through `Scope::queryProperties`)
+    pub(crate) ram: Option<u32>,
+    /// the unique space (`IPTR_INTERNAL`)
+    pub(crate) uniq: Option<u32>,
+    /// `ActionStackPtrFlow::analysis_finished` (the action is made per function)
+    pub(crate) stackptrflow_done: bool,
 }
 
 impl Funcdata {
@@ -88,6 +95,9 @@ impl Funcdata {
             heritage: Heritage::default(),
             next_unique: UNIQUE_ANALYSIS,
             warnings: Vec::new(),
+            ram: None,
+            uniq: None,
+            stackptrflow_done: false,
         }
     }
 
@@ -100,7 +110,7 @@ impl Funcdata {
     pub(crate) fn vn(&self, id: VarnodeId) -> &Varnode {
         &self.vns[id.0 as usize]
     }
-    fn vn_mut(&mut self, id: VarnodeId) -> &mut Varnode {
+    pub(crate) fn vn_mut(&mut self, id: VarnodeId) -> &mut Varnode {
         &mut self.vns[id.0 as usize]
     }
     pub(crate) fn call(&self, id: CallId) -> &CallSpec {
@@ -192,9 +202,21 @@ impl Funcdata {
     /// Port of `Funcdata::newVarnode` (also `newConstant`, `newCodeRef`): a free varnode.
     pub(crate) fn new_varnode(&mut self, size: u32, space: Space, offset: u64) -> VarnodeId {
         let id = VarnodeId(self.vns.len() as u32);
-        self.vns.push(Varnode::new(space, offset, size));
+        let v = self.scoped(Varnode::new(space, offset, size));
+        self.vns.push(v);
         self.loc_add(id);
         id
+    }
+
+    /// The scope's properties of a new varnode (`Scope::queryProperties`): the global scope
+    /// owns ram, so its varnodes are `persist` and `addrtied`; the local scope (the stack) holds
+    /// no symbols the console could give.
+    fn scoped(&self, mut v: Varnode) -> Varnode {
+        if self.ram.is_some_and(|r| v.space == Space::Sleigh(r)) {
+            v.flags.set(VnFlags::PERSIST);
+            v.flags.set(VnFlags::ADDRTIED);
+        }
+        v
     }
 
     pub(crate) fn new_constant(&mut self, size: u32, value: u64) -> VarnodeId {
@@ -204,7 +226,7 @@ impl Funcdata {
     /// Port of `Funcdata::newVarnodeOut`: a varnode written by `op`.
     pub(crate) fn new_varnode_out(&mut self, size: u32, space: Space, offset: u64, op: OpId) -> VarnodeId {
         let id = VarnodeId(self.vns.len() as u32);
-        let mut v = Varnode::new(space, offset, size);
+        let mut v = self.scoped(Varnode::new(space, offset, size));
         v.def = Some(op);
         self.vns.push(v);
         self.loc_add(id);
@@ -371,7 +393,7 @@ impl Funcdata {
     }
 
     /// Port of `Funcdata::opUnsetOutput` (`VarnodeBank::makeFree`).
-    fn op_unset_output(&mut self, op: OpId) {
+    pub(crate) fn op_unset_output(&mut self, op: OpId) {
         let Some(vn) = self.op_mut(op).out.take() else { return };
         self.loc_del(vn);
         let v = self.vn_mut(vn);
@@ -657,11 +679,7 @@ impl Funcdata {
             None => before.saturating_add(0x100_0000),
         };
         if after.wrapping_sub(before) <= 1 {
-            // BlockBasic::setOrder: renumber the block evenly
-            let step = u32::MAX / ops.len() as u32 - 1;
-            for (i, o) in self.blocks.block(bl).ops.iter().enumerate() {
-                self.ops[o.0 as usize].order = step.wrapping_mul(i as u32 + 1);
-            }
+            self.set_order(bl);
         } else {
             self.op_mut(op).order = after / 2 + before / 2;
         }
@@ -680,6 +698,8 @@ impl Funcdata {
 
     /// Port of `Funcdata::startProcessing`: follow flow, build blocks, order them and the calls.
     pub(crate) fn start_processing(&mut self, arch: &Arch) -> Result<()> {
+        self.ram = Some(arch.spec.stack_container);
+        self.uniq = Some(arch.sleigh.uniq_space());
         flow::follow_flow(self, arch)?;
         self.blocks.structure_loops()?;
         self.sort_call_specs();
@@ -696,5 +716,158 @@ impl Funcdata {
         };
         stdsort::sort(&mut q, |a, b| key(a) < key(b));
         self.qlst = q;
+    }
+
+    /// Port of `BlockBasic::setOrder`: renumber the block's order keys evenly.
+    pub(crate) fn set_order(&mut self, bl: BlockId) {
+        let ops = &self.blocks.block(bl).ops;
+        let step = u32::MAX / ops.len() as u32 - 1;
+        for (i, o) in self.blocks.block(bl).ops.iter().enumerate() {
+            self.ops[o.0 as usize].order = step.wrapping_mul(i as u32 + 1);
+        }
+    }
+
+    /// Port of `Funcdata::opSetOpcode` (the per-opcode lists follow the op's creation order
+    /// here, see [`Funcdata::ops_created_with`]).
+    pub(crate) fn op_set_opcode(&mut self, op: OpId, opc: Opcode) {
+        self.op_mut(op).opc = opc;
+    }
+
+    /// Port of `Funcdata::opUninsert`: take `op` out of its block; it becomes dead.
+    pub(crate) fn op_uninsert(&mut self, op: OpId) {
+        if let Some(bl) = self.op_mut(op).parent.take() {
+            self.blocks.block_mut(bl).ops.retain(|&o| o != op);
+            self.dead.push(op);
+        }
+    }
+
+    /// Port of `Funcdata::opUnsetInput` for every input.
+    fn op_clear_inputs(&mut self, op: OpId) {
+        for vn in std::mem::take(&mut self.op_mut(op).ins) {
+            self.erase_descend(vn, op);
+        }
+    }
+
+    /// Port of `Funcdata::opUnlink`: no output, no inputs, out of its block.
+    pub(crate) fn op_unlink(&mut self, op: OpId) {
+        self.op_unset_output(op);
+        self.op_clear_inputs(op);
+        self.op_uninsert(op);
+    }
+
+    /// Port of `Funcdata::opDestroy`: the output varnode is destroyed (its readers keep a stale
+    /// reference, the C++ null input, and are expected to go too), the inputs unlinked, and the
+    /// op made dead; [`Funcdata::clear_dead_ops`] frees it.
+    pub(crate) fn op_destroy(&mut self, op: OpId) {
+        if let Some(out) = self.op_mut(op).out.take() {
+            self.loc_del(out);
+            let v = self.vn_mut(out);
+            v.def = None;
+            v.descend.clear();
+            self.delete_varnode(out);
+        }
+        self.op_clear_inputs(op);
+        self.op_uninsert(op);
+    }
+
+    /// Port of `Funcdata::clearDeadOps`: the dead ops made by edits are freed.
+    pub(crate) fn clear_dead_ops(&mut self) {
+        for op in std::mem::take(&mut self.dead) {
+            if self.op(op).parent.is_none() && self.op_exists(op) {
+                self.op_clear_inputs(op);
+                if let Some(out) = self.op_mut(op).out.take() {
+                    self.loc_del(out);
+                    self.vn_mut(out).def = None;
+                    self.delete_varnode(out);
+                }
+                let seq = self.op(op).seq;
+                self.seqs.remove(&(seq.addr, seq.time));
+            }
+        }
+    }
+
+    /// Port of `Funcdata::clearDeadVarnodes`: a varnode nothing reads goes, an input becoming
+    /// free first.
+    pub(crate) fn clear_dead_varnodes(&mut self) {
+        let all: Vec<VarnodeId> = self.loc.iter().map(|k| k.id).collect();
+        for vn in all {
+            if !self.vn(vn).descend.is_empty() {
+                continue;
+            }
+            if self.vn(vn).is_input() {
+                let v = self.vn(vn);
+                let key = (v.space.index(), v.offset, v.size, vn);
+                self.loc_del(vn);
+                self.inputs.remove(&key);
+                self.vn_clear(vn, VnFlags::INPUT);
+                self.loc_add(vn);
+            }
+            if self.vn(vn).is_free() {
+                self.delete_varnode(vn);
+            }
+        }
+    }
+
+    /// The live varnodes of one space in location order (`beginLoc(spc)`).
+    pub(crate) fn loc_space(&self, space: Space) -> Vec<VarnodeId> {
+        self.loc_range(space, 0, None)
+    }
+
+    /// Every live varnode in location order (`beginLoc()`).
+    pub(crate) fn loc_all(&self) -> Vec<VarnodeId> {
+        self.loc.iter().map(|k| k.id).collect()
+    }
+
+    /// The varnodes at exactly `(space, off)` of `size` bytes, inputs first, then by the
+    /// writing op's sequence number, free ones last (`beginLoc(size, addr)`).
+    pub(crate) fn loc_at(&self, space: Space, off: u64, size: u32) -> Vec<VarnodeId> {
+        let s = space.index();
+        self.loc
+            .range(LocKey::start(s, off)..LocKey::start(s, off.wrapping_add(1)))
+            .filter(|k| k.size == size)
+            .map(|k| k.id)
+            .collect()
+    }
+
+    /// Port of `Funcdata::findVarnodeInput`.
+    pub(crate) fn find_input(&self, space: Space, off: u64, size: u32) -> Option<VarnodeId> {
+        let s = space.index();
+        self.inputs.range((s, off, size, VarnodeId(0))..=(s, off, size, VarnodeId(u32::MAX))).next().map(|k| k.3)
+    }
+
+    /// Port of `Funcdata::findCoveredInput`: the input containing the range.
+    pub(crate) fn find_covered_input(&self, space: Space, off: u64, size: u32) -> Option<VarnodeId> {
+        let s = space.index();
+        let &(ps, poff, psize, id) = self.inputs.range(..=(s, off, u32::MAX, VarnodeId(u32::MAX))).next_back()?;
+        (ps == s && poff <= off && off + u64::from(size) <= poff + u64::from(psize)).then_some(id)
+    }
+
+    /// The slot of `vn` among `op`'s inputs (`PcodeOp::getSlot`).
+    pub(crate) fn slot_of(&self, op: OpId, vn: VarnodeId) -> Option<usize> {
+        self.op(op).ins.iter().position(|&v| v == vn)
+    }
+
+    /// The op an iop annotation names (`PcodeOp::getOpFromConst`).
+    pub(crate) fn iop_target(&self, vn: VarnodeId) -> Option<OpId> {
+        let v = self.vn(vn);
+        (v.space == Space::Iop).then_some(OpId(v.offset as u32))
+    }
+
+    /// The call whose op is `op` (`Funcdata::getCallSpecs(op)`).
+    pub(crate) fn call_of(&self, op: OpId) -> Option<CallId> {
+        self.qlst.iter().copied().find(|&c| self.call(c).op == op)
+    }
+
+    /// The op before `op` in its block (`PcodeOp::previousOp`).
+    pub(crate) fn previous_op(&self, op: OpId) -> Option<OpId> {
+        let bl = self.op(op).parent?;
+        let ops = &self.blocks.block(bl).ops;
+        let at = ops.iter().position(|&o| o == op)?;
+        at.checked_sub(1).map(|i| ops[i])
+    }
+
+    /// Port of `Funcdata::warningHeader`.
+    pub(crate) fn warning_header(&mut self, msg: impl Into<String>) {
+        self.warnings.push(msg.into());
     }
 }

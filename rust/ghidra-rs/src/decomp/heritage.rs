@@ -187,6 +187,10 @@ pub(crate) struct Heritage {
     maxdepth: i32,
     merge: Vec<usize>,
     pq: PriorityQueue,
+    /// by SLEIGH space index: dead code was removed there (`HeritageInfo::deadremoved`)
+    deadremoved: Vec<bool>,
+    /// the call placeholders were cleared, at the stack's first pass (`hasCallPlaceholders`)
+    placeholders_cleared: bool,
 }
 
 impl Default for Heritage {
@@ -202,7 +206,44 @@ impl Default for Heritage {
             maxdepth: -1,
             merge: Vec::new(),
             pq: PriorityQueue::default(),
+            deadremoved: Vec::new(),
+            placeholders_cleared: false,
         }
+    }
+}
+
+/// The heritage delay of the `stack` space: its base register's space (the register space,
+/// delay 0) plus one (`Architecture::addSpacebase`).
+const STACK_DELAY: i32 = 1;
+
+impl Heritage {
+    /// Port of `Heritage::deadRemovalAllowed`: dead code may go from a space once it has been
+    /// heritaged (its dead-code delay is its heritage delay; x86 sets no other).
+    pub(crate) fn dead_removal_allowed(&self, arch: &Arch, space: u32) -> bool {
+        arch.sleigh.spaces[space as usize].delay.is_some_and(|d| self.pass > d)
+    }
+
+    /// Port of `Heritage::seenDeadCode`.
+    pub(crate) fn seen_dead_code(&mut self, space: u32) {
+        let i = space as usize;
+        if self.deadremoved.len() <= i {
+            self.deadremoved.resize(i + 1, false);
+        }
+        self.deadremoved[i] = true;
+    }
+
+    fn dead_removed(&self, space: u32) -> bool {
+        self.deadremoved.get(space as usize).copied().unwrap_or(false)
+    }
+
+    /// Port of `Heritage::forceRestructure`: the dominator tree is rebuilt at the next pass.
+    pub(crate) fn force_restructure(&mut self) {
+        self.maxdepth = -1;
+    }
+
+    /// `Funcdata::getHeritagePass`.
+    pub(crate) fn pass(&self) -> i32 {
+        self.pass
     }
 }
 
@@ -221,30 +262,66 @@ pub(crate) fn heritage(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
         if pass < delay {
             continue;
         }
-        if delay > 0 {
-            return err(format!(
-                "heritage of the {} space: not implemented in ghidra-rs yet (later heritage passes)",
-                sp.name
-            ));
-        }
-        // the register and unique spaces hold no stack pointer (discoverIndexedStackPointers)
-        // and no call placeholders
+        // no stack pointer lives in these spaces (discoverIndexedStackPointers)
         let space = Space::Sleigh(i as u32);
-        add_space_ranges(fd, space, space_mask(arch, space));
+        add_space_ranges(fd, arch, space, space_mask(arch, space))?;
+    }
+    // the stack space comes last in space order: its first pass clears the call placeholders
+    // (clearStackPlaceholders). discoverIndexedStackPointers only marks LOADs and STOREs and
+    // records guards for stack ranges, and no stack varnode exists without the `stackvars`
+    // rules (stage R5), so the stack contributes no range.
+    if pass >= STACK_DELAY && !fd.heritage.placeholders_cleared {
+        for i in 0..fd.qlst.len() {
+            let c = fd.qlst[i];
+            abort_spacebase_relative(fd, c)?;
+        }
+        fd.heritage.placeholders_cleared = true;
     }
     if !fd.heritage.disjoint.is_empty() {
         place_multiequals(fd, arch)?;
         rename(fd, arch)?;
     }
-    // analyzeNewLoadGuards and handleNewLoadCopies act on the load guards of the stack pass
+    // analyzeNewLoadGuards and handleNewLoadCopies act on the load guards of stack ranges
     fd.heritage.pass += 1;
     Ok(())
 }
 
+/// Port of `FuncCallSpecs::abortSpacebaseRelative`: the call's stack-pointer placeholder input
+/// goes, and its LOAD with it.
+pub(crate) fn abort_spacebase_relative(fd: &mut Funcdata, c: super::funcdata::CallId) -> Result<()> {
+    let Some(slot) = fd.call(c).stack_placeholder_slot else { return Ok(()) };
+    let op = fd.call(c).op;
+    let vn = fd.input(op, slot)?;
+    fd.op_remove_input(op, slot);
+    fd.call_mut(c).stack_placeholder_slot = None;
+    if let Some(a) = &mut fd.call_mut(c).active_input {
+        a.free_placeholder_slot();
+    }
+    let v = fd.vn(vn);
+    let internal = v.space == Space::Sleigh(arch_uniq(fd, vn));
+    if v.descend.is_empty() && internal {
+        if let Some(def) = v.def {
+            fd.op_destroy(def);
+        }
+    }
+    Ok(())
+}
+
+/// The unique space, as the placeholder's own space (it is always made there).
+fn arch_uniq(fd: &Funcdata, vn: VarnodeId) -> u32 {
+    match fd.vn(vn).space {
+        Space::Sleigh(s) => s,
+        _ => u32::MAX,
+    }
+}
+
 /// The space loop of `Heritage::heritage`: every varnode of the space that is read, written or
 /// an input joins a disjoint range to link.
-fn add_space_ranges(fd: &mut Funcdata, space: Space, mask: u64) {
+fn add_space_ranges(fd: &mut Funcdata, arch: &Arch, space: Space, mask: u64) -> Result<()> {
     let pass = fd.heritage.pass;
+    let Space::Sleigh(si) = space else { return Ok(()) };
+    let deadremoved = fd.heritage.dead_removed(si);
+    let mut needwarning = false;
     for vn in fd.loc_range(space, 0, None) {
         let v = fd.vn(vn);
         if v.def.is_none() && v.descend.is_empty() && !v.has(VnFlags::UNAFFECTED) && !v.is_input() {
@@ -258,14 +335,41 @@ fn add_space_ranges(fd: &mut Funcdata, space: Space, mask: u64) {
         // (new, old) addresses
         let (new_addresses, old_addresses) = match intersect {
             Intersect::New => (true, false),
-            // no dead code has been removed before the first passes, so no warning
             Intersect::Old if known || nodescend => continue,
-            Intersect::Old => (false, true),
-            Intersect::Partial => (true, true),
+            Intersect::Old => {
+                if !needwarning && deadremoved {
+                    needwarning = true;
+                    bump_deadcode_delay(arch, si)?;
+                }
+                (false, true)
+            }
+            Intersect::Partial => {
+                if !needwarning && deadremoved && !known {
+                    needwarning = true;
+                    bump_deadcode_delay(arch, si)?;
+                }
+                (true, true)
+            }
         };
         let range = MemRange { space, off, size, mask, new_addresses, old_addresses };
         task_add(&mut fd.heritage.disjoint, range);
     }
+    if needwarning {
+        fd.warning_header("Heritage AFTER dead removal");
+    }
+    Ok(())
+}
+
+/// Port of `Heritage::bumpDeadcodeDelay`: a processor space (not the unique space) gets a
+/// longer dead-code delay and the decompile restarts, which is not ported.
+fn bump_deadcode_delay(arch: &Arch, space: u32) -> Result<()> {
+    if space == arch.sleigh.uniq_space() {
+        return Ok(());
+    }
+    err(format!(
+        "heritage after dead-code removal in the {} space: the restart with a longer dead-code delay is not implemented in ghidra-rs yet",
+        arch.sleigh.spaces[space as usize].name
+    ))
 }
 
 /// Port of `TaskList::add`: ranges come sorted; one overlapping the last is merged into it.
@@ -539,10 +643,12 @@ fn guard(fd: &mut Funcdata, arch: &Arch, range: &MemRange, c: &mut Collected) ->
         fd.vn_set(*w, VnFlags::ACTIVE_HERITAGE);
     }
     if range.new_addresses {
-        // the scope gives no properties (addrtied, persist) to register or unique storage, and
-        // STOREs and LOADs reach neither space (guardStores, guardLoads)
-        guard_calls(fd, arch, range, &mut c.write)?;
-        guard_returns(fd, arch, range)?;
+        // queryProperties: the global scope owns ram (persist, addrtied); no other space has
+        // properties. LOAD guards exist only for stack ranges (guardLoads).
+        let global = fd.ram.is_some_and(|r| range.space == Space::Sleigh(r));
+        guard_calls(fd, arch, range, &mut c.write, global)?;
+        guard_returns(fd, arch, range, global)?;
+        guard_stores(fd, range, &mut c.write)?;
     }
     Ok(())
 }
@@ -646,7 +752,13 @@ fn normalize_write_size(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, range: &M
 /// range gets an INDIRECT (`r = r [] call`), or an INDIRECT creation when it kills it; a
 /// range that may be a return value or a parameter becomes a trial, and a possible
 /// parameter an extra input of the call.
-fn guard_calls(fd: &mut Funcdata, arch: &Arch, range: &MemRange, write: &mut Vec<VarnodeId>) -> Result<()> {
+fn guard_calls(
+    fd: &mut Funcdata,
+    arch: &Arch,
+    range: &MemRange,
+    write: &mut Vec<VarnodeId>,
+    holdind: bool,
+) -> Result<()> {
     let (space, off, size) = (range.space, range.off, range.size);
     // a call leaves the unique space alone (`lookupEffect`) and no parameter list holds it, so
     // no call guards it
@@ -715,6 +827,9 @@ fn guard_calls(fd: &mut Funcdata, arch: &Arch, range: &MemRange, write: &mut Vec
                 fd.vn_set(in0, VnFlags::ACTIVE_HERITAGE);
                 if let Some(out) = out {
                     fd.vn_set(out, VnFlags::ACTIVE_HERITAGE);
+                    if holdind {
+                        fd.vn_set(out, VnFlags::ADDRFORCE);
+                    }
                     if effect.is_some() {
                         fd.vn_set(out, VnFlags::RETURN_ADDRESS);
                     }
@@ -737,11 +852,58 @@ fn guard_calls(fd: &mut Funcdata, arch: &Arch, range: &MemRange, write: &mut Vec
 /// Port of `Heritage::guardReturns` for an unlocked prototype: a range that may be the return
 /// value becomes a trial and an extra input of every RETURN that is not a special halt.
 /// (Global, `persist` storage, which gets a COPY at each RETURN, is ram: a later pass.)
-fn guard_returns(fd: &mut Funcdata, arch: &Arch, range: &MemRange) -> Result<()> {
+fn guard_returns(fd: &mut Funcdata, arch: &Arch, range: &MemRange, persist: bool) -> Result<()> {
     let (space, off, size) = (range.space, range.off, range.size);
-    if fd.active_output.is_none() {
+    if fd.active_output.is_some() {
+        guard_return_trials(fd, arch, range)?;
+    }
+    if !persist {
         return Ok(());
     }
+    for op in fd.ops_created_with(Opcode::Return) {
+        if fd.op(op).is_dead() {
+            continue;
+        }
+        let copyop = fd.new_op(Opcode::Copy, fd.op(op).seq.addr);
+        let vn = fd.new_varnode_out(size, space, off, copyop);
+        fd.vn_set(vn, VnFlags::ADDRFORCE);
+        fd.vn_set(vn, VnFlags::ACTIVE_HERITAGE);
+        fd.op_mut(copyop).flags.set(OpFlags::RETURN_COPY);
+        let invn = fd.new_varnode(size, space, off);
+        fd.vn_set(invn, VnFlags::ACTIVE_HERITAGE);
+        fd.op_set_input(copyop, invn, 0)?;
+        fd.op_insert_before(copyop, op)?;
+    }
+    Ok(())
+}
+
+/// Port of `Heritage::guardStores`: every STORE into the range's space may change it, so an
+/// INDIRECT before each (`indirect_store`). (A STORE through the stack pointer guards stack
+/// ranges, which do not exist yet.)
+fn guard_stores(fd: &mut Funcdata, range: &MemRange, write: &mut Vec<VarnodeId>) -> Result<()> {
+    let Space::Sleigh(si) = range.space else { return Ok(()) };
+    for op in fd.ops_created_with(Opcode::Store) {
+        if fd.op(op).is_dead() {
+            continue;
+        }
+        let Some(&spc) = fd.op(op).ins.first() else { continue };
+        if fd.vn(spc).offset != u64::from(si) {
+            continue;
+        }
+        let ind = fd.new_indirect_op(op, range.space, range.off, range.size, OpFlags::INDIRECT_STORE)?;
+        let (in0, out) = (fd.input(ind, 0)?, fd.op(ind).out);
+        fd.vn_set(in0, VnFlags::ACTIVE_HERITAGE);
+        if let Some(out) = out {
+            fd.vn_set(out, VnFlags::ACTIVE_HERITAGE);
+            write.push(out);
+        }
+    }
+    Ok(())
+}
+
+/// The trial part of `Heritage::guardReturns`.
+fn guard_return_trials(fd: &mut Funcdata, arch: &Arch, range: &MemRange) -> Result<()> {
+    let (space, off, size) = (range.space, range.off, range.size);
     match fd.proto.characterize_as_output(arch, space, off, size) {
         Containment::None => {}
         Containment::ContainedBy => {

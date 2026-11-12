@@ -66,6 +66,8 @@ pub struct Console {
     fd: Option<Funcdata>,
     /// the action tree working on `fd`, kept for `continue`
     actions: Option<ActionTree>,
+    /// groups switched off with `option currentaction decompile <group> off`
+    disabled: std::collections::HashSet<String>,
 }
 
 /// The `.sla` for a 32-bit PE (`GHIDRA_RS_SLA`, else x86.sla built by `build-sla.sh`) and the
@@ -173,9 +175,9 @@ impl Console {
             }
             ["break", "start", action] if self.arch.is_some() => self.break_start = Some(action.to_string()),
             // `map externalref <slot> <refaddr> [<name>]`: the slot's symbol (read-only lookups skip it)
-            ["map", "externalref", slot, ..] => {
+            ["map", "externalref", slot, refaddr, ..] => {
                 let arch = self.arch.as_mut().ok_or("map externalref: no program loaded")?;
-                arch.add_externref(u64::from(addr(Some(slot))?));
+                arch.add_externref(u64::from(addr(Some(slot))?), u64::from(addr(Some(refaddr))?));
             }
             ["option", "readonly", on @ ("on" | "off")] => {
                 let arch = self.arch.as_mut().ok_or("option: no program loaded")?;
@@ -183,7 +185,16 @@ impl Console {
                 let msg = if arch.readonly_propagate { "now propagate as constants" } else { "now do not propagate" };
                 writeln!(out, "Read-only memory locations {msg}").map_err(io)?;
             }
-            // the other options switch rules and actions the ported stages do not have yet
+            // `option currentaction decompile <group> on|off`: the groups of the root action
+            ["option", "currentaction", "decompile", group, on @ ("on" | "off")] if self.arch.is_some() => {
+                if *on == "off" {
+                    self.disabled.insert(group.to_string());
+                } else {
+                    self.disabled.remove(*group);
+                }
+                writeln!(out, "Toggled {group} in action decompile").map_err(io)?;
+            }
+            // the other options (`togglerule`: no rule is ported) are read and ignored
             ["option", ..] if self.arch.is_some() => {}
             // `readonly <addr>:<size>`
             ["readonly", range] => {
@@ -210,7 +221,7 @@ impl Console {
                     return Ok(true);
                 }
                 writeln!(out, "Decompiling {name}").map_err(io)?;
-                let mut actions = action::universal();
+                let mut actions = action::universal(&self.disabled);
                 let set = match &self.break_start {
                     Some(b) => actions.set_break_start(b),
                     None => Ok(()),

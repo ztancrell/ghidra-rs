@@ -151,6 +151,11 @@ impl<'a> Printer<'a> {
                 4
             }
             Space::Sleigh(sp) => self.address(sp, v.offset, v.size),
+            // stack varnodes come with the `stackvars` rules (stage R5)
+            Space::Stack => {
+                self.out.str(&format!("s0x{:08x}", v.offset));
+                4
+            }
         };
         if expect != v.size {
             self.out.str(":");

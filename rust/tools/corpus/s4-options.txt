@@ -1,0 +1,23 @@
+option currentaction decompile analysis off
+option currentaction decompile cleanup off
+option currentaction decompile typerecovery off
+option currentaction decompile stackvars off
+option currentaction decompile subvar off
+option currentaction decompile floatprecision off
+option currentaction decompile doubleload off
+option currentaction decompile doubleprecis off
+option currentaction decompile segment off
+option currentaction decompile blockrecovery off
+option currentaction decompile localrecovery off
+option currentaction decompile switchnorm off
+option currentaction decompile returnsplit off
+option currentaction decompile splitcopy off
+option currentaction decompile splitpointer off
+option currentaction decompile constsequence off
+option currentaction decompile bitfields off
+option currentaction decompile dynamic off
+option togglerule earlyremoval off
+option togglerule push_multi off
+option togglerule conditionalmove off
+option togglerule orpredicate off
+option togglerule piecepathology off
