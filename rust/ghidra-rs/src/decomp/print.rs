@@ -140,9 +140,10 @@ impl<'a> Printer<'a> {
             Space::Fspec => {
                 let call = &self.fd().calls[v.offset as usize];
                 self.out.str("f");
-                match (&call.name, call.entry) {
-                    (Some(n), _) => self.out.str(n),
-                    (None, entry) => {
+                match call.callee().and_then(|e| self.arch.functions.get(&e)) {
+                    Some(f) => self.out.str(&f.name),
+                    None => {
+                        let entry = call.entry;
                         self.out.str("func_");
                         self.out.addr(entry.unwrap_or_default());
                     }

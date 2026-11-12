@@ -4,8 +4,8 @@
 //! - [`prelude`]: the console commands both engines read before a function, generated from
 //!   ghidra-rs's own analysis (functions, import slots, read-only `.rdata`);
 //! - [`Console`]: the Rust side of Ghidra's console decompiler (`decomp_dbg`). It reads the same
-//!   scripts and prints in the same format. There is no decompiler yet, so `decompile` fails
-//!   loudly; every command the corpora do not need fails loudly too;
+//!   scripts and prints in the same format. `decompile` runs the ported actions up to a `break
+//!   start` (see [`crate::decomp::action`]); every command the corpora do not need fails loudly;
 //! - [`datatest`]: a port of `testfunction.cc`, which runs the upstream XML datatests (corpus D)
 //!   on either engine and checks their `<stringmatch>` patterns.
 
@@ -63,11 +63,15 @@ pub struct Console {
     fd: Option<Funcdata>,
 }
 
-/// The `.sla` for a 32-bit PE: `GHIDRA_RS_SLA`, else x86.sla built by `build-sla.sh`.
-fn x86_sleigh() -> Result<Sleigh, String> {
+/// The `.sla` for a 32-bit PE (`GHIDRA_RS_SLA`, else x86.sla built by `build-sla.sh`) and the
+/// text of the Windows compiler spec `x86win.cspec` next to it, as the console's
+/// `x86:LE:32:default:windows` language reads them.
+fn x86_windows() -> Result<(Sleigh, String), String> {
     let path =
         std::env::var_os("GHIDRA_RS_SLA").map(std::path::PathBuf::from).unwrap_or_else(|| Sleigh::sla_path("x86"));
-    Sleigh::load(&path)
+    let cspec_path = path.with_file_name("x86win.cspec");
+    let cspec = std::fs::read_to_string(&cspec_path).map_err(|e| format!("{}: {e}", cspec_path.display()))?;
+    Ok((Sleigh::load(&path)?, cspec))
 }
 
 impl Console {
@@ -102,7 +106,8 @@ impl Console {
             ["load", "file", path] => {
                 let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
                 let image = Image::from_pe(&data).map_err(|e| format!("{path}: {e}"))?;
-                self.arch = Some(Arch::new(x86_sleigh()?, image).map_err(|e| e.to_string())?);
+                let (sleigh, cspec) = x86_windows()?;
+                self.arch = Some(Arch::new(sleigh, image, &cspec).map_err(|e| e.to_string())?);
                 writeln!(out, "{path} successfully loaded: Intel/AMD 32-bit x86").map_err(io)?;
             }
             ["load", "addr", rest @ ..] if self.arch.is_some() => {
@@ -119,8 +124,9 @@ impl Console {
                     .first()
                     .filter(|n| **n != "nocode")
                     .map_or_else(|| format!("func_0x{a:08x}"), |n| n.to_string());
-                arch.functions.insert(u64::from(a), name.clone());
-                self.functions.insert(name, a);
+                arch.add_function(u64::from(a), name.clone());
+                // a name mapped twice finds the first (`findFirstByName`: the lowest dedup number)
+                self.functions.entry(name).or_insert(a);
             }
             ["load", "function", name] if self.arch.is_some() => {
                 let a = *self.functions.get(*name).ok_or(format!("Unknown function name: {name}"))?;
@@ -128,20 +134,51 @@ impl Console {
                 self.function = Some((a, name.to_string()));
             }
             ["break", "start", action] if self.arch.is_some() => self.break_start = Some(action.to_string()),
-            // the stages so far read no symbols or options
-            ["map", "externalref", ..] | ["option", ..] if self.arch.is_some() => {}
-            ["readonly", rest @ ..] if self.arch.is_some() => {
-                addr(rest.first())?;
+            // `map externalref <slot> <refaddr> [<name>]`: the slot's symbol (read-only lookups skip it)
+            ["map", "externalref", slot, ..] => {
+                let arch = self.arch.as_mut().ok_or("map externalref: no program loaded")?;
+                arch.add_externref(u64::from(addr(Some(slot))?));
+            }
+            ["option", "readonly", on @ ("on" | "off")] => {
+                let arch = self.arch.as_mut().ok_or("option: no program loaded")?;
+                arch.readonly_propagate = *on == "on";
+                let msg = if arch.readonly_propagate { "now propagate as constants" } else { "now do not propagate" };
+                writeln!(out, "Read-only memory locations {msg}").map_err(io)?;
+            }
+            // the other options switch rules and actions the ported stages do not have yet
+            ["option", ..] if self.arch.is_some() => {}
+            // `readonly <addr>:<size>`
+            ["readonly", range] => {
+                let arch = self.arch.as_mut().ok_or("readonly: no program loaded")?;
+                let size =
+                    range.split_once(':').and_then(|(_, s)| s.parse().ok()).ok_or(format!("{line}: bad size"))?;
+                arch.add_readonly(u64::from(addr(Some(range))?), size);
                 writeln!(out, "Successfully marked range as readonly").map_err(io)?;
+            }
+            ["fixup", "apply", fixup, func] => {
+                let arch = self.arch.as_mut().ok_or("fixup apply: no program loaded")?;
+                let a = *self.functions.get(*func).ok_or(format!("Unknown function name: {func}"))?;
+                arch.apply_fixup(fixup, u64::from(a)).map_err(|e| e.to_string())?;
+                writeln!(out, "Successfully applied callfixup").map_err(io)?;
             }
             ["decompile"] => {
                 let arch = self.arch.as_ref().ok_or("decompile: no program loaded")?;
                 let (a, name) = self.function.as_ref().ok_or("decompile: no function selected")?;
                 writeln!(out, "Decompiling {name}").map_err(io)?;
                 let mut fd = Funcdata::new(u64::from(*a));
-                action::perform(&mut fd, arch, self.break_start.as_deref()).map_err(|e| e.to_string())?;
-                if let Some(b) = &self.break_start {
-                    writeln!(out, "Break at {}:{b} start", action::ROOT).map_err(io)?;
+                match action::perform(&mut fd, arch, self.break_start.as_deref()) {
+                    Ok(Some(path)) => writeln!(out, "Break at {path} start").map_err(io)?,
+                    Ok(None) => {}
+                    // the console reports the error, drops the function and goes on (`abortFunction`)
+                    Err(e) => {
+                        writeln!(out, "Low-level ERROR: {e}\nUnable to proceed with function: {name}").map_err(io)?;
+                        self.fd = None;
+                        return Ok(true);
+                    }
+                }
+                // the function's prototype lives on in the scope, as the C++ Funcdata's does
+                if let Some(f) = self.arch.as_mut().and_then(|a| a.functions.get_mut(&fd.entry)) {
+                    f.proto = fd.proto.clone();
                 }
                 self.fd = Some(fd);
             }
@@ -153,7 +190,7 @@ impl Console {
             }
             // read by the corpora but needing later stages (`parse line`: the types of S6)
             ["continue"] | ["print", "C"] | ["print", "tree", "block"] | ["parse", "line", ..] => {
-                return Err(format!("{line}: not implemented in ghidra-rs yet (milestone 3, stage S1b and later)"));
+                return Err(format!("{line}: not implemented in ghidra-rs yet (milestone 3, stage S2 and later)"));
             }
             _ => return Err(format!("not implemented in ghidra-rs: {line}")),
         }
@@ -180,66 +217,6 @@ pub mod datatest {
         pub patterns: Vec<regex_lite::Regex>,
     }
 
-    /// XML character data: entities and character references (`&#xc2;` is one byte, as in
-    /// Ghidra's XML reader) decoded, `<![CDATA[...]]>` sections taken as they are.
-    fn unescape(s: &str) -> String {
-        let mut out = Vec::new();
-        let mut rest = s;
-        while let Some(i) = rest.find(['&', '<']) {
-            out.extend_from_slice(&rest.as_bytes()[..i]);
-            rest = &rest[i..];
-            if let Some(cdata) = rest.strip_prefix("<![CDATA[") {
-                let end = cdata.find("]]>").unwrap_or(cdata.len());
-                out.extend_from_slice(&cdata.as_bytes()[..end]);
-                rest = cdata.get(end + 3..).unwrap_or("");
-                continue;
-            }
-            let ent = rest.find(';').map(|e| &rest[1..e]);
-            let byte = match ent {
-                Some("lt") => Some(b'<'),
-                Some("gt") => Some(b'>'),
-                Some("amp") => Some(b'&'),
-                Some("quot") => Some(b'"'),
-                Some("apos") => Some(b'\''),
-                Some(e) if e.starts_with("#x") => u8::from_str_radix(&e[2..], 16).ok(),
-                Some(e) if e.starts_with('#') => e[1..].parse().ok(),
-                _ => None,
-            };
-            match (byte, ent) {
-                (Some(b), Some(e)) => {
-                    out.push(b);
-                    rest = &rest[e.len() + 2..];
-                }
-                _ => {
-                    out.push(rest.as_bytes()[0]);
-                    rest = &rest[1..];
-                }
-            }
-        }
-        out.extend_from_slice(rest.as_bytes());
-        String::from_utf8_lossy(&out).into_owned()
-    }
-
-    fn attr(tag: &str, name: &str) -> Option<String> {
-        let i = tag.find(&format!(" {name}=\""))? + name.len() + 3;
-        Some(unescape(&tag[i..i + tag[i..].find('"')?]))
-    }
-
-    /// The elements `<name ...>content</name>` in `xml`: (start tag, content).
-    fn elements<'a>(xml: &'a str, name: &str) -> Vec<(&'a str, &'a str)> {
-        let (open, close) = (format!("<{name}"), format!("</{name}>"));
-        let mut v = Vec::new();
-        let mut rest = xml;
-        while let Some(i) = rest.find(&open) {
-            rest = &rest[i..];
-            let Some(gt) = rest.find('>') else { break };
-            let Some(end) = rest.find(&close) else { break };
-            v.push((&rest[..gt], &rest[gt + 1..end]));
-            rest = &rest[end + close.len()..];
-        }
-        v
-    }
-
     /// std::regex (ECMAScript) reads `\<` and `\>` as the characters; regex-lite reads them as
     /// word boundaries.
     pub fn ecmascript(pat: &str) -> String {
@@ -260,25 +237,24 @@ pub mod datatest {
     }
 
     pub fn load(path: &Path) -> Result<Test, String> {
-        let xml = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let script =
-            elements(&xml, "script").into_iter().next().ok_or("Did not see <script> tag in <decompilertest>")?.1;
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let root = crate::xml::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let script = root.find("script").ok_or("Did not see <script> tag in <decompilertest>")?;
         // stripNewlines: CR removed, LF made a space
-        let commands =
-            elements(script, "com").iter().map(|(_, c)| unescape(c).replace('\r', "").replace('\n', " ")).collect();
+        let commands = script.kids_named("com").map(|c| c.text.replace('\r', "").replace('\n', " ")).collect();
         let mut checks = Vec::new();
-        for (tag, content) in elements(&xml, "stringmatch") {
-            let num = |n| attr(tag, n).and_then(|v| v.trim().parse().ok()).ok_or(format!("stringmatch: bad {n}"));
+        for tag in root.kids_named("stringmatch") {
+            let num = |n| tag.attr(n).and_then(|v| v.trim().parse().ok()).ok_or(format!("stringmatch: bad {n}"));
             let mut patterns = Vec::new();
             // one regex per line, leading blanks removed (FunctionTestProperty::restoreXml)
-            for line in unescape(content).split('\n') {
+            for line in tag.text.split('\n') {
                 let line = line.trim_start_matches([' ', '\t']);
                 if !line.is_empty() {
                     patterns.push(regex_lite::Regex::new(&ecmascript(line)).map_err(|e| format!("{line}: {e}"))?);
                 }
             }
             checks.push(Check {
-                name: attr(tag, "name").unwrap_or_default(),
+                name: tag.attr("name").unwrap_or_default().to_string(),
                 min: num("min")?,
                 max: num("max")?,
                 patterns,

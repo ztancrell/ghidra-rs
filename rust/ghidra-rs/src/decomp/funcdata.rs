@@ -2,6 +2,7 @@
 //! varnodes, basic blocks and calls, with the creation primitives the actions use.
 
 use super::block::{BlockGraph, BlockId};
+use super::fspec::{CallSpec, FuncProto};
 use super::op::{OpFlags, OpId, PcodeOp, SeqNum};
 use super::opcode::Opcode;
 use super::varnode::{Space, Varnode, VarnodeId, CONST_SPACE};
@@ -12,19 +13,12 @@ use std::collections::BTreeMap;
 /// (`sizeof(void *)` on the 64-bit reference build).
 const POINTER_SIZE: u32 = 8;
 
+/// `Translate::ANALYSIS`: where the decompiler's own unique varnodes start.
+const UNIQUE_ANALYSIS: u64 = 0x1000_0000;
+
 /// Index of a call in [`Funcdata::calls`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CallId(pub(crate) u32);
-
-/// Port of the parts of `FuncCallSpecs` (fspec.cc) S1a needs.
-#[derive(Debug, Clone)]
-pub(crate) struct CallSpec {
-    pub(crate) op: OpId,
-    /// the called address of a direct call
-    pub(crate) entry: Option<u64>,
-    /// the callee's display name, when the scope knows a function there (`setFuncdata`)
-    pub(crate) name: Option<String>,
-}
 
 /// Port of the S1a part of `JumpTable`: the indirect jump and its targets in table order.
 #[derive(Debug, Clone)]
@@ -50,6 +44,12 @@ pub struct Funcdata {
     /// the live calls, sorted by `sortCallSpecs` once blocks exist (`Funcdata::qlst`)
     pub(crate) qlst: Vec<CallId>,
     pub(crate) jumptables: Vec<JumpTable>,
+    /// the function's own prototype (`Funcdata::funcp`)
+    pub(crate) proto: FuncProto,
+    /// the next free offset of the unique space (`VarnodeBank::uniqid`)
+    next_unique: u64,
+    /// header warnings (`Funcdata::warningHeader`), for `print C`
+    pub(crate) warnings: Vec<String>,
 }
 
 impl Funcdata {
@@ -66,6 +66,9 @@ impl Funcdata {
             calls: Vec::new(),
             qlst: Vec::new(),
             jumptables: Vec::new(),
+            proto: FuncProto::default(),
+            next_unique: UNIQUE_ANALYSIS,
+            warnings: Vec::new(),
         }
     }
 
@@ -80,6 +83,9 @@ impl Funcdata {
     }
     pub(crate) fn call(&self, id: CallId) -> &CallSpec {
         &self.calls[id.0 as usize]
+    }
+    pub(crate) fn call_mut(&mut self, id: CallId) -> &mut CallSpec {
+        &mut self.calls[id.0 as usize]
     }
 
     /// Port of `Funcdata::newOp`: a new op at `addr` with the next creation time, appended to
@@ -129,6 +135,104 @@ impl Funcdata {
     /// Port of `Funcdata::newVarnodeCallSpecs`: an annotation naming a call.
     pub(crate) fn new_varnode_callspecs(&mut self, call: CallId) -> VarnodeId {
         self.new_varnode(POINTER_SIZE, Space::Fspec, u64::from(call.0))
+    }
+
+    /// Port of `Funcdata::newUniqueOut`: a new unique-space varnode of `size` bytes written by
+    /// `op`, at the next free offset (`VarnodeBank::createUnique`). `uniq` is the unique space.
+    pub(crate) fn new_unique_out(&mut self, size: u32, uniq: u32, op: OpId) -> VarnodeId {
+        let offset = self.next_unique;
+        self.next_unique += u64::from(size);
+        self.new_varnode_out(size, Space::Sleigh(uniq), offset, op)
+    }
+
+    /// Port of `Funcdata::newVarnodeSpace`: the constant naming a space (LOAD/STORE input 0).
+    pub(crate) fn new_varnode_space(&mut self, space: u32) -> VarnodeId {
+        self.new_constant(POINTER_SIZE, u64::from(space))
+    }
+
+    /// Port of `PcodeEmitFd::dump`: new ops at `addr` for the p-code `ops` (an instruction's
+    /// translation or an injected snippet), appended to the dead list.
+    pub(crate) fn emit_pcode(&mut self, addr: u64, ops: &[crate::sleigh::PcodeOp]) -> Result<()> {
+        for p in ops {
+            let opc = Opcode::from_u8(p.opc).ok_or_else(|| LowlevelError(format!("bad opcode {}", p.opc)))?;
+            let op = self.new_op(opc, addr);
+            if let Some(o) = p.out {
+                self.new_varnode_out(o.size, Space::Sleigh(o.space), o.offset, op);
+            }
+            let ins = p.ins.iter().map(|v| self.new_varnode(v.size, Space::Sleigh(v.space), v.offset)).collect();
+            self.op_mut(op).ins = ins;
+        }
+        Ok(())
+    }
+
+    /// Port of `Funcdata::opInsertInput`: a new input at `slot`.
+    pub(crate) fn op_insert_input(&mut self, op: OpId, vn: VarnodeId, slot: usize) {
+        self.op_mut(op).ins.insert(slot, vn);
+    }
+
+    /// Port of `Funcdata::opStackLoad`: a LOAD of `size` bytes at stack offset `off`, computed
+    /// from the stack pointer `sp` (space, offset, size) just before `op`; `ram` is the space the
+    /// stack lives in. Returns the loaded value.
+    pub(crate) fn op_stack_load(
+        &mut self,
+        sp: (u32, u64, u32),
+        ram: u32,
+        uniq: u32,
+        off: u64,
+        size: u32,
+        op: OpId,
+    ) -> Result<VarnodeId> {
+        let addout = self.create_stack_ref(sp, uniq, off, op)?;
+        let addop = self.vn(addout).def.ok_or_else(|| LowlevelError("stack reference without its op".into()))?;
+        let addr = self.op(op).seq.addr;
+        let loadop = self.new_op(Opcode::Load, addr);
+        let spc = self.new_varnode_space(ram);
+        self.op_mut(loadop).ins = vec![spc, addout];
+        let res = self.new_unique_out(size, uniq, loadop);
+        // the LOAD comes after the stack-building op
+        self.op_insert_after(loadop, addop)?;
+        Ok(res)
+    }
+
+    /// Port of `Funcdata::createStackRef` (no reused stack pointer, inserted before `op`):
+    /// `u = SP + off`. x86 declares no segment op, so there is no `SEGMENTOP` around it.
+    fn create_stack_ref(&mut self, sp: (u32, u64, u32), uniq: u32, off: u64, op: OpId) -> Result<VarnodeId> {
+        let (space, spoff, size) = sp;
+        let stackptr = self.new_varnode(size, Space::Sleigh(space), spoff);
+        let addop = self.new_op(Opcode::IntAdd, self.op(op).seq.addr);
+        let addout = self.new_unique_out(size, uniq, addop);
+        let c = self.new_constant(size, off);
+        self.op_mut(addop).ins = vec![stackptr, c];
+        self.op_insert_before(addop, op)?;
+        Ok(addout)
+    }
+
+    /// Port of `Funcdata::opInsertAfter`: put `op` just after `prev` (after the store or call an
+    /// INDIRECT `prev` stands for), past any MULTIEQUAL there.
+    pub(crate) fn op_insert_after(&mut self, op: OpId, mut prev: OpId) -> Result<()> {
+        if self.op(prev).opc == Opcode::Indirect {
+            if let Some(&iop) = self.op(prev).ins.get(1) {
+                let v = self.vn(iop);
+                // the op the INDIRECT names, while it is alive (in a block)
+                let target = OpId(v.offset as u32);
+                if v.space == Space::Iop && self.op(target).parent.is_some() {
+                    prev = target;
+                }
+            }
+        }
+        let Some(bl) = self.op(prev).parent else { return err("opInsertAfter: op outside any block") };
+        let ops = &self.blocks.block(bl).ops;
+        let Some(pos) = ops.iter().position(|&o| o == prev) else {
+            return err("opInsertAfter: op missing from its block");
+        };
+        let mut at = pos + 1;
+        if self.op(op).opc != Opcode::Multiequal {
+            while ops.get(at).is_some_and(|&o| self.op(o).opc == Opcode::Multiequal) {
+                at += 1;
+            }
+        }
+        self.op_insert(op, bl, at);
+        Ok(())
     }
 
     pub(crate) fn find_op(&self, seq: SeqNum) -> Option<OpId> {

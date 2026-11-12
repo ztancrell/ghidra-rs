@@ -38,17 +38,24 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
 - `ghidra-rs/src/console.rs`: the milestone 3 harness: the decompiler prelude, the Rust side of
   Ghidra's console decompiler (`decompile -i`) and the datatest runner (port of
   `testfunction.cc`). See "Decompiler harness (Milestone 3, stage S0)" below.
+- `ghidra-rs/src/xml.rs`: the small XML reader for the `.pspec`/`.cspec` files and the datatests.
 - `ghidra-rs/tests/console.rs`: console commands not ported yet fail; a datatest XML parses.
 - `ghidra-rs/src/decomp/`: the decompiler (milestone 3), one module per C++ concern:
-  `mod.rs` (`Arch`: image, SLEIGH engine, mapped functions, register names; `LowlevelError`),
-  `funcdata.rs` (`Funcdata`: op/varnode arenas, op insertion, calls), `op.rs`, `varnode.rs`,
-  `opcode.rs` (opcodes and their `print raw` names), `flow.rs` (`FlowInfo`), `block.rs`
-  (basic blocks, spanning tree), `action.rs` (the universal action up to `funclink`),
-  `print.rs` (`print raw`), `stdsort.rs` (libstdc++'s `std::sort`). See "Decompiler
-  (Milestone 3)" below.
-- `ghidra-rs/tests/decomp.rs`, `tests/data/raw-funclink-*.txt`: `print raw` at `funclink` against
-  the reference's output, for mercs2's 0x40a110 (rebuilt from its bytes) and for `INTO; RET` (a
-  relative branch to the end of its own instruction).
+  `mod.rs` (`Arch`: image, SLEIGH engine, compiler spec, mapped functions and external
+  references, read-only ranges, register names; `LowlevelError`), `cspec.rs` (reading
+  `x86win.cspec`), `fspec.rs` (prototype models, `FuncProto`, `CallSpec`), `inject.rs` (call
+  fixups: the p-code snippet parser),
+  `funcdata.rs` (`Funcdata`: op/varnode arenas, op insertion, stack loads), `op.rs`,
+  `varnode.rs`, `opcode.rs` (opcodes and their `print raw` names), `flow.rs` (`FlowInfo`,
+  call-fixup injection), `block.rs` (basic blocks, spanning tree), `action.rs` (the universal
+  action up to `heritage`), `print.rs` (`print raw`), `stdsort.rs` (libstdc++'s `std::sort`).
+  See "Decompiler (Milestone 3)" below.
+- `ghidra-rs/tests/decomp.rs`, `tests/data/raw-funclink-*.txt`, `tests/data/raw-heritage-40a110.txt`:
+  `print raw` at `funclink` and `heritage` against the reference's output, for mercs2's 0x40a110
+  (rebuilt from its bytes) and for `INTO; RET` (a relative branch to the end of its own
+  instruction). Unit tests in `decomp/action.rs` (`tests/data/raw-heritage-onexit.txt`: mercs2's
+  `__onexit` with two call fixups, external references and read-only propagation; read-only
+  reads becoming constants) and `decomp/inject.rs` (the snippet parser).
 - `tools/stdsort_ref.cc`, `ghidra-rs/tests/data/stdsort-gxx.txt`: libstdc++ `std::sort` tie orders
   that `decomp/stdsort.rs` must reproduce.
 - `tools/decomp-ref.sh`, `tools/decomp-ref.patch`: build the reference decompiler `decomp_dbg`.
@@ -502,12 +509,16 @@ rust/tools/decomp-diff.sh --script <file>      # one script on both engines, ful
   every function with its FID or export name. For mercs2: 30,262 `map function` lines (1,022 of
   them import slots), 1,022 `map externalref`.
 - `decompile -i` reads `load file`, `source`, `map function`, `map externalref`, `readonly`,
-  `option`, `load function`, `load addr`, `break start`, `decompile`, `print raw` and `quit`,
-  and echoes them as `decomp_dbg -i` does. `decompile` runs up to the `break start` action
-  (stage S1a: at most `funclink`). `continue`, `print C|tree block` and `parse line` fail with
-  "not implemented in ghidra-rs yet (milestone 3, stage S1b and later)"; any other command
-  fails with "not implemented in ghidra-rs". `option` and `map externalref` are read and
-  ignored (no ported stage uses them yet).
+  `option`, `fixup apply`, `load function`, `load addr`, `break start`, `decompile`,
+  `print raw` and `quit`, and echoes them as `decomp_dbg -i` does. `decompile` runs up to the
+  `break start` action (stage S1b: at most `heritage`). `continue`, `print C|tree block` and
+  `parse line` fail with "not implemented in ghidra-rs yet (milestone 3, stage S2 and
+  later)"; any other command fails with "not implemented in ghidra-rs". Of the options only
+  `option readonly on|off` has an effect (and prints the reference's message); the others
+  switch rules and actions not ported yet and are read and ignored. A name mapped twice
+  (`map function`) finds its first function, as the C++ `findFirstByName` does.
+  Superseded: S0 and S1a ignored `option` and `map externalref`; S1b reads them (read-only
+  propagation, external-reference slots).
 - `datatest` is the port of `testfunction.cc`: it reads an upstream XML test (`<script>`,
   `<stringmatch>` regexes with `min`/`max`) and checks the script's bulk output. With `--ref` it
   runs the script on `decomp_dbg` (needs `SLEIGHHOME`); without, on the Rust console, which
@@ -579,6 +590,97 @@ indirect jump becomes a call and a halt (`truncateIndirectJump`). It covers the 
 M8 and M500. As in the C++, an instruction at an unmapped address ends the decompile with an
 error (`DataUnavailError`), and only a constructor without p-code counts as unimplemented
 (`Sleigh::pcode` returns `PcodeError::Unimplemented` for it, `Invalid` for anything else).
+Superseded: "call fixups ... (the console applies no `callfixup` by name)" above: the console
+applies none by name, but `fixup apply` sets one, and S1b injects it (below).
+
+### Stage S1b: specs, prototypes, call fixups
+
+Stage S1b (branch `m3-s1b`) runs the universal action up to `heritage`: after `funclink`, the
+`fullloop:mainloop` actions `unreachable` and `varnodeprops`; `break start heritage` prints
+`Break at universal:fullloop:mainloop:heritage start`. It reads `x86win.cspec` (next to the
+`.sla`; `Arch::new` takes its text) and replaces S1a's minimal actions with ports:
+
+- `cspec.rs`: the stack pointer (`<stackpointer>`, replacing S1a's hard-coded ESP), the return
+  address, the four prototype models with their parameter entries, unaffected,
+  killed-by-call (including `<output killedbycall="true">`) and likely-trash registers,
+  `<resolveprototype>` (`ProtoModelMerged`: shared effects and likely trash, input entries
+  merged as `ParamListMerged::foldIn` does, by containment and minimum size),
+  `<eval_current_prototype>`/`<eval_called_prototype>`, and the ten `<callfixup>` snippets.
+  `<data_organization>` and `<global>` are skipped until types (S6) and scopes read them;
+  any other element is an error. The tracked `DF = 0` still comes from the `.pspec`.
+- `inject.rs`: the snippet parser, a recursive-descent parser for the subset of SLEIGH
+  semantics snippets use (assignments to registers and new temporaries, `local`, stores and
+  loads with optional space and size, integer and boolean operators, unary `-`, `~`, `!`).
+  It follows `PcodeCompile`: each operator and each named temporary takes the next 16-byte
+  unique slot, counting from the `.sla`'s unique base + 0x200 across all snippets in file
+  order, assignments rename an operator's temporary, sizes propagate as `propagateSize` does.
+  User ops, branches, labels, signed and float operators are rejected at load.
+- `flow.rs`: a call to a function with a fixup (`fixup apply`) is queued (`injectlist`) and,
+  after flow, replaced by the snippet's ops: made at the end of the dead list, walked for
+  control flow, moved after the call, and the call deleted (`doInjection`), also in the
+  jump-table loop as `generateOps` does.
+- `action.rs`: `defaultparams` (each call takes the callee's prototype, with the
+  `evalfp_called` or default model), `extrapopsetup` (by the call's extrapop: `SP = SP + n`
+  after the call when known, the INDIRECT when unknown), `prototypetypes` (the function takes
+  the `evalfp_current` model; RETURN loses its address), `funclink` (a call whose model passes
+  parameters on the stack gets the stack-pointer placeholder: `u = ESP + 0`, a 1-byte LOAD,
+  as its last input; unique varnodes count from 0x10000000), `unreachable` (nothing to remove
+  on the first pass; an unreachable block is an error until block removal is ported in S4),
+  `varnodeprops` (with `option readonly on`, a free read of read-only memory becomes the
+  constant the image holds there, read as `loadFill` reads: on into later sections, zero where
+  none is; the reads are taken in the varnodes' location order, as `beginLoc` walks them). `normalizesetup` and `funclinkoutonly`
+  are not in the `decompile` root's groups and are left out.
+- Read-only memory is the loader's read-only sections (bfd's `SEC_READONLY`: PE sections
+  without `IMAGE_SCN_MEM_WRITE`, `Section::readonly`) plus `readonly` commands; a varnode is
+  read-only by the property at its first byte unless an external-reference slot (`map
+  externalref`, 4 bytes) contains it, which is how the IAT slots called through stay varnodes.
+  A section is as long as bfd loads it (`Section::zero_tail`): the raw size when that is
+  smaller than the virtual size, else the virtual size (`_bfd_XXi_swap_scnhdr_in`); in mercs2
+  the two are equal for every section.
+- The function's prototype is written back to its `map function` entry after `decompile`, as
+  the C++ scope keeps its `Funcdata`; a header warning records each injected call fixup
+  (`Funcdata::warnings`, for `print C`). A decompile error prints `Low-level ERROR: ...` and
+  `Unable to proceed with function: ...` and the script goes on, as in the C++ console.
+
+Check:
+
+```sh
+BREAK=heritage rust/tools/decomp-diff.sh m8
+BREAK=heritage rust/tools/decomp-diff.sh m500
+BREAK=funclink rust/tools/decomp-diff.sh m500   # S1a's check still holds
+```
+
+| corpus | identical at `break start heritage` | at `break start funclink` |
+|---|---|---|
+| m8 | 8 / 8 | 8 / 8 |
+| m500 | 500 / 500 | 500 / 500 |
+
+Speed (Mall: every non-import `map function` of the mercs2 prelude, 29,240 functions, one
+script, one thread, release build, 2026-11-12): to `break start heritage` in 4.7 s including
+loading the PE and the prelude, about 6,200 functions per second; peak RSS 472 MB. 29,139
+reach the break, 101 end with the C++'s errors (70 `Unable to load bytes` (flow into unmapped
+addresses), 30 `Bad instruction count exceeded`, 1 `Flow exceeded maximum allowable
+instructions`); no panics.
+
+No differences remain. Call fixups do not occur in the corpora (the console applies them
+only with `fixup apply`); they are checked on mercs2's `__onexit` (0x9ee37a) with
+`fixup apply SEH_prolog4 __SEH_prolog4` and `fixup apply EH_epilog3 __SEH_epilog4`
+(the unit test `print_raw_at_heritage_with_callfixups`), and by hand with `EH_prolog` and
+`alloca_probe` applied to callees of 0x23d8928 (identical but for the reference's "overlaps
+object" warning of `load addr`, which the Rust console does not print).
+
+What S1b reads but does not use yet, and what it leaves out:
+
+- The models' output entries (return recovery, S4), the effect lists and likely-trash
+  registers (heritage, S2; read now only to merge `<resolveprototype>`), the call's
+  placeholder slot (S2). Parameter and return trials (`initActiveInput`/`Output`) are S4.
+- Locked prototypes and their paths in `funclink`/`prototypetypes` (no command locks one
+  yet: `parse line` is S6, mercs2's `register_abi.csv` as locked custom-storage prototypes
+  is plan decision 6, later in milestone 3), no-return calls, inlining, overrides, user-op
+  (`callotherfixup`) injection, `uponentry`/`uponreturn` model injections (the x86 specs
+  declare none), the `.pspec`'s register data, data types beyond none.
+- Superseded: S1b's first commit had read-only ranges over the virtual size; they now follow
+  bfd (above).
 
 ## Speed
 

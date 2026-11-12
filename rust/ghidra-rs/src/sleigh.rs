@@ -104,29 +104,15 @@ pub const OPCODE_NAMES: [&str; 75] = [
     "SPULL",
 ];
 
-/// `<set name=".." val=".."/>` entries of a .pspec `<context_set>`: the context defaults.
-fn pspec_context(text: &str) -> Vec<(String, u32)> {
-    pspec_sets(text, "context_set")
-}
-
-/// `<set name=".." val=".."/>` entries of the .pspec element `tag` (`context_set`, `tracked_set`).
-fn pspec_sets(text: &str, tag: &str) -> Vec<(String, u32)> {
-    let Some(start) = text.find(&format!("<{tag}")) else { return Vec::new() };
-    let end = text[start..].find(&format!("</{tag}>")).map_or(text.len(), |e| start + e);
-    let attr = |tag: &str, name: &str| {
-        let i = tag.find(&format!("{name}=\""))? + name.len() + 2;
-        Some(tag[i..i + tag[i..].find('"')?].to_string())
-    };
-    text[start..end]
-        .split("<set ")
-        .skip(1)
-        .filter_map(|tag| {
-            let v = attr(tag, "val")?;
-            let v = match v.strip_prefix("0x") {
-                Some(h) => u32::from_str_radix(h, 16).ok()?,
-                None => v.parse().ok()?,
-            };
-            Some((attr(tag, "name")?, v))
+/// `<set name=".." val=".."/>` entries of the .pspec element `tag` (`context_set`: the context
+/// defaults; `tracked_set`: registers with a known value).
+fn pspec_sets(root: &crate::xml::Element, tag: &str) -> Result<Vec<(String, u32)>> {
+    let Some(set) = root.find(tag) else { return Ok(Vec::new()) };
+    set.kids_named("set")
+        .map(|s| {
+            let v = u32::try_from(s.int("val")?)
+                .map_err(|_| format!("<set name={}>: val out of range", s.attr("name").unwrap_or("?")))?;
+            Ok((s.req("name")?.to_string(), v))
         })
         .collect()
 }
@@ -703,9 +689,15 @@ impl Sleigh {
 
     /// Load a `.sla`; context defaults come from the `.pspec` of the same name next to it, if any.
     pub fn load(path: &Path) -> Result<Sleigh> {
-        let pspec = std::fs::read_to_string(path.with_extension("pspec")).unwrap_or_default();
-        let mut sl = Self::load_with_context(path, &pspec_context(&pspec))?;
-        sl.tracked = pspec_sets(&pspec, "tracked_set");
+        let (context, tracked) = match std::fs::read_to_string(path.with_extension("pspec")) {
+            Ok(text) => {
+                let root = crate::xml::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+                (pspec_sets(&root, "context_set")?, pspec_sets(&root, "tracked_set")?)
+            }
+            Err(_) => (Vec::new(), Vec::new()),
+        };
+        let mut sl = Self::load_with_context(path, &context)?;
+        sl.tracked = tracked;
         Ok(sl)
     }
 
@@ -863,6 +855,12 @@ impl Sleigh {
     /// Index of the `unique` (temporary) space.
     pub fn uniq_space(&self) -> u32 {
         self.uniq_space
+    }
+
+    /// The first unique-space offset free after the `.sla`'s own temporaries
+    /// (`Translate::unique_base`).
+    pub fn uniq_base(&self) -> u64 {
+        self.uniq_base
     }
 
     pub fn new_parse(&self) -> Parse {
