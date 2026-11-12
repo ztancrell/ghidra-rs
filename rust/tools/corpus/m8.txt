@@ -1,0 +1,9 @@
+# M8: mercs2 functions hand-picked in docs/plans/m3-decompiler.md (address, then why)
+0x401000 global counter
+0x401080 x87 floats, stack arrays
+0x40a110 import call through a thunk
+0x58d030 bit tests
+0x9eec5e __security_check_cookie (FID)
+0x54c990 HumanExit_Update
+0x73a340 holds the vtable call at 0x73b4d1
+0x4042e0 two-level switch (byte table read at 0x4043d5, jump at 0x4043dc)

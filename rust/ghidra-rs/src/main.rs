@@ -5,7 +5,9 @@ use std::path::PathBuf;
 
 const USAGE: &str = "usage: ghidra-rs disasm <binary> [--func <symbol>|--addr <hex>] [--count N] [--pcode] [--sla <file>]
        ghidra-rs analyze <pe32> [--functions <csv>] [--gaps <csv>] [--abi-callers <register_abi.csv> <out.csv> [--data-pointers]]
-                         [--seeds <csv> | --functions-from <csv>]... [--sla <file>]";
+                         [--decomp-prelude <out>] [--seeds <csv> | --functions-from <csv>]... [--sla <file>]
+       ghidra-rs decompile -i <script>
+       ghidra-rs datatest [--ref <decomp_dbg>] <test.xml|dir>...";
 
 fn main() {
     if let Err(e) = run() {
@@ -18,6 +20,16 @@ fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() >= 2 && args[0] == "analyze" {
         return analyze(&args[1], &args[2..]);
+    }
+    if args.len() == 3 && args[0] == "decompile" && args[1] == "-i" {
+        let stdout = std::io::stdout();
+        let mut out = std::io::BufWriter::new(stdout.lock());
+        let r = ghidra_rs::console::Console::default().run_file(&args[2], &mut out);
+        out.flush().map_err(|e| e.to_string())?;
+        return r.map(|_| ());
+    }
+    if args.len() >= 2 && args[0] == "datatest" {
+        return datatest(&args[1..]);
     }
     if args.len() < 2 || args[0] != "disasm" {
         return Err(USAGE.into());
@@ -120,12 +132,82 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
+/// `datatest`: run upstream decompiler datatests (`console::datatest`) on the Rust console, or
+/// with `--ref <decomp_dbg>` on the reference, and print `decomp_test_dbg`'s summary.
+fn datatest(args: &[String]) -> Result<(), String> {
+    use ghidra_rs::console::datatest;
+    let (reference, paths) = match args {
+        [flag, exe, rest @ ..] if flag == "--ref" => (Some(PathBuf::from(exe)), rest),
+        _ => (None, args),
+    };
+    let mut files = Vec::new();
+    for p in paths.iter().map(PathBuf::from) {
+        if p.is_dir() {
+            let mut v: Vec<_> = std::fs::read_dir(&p).map_err(|e| format!("{}: {e}", p.display()))?.flatten().map(|e| e.path()).collect();
+            v.retain(|f| f.extension().is_some_and(|x| x == "xml"));
+            v.sort();
+            files.extend(v);
+        } else {
+            files.push(p);
+        }
+    }
+    let work = std::env::temp_dir().join(format!("ghidra-rs-datatest-{}", std::process::id()));
+    if reference.is_some() {
+        std::fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
+    }
+    let (mut applied, mut passed, mut failures) = (0, 0, Vec::new());
+    for f in &files {
+        let test = match datatest::load(f) {
+            Ok(t) => t,
+            Err(e) => {
+                let msg = format!("Error parsing {}: {e}", f.display());
+                println!("{msg}");
+                failures.push(msg);
+                continue;
+            }
+        };
+        let out = match &reference {
+            Some(exe) => datatest::run_reference(exe, f, &test, &work),
+            None => datatest::run_rust(&test),
+        };
+        let out = match out {
+            Ok(o) => o,
+            Err(e) => {
+                println!("Error: Did not apply tests in {}: {e}", f.display());
+                failures.push(format!("Execution failed for {}", f.display()));
+                continue;
+            }
+        };
+        for c in &test.checks {
+            applied += 1;
+            if c.passes(&out) {
+                passed += 1;
+                println!("Success -- {}", c.name);
+            } else {
+                println!("FAIL -- {}", c.name);
+                failures.push(c.name.clone());
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&work);
+    println!("\nTotal tests applied = {applied}\nTotal passing tests = {passed}\n");
+    if !failures.is_empty() {
+        println!("Failures: ");
+        failures.iter().take(10).for_each(|f| println!("  {f}"));
+    }
+    if passed < applied || !failures.is_empty() {
+        return Err(format!("{} of {applied} checks failed, {} failures in all", applied - passed, failures.len()));
+    }
+    Ok(())
+}
+
 /// `analyze`: Ghidra-style function discovery on a 32-bit PE, writing the files of the mercs2
 /// scripts ExportFunctions.java (`--functions`) and ExportGaps.java (`--gaps`).
 fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     use ghidra_rs::{analysis, scripts};
     let (mut functions, mut gaps, mut seeds, mut exact, mut data_pointers) = (None, None, Vec::new(), false, false);
     let mut abi: Option<(String, String)> = None;
+    let mut prelude = None;
     let mut sla = std::env::var_os("GHIDRA_RS_SLA").map(PathBuf::from).unwrap_or_else(|| Sleigh::sla_path("x86"));
     let mut it = args.iter();
     while let Some(flag) = it.next() {
@@ -137,6 +219,7 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
         match flag.as_str() {
             "--functions" => functions = Some(val),
             "--gaps" => gaps = Some(val),
+            "--decomp-prelude" => prelude = Some(val),
             "--sla" => sla = PathBuf::from(val),
             "--abi-callers" => {
                 let out = it.next().cloned().ok_or("--abi-callers needs <register_abi.csv> <out.csv>")?;
@@ -199,14 +282,20 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
         t.elapsed().as_secs_f64()
     );
     let create = |p: &str| std::fs::File::create(p).map(std::io::BufWriter::new).map_err(|e| format!("{p}: {e}"));
-    if let Some(p) = functions {
+    if functions.is_some() || prelude.is_some() {
         let t = std::time::Instant::now();
         let files = ghidra_rs::fid::default_files();
         let dbs = files.iter().map(|f| ghidra_rs::fid::FidDb::open(f)).collect::<Result<Vec<_>, _>>()?;
         let fid = ghidra_rs::fid::apply(&img, &an, &sl, &dbs, &scripts::demangle);
         eprintln!("function id: {} functions named from {} databases in {:.1}s", fid.len(), dbs.len(), t.elapsed().as_secs_f64());
-        let n = scripts::export_functions(&img, &an, &fid, &mut create(&p)?).map_err(|e| e.to_string())?;
-        println!("exported {n} functions");
+        if let Some(p) = functions {
+            let n = scripts::export_functions(&img, &an, &fid, &mut create(&p)?).map_err(|e| e.to_string())?;
+            println!("exported {n} functions");
+        }
+        if let Some(p) = prelude {
+            std::fs::write(&p, ghidra_rs::console::prelude(&img, &an, &fid)).map_err(|e| format!("{p}: {e}"))?;
+            println!("wrote decompiler prelude {p}");
+        }
     }
     if let Some(p) = gaps {
         let (covered, total) = scripts::export_gaps(&img, &an, &mut create(&p)?).map_err(|e| e.to_string())?;

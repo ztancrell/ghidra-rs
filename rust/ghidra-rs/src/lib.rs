@@ -5,3 +5,4 @@ pub mod analysis;
 pub mod scripts;
 pub mod abi;
 pub mod fid;
+pub mod console;

@@ -1,0 +1,30 @@
+--- a/varnode.cc
++++ b/varnode.cc
+@@ -16,6 +16,8 @@
+ #include "varnode.hh"
+ #include "funcdata.hh"
+ 
++#include <cstdlib>
++
+ namespace ghidra {
+ 
+ AttributeId ATTRIB_ADDRTIED = AttributeId("addrtied",30);
+@@ -750,6 +752,18 @@
+     s << "(i)";
+   if (isWritten())
+     s << '(' << def->getSeqNum() << ')';
++  // ghidra-rs (rust/tools/decomp-ref.patch): with DECOMP_RAW_EXTRA set, also print the data-type and
++  // the high variable (by the create index of its name representative), for stages S6 and S7
++  static const bool extra = getenv("DECOMP_RAW_EXTRA") != (char *)0;
++  if (extra) {
++    if (type != (Datatype *)0) {
++      s << '<';
++      type->printRaw(s);
++      s << '>';
++    }
++    if (high != (HighVariable *)0)
++      s << "{h" << dec << high->getNameRepresentative()->getCreateIndex() << '}';
++  }
+   if ((flags&(Varnode::insert|Varnode::constant))==0) {
+     s << "(free)";
+     return;

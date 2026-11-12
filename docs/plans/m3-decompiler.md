@@ -90,6 +90,8 @@ make -C rust/target/decomp-build -j12 decomp_dbg decomp_test_dbg
 - `decomp_test_dbg -sleighpath <repo> -path Ghidra/Features/Decompiler/src/decompile/datatests datatests`
   runs the upstream XML tests in 4.5 s. All 665 checks in the 67 test files whose `.sla` exists
   (the x86 ones) pass; the 26 ARM/MIPS/PowerPC files fail with "Could not find .sla file", which is expected.
+  Superseded: the datatests directory has 93 files; 77 run (665 checks) and 16 (non-x86) lack a
+  `.sla`. The 26 counted the "Could not find .sla" lines, which the failure summary repeats.
 - `decomp_dbg` loads the whole mercs2 PE through libbfd (it picks `x86:LE:32:default:windows`,
   so `x86win.cspec`) and decompiles one function in about 0.2 s:
 
@@ -145,7 +147,7 @@ references; only names and types differ.
 
 ## Corpora
 
-- **D**: the upstream x86 datatests (67 files, 665 checks). Our test runner reads the same XML.
+- **D**: the upstream x86 datatests (77 files, 665 checks; "67" before 2026-11-12 was a miscount). Our test runner reads the same XML.
 - **M8**: mercs2 hand-picked: 0x401000 (global counter), 0x401080 (x87 floats, stack arrays),
   0x40a110 (import call through a thunk), 0x58d030 (bit tests), 0x9eec5e
   (`__security_check_cookie`, FID), 0x54c990 (`HumanExit_Update`), the function holding the
@@ -198,6 +200,17 @@ build script. The Rust side prints the same.
 - `rust/tools/decomp-diff.sh <corpus>`: runs both, diffs per function and prints
   `identical N / M` plus the first differing line of each mismatch.
 - The datatest runner (port of `testfunction.cc`, 399 lines) for corpus D.
+
+Done on branch `m3-s0` (2026-11-12); the commands and results are in `rust/README.md`,
+"Decompiler harness". Where it differs from the list above:
+
+- Functions are selected with `load function <name>` (name from the prelude) rather than
+  `load addr`: `load addr` on an address the prelude already maps makes a second function and a
+  "overlaps object" warning, and loses the FID name. The console reads both.
+- The `print raw` patch is active only with `DECOMP_RAW_EXTRA` set, so the default output is
+  upstream's and the early stages compare without types.
+- The datatest runner is `ghidra-rs datatest [--ref <decomp_dbg>]`; `decomp-diff.sh d` runs it on
+  both engines. On the reference it reproduces `decomp_test_dbg`'s 665 / 665.
 
 ## Running stages in parallel
 
