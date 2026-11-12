@@ -1,89 +1,84 @@
-//! The action framework (port of the parts of `action.cc` used so far) and the actions of
-//! `ActionDatabase::universalAction` (coreaction.cc) that run before `heritage`, as the
-//! `decompile` root action has them (its groups leave out `normalizesetup` and
-//! `funclinkoutonly`).
+//! The actions of `ActionDatabase::universalAction` (coreaction.cc) ported so far, in the tree
+//! the `decompile` root action has them in (its groups leave out `normalizesetup` and
+//! `funclinkoutonly`), run by the framework of [`super::actiontree`].
 //!
-//! The universal action is run from the start up to a `break start` breakpoint. The
-//! repeat/restart groups and the rule pools of `action.cc` come with the main loop (stage S2 on):
-//! here the groups `fullloop` and `mainloop` are entered once, and an action past the ported
-//! prefix fails loudly.
+//! Stage S2 ends at `paramdouble`, the first action of the main loop after `heritage`: it and
+//! everything after it fail loudly, so a run stops at a `break start` up to `paramdouble`.
 
-use super::fspec::ExtraPop;
+pub use super::actiontree::{ActionTree, Outcome};
+use super::fspec::{ExtraPop, ParamActive};
 use super::funcdata::CallId;
 use super::opcode::Opcode;
 use super::varnode::Space;
-use super::{err, Arch, Funcdata, Result};
+use super::{err, heritage, Arch, Funcdata, Result};
 
-/// One action of the universal action: the groups it sits in (as `Break at` prints them), its
-/// name (as `break start` names it) and its `apply`.
-struct Action {
-    groups: &'static str,
-    name: &'static str,
-    apply: fn(&mut Funcdata, &Arch) -> Result<()>,
-}
-
-/// The ported prefix of `universalAction`, in order. `heritage` is listed so that a run can
-/// stop before it; its body is not ported yet.
-const UNIVERSAL: &[Action] = &[
-    Action { groups: "", name: "start", apply: start },
-    Action { groups: "", name: "constbase", apply: constbase },
-    Action { groups: "", name: "defaultparams", apply: default_params },
-    Action { groups: "", name: "extrapopsetup", apply: extrapop_setup },
-    Action { groups: "", name: "prototypetypes", apply: prototype_types },
-    Action { groups: "", name: "funclink", apply: funclink },
-    Action { groups: "fullloop:mainloop:", name: "unreachable", apply: unreachable },
-    Action { groups: "fullloop:mainloop:", name: "varnodeprops", apply: varnode_props },
-    Action { groups: "fullloop:mainloop:", name: "heritage", apply: not_ported },
-];
-
-/// The name of the root action, as `Break at universal:<action> start` prints it.
-const ROOT: &str = "universal";
-
-/// Run the universal action on `fd` until just before the action named `stop`
-/// (`break start <stop>`); returns the breakpoint's path as `Break at <path> start` prints it.
-/// Without a breakpoint the run reaches an unported action and fails.
-pub fn perform(fd: &mut Funcdata, arch: &Arch, stop: Option<&str>) -> Result<Option<String>> {
-    if let Some(s) = stop.filter(|s| !UNIVERSAL.iter().any(|a| a.name == *s)) {
-        return err(format!("break start {s}: action not ported yet (stage S1b ends at heritage)"));
-    }
-    for a in UNIVERSAL {
-        if Some(a.name) == stop {
-            return Ok(Some(format!("{ROOT}:{}{}", a.groups, a.name)));
-        }
-        (a.apply)(fd, arch)?;
-    }
-    Ok(None)
+/// The ported part of `universalAction`: the root `universal` (restart group, once per
+/// function), its first actions, and the repeating groups `fullloop` and `mainloop` up to
+/// `paramdouble`.
+pub fn universal() -> ActionTree {
+    let mut t = ActionTree::default();
+    let root: Vec<_> = [
+        ("start", start as super::actiontree::ApplyFn),
+        ("constbase", constbase),
+        ("defaultparams", default_params),
+        ("extrapopsetup", extrapop_setup),
+        ("prototypetypes", prototype_types),
+        ("funclink", funclink),
+    ]
+    .into_iter()
+    .map(|(name, f)| t.leaf(name, f))
+    .collect();
+    let mainloop = vec![
+        t.leaf("unreachable", unreachable),
+        t.leaf("varnodeprops", varnode_props),
+        t.leaf("heritage", heritage_pass),
+        t.leaf("paramdouble", not_ported),
+    ];
+    let mainloop = t.group("mainloop", mainloop, true);
+    let fullloop = t.group("fullloop", vec![mainloop], true);
+    let mut kids = root;
+    kids.push(fullloop);
+    t.restart_group("universal", kids);
+    t
 }
 
 /// `ActionStart`: `Funcdata::startProcessing`.
-fn start(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
-    fd.start_processing(arch)
+fn start(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
+    fd.start_processing(arch)?;
+    Ok(0)
 }
 
-fn not_ported(_: &mut Funcdata, _: &Arch) -> Result<()> {
-    err("action heritage: not implemented in ghidra-rs yet (milestone 3, stage S2)")
+/// The main loop past `heritage` (`paramdouble` on) is not ported.
+fn not_ported(_: &mut Funcdata, _: &Arch) -> Result<i32> {
+    err("action paramdouble: not implemented in ghidra-rs yet (milestone 3, stage S4)")
+}
+
+/// `ActionHeritage`: one heritage pass. It counts no change.
+fn heritage_pass(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
+    heritage::heritage(fd, arch)?;
+    Ok(0)
 }
 
 /// Port of `ActionConstbase::apply`: a COPY of each tracked register's value (x86: `DF = 0`) at
 /// the start of the entry block. (The x86 models declare no `uponentry` injection.)
-fn constbase(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
-    let Some(&bb) = fd.blocks.list.first() else { return Ok(()) };
+fn constbase(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
+    let Some(&bb) = fd.blocks.list.first() else { return Ok(0) };
     let start = fd.blocks.block(bb).start;
     for &(space, off, size, val) in &arch.tracked {
         let op = fd.new_op(Opcode::Copy, start);
         fd.new_varnode_out(size, Space::Sleigh(space), off, op);
         let c = fd.new_constant(size, val);
-        fd.op_mut(op).ins = vec![c];
+        fd.op_set_all_input(op, &[c])?;
         fd.op_insert_begin(op, bb);
     }
-    Ok(())
+    Ok(0)
 }
 
 /// Port of `ActionDefaultParams::apply`: each call without a model takes the callee's
 /// prototype, evaluated with the `evalfp_called` model (else the default) unless its model is
 /// locked; a call to an unknown function gets that model. (`insertPcode` injects only the
 /// models' `uponreturn` p-code, which the x86 specs do not declare.)
-fn default_params(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
+fn default_params(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     let models = &arch.spec.models;
     let evalfp = models.eval_called.unwrap_or(models.default);
     for i in 0..fd.qlst.len() {
@@ -104,13 +99,13 @@ fn default_params(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
             None => proto.set_model(models, evalfp),
         }
     }
-    Ok(())
+    Ok(0)
 }
 
 /// Port of `ActionExtraPopSetup::apply`: after a call whose stack effect is known,
 /// `SP = SP + extrapop`; before one whose effect is unknown (the `__stdcall` default),
 /// `SP = SP [] <call>`.
-fn extrapop_setup(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
+fn extrapop_setup(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     let (space, off, size) = arch.spec.stack_pointer;
     let sp = Space::Sleigh(space);
     for i in 0..fd.qlst.len() {
@@ -124,7 +119,7 @@ fn extrapop_setup(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
                 fd.new_varnode_out(size, sp, off, op);
                 let base = fd.new_varnode(size, sp, off);
                 let amount = fd.new_constant(size, i64::from(pop) as u64);
-                fd.op_mut(op).ins = vec![base, amount];
+                fd.op_set_all_input(op, &[base, amount])?;
                 fd.op_insert_after(op, call)?;
             }
             ExtraPop::Unknown => {
@@ -132,50 +127,54 @@ fn extrapop_setup(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
                 fd.new_varnode_out(size, sp, off, op);
                 let base = fd.new_varnode(size, sp, off);
                 let iop = fd.new_varnode_iop(call);
-                fd.op_mut(op).ins = vec![base, iop];
+                fd.op_set_all_input(op, &[base, iop])?;
                 fd.op_insert_before(op, call)?;
             }
         }
     }
-    Ok(())
+    Ok(0)
 }
 
 /// Port of `ActionPrototypeTypes::apply` for an unlocked prototype (the console locks none):
 /// the function takes the `evalfp_current` model (else the default), and the indirect return
-/// address leaves the RETURN ops (`return(#0x0)`). Gathering return-value trials
-/// (`initActiveOutput`) is parameter recovery (stage S4); x86-32's code space is not truncated,
+/// address leaves the RETURN ops (`return(#0x0)`), and return-value trials begin
+/// (`initActiveOutput`; heritage registers them). x86-32's code space is not truncated,
 /// and a merged model has no `this` pointer to prepare.
-fn prototype_types(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
+fn prototype_types(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     let models = &arch.spec.models;
     let evalfp = models.eval_current.unwrap_or(models.default);
     if !fd.proto.model_locked && !fd.proto.has_matching_model(evalfp) {
         fd.proto.set_model(models, evalfp);
     }
+    fd.active_output = Some(ParamActive::default());
     for op in fd.ops_with(Opcode::Return) {
         let Some(&in0) = fd.op(op).ins.first() else { continue };
         if !fd.vn(in0).is_constant() {
             let size = fd.vn(in0).size;
             let c = fd.new_constant(size, 0);
-            fd.op_mut(op).ins[0] = c;
+            fd.op_set_input(op, c, 0)?;
         }
     }
-    Ok(())
+    Ok(0)
 }
 
 /// Port of `ActionFuncLink::apply` for unlocked call prototypes: a call whose model passes
 /// parameters on the stack gets the stack-pointer placeholder as its last input
-/// (`funcLinkInput`, `FuncCallSpecs::createPlaceholder`). The parameter and return trials
-/// (`initActiveInput`, `initActiveOutput`) are parameter recovery (stage S4); CALL ops from
+/// (`funcLinkInput`, `FuncCallSpecs::createPlaceholder`); parameter and return trials begin
+/// for every call (`initActiveInput`, `initActiveOutput`; heritage registers them). CALL ops from
 /// SLEIGH never have an output for `funcLinkOutput` to remove.
-fn funclink(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
+fn funclink(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     for i in 0..fd.qlst.len() {
         let c = fd.qlst[i];
-        let Some(model) = fd.call(c).proto.model else { continue };
+        let call = fd.call_mut(c);
+        call.active_input = Some(ParamActive::default());
+        call.active_output = Some(ParamActive::default());
+        let Some(model) = call.proto.model else { continue };
         if arch.spec.models.get(model).input.has_stack() {
             create_placeholder(fd, arch, c)?;
         }
     }
-    Ok(())
+    Ok(0)
 }
 
 /// Port of `FuncCallSpecs::createPlaceholder`: a 1-byte LOAD at stack offset 0, appended to
@@ -186,7 +185,7 @@ fn create_placeholder(fd: &mut Funcdata, arch: &Arch, c: CallId) -> Result<()> {
     let spec = &arch.spec;
     let uniq = arch.sleigh.uniq_space();
     let loadval = fd.op_stack_load(spec.stack_pointer, spec.stack_container, uniq, 0, 1, op)?;
-    fd.op_insert_input(op, loadval, slot);
+    fd.op_insert_input(op, loadval, slot)?;
     fd.call_mut(c).stack_placeholder_slot = Some(slot);
     Ok(())
 }
@@ -194,8 +193,8 @@ fn create_placeholder(fd: &mut Funcdata, arch: &Arch, c: CallId) -> Result<()> {
 /// `ActionUnreachable` (`Funcdata::removeUnreachableBlocks`). Flow builds only blocks reachable
 /// from the entry, so on the first pass there is nothing to remove; block removal is not ported
 /// (stage S4), so an unreachable block is an error rather than a silent difference.
-fn unreachable(fd: &mut Funcdata, _: &Arch) -> Result<()> {
-    let Some(&entry) = fd.blocks.list.first() else { return Ok(()) };
+fn unreachable(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
+    let Some(&entry) = fd.blocks.list.first() else { return Ok(0) };
     let mut seen = vec![false; fd.blocks.list.len()];
     let mut stack = vec![entry];
     while let Some(b) = stack.pop() {
@@ -208,7 +207,7 @@ fn unreachable(fd: &mut Funcdata, _: &Arch) -> Result<()> {
     if seen.contains(&false) {
         return err("action unreachable: removing unreachable blocks is not implemented in ghidra-rs yet (stage S4)");
     }
-    Ok(())
+    Ok(0)
 }
 
 /// Port of `ActionVarnodeProps::apply` on the first pass (before heritage): with
@@ -219,12 +218,13 @@ fn unreachable(fd: &mut Funcdata, _: &Arch) -> Result<()> {
 /// The C++ walks the varnodes in location order (`beginLoc`: address, size, then creation for
 /// free ones) and makes one constant per read; before heritage each free varnode has one
 /// reader, so the reads are visited in that order and the constants made in it.
-fn varnode_props(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
+fn varnode_props(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     if !arch.readonly_propagate {
-        return Ok(());
+        return Ok(0);
     }
     let ram = Space::Sleigh(arch.sleigh.code_space());
     let mut reads = Vec::new();
+    let mut changes = 0;
     for op in fd.blocks.ops() {
         for (slot, &vn) in fd.op(op).ins.iter().enumerate() {
             let v = fd.vn(vn);
@@ -246,20 +246,21 @@ fn varnode_props(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
         match fd.op(op).opc {
             // only the first input of an INDIRECT, which then becomes a COPY
             Opcode::Indirect => {
-                let out = fd.op(op).out.map(|o| *fd.vn(o));
-                if slot != 0 || out.is_some_and(|o| o.space == ram && o.offset == offset) {
+                let out = fd.op(op).out.map(|o| (fd.vn(o).space, fd.vn(o).offset));
+                if slot != 0 || out == Some((ram, offset)) {
                     continue;
                 }
-                fd.op_mut(op).ins.truncate(1);
+                fd.op_remove_input(op, 1);
                 fd.op_mut(op).opc = Opcode::Copy;
             }
             Opcode::Multiequal => continue,
             _ => {}
         }
         let c = fd.new_constant(size, value);
-        fd.op_mut(op).ins[slot] = c;
+        fd.op_set_input(op, c, slot)?;
+        changes += 1;
     }
-    Ok(())
+    Ok(changes)
 }
 
 #[cfg(test)]
@@ -288,8 +289,10 @@ mod tests {
 
     fn raw_at_heritage(arch: &Arch, entry: u64) -> String {
         let mut fd = Funcdata::new(entry);
-        let brk = perform(&mut fd, arch, Some("heritage")).unwrap();
-        assert_eq!(brk.as_deref(), Some("universal:fullloop:mainloop:heritage"));
+        let mut t = universal();
+        t.set_break_start("heritage").unwrap();
+        let brk = t.perform(&mut fd, arch).unwrap();
+        assert_eq!(brk, Outcome::Break("universal:fullloop:mainloop:heritage start".into()));
         crate::decomp::print_raw(&fd, arch).unwrap()
     }
 

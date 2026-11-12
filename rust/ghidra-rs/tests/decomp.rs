@@ -1,5 +1,6 @@
-// Milestone 3, stages S1a and S1b: `print raw` at `break start funclink` and `heritage` for
-// mercs2's 0x40a110, rebuilt from its bytes, against the reference decompiler's output
+// Milestone 3, stages S1a, S1b and S2: `print raw` at `break start funclink` and `heritage` for
+// mercs2's 0x40a110 (and at `paramdouble` for 0x40ad80, below), rebuilt from its bytes, against
+// the reference decompiler's output
 // (decomp_dbg, committed under tests/data). It covers flow across a jump, a conditional branch
 // (blocks in reverse post-order), an import thunk jump turned into a call and a halt, the
 // INDIRECT that ActionExtraPopSetup puts before the call, the tracked DF of ActionConstbase, the
@@ -77,6 +78,44 @@ fn raw_at(img: Image, entry: u64, stop: &str) -> String {
     let cspec = std::fs::read_to_string(path.with_file_name("x86win.cspec")).unwrap();
     let arch = Arch::new(Sleigh::load(&path).unwrap(), img, &cspec).unwrap();
     let mut fd = Funcdata::new(entry);
-    action::perform(&mut fd, &arch, Some(stop)).unwrap();
+    let mut actions = action::universal();
+    actions.set_break_start(stop).unwrap();
+    let brk = actions.perform(&mut fd, &arch).unwrap();
+    assert!(matches!(brk, action::Outcome::Break(p) if p.ends_with(&format!("{stop} start"))));
     print_raw(&fd, &arch).unwrap()
+}
+
+/// Stage S2: `print raw` at `break start paramdouble`, after the first heritage pass, for
+/// mercs2's 0x40ad80 (a loop of byte XORs with an indirect call after it), rebuilt from its
+/// bytes, against decomp_dbg's output for the corpus script. It covers MULTIEQUAL placement
+/// at the loop head for registers and unique temporaries, renaming across the back edge,
+/// inputs, reads and writes widened to their whole range (SUBPIECE/CONCAT), the INDIRECTs and
+/// INDIRECT creations at the call, and the return-value inputs of the RETURN.
+#[test]
+fn print_raw_at_paramdouble_with_a_loop() {
+    let section = |addr: u32, data: Vec<u8>| Section {
+        name: ".text".into(),
+        exec: true,
+        readonly: true,
+        zero_tail: 0,
+        addr,
+        data,
+    };
+    let img = Image {
+        sections: vec![
+            // MOV ECX,dword ptr [0x24db07c]; JMP 0x730ce0
+            section(0x40ad80, vec![0x8b, 0x0d, 0x7c, 0xb0, 0x4d, 0x02, 0xe9, 0x55, 0x5f, 0x32, 0x00]),
+            section(
+                0x730ce0,
+                vec![
+                    0x0f, 0xb6, 0x14, 0x0c, 0x30, 0x14, 0x04, 0x8a, 0x14, 0x04, 0x30, 0x14, 0x0c, 0x8a, 0x14, 0x0c,
+                    0x30, 0x14, 0x04, 0x83, 0xc0, 0x01, 0x83, 0xe9, 0x01, 0x3b, 0xc1, 0x72, 0xe3, 0x8b, 0x0f, 0x8b,
+                    0x01, 0x8b, 0x40, 0x14, 0x6a, 0x02, 0x8d, 0x54, 0x24, 0x04, 0x52, 0xff, 0xd0, 0x8b, 0xc7, 0x59,
+                    0xc3,
+                ],
+            ),
+        ],
+        ..Image::default()
+    };
+    assert_eq!(raw_at(img, 0x40ad80, "paramdouble"), include_str!("data/raw-paramdouble-40ad80.txt"));
 }

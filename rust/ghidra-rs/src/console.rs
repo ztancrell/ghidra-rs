@@ -10,7 +10,8 @@
 //!   on either engine and checks their `<stringmatch>` patterns.
 
 use crate::analysis::{Analysis, Image};
-use crate::decomp::{action, Arch, Funcdata};
+use crate::decomp::action::{self, ActionTree, Outcome};
+use crate::decomp::{Arch, Funcdata, LowlevelError};
 use crate::sleigh::Sleigh;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -57,10 +58,14 @@ pub struct Console {
     function: Option<(u32, String)>,
     /// functions from `map function`, by name
     functions: std::collections::HashMap<String, u32>,
+    /// functions mapped `nocode` (imports): `decompile` prints "No code for"
+    nocode: std::collections::HashSet<u32>,
     /// the action `break start` stops before
     break_start: Option<String>,
     /// the function `decompile` worked on last
     fd: Option<Funcdata>,
+    /// the action tree working on `fd`, kept for `continue`
+    actions: Option<ActionTree>,
 }
 
 /// The `.sla` for a 32-bit PE (`GHIDRA_RS_SLA`, else x86.sla built by `build-sla.sh`) and the
@@ -75,6 +80,36 @@ fn x86_windows() -> Result<(Sleigh, String), String> {
 }
 
 impl Console {
+    /// Run (or resume) the actions on the current function and print where they stopped, as
+    /// `IfcDecompile`/`IfcContinue` do. `set` is the outcome of setting the breakpoint. An error
+    /// is reported and drops the function, and the script goes on (`abortFunction`).
+    fn run_actions(&mut self, set: Result<(), LowlevelError>, out: &mut dyn Write) -> Result<(), String> {
+        let io = |e: std::io::Error| e.to_string();
+        let (Some(arch), Some(fd)) = (&self.arch, &mut self.fd) else { return Err("no function decompiled".into()) };
+        let name = self.function.as_ref().map_or("", |f| f.1.as_str());
+        let res = set.and_then(|()| match &mut self.actions {
+            Some(t) => t.perform(fd, arch),
+            None => Err(LowlevelError("no actions".into())),
+        });
+        match res {
+            Ok(Outcome::Break(path)) => writeln!(out, "Break at {path}").map_err(io)?,
+            Ok(Outcome::Complete) => writeln!(out, "Decompilation complete").map_err(io)?,
+            Err(e) => {
+                writeln!(out, "Low-level ERROR: {e}\nUnable to proceed with function: {name}").map_err(io)?;
+                self.fd = None;
+                self.actions = None;
+                return Ok(());
+            }
+        }
+        // the function's prototype lives on in the scope, as the C++ Funcdata's does
+        let entry = fd.entry;
+        let proto = fd.proto.clone();
+        if let Some(f) = self.arch.as_mut().and_then(|a| a.functions.get_mut(&entry)) {
+            f.proto = proto;
+        }
+        Ok(())
+    }
+
     /// Run the commands of a script file; `Err` stops the script (an unported command, or
     /// `decompile`, which is not implemented yet).
     pub fn run_file(&mut self, path: &str, out: &mut dyn Write) -> Result<bool, String> {
@@ -127,6 +162,9 @@ impl Console {
                 arch.add_function(u64::from(a), name.clone());
                 // a name mapped twice finds the first (`findFirstByName`: the lowest dedup number)
                 self.functions.entry(name).or_insert(a);
+                if rest.contains(&"nocode") {
+                    self.nocode.insert(a);
+                }
             }
             ["load", "function", name] if self.arch.is_some() => {
                 let a = *self.functions.get(*name).ok_or(format!("Unknown function name: {name}"))?;
@@ -162,25 +200,31 @@ impl Console {
                 writeln!(out, "Successfully applied callfixup").map_err(io)?;
             }
             ["decompile"] => {
-                let arch = self.arch.as_ref().ok_or("decompile: no program loaded")?;
+                self.arch.as_ref().ok_or("decompile: no program loaded")?;
                 let (a, name) = self.function.as_ref().ok_or("decompile: no function selected")?;
+                // `IfcDecompile`: a function mapped without code (an import) is not decompiled
+                if self.nocode.contains(a) {
+                    writeln!(out, "No code for {name}").map_err(io)?;
+                    self.fd = None;
+                    self.actions = None;
+                    return Ok(true);
+                }
                 writeln!(out, "Decompiling {name}").map_err(io)?;
-                let mut fd = Funcdata::new(u64::from(*a));
-                match action::perform(&mut fd, arch, self.break_start.as_deref()) {
-                    Ok(Some(path)) => writeln!(out, "Break at {path} start").map_err(io)?,
-                    Ok(None) => {}
-                    // the console reports the error, drops the function and goes on (`abortFunction`)
-                    Err(e) => {
-                        writeln!(out, "Low-level ERROR: {e}\nUnable to proceed with function: {name}").map_err(io)?;
-                        self.fd = None;
-                        return Ok(true);
-                    }
+                let mut actions = action::universal();
+                let set = match &self.break_start {
+                    Some(b) => actions.set_break_start(b),
+                    None => Ok(()),
+                };
+                self.fd = Some(Funcdata::new(u64::from(*a)));
+                self.actions = set.is_ok().then_some(actions);
+                self.run_actions(set, out)?;
+            }
+            // `IfcContinue`: resume the actions after a breakpoint
+            ["continue"] => {
+                if self.fd.is_none() || self.actions.is_none() {
+                    return Err("continue: no function being decompiled".into());
                 }
-                // the function's prototype lives on in the scope, as the C++ Funcdata's does
-                if let Some(f) = self.arch.as_mut().and_then(|a| a.functions.get_mut(&fd.entry)) {
-                    f.proto = fd.proto.clone();
-                }
-                self.fd = Some(fd);
+                self.run_actions(Ok(()), out)?;
             }
             ["print", "raw"] => {
                 let (Some(arch), Some(fd)) = (&self.arch, &self.fd) else {
@@ -189,8 +233,8 @@ impl Console {
                 write!(out, "{}", crate::decomp::print_raw(fd, arch).map_err(|e| e.to_string())?).map_err(io)?;
             }
             // read by the corpora but needing later stages (`parse line`: the types of S6)
-            ["continue"] | ["print", "C"] | ["print", "tree", "block"] | ["parse", "line", ..] => {
-                return Err(format!("{line}: not implemented in ghidra-rs yet (milestone 3, stage S2 and later)"));
+            ["print", "C"] | ["print", "tree", "block"] | ["parse", "line", ..] => {
+                return Err(format!("{line}: not implemented in ghidra-rs yet (milestone 3, later stages)"));
             }
             _ => return Err(format!("not implemented in ghidra-rs: {line}")),
         }

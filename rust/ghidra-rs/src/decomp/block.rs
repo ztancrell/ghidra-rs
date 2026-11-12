@@ -40,7 +40,7 @@ impl EdgeFlags {
 pub(crate) struct Edge {
     pub(crate) point: BlockId,
     label: EdgeFlags,
-    reverse: usize,
+    pub(crate) reverse: usize,
 }
 
 /// Port of `BlockBasic` (with its `FlowBlock` base).
@@ -59,6 +59,8 @@ pub(crate) struct BlockBasic {
     copymap: BlockId,
     mark: bool,
     entry_point: bool,
+    /// the immediate dominator (`immed_dom`), none for the entry
+    pub(crate) idom: Option<BlockId>,
 }
 
 /// Port of the basic-block `BlockGraph` of a function (`Funcdata::bblocks`).
@@ -96,6 +98,7 @@ impl BlockGraph {
             copymap: id,
             mark: false,
             entry_point: false,
+            idom: None,
         });
         self.list.push(id);
         id
@@ -142,15 +145,17 @@ impl BlockGraph {
         }
     }
 
-    /// Port of `BlockGraph::structureLoops` up to the spanning tree: label the edges, mark
-    /// irreducible ones, and put the blocks in reverse post-order. (`calcLoop` and the dominator
-    /// tree only label edges further, which nothing before `funclink` reads.)
+    /// Port of `BlockGraph::structureLoops` with the `calcForwardDominator` that
+    /// `Funcdata::structureReset` runs after it: label the edges, mark irreducible ones, put the
+    /// blocks in reverse post-order and find each block's immediate dominator. (`calcLoop` only
+    /// labels loop-exit edges, which nothing ported reads.)
     pub(crate) fn structure_loops(&mut self) -> Result<()> {
         // each rebuild follows a newly irreducible tree edge, so there are at most edges + 1 rounds
         let edges: usize = self.blocks.iter().map(|b| b.outs.len()).sum();
         for _ in 0..=edges {
-            let preorder = self.find_spanning_tree()?;
+            let (preorder, rootlist) = self.find_spanning_tree()?;
             if !self.find_irreducible(&preorder) {
+                self.calc_forward_dominator(&rootlist);
                 return Ok(());
             }
             self.clear_edge_flags(EdgeFlags::CLASSIFIED);
@@ -160,13 +165,13 @@ impl BlockGraph {
 
     /// Port of `BlockGraph::findSpanningTree`: a depth-first search from the roots, labelling
     /// tree/forward/cross/back edges; the list becomes the reverse post-order. Returns the
-    /// pre-order.
-    fn find_spanning_tree(&mut self) -> Result<Vec<BlockId>> {
+    /// pre-order and the roots.
+    fn find_spanning_tree(&mut self) -> Result<(Vec<BlockId>, Vec<BlockId>)> {
         let n = self.list.len();
         let mut preorder = Vec::with_capacity(n);
         let mut rootlist = Vec::new();
         if n == 0 {
-            return Ok(preorder);
+            return Ok((preorder, rootlist));
         }
         let mut rpostorder = vec![self.list[0]; n];
         for i in 0..n {
@@ -231,7 +236,7 @@ impl BlockGraph {
             preorder.clear();
         }
         self.list = rpostorder;
-        Ok(preorder)
+        Ok((preorder, rootlist))
     }
 
     fn reset_visit(&mut self, b: BlockId) {
@@ -280,6 +285,142 @@ impl BlockGraph {
                 self.set_out_edge_flag(cur, e, EdgeFlags::CROSS);
             }
         }
+    }
+
+    /// Port of `BlockGraph::calcForwardDominator` (Cooper, Harvey and Kennedy's iterative
+    /// algorithm over the reverse post-order). Several roots, or an entry with in-edges, get a
+    /// virtual root with an edge to each root; it is dropped at the end, so those roots have no
+    /// dominator. The C++ virtual root is a `FlowBlock` with index 0, which the intersection
+    /// walk reads as the entry's position; [`Dom::Virtual`] keeps that.
+    fn calc_forward_dominator(&mut self, rootlist: &[BlockId]) {
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Dom {
+            Block(BlockId),
+            Virtual,
+        }
+        let n = self.list.len();
+        if n == 0 {
+            return;
+        }
+        let numnodes = n - 1;
+        let entry = self.list[0];
+        let virtual_root = rootlist.len() > 1 || !self.block(entry).ins.is_empty();
+        let mut idom: Vec<Option<Dom>> = vec![None; self.blocks.len()];
+        let mut virtual_idom = None;
+        let pos = |d: Dom, g: &BlockGraph| numnodes - g.index_of(d_block(d)).unwrap_or(0);
+        fn d_block(d: Dom) -> Option<BlockId> {
+            match d {
+                Dom::Block(b) => Some(b),
+                Dom::Virtual => None,
+            }
+        }
+        let root = if virtual_root { Dom::Virtual } else { Dom::Block(entry) };
+        match root {
+            Dom::Virtual => {
+                virtual_idom = Some(Dom::Virtual);
+                for &r in rootlist {
+                    idom[r.0 as usize] = Some(Dom::Virtual);
+                }
+            }
+            Dom::Block(b) => {
+                idom[b.0 as usize] = Some(root);
+                for e in &self.block(b).outs {
+                    idom[e.point.0 as usize] = Some(root);
+                }
+            }
+        }
+        let get = |idom: &[Option<Dom>], virtual_idom: Option<Dom>, d: Dom| match d {
+            Dom::Block(b) => idom[b.0 as usize],
+            Dom::Virtual => virtual_idom,
+        };
+        // the in-edges of a block, the virtual root's edge last
+        let ins = |g: &BlockGraph, b: BlockId| {
+            let mut v: Vec<Dom> = g.block(b).ins.iter().map(|e| Dom::Block(e.point)).collect();
+            if virtual_root && rootlist.contains(&b) {
+                v.push(Dom::Virtual);
+            }
+            v
+        };
+        let mut new_idom = root;
+        let mut changed = true;
+        while changed {
+            changed = false;
+            // every block in reverse post-order except the root (postorder[numnodes - i] = list[i])
+            let skip = usize::from(!virtual_root);
+            for i in skip..n {
+                let b = self.list[i];
+                if idom[b.0 as usize] == Some(root) {
+                    continue;
+                }
+                let preds = ins(self, b);
+                let mut j = 0;
+                while j < preds.len() {
+                    new_idom = preds[j];
+                    if get(&idom, virtual_idom, new_idom).is_some() {
+                        break;
+                    }
+                    j += 1;
+                }
+                for &rho in preds.iter().skip(j + 1) {
+                    if get(&idom, virtual_idom, rho).is_none() {
+                        continue;
+                    }
+                    let mut f1 = pos(rho, self);
+                    let mut f2 = pos(new_idom, self);
+                    let up = |f: usize| {
+                        let d = get(&idom, virtual_idom, Dom::Block(self.list[numnodes - f])).unwrap_or(root);
+                        pos(d, self)
+                    };
+                    while f1 != f2 {
+                        while f1 < f2 {
+                            f1 = up(f1);
+                        }
+                        while f2 < f1 {
+                            f2 = up(f2);
+                        }
+                    }
+                    new_idom = Dom::Block(self.list[numnodes - f1]);
+                }
+                if idom[b.0 as usize] != Some(new_idom) {
+                    idom[b.0 as usize] = Some(new_idom);
+                    changed = true;
+                }
+            }
+        }
+        for (i, b) in self.blocks.iter_mut().enumerate() {
+            b.idom = match idom[i] {
+                Some(Dom::Block(d)) if !(d == entry && i == entry.0 as usize && !virtual_root) => Some(d),
+                _ => None,
+            };
+        }
+    }
+
+    /// The position of `b` in the list (its index), if any.
+    fn index_of(&self, b: Option<BlockId>) -> Option<usize> {
+        b.map(|b| self.block(b).index as usize)
+    }
+
+    /// Port of `BlockGraph::buildDomTree`: each block's children in the dominator tree, by
+    /// index, in list order (the blocks without a dominator are not listed).
+    pub(crate) fn dom_children(&self) -> Vec<Vec<usize>> {
+        let mut child = vec![Vec::new(); self.list.len()];
+        for (i, &b) in self.list.iter().enumerate() {
+            if let Some(d) = self.block(b).idom {
+                child[self.block(d).index as usize].push(i);
+            }
+        }
+        child
+    }
+
+    /// Port of `BlockGraph::buildDomDepth`: each block's depth in the dominator tree (the entry
+    /// is 1), and the largest.
+    pub(crate) fn dom_depth(&self) -> (Vec<i32>, i32) {
+        let mut depth = vec![0; self.list.len()];
+        for (i, &b) in self.list.iter().enumerate() {
+            depth[i] = self.block(b).idom.map_or(1, |d| depth[self.block(d).index as usize] + 1);
+        }
+        let max = depth.iter().copied().max().unwrap_or(0);
+        (depth, max)
     }
 
     /// Port of `BlockGraph::findIrreducible` (Tarjan's reducibility test): mark the edges that

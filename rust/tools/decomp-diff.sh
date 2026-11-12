@@ -12,6 +12,11 @@
 #   PRINT    what to print after `decompile` (default: print raw)
 #   OPTIONS  file of extra commands run before `load function` (option togglerule ..., option currentaction ...)
 #   JOBS     parallel runs (default: nproc)
+#   CONTINUES  after the print, this many times `continue` and the print again (next hit of BREAK)
+#   VERBOSE=1  for each mismatch, also the break lines, first differing op's block and context (decomp-show.sh)
+#   ORDER=easy run the corpus simplest first (decomp-rank.sh, cached at rust/target/decomp-check/<corpus>.ranked)
+#   STOP=1     one function at a time, in corpus order, stopping at the first mismatch the reference ran
+#   OUT        output directory (default: rust/target/decomp-check/<corpus>)
 # Each function is selected with `load function <name>`, its name taken from the prelude (which maps
 # every function, FID names included; `load addr` for one it lacks). Outputs are compared from that
 # line on: everything before it is the shared prelude.
@@ -25,7 +30,7 @@ export GHIDRA_RS=$rust/target/release/ghidra-rs
 export GHIDRA_RS_SLA=${GHIDRA_RS_SLA:-$root/Ghidra/Processors/x86/data/languages/x86.sla}
 export BIN=${BIN:-/home/zpt/projects/mercs/mercs2-decomp/orig/Mercenaries2.analysis.exe}
 export PRELUDE=${PRELUDE:-$rust/target/decomp-check/mercs2.prelude}
-export BREAK PRINT=${PRINT:-print raw} OPTIONS
+export BREAK PRINT=${PRINT:-print raw} OPTIONS CONTINUES=${CONTINUES:-0}
 [ -x "$DECOMP" ] || { echo "no reference: run rust/tools/decomp-ref.sh" >&2; exit 1; }
 [ -x "$GHIDRA_RS" ] || (cd "$rust" && cargo build --release)
 
@@ -42,7 +47,9 @@ fi
 
 if [ ! -f "$PRELUDE" ]; then
     mkdir -p "$(dirname "$PRELUDE")"
-    "$GHIDRA_RS" analyze "$BIN" --decomp-prelude "$PRELUDE" >&2
+    # written to a temporary file and renamed, so parallel runs (decomp-bisect.sh) never read half of it
+    "$GHIDRA_RS" analyze "$BIN" --decomp-prelude "$PRELUDE.$$" >&2
+    mv "$PRELUDE.$$" "$PRELUDE"
 fi
 
 if [ "$1" = --script ]; then
@@ -53,7 +60,13 @@ fi
 corpus=$1
 [ -f "$corpus" ] || corpus=$rust/tools/corpus/$1.txt
 name=$(basename "$corpus" .txt)
-export out=$rust/target/decomp-check/$name
+list=$(grep -v '^#' "$corpus" | awk 'NF { print $1 }')
+if [ "$ORDER" = easy ]; then
+    ranked=$rust/target/decomp-check/$name.ranked
+    [ -f "$ranked" ] || "$rust/tools/decomp-rank.sh" "$corpus" >/dev/null
+    list=$(awk '!/^#/ && NF { print $1 }' "$ranked")
+fi
+export out=${OUT:-$rust/target/decomp-check/$name}
 rm -rf "$out"
 mkdir -p "$out"/scripts "$out"/ref "$out"/rust
 
@@ -68,21 +81,32 @@ one() {
         [ -n "$BREAK" ] && echo "break start $BREAK"
         echo decompile
         echo "$PRINT"
+        for ((i = 0; i < CONTINUES; i++)); do echo continue; echo "$PRINT"; done
         echo quit
     } > "$s"
     "$DECOMP" -i "$s" </dev/null 2>&1 | sed -n '/^init> load \(function\|addr\)/,$p' > "$out/ref/$a"
     "$GHIDRA_RS" decompile -i "$s" 2>&1 | sed -n '/^init> load \(function\|addr\)/,$p' > "$out/rust/$a"
 }
 export -f one
-grep -v '^#' "$corpus" | awk 'NF { print $1 }' | xargs -P "${JOBS:-$(nproc)}" -I{} bash -c 'one {}'
+# the reference failed: an error, or no decompile result
+refbad() {
+    grep -q 'Low-level ERROR\|Unable to proceed\|Execution error\|parsing error' "$1" ||
+        ! grep -q '^Decompilation complete\|^Break at' "$1"
+}
+if [ -n "$STOP" ]; then
+    for a in $list; do
+        one "$a"
+        refbad "$out/ref/$a" || cmp -s "$out/ref/$a" "$out/rust/$a" || { echo "stopped at $a"; break; }
+    done
+else
+    xargs -P "${JOBS:-$(nproc)}" -I{} bash -c 'one "$1"' _ {} <<<"$list"
+fi
 
 total=0 same=0 refok=0
 for f in "$out"/ref/*; do
     a=$(basename "$f")
     total=$((total + 1))
-    # the reference failed: an error, or no decompile result
-    if grep -q 'Low-level ERROR\|Unable to proceed\|Execution error\|parsing error' "$f" ||
-        ! grep -q '^Decompilation complete\|^Break at' "$f"; then
+    if refbad "$f"; then
         echo "reference failed $a: $(grep -m1 'ERROR\|Unable\|error' "$f")"
     else
         refok=$((refok + 1))
@@ -95,6 +119,7 @@ for f in "$out"/ref/*; do
         n=$(grep -o 'line [0-9]*' <<<"$c" | grep -o '[0-9]*')
         grep -q EOF <<<"$c" && n=$((n + 1))
         echo "different $a, line $n: ref: $(sed -n "${n}p" "$f") | rust: $(sed -n "${n}p" "$out/rust/$a")"
+        if [ -n "$VERBOSE$STOP" ]; then "$rust/tools/decomp-show.sh" "$f" "$out/rust/$a"; fi
     fi
 done
 echo "$name: reference ran $refok / $total"

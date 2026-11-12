@@ -7,7 +7,7 @@
 //! state so the text matches byte for byte.
 
 use super::block::{BlockBasic, BlockId};
-use super::op::{OpId, SeqNum};
+use super::op::{OpFlags, OpId, SeqNum};
 use super::opcode::{Opcode, RawForm, Sizes};
 use super::varnode::{Space, VarnodeId};
 use super::{err, Arch, Funcdata, Result};
@@ -156,11 +156,14 @@ impl<'a> Printer<'a> {
             self.out.str(":");
             self.out.num(u64::from(v.size));
         }
+        if v.is_input() {
+            self.out.str("(i)");
+        }
         if let Some(def) = v.def {
             self.out.str("(");
             self.out.seq(self.fd().op(def).seq);
             self.out.str(")");
-        } else if !v.is_constant() {
+        } else if !v.is_input() && !v.is_constant() {
             self.out.str("(free)");
         }
     }
@@ -348,8 +351,12 @@ impl<'a> Printer<'a> {
             }
             Opcode::Indirect => {
                 self.assign(id);
-                self.vn(ins[0]);
-                self.out.str(" [] ");
+                if op.flags.has(OpFlags::INDIRECT_CREATION) {
+                    self.out.str("[create] ");
+                } else {
+                    self.vn(ins[0]);
+                    self.out.str(" [] ");
+                }
                 self.vn(ins[1]);
             }
             Opcode::Multiequal => {

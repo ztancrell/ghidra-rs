@@ -1,13 +1,16 @@
 //! Port of `Funcdata` (funcdata.cc, funcdata_op.cc, funcdata_varnode.cc): one function's ops,
-//! varnodes, basic blocks and calls, with the creation primitives the actions use.
+//! varnodes, basic blocks and calls, with the creation and editing primitives the actions use.
+//! Every edit of an op's inputs or output goes through these primitives, which keep the
+//! varnodes' reader lists (`descend`) and the location-sorted set (`VarnodeBank::loc_tree`).
 
 use super::block::{BlockGraph, BlockId};
-use super::fspec::{CallSpec, FuncProto};
+use super::fspec::{CallSpec, EffectKind, FuncProto, ParamActive};
+use super::heritage::Heritage;
 use super::op::{OpFlags, OpId, PcodeOp, SeqNum};
 use super::opcode::Opcode;
-use super::varnode::{Space, Varnode, VarnodeId, CONST_SPACE};
+use super::varnode::{LocKey, Space, Varnode, VarnodeId, VnFlags, CONST_SPACE};
 use super::{err, flow, stdsort, Arch, LowlevelError, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Size of the annotation varnodes that hold an op or call reference: the C++ stores a pointer
 /// (`sizeof(void *)` on the 64-bit reference build).
@@ -32,6 +35,13 @@ pub struct Funcdata {
     pub(crate) entry: u64,
     pub(crate) ops: Vec<PcodeOp>,
     pub(crate) vns: Vec<Varnode>,
+    /// the live varnodes in location order (`VarnodeBank::loc_tree`), once heritage needs it
+    loc: BTreeSet<LocKey>,
+    /// whether `loc` is built and kept: nothing reads it before the first heritage pass, so it
+    /// is built there in one go ([`Funcdata::build_loc`])
+    loc_on: bool,
+    /// the input varnodes by address and size (the inputs of `VarnodeBank::def_tree`)
+    inputs: BTreeSet<(u32, u64, u32, VarnodeId)>,
     /// the live ops by sequence number (`PcodeOpBank::optree`)
     seqs: BTreeMap<(u64, u32), OpId>,
     /// the ops in creation order, before they go into blocks (`PcodeOpBank::deadlist`)
@@ -46,6 +56,10 @@ pub struct Funcdata {
     pub(crate) jumptables: Vec<JumpTable>,
     /// the function's own prototype (`Funcdata::funcp`)
     pub(crate) proto: FuncProto,
+    /// the return-value trials (`Funcdata::activeoutput`), from `ActionPrototypeTypes` on
+    pub(crate) active_output: Option<ParamActive>,
+    /// the SSA builder's state across passes (`Funcdata::heritage`)
+    pub(crate) heritage: Heritage,
     /// the next free offset of the unique space (`VarnodeBank::uniqid`)
     next_unique: u64,
     /// header warnings (`Funcdata::warningHeader`), for `print C`
@@ -59,6 +73,9 @@ impl Funcdata {
             entry,
             ops: Vec::new(),
             vns: Vec::new(),
+            loc: BTreeSet::new(),
+            loc_on: false,
+            inputs: BTreeSet::new(),
             seqs: BTreeMap::new(),
             dead: Vec::new(),
             next_time: 0,
@@ -67,6 +84,8 @@ impl Funcdata {
             qlst: Vec::new(),
             jumptables: Vec::new(),
             proto: FuncProto::default(),
+            active_output: None,
+            heritage: Heritage::default(),
             next_unique: UNIQUE_ANALYSIS,
             warnings: Vec::new(),
         }
@@ -81,11 +100,72 @@ impl Funcdata {
     pub(crate) fn vn(&self, id: VarnodeId) -> &Varnode {
         &self.vns[id.0 as usize]
     }
+    fn vn_mut(&mut self, id: VarnodeId) -> &mut Varnode {
+        &mut self.vns[id.0 as usize]
+    }
     pub(crate) fn call(&self, id: CallId) -> &CallSpec {
         &self.calls[id.0 as usize]
     }
     pub(crate) fn call_mut(&mut self, id: CallId) -> &mut CallSpec {
         &mut self.calls[id.0 as usize]
+    }
+
+    /// Set varnode flags (`Varnode::setFlags`).
+    pub(crate) fn vn_set(&mut self, id: VarnodeId, f: VnFlags) {
+        self.vn_mut(id).flags.set(f);
+    }
+    /// Clear varnode flags (`Varnode::clearFlags`).
+    pub(crate) fn vn_clear(&mut self, id: VarnodeId, f: VnFlags) {
+        self.vn_mut(id).flags.clear(f);
+    }
+
+    /// Puts `id` into the location set, once it is kept.
+    fn loc_add(&mut self, id: VarnodeId) {
+        if self.loc_on {
+            self.loc.insert(self.loc_key(id));
+        }
+    }
+
+    /// Takes `id` out of the location set (before its key changes).
+    fn loc_del(&mut self, id: VarnodeId) {
+        if self.loc_on {
+            self.loc.remove(&self.loc_key(id));
+        }
+    }
+
+    /// Builds the location set from the live varnodes and keeps it from then on. The set holds
+    /// the same keys as one kept from the start, since a key depends only on the varnode.
+    pub(crate) fn build_loc(&mut self) {
+        if self.loc_on {
+            return;
+        }
+        self.loc = (0..self.vns.len() as u32)
+            .map(VarnodeId)
+            .filter(|&v| !self.vn(v).is_dead())
+            .map(|v| self.loc_key(v))
+            .collect();
+        self.loc_on = true;
+    }
+
+    /// The varnode's key in the location set.
+    fn loc_key(&self, id: VarnodeId) -> LocKey {
+        let v = self.vn(id);
+        LocKey::of(v, id, v.def.map(|d| self.op(d).seq))
+    }
+
+    /// The live varnodes from address `(space, start)` up to `(space, end)` (exclusive), or to
+    /// the end of the space, in location order (`beginLoc`/`endLoc`).
+    pub(crate) fn loc_range(&self, space: Space, start: u64, end: Option<u64>) -> Vec<VarnodeId> {
+        let s = space.index();
+        let from = LocKey::start(s, start);
+        let to = match end {
+            Some(e) => LocKey::start(s, e),
+            None => LocKey::start(s + 1, 0),
+        };
+        if to <= from {
+            return Vec::new();
+        }
+        self.loc.range(from..to).map(|k| k.id).collect()
     }
 
     /// Port of `Funcdata::newOp`: a new op at `addr` with the next creation time, appended to
@@ -102,16 +182,18 @@ impl Funcdata {
             parent: None,
             order: 0,
             flags: OpFlags::default(),
+            halt: None,
         });
         self.seqs.insert((addr, seq.time), id);
         self.dead.push(id);
         id
     }
 
-    /// Port of `Funcdata::newVarnode` (also `newConstant`, `newCodeRef`).
+    /// Port of `Funcdata::newVarnode` (also `newConstant`, `newCodeRef`): a free varnode.
     pub(crate) fn new_varnode(&mut self, size: u32, space: Space, offset: u64) -> VarnodeId {
         let id = VarnodeId(self.vns.len() as u32);
-        self.vns.push(Varnode { space, offset, size, def: None });
+        self.vns.push(Varnode::new(space, offset, size));
+        self.loc_add(id);
         id
     }
 
@@ -121,10 +203,13 @@ impl Funcdata {
 
     /// Port of `Funcdata::newVarnodeOut`: a varnode written by `op`.
     pub(crate) fn new_varnode_out(&mut self, size: u32, space: Space, offset: u64, op: OpId) -> VarnodeId {
-        let vn = self.new_varnode(size, space, offset);
-        self.vns[vn.0 as usize].def = Some(op);
-        self.op_mut(op).out = Some(vn);
-        vn
+        let id = VarnodeId(self.vns.len() as u32);
+        let mut v = Varnode::new(space, offset, size);
+        v.def = Some(op);
+        self.vns.push(v);
+        self.loc_add(id);
+        self.op_mut(op).out = Some(id);
+        id
     }
 
     /// Port of `Funcdata::newVarnodeIop`: an annotation naming `op`.
@@ -137,12 +222,24 @@ impl Funcdata {
         self.new_varnode(POINTER_SIZE, Space::Fspec, u64::from(call.0))
     }
 
-    /// Port of `Funcdata::newUniqueOut`: a new unique-space varnode of `size` bytes written by
-    /// `op`, at the next free offset (`VarnodeBank::createUnique`). `uniq` is the unique space.
-    pub(crate) fn new_unique_out(&mut self, size: u32, uniq: u32, op: OpId) -> VarnodeId {
+    /// The next free offset of the unique space for `size` bytes (`VarnodeBank::createUnique`).
+    fn next_unique_offset(&mut self, size: u32) -> u64 {
         let offset = self.next_unique;
         self.next_unique += u64::from(size);
+        offset
+    }
+
+    /// Port of `Funcdata::newUniqueOut`: a new unique-space varnode of `size` bytes written by
+    /// `op`. `uniq` is the unique space.
+    pub(crate) fn new_unique_out(&mut self, size: u32, uniq: u32, op: OpId) -> VarnodeId {
+        let offset = self.next_unique_offset(size);
         self.new_varnode_out(size, Space::Sleigh(uniq), offset, op)
+    }
+
+    /// Port of `Funcdata::newUnique`: a new free unique-space varnode.
+    pub(crate) fn new_unique(&mut self, size: u32, uniq: u32) -> VarnodeId {
+        let offset = self.next_unique_offset(size);
+        self.new_varnode(size, Space::Sleigh(uniq), offset)
     }
 
     /// Port of `Funcdata::newVarnodeSpace`: the constant naming a space (LOAD/STORE input 0).
@@ -159,15 +256,251 @@ impl Funcdata {
             if let Some(o) = p.out {
                 self.new_varnode_out(o.size, Space::Sleigh(o.space), o.offset, op);
             }
-            let ins = p.ins.iter().map(|v| self.new_varnode(v.size, Space::Sleigh(v.space), v.offset)).collect();
-            self.op_mut(op).ins = ins;
+            let ins: Vec<_> =
+                p.ins.iter().map(|v| self.new_varnode(v.size, Space::Sleigh(v.space), v.offset)).collect();
+            self.op_set_all_input(op, &ins)?;
+        }
+        Ok(())
+    }
+
+    /// Port of `Varnode::addDescend`: a free varnode has at most one reader.
+    fn add_descend(&mut self, vn: VarnodeId, op: OpId) -> Result<()> {
+        let v = self.vn(vn);
+        if v.is_free() && !v.is_constant() && !v.descend.is_empty() {
+            return err("Free varnode has multiple descendants");
+        }
+        self.vn_mut(vn).descend.push(op);
+        Ok(())
+    }
+
+    /// Port of `Varnode::eraseDescend`: drop the first occurrence of `op`.
+    fn erase_descend(&mut self, vn: VarnodeId, op: OpId) {
+        let d = &mut self.vn_mut(vn).descend;
+        if let Some(p) = d.iter().position(|&o| o == op) {
+            d.remove(p);
+        }
+    }
+
+    /// `opSetInput`'s constant rule: a constant that already has a reader is copied.
+    fn unshared_constant(&mut self, vn: VarnodeId) -> VarnodeId {
+        let v = self.vn(vn);
+        if v.is_constant() && !v.descend.is_empty() {
+            let (size, offset) = (v.size, v.offset);
+            return self.new_constant(size, offset);
+        }
+        vn
+    }
+
+    /// Port of `Funcdata::opSetInput`: `vn` becomes input `slot` of `op`; `slot` may be one past
+    /// the last input, which appends it (the C++ op has its slots allocated by `newOp`).
+    pub(crate) fn op_set_input(&mut self, op: OpId, vn: VarnodeId, slot: usize) -> Result<()> {
+        let old = self.op(op).ins.get(slot).copied();
+        if old == Some(vn) {
+            return Ok(());
+        }
+        let vn = self.unshared_constant(vn);
+        if let Some(o) = old {
+            self.erase_descend(o, op);
+        }
+        self.add_descend(vn, op)?;
+        let ins = &mut self.op_mut(op).ins;
+        if slot < ins.len() {
+            ins[slot] = vn;
+        } else if slot == ins.len() {
+            ins.push(vn);
+        } else {
+            return err(format!("opSetInput: slot {slot} past the inputs"));
+        }
+        Ok(())
+    }
+
+    /// Port of `Funcdata::opSetAllInput`.
+    pub(crate) fn op_set_all_input(&mut self, op: OpId, vns: &[VarnodeId]) -> Result<()> {
+        for vn in std::mem::take(&mut self.op_mut(op).ins) {
+            self.erase_descend(vn, op);
+        }
+        for (slot, &vn) in vns.iter().enumerate() {
+            self.op_set_input(op, vn, slot)?;
         }
         Ok(())
     }
 
     /// Port of `Funcdata::opInsertInput`: a new input at `slot`.
-    pub(crate) fn op_insert_input(&mut self, op: OpId, vn: VarnodeId, slot: usize) {
+    pub(crate) fn op_insert_input(&mut self, op: OpId, vn: VarnodeId, slot: usize) -> Result<()> {
+        let vn = self.unshared_constant(vn);
+        self.add_descend(vn, op)?;
         self.op_mut(op).ins.insert(slot, vn);
+        Ok(())
+    }
+
+    /// Port of `Funcdata::opRemoveInput`.
+    pub(crate) fn op_remove_input(&mut self, op: OpId, slot: usize) {
+        let vn = self.op_mut(op).ins.remove(slot);
+        self.erase_descend(vn, op);
+    }
+
+    /// Port of `VarnodeBank::setDef`: a free varnode becomes written by `op`.
+    fn set_def(&mut self, vn: VarnodeId, op: OpId) -> Result<()> {
+        // Varnode::setDef
+        if self.vn(vn).is_constant() {
+            return err(format!("Assignment to constant at r0x{:08x}", self.op(op).seq.addr));
+        }
+        if !self.vn(vn).is_free() {
+            return err(format!("Defining varnode which is not free at 0x{:08x}", self.op(op).seq.addr));
+        }
+        self.loc_del(vn);
+        self.vn_mut(vn).def = Some(op);
+        self.loc_add(vn);
+        Ok(())
+    }
+
+    /// Port of `Funcdata::opSetOutput`.
+    pub(crate) fn op_set_output(&mut self, op: OpId, vn: VarnodeId) -> Result<()> {
+        if self.op(op).out == Some(vn) {
+            return Ok(());
+        }
+        if self.op(op).out.is_some() {
+            self.op_unset_output(op);
+        }
+        if let Some(def) = self.vn(vn).def {
+            self.op_unset_output(def);
+        }
+        self.set_def(vn, op)?;
+        self.op_mut(op).out = Some(vn);
+        Ok(())
+    }
+
+    /// Port of `Funcdata::opUnsetOutput` (`VarnodeBank::makeFree`).
+    fn op_unset_output(&mut self, op: OpId) {
+        let Some(vn) = self.op_mut(op).out.take() else { return };
+        self.loc_del(vn);
+        let v = self.vn_mut(vn);
+        v.def = None;
+        v.flags.clear(VnFlags::INDIRECT_CREATION);
+        self.loc_add(vn);
+    }
+
+    /// Port of `Funcdata::deleteVarnode` (`VarnodeBank::destroy`).
+    pub(crate) fn delete_varnode(&mut self, vn: VarnodeId) {
+        self.loc_del(vn);
+        let v = self.vn(vn);
+        if v.is_input() {
+            self.inputs.remove(&(v.space.index(), v.offset, v.size, vn));
+        }
+        self.vn_set(vn, VnFlags::DEAD);
+    }
+
+    /// Port of `Funcdata::setInputVarnode`: `vn` becomes an input of the function, or the input
+    /// already there is returned. Inputs the prototype leaves unaffected are marked so.
+    pub(crate) fn set_input_varnode(&mut self, vn: VarnodeId, arch: &Arch) -> Result<VarnodeId> {
+        let v = self.vn(vn);
+        if v.is_input() {
+            return Ok(vn);
+        }
+        let (s, off, size) = (v.space.index(), v.offset, v.size);
+        // the last input before the end of vn (VarnodeBank::beginDef(input, addr + size), back one)
+        if let Some(&(ps, poff, psize, prev)) =
+            self.inputs.range(..(s, off + u64::from(size), 0, VarnodeId(0))).next_back()
+        {
+            let overlaps =
+                ps == s && (off.wrapping_sub(poff) < u64::from(psize) || poff.wrapping_sub(off) < u64::from(size));
+            if overlaps {
+                if psize == size && poff == off {
+                    return Ok(prev);
+                }
+                return err("Overlapping input varnodes");
+            }
+        }
+        if !self.vn(vn).is_free() || self.vn(vn).is_constant() {
+            return err("Making input out of varnode which is not free");
+        }
+        self.loc_del(vn);
+        self.vn_set(vn, VnFlags::INPUT);
+        self.loc_add(vn);
+        self.inputs.insert((s, off, size, vn));
+        let v = self.vn(vn);
+        match self.proto.has_effect(arch, v.space, v.offset, v.size) {
+            Some(EffectKind::Unaffected) => self.vn_set(vn, VnFlags::UNAFFECTED),
+            Some(EffectKind::ReturnAddress) => {
+                self.vn_set(vn, VnFlags::UNAFFECTED);
+                self.vn_set(vn, VnFlags::RETURN_ADDRESS);
+            }
+            _ => {}
+        }
+        Ok(vn)
+    }
+
+    /// Port of `Funcdata::totalReplace`: every reader of `vn` reads `newvn` instead.
+    pub(crate) fn total_replace(&mut self, vn: VarnodeId, newvn: VarnodeId) -> Result<()> {
+        for op in self.vn(vn).descend.clone() {
+            let slot = self
+                .op(op)
+                .ins
+                .iter()
+                .position(|&v| v == vn)
+                .ok_or_else(|| LowlevelError("totalReplace: reader without the varnode".into()))?;
+            self.op_set_input(op, newvn, slot)?;
+        }
+        Ok(())
+    }
+
+    /// Port of `Funcdata::newIndirect`: an INDIRECT at `indeffect`'s address naming it (its
+    /// output and first input are the caller's).
+    fn new_indirect(&mut self, indeffect: OpId) -> Result<OpId> {
+        let op = self.new_op(Opcode::Indirect, self.op(indeffect).seq.addr);
+        let iop = self.new_varnode_iop(indeffect);
+        // input 1 first, as the C++ sets it before input 0
+        self.op_mut(op).ins.push(iop);
+        self.add_descend(iop, op)?;
+        Ok(op)
+    }
+
+    /// Sets input 0 of an INDIRECT made by [`Funcdata::new_indirect`].
+    fn set_indirect_input(&mut self, op: OpId, vn: VarnodeId) -> Result<()> {
+        let vn = self.unshared_constant(vn);
+        self.add_descend(vn, op)?;
+        self.op_mut(op).ins.insert(0, vn);
+        Ok(())
+    }
+
+    /// Port of `Funcdata::newIndirectOp`: `vn = vn [] indeffect`, before `indeffect`.
+    pub(crate) fn new_indirect_op(
+        &mut self,
+        indeffect: OpId,
+        space: Space,
+        off: u64,
+        size: u32,
+        extra: OpFlags,
+    ) -> Result<OpId> {
+        let newin = self.new_varnode(size, space, off);
+        let op = self.new_indirect(indeffect)?;
+        self.op_mut(op).flags.set(extra);
+        self.new_varnode_out(size, space, off, op);
+        self.set_indirect_input(op, newin)?;
+        self.op_insert_before(op, indeffect)?;
+        Ok(op)
+    }
+
+    /// Port of `Funcdata::newIndirectCreation`: `vn = [create] indeffect`, before `indeffect`.
+    pub(crate) fn new_indirect_creation(
+        &mut self,
+        indeffect: OpId,
+        space: Space,
+        off: u64,
+        size: u32,
+        possibleout: bool,
+    ) -> Result<OpId> {
+        let newin = self.new_constant(size, 0);
+        let op = self.new_indirect(indeffect)?;
+        self.op_mut(op).flags.set(OpFlags::INDIRECT_CREATION);
+        let newout = self.new_varnode_out(size, space, off, op);
+        if !possibleout {
+            self.vn_set(newin, VnFlags::INDIRECT_CREATION);
+        }
+        self.vn_set(newout, VnFlags::INDIRECT_CREATION);
+        self.set_indirect_input(op, newin)?;
+        self.op_insert_before(op, indeffect)?;
+        Ok(op)
     }
 
     /// Port of `Funcdata::opStackLoad`: a LOAD of `size` bytes at stack offset `off`, computed
@@ -187,7 +520,7 @@ impl Funcdata {
         let addr = self.op(op).seq.addr;
         let loadop = self.new_op(Opcode::Load, addr);
         let spc = self.new_varnode_space(ram);
-        self.op_mut(loadop).ins = vec![spc, addout];
+        self.op_set_all_input(loadop, &[spc, addout])?;
         let res = self.new_unique_out(size, uniq, loadop);
         // the LOAD comes after the stack-building op
         self.op_insert_after(loadop, addop)?;
@@ -202,7 +535,7 @@ impl Funcdata {
         let addop = self.new_op(Opcode::IntAdd, self.op(op).seq.addr);
         let addout = self.new_unique_out(size, uniq, addop);
         let c = self.new_constant(size, off);
-        self.op_mut(addop).ins = vec![stackptr, c];
+        self.op_set_all_input(addop, &[stackptr, c])?;
         self.op_insert_before(addop, op)?;
         Ok(addout)
     }
@@ -245,10 +578,22 @@ impl Funcdata {
     }
 
     /// Port of `Funcdata::opDestroyRaw` for ops still in the dead list (the caller removes it
-    /// from the list).
+    /// from the list): the op and its varnodes are gone.
     pub(crate) fn op_destroy_raw(&mut self, op: OpId) {
         let seq = self.op(op).seq;
         self.seqs.remove(&(seq.addr, seq.time));
+        let o = self.op_mut(op);
+        let vns: Vec<VarnodeId> = std::mem::take(&mut o.ins).into_iter().chain(o.out.take()).collect();
+        for vn in vns {
+            self.vn_mut(vn).descend.clear();
+            self.delete_varnode(vn);
+        }
+    }
+
+    /// Whether `op` still exists (not destroyed by [`Funcdata::op_destroy_raw`]).
+    fn op_exists(&self, op: OpId) -> bool {
+        let seq = self.op(op).seq;
+        self.seqs.get(&(seq.addr, seq.time)) == Some(&op)
     }
 
     /// Port of `Funcdata::opDeadInsertAfter`: move `op` to just after `prev` in the dead list.
@@ -283,9 +628,14 @@ impl Funcdata {
         })
     }
 
-    /// Port of `Funcdata::opInsertBegin`: put `op` at the start of `bl`, after any MULTIEQUAL.
+    /// Port of `Funcdata::opInsertBegin`: put `op` at the start of `bl`, after any MULTIEQUAL
+    /// (unless `op` is one itself).
     pub(crate) fn op_insert_begin(&mut self, op: OpId, bl: BlockId) {
-        let at = self.blocks.block(bl).ops.iter().take_while(|&&o| self.op(o).opc == Opcode::Multiequal).count();
+        let at = if self.op(op).opc == Opcode::Multiequal {
+            0
+        } else {
+            self.blocks.block(bl).ops.iter().take_while(|&&o| self.op(o).opc == Opcode::Multiequal).count()
+        };
         self.op_insert(op, bl, at);
     }
 
@@ -319,6 +669,12 @@ impl Funcdata {
     /// The live ops with opcode `opc` (`Funcdata::beginOp(opc)`), in block order.
     pub(crate) fn ops_with(&self, opc: Opcode) -> Vec<OpId> {
         self.blocks.ops().filter(|&o| self.op(o).opc == opc).collect()
+    }
+
+    /// The ops with opcode `opc` in the order the C++ keeps its per-opcode lists (`returnlist`,
+    /// `storelist`: creation order), dead ones included.
+    pub(crate) fn ops_created_with(&self, opc: Opcode) -> Vec<OpId> {
+        (0..self.ops.len() as u32).map(OpId).filter(|&o| self.op(o).opc == opc && self.op_exists(o)).collect()
     }
 
     /// Port of `Funcdata::startProcessing`: follow flow, build blocks, order them and the calls.
