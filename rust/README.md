@@ -545,6 +545,50 @@ Results on 2026-11-12 (branch `m3-s0`):
 
 Superseded: S1a's results are in "Decompiler (Milestone 3)" below.
 
+### Debugging tools
+
+Added in stage S2. All run both engines through `decomp-diff.sh` and keep their outputs under
+`rust/target/decomp-check/`.
+
+- `decomp-diff.sh` options, as environment variables:
+  - `VERBOSE=1`: for each mismatch, also print the break each side stopped at, any ghidra-rs
+    error, the first differing op and its basic block, and 5 lines of context from both sides
+    in two columns (`>>` marks the first differing line).
+  - `ORDER=easy`: run the corpus simplest first.
+  - `STOP=1`: run one function at a time and stop at the first mismatch, printing its verbose
+    diff.
+  - `CONTINUES=N`: after the print, run `continue` and the print again N times.
+  - `OUT=<dir>`: set the output directory.
+
+```sh
+BREAK=paramdouble VERBOSE=1 rust/tools/decomp-diff.sh m8
+ORDER=easy STOP=1 BREAK=paramdouble rust/tools/decomp-diff.sh m500
+```
+
+- `decomp-show.sh <ref-file> <rust-file>` prints that verbose diff for any two outputs, e.g.
+  `rust/target/decomp-check/m8/{ref,rust}/0x401000`.
+- `decomp-rank.sh <corpus>` ranks a corpus by loops (back edges), then basic blocks, counted in
+  ghidra-rs's `print raw` at `break start funclink`. It writes
+  `rust/target/decomp-check/<corpus>.ranked` (`0x401000 # 4 blocks 0 loops`), which
+  `ORDER=easy` uses and builds if it is missing.
+- `decomp-bisect.sh <addr> [continues]` finds the first action, and the first hit of it, at
+  which the two engines' `print raw` differ for one function. It breaks at each action of the
+  universal order from `start` through mainloop, with `continues` (default 3) further
+  `continue`s to reach the repeated mainloop passes, compares hit 1 of every action, then hit
+  2, and so on, and prints the first difference with the verbose diff. A ghidra-rs break or
+  command that is not ported yet shows as `rust: not supported: ...`.
+  `ACTIONS="funclink heritage paramdouble"` limits the list. `unreachable`, `directwrite` and
+  `deadcode` are left out because the reference rejects breaks on them (each name is in the
+  action tree twice). Outputs: `rust/target/decomp-check/bisect-<addr>/`.
+
+```sh
+rust/tools/decomp-bisect.sh 0x401000
+ACTIONS="funclink heritage paramdouble" rust/tools/decomp-bisect.sh 0x401000 5
+```
+
+The reference only accepts an absolute script path (`decomp_dbg -i /abs/path`); with a relative
+one it fails a libstdc++ assertion and prints nothing.
+
 ## Decompiler (Milestone 3)
 
 Stage S1a (branch `m3-s1a`): flow and raw p-code. `decompile` follows the function's flow with
