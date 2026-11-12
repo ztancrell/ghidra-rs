@@ -59,7 +59,9 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    pointer callees and non-returning import thunks. On branch `fid`: Function ID (the FID
    hasher, Ghidra's `.fidbf` databases read in place, matching and naming): of Ghidra's 26 FID
    functions in mercs2's `.text`, 24 get the same name, 2 another, none missing (details in
-   `rust/README.md`). Not done yet: constant propagation.
+   `rust/README.md`). On branch `constprop`: Ghidra's constant propagation
+   (`Analysis::propagate`, whole-function walks with callee purges), used by `--abi-callers`
+   only so far. Not done yet: constant propagation for `--functions` (its `callees`/`data_refs`).
 2b. CheckAbiCallers.java (register liveness over p-code), the mercs2 pipeline's per-batch
    check: `ghidra-rs analyze --abi-callers`. On branch `m2b-abi-callers`: 96.5% of the
    reference rows identical. On branch `abi-dropin` (a drop-in for the script, judged by the
@@ -71,9 +73,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    and stored values, and follows jumps, so vtable calls resolve; pointers to import thunks
    count as imports; a `violation` behind any reference wins over a stopped walk): 98.6%
    identical, and the last three missing `violation` rows (0x84af20 at 0x41d7be, 0x41d834,
-   0x675611) are found.
-3. Decompilation: a Rust decompiler, or FFI to the existing C++ decompiler as a stopgap.
-   Plan: `docs/plans/m3-decompiler.md` (stages, reference checks, open decisions).
+   0x675611) are found. On branch `constprop` (whole-function constant propagation, see
+   milestone 2): 98.8% identical against the reference of mercs2 f14e5c4, and `CALL EAX` at
+   0x73b4d1 resolves.
+3. Decompilation: a Rust decompiler, checked against Ghidra's C++ one.
+   Plan: `docs/plans/m3-decompiler.md` (stages, reference checks, decisions).
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.
