@@ -47,7 +47,7 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   fixups: the p-code snippet parser),
   `funcdata.rs` (`Funcdata`: op/varnode arenas, readers and the location-sorted varnode set,
   op insertion and input/output edits, stack loads), `op.rs`,
-  `varnode.rs`, `opcode.rs` (opcodes and their `print raw` names), `flow.rs` (`FlowInfo`,
+  `varnode.rs`, `readers.rs` (a varnode's reader list, up to 4 inline), `opcode.rs` (opcodes and their `print raw` names), `flow.rs` (`FlowInfo`,
   call-fixup injection), `block.rs` (basic blocks, spanning tree, dominators), `actiontree.rs`
   (the action framework: groups, repeat, breakpoints, `continue`), `heritage.rs` (SSA: phi
   placement and renaming), `action.rs` (the universal
@@ -781,10 +781,13 @@ pins a loop function; unit tests in `heritage.rs` check phi placement on hand-bu
 (diamond, loop, nested loops) and `actiontree.rs` a break inside a repeating group.
 
 Mall (29,240 functions, one script, one thread, release build, 2026-11-12): to
-`break start paramdouble` in 21.2 s including loading (about 1,400 functions per second), to
-`heritage` in 6.2 s; peak RSS 682 MB, reached by one function in garbage code that decodes
+`break start paramdouble` in 19.2 s including loading (about 1,500 functions per second), to
+`heritage` in 5.4 s; peak RSS 599 MB, reached by one function in garbage code that decodes
 100,000 instructions before it fails (the reader lists cost memory per varnode; the run stays
-near 200 MB otherwise); no panics. The location-sorted set is built at the first heritage
+near 200 MB otherwise); no panics. Each varnode's reader list (`readers.rs`, `Readers`) keeps
+up to 4 readers inline in the varnode (24 bytes, a `Vec`'s size) and moves to a `Vec` from the
+fifth. Superseded: with a `Vec` per varnode the same runs took 20.9 s and 6.1 s, peak 679 MB
+(first measured as 21.2 s, 6.2 s, 682 MB). The location-sorted set is built at the first heritage
 pass, since nothing reads it before. Superseded: S2's first commit kept it from varnode
 creation on (24.4 s, 11.2 s, 1 GB). 29,131 reach the break, 8 are
 `nocode` imports a duplicate name picks first (`No code for`, as the reference), 101 fail. The
