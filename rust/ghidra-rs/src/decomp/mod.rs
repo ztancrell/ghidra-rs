@@ -1,23 +1,30 @@
 //! Milestone 3: the decompiler, a port of Ghidra's C++ decompiler
 //! (`Ghidra/Features/Decompiler/src/decompile/cpp`). See `docs/plans/m3-decompiler.md`.
 //!
-//! Stage S1a: the IR (ops and varnodes in arenas, [`Funcdata`]), flow following on the SLEIGH
-//! engine of milestone 1 ([`flow`]), basic blocks ([`block`]), the actions that run before
-//! `funclink` ([`action`]) and `print raw` ([`print`]).
+//! Stages S1a and S1b: the IR (ops and varnodes in arenas, [`Funcdata`]), flow following on
+//! the SLEIGH engine of milestone 1 ([`flow`]) with call fixups ([`inject`]), basic blocks
+//! ([`block`]), the compiler spec ([`cspec`]) and prototypes ([`fspec`]), the actions that run
+//! before `heritage` ([`action`]) and `print raw` ([`print`]).
 
 pub mod action;
 mod block;
+mod cspec;
 mod flow;
+mod fspec;
 mod funcdata;
+mod inject;
 mod op;
 mod opcode;
 mod print;
 mod stdsort;
 mod varnode;
+mod xml;
 
 use crate::analysis::Image;
 use crate::sleigh::Sleigh;
-use std::collections::{BTreeMap, HashMap};
+use cspec::{CompilerSpec, SleighNames};
+use fspec::FuncProto;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub use funcdata::Funcdata;
 pub use print::print_raw;
@@ -44,25 +51,43 @@ pub(crate) fn err<T>(msg: impl Into<String>) -> Result<T> {
 /// first (`VarnodeData::operator<`).
 type RegKey = (u32, u64, std::cmp::Reverse<u32>);
 
-/// The program-wide state a decompilation reads (the parts of C++ `Architecture` S1a needs):
-/// the loaded image, the SLEIGH engine, the functions the console mapped and the processor
-/// facts from the `.pspec`/`.cspec`. Shared read-only by every [`Funcdata`].
+/// Size of an external-reference symbol: a pointer (`ExternRefSymbol::buildNameType`).
+const EXTERNREF_SIZE: u64 = 4;
+
+/// A function the console mapped (`map function`): its name and prototype (the scope's
+/// `Funcdata`, as `queryFunction` finds it).
+#[derive(Debug, Clone)]
+pub(crate) struct Function {
+    pub(crate) name: String,
+    pub(crate) proto: FuncProto,
+}
+
+/// The program-wide state a decompilation reads (the parts of C++ `Architecture` used so far):
+/// the loaded image, the SLEIGH engine, the compiler spec, the functions and symbols the console
+/// mapped and the read-only ranges. Shared read-only by every [`Funcdata`].
 pub struct Arch {
     pub(crate) sleigh: Sleigh,
     pub(crate) image: Image,
-    /// `map function`: entry -> display name (the scope's `queryFunction`)
-    pub(crate) functions: HashMap<u64, String>,
+    pub(crate) spec: CompilerSpec,
+    /// `map function`: entry -> the function
+    pub(crate) functions: HashMap<u64, Function>,
     /// the register names, for `Address::printRaw`
     registers: BTreeMap<RegKey, String>,
-    /// the stack pointer (`getSpacebase(0)` of the stack space): space, offset, size
-    pub(crate) stack_pointer: (u32, u64, u32),
     /// `<tracked_set>` registers: space, offset, size, value (ActionConstbase)
     pub(crate) tracked: Vec<(u32, u64, u32, u64)>,
+    /// ram ranges `[start, end)` with the `readonly` property: the loader's read-only sections
+    /// (`fillinReadOnlyFromLoader`) and the console's `readonly` commands
+    readonly: Vec<(u64, u64)>,
+    /// `map externalref`: the slots holding a reference to an external function
+    externrefs: HashSet<u64>,
+    /// `option readonly`: read-only memory propagates as constants (`readonlypropagate`)
+    pub(crate) readonly_propagate: bool,
 }
 
 impl Arch {
-    /// An architecture for `image` decoded by `sleigh` (x86 32-bit: the stack pointer is ESP).
-    pub fn new(sleigh: Sleigh, image: Image) -> Result<Arch> {
+    /// An architecture for `image` decoded by `sleigh`, with the compiler spec `cspec` (the
+    /// text of a `.cspec` file).
+    pub fn new(sleigh: Sleigh, image: Image, cspec: &str) -> Result<Arch> {
         let mut syms = sleigh.varnode_syms();
         // SymbolTree iterates by name, and the first name wins for a shared varnode
         syms.sort_by(|a, b| a.0.cmp(b.0));
@@ -70,18 +95,68 @@ impl Arch {
         for (name, space, off, size) in &syms {
             registers.entry((*space, *off, std::cmp::Reverse(*size))).or_insert_with(|| name.to_string());
         }
-        let reg = |name: &str| syms.iter().find(|s| s.0 == name).map(|s| (s.1, s.2, s.3));
-        let stack_pointer = reg("ESP").ok_or(LowlevelError("no ESP register".into()))?;
+        let names = SleighNames::new(&sleigh);
         let tracked = sleigh
             .tracked
             .iter()
-            .map(|(name, val)| {
-                reg(name)
-                    .map(|(s, o, z)| (s, o, z, u64::from(*val)))
-                    .ok_or(LowlevelError(format!("unknown tracked register {name}")))
-            })
+            .map(|(name, val)| names.register(name).map(|(s, o, z)| (s, o, z, u64::from(*val))))
             .collect::<Result<_>>()?;
-        Ok(Arch { sleigh, image, functions: HashMap::new(), registers, stack_pointer, tracked })
+        let spec = CompilerSpec::parse(cspec, &sleigh, &names)?;
+        let readonly = image
+            .sections
+            .iter()
+            .filter(|s| s.readonly)
+            .map(|s| (u64::from(s.addr), u64::from(s.addr) + s.data.len() as u64))
+            .collect();
+        Ok(Arch {
+            sleigh,
+            image,
+            spec,
+            functions: HashMap::new(),
+            registers,
+            tracked,
+            readonly,
+            externrefs: HashSet::new(),
+            readonly_propagate: false,
+        })
+    }
+
+    /// `map function`: a function at `entry` with the default (empty) prototype.
+    pub(crate) fn add_function(&mut self, entry: u64, name: String) {
+        self.functions.insert(entry, Function { name, proto: FuncProto::default() });
+    }
+
+    /// `map externalref <slot> ...`
+    pub(crate) fn add_externref(&mut self, slot: u64) {
+        self.externrefs.insert(slot);
+    }
+
+    /// `readonly <addr>:<size>` (`Database::setPropertyRange(readonly, ...)`).
+    pub(crate) fn add_readonly(&mut self, start: u64, size: u64) {
+        self.readonly.push((start, start + size));
+    }
+
+    /// `fixup apply <fixup> <function>` (`IfcFixupApply`): calls to the function at `entry`
+    /// become the call fixup's p-code.
+    pub(crate) fn apply_fixup(&mut self, fixup: &str, entry: u64) -> Result<()> {
+        let id =
+            self.spec.injects.callfixup_id(fixup).ok_or_else(|| LowlevelError(format!("Unknown fixup: {fixup}")))?;
+        let f = self.functions.get_mut(&entry).ok_or_else(|| LowlevelError(format!("no function at 0x{entry:x}")))?;
+        f.proto.inject = Some(id);
+        Ok(())
+    }
+
+    /// Whether a ram varnode at `off` of `size` bytes is read-only, as `Funcdata::newVarnode`
+    /// flags it (`Scope::queryProperties`): the property of its first byte, unless an
+    /// external-reference symbol contains it (`ScopeInternal::addExternalRef` clears its
+    /// read-only flag). A function symbol containing it gives the same answer as the property:
+    /// its flags are the property at its entry, and being 1 byte long it contains only a 1-byte
+    /// varnode at that entry.
+    pub(crate) fn is_readonly(&self, off: u64, size: u32) -> bool {
+        let end = off + u64::from(size);
+        let in_externref = (off.saturating_sub(EXTERNREF_SIZE - 1)..=off)
+            .any(|slot| self.externrefs.contains(&slot) && end <= slot + EXTERNREF_SIZE);
+        !in_externref && self.readonly.iter().any(|&(s, e)| s <= off && off < e)
     }
 
     /// Port of `SleighBase::getRegisterName`: the register holding the range, as its name, offset

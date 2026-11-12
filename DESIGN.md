@@ -92,6 +92,9 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    decompile -i` runs the same scripts and stops at `decompile` (not ported: identical 0 / 8).
    S1a (IR, flow, raw p-code) done on branch `m3-s1a`: `print raw` at `break start funclink`
    is identical on M8 (8 / 8) and M500 (500 / 500); jump tables use a stand-in until S3.
+   S1b (specs, prototypes, call fixups) done on branch `m3-s1b`: reads `x86win.cspec`
+   (prototype models, call-fixup snippets), `print raw` at `break start heritage` identical on
+   M8 (8 / 8) and M500 (500 / 500); locked prototypes (the register ABI) still to come.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.

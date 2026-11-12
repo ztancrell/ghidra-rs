@@ -1,6 +1,6 @@
 # Milestone 3 plan: the decompiler
 
-Written 2026-11-12 as a plan. Built so far: S0 and S1a (see their sections below).
+Written 2026-11-12 as a plan. Built so far: S0, S1a and S1b (see their sections below).
 
 ## Goal
 
@@ -229,6 +229,35 @@ M8 8 / 8 and M500 500 / 500 identical at `break start funclink`; details in `rus
   They are ported in that minimal form; S1b owns the rest of them.
 - Two C++ details reach the output and are ported as such: `BlockBasic::insert`'s order keys,
   which tie in long blocks, and libstdc++'s `std::sort`, which `sortCallSpecs` uses on them.
+
+Superseded: the minimal `ActionConstbase`, `ActionExtraPopSetup` and `ActionPrototypeTypes`
+above are replaced by S1b's ports (`rust/ghidra-rs/src/decomp/action.rs`).
+
+### S1b: done on branch `m3-s1b` (2026-11-12)
+
+M8 8 / 8 and M500 500 / 500 identical at `break start heritage`; the funclink check stays
+8 / 8 and 500 / 500. Details in `rust/README.md`, "Stage S1b". Between `funclink` and
+`heritage` two things reach the output: the stack-pointer placeholder of every call
+(`ActionFuncLink`) and read-only memory turned into constants (`ActionVarnodeProps` with the
+prelude's `option readonly on`). Where it differs from the table row:
+
+- `.cspec` reading, prototype models (`ProtoModel`, `ProtoModelMerged`, parameter entries,
+  effects, likely trash), `FuncProto`/`FuncCallSpecs` and the actions are ported for unlocked
+  prototypes only: the console locks none (`parse line` is S6; mercs2's `register_abi.csv` as
+  locked custom-storage prototypes, decision 6, comes later in milestone 3 and plugs into
+  `FuncProto`). Parameter and return trials (`ParamActive`) move to S4, where they are used.
+- Call fixups: the console applies them only with `fixup apply` (never by callee name), so the
+  corpora contain none; `ghidra-rs decompile` reads `fixup apply`, and a unit test checks
+  mercs2's `__onexit` with two fixups against the reference. The snippet parser covers the
+  subset of SLEIGH semantics snippets use and rejects the rest at load.
+- Not ported because nothing for x86 or the console reaches them: `modelrules` (x86win.cspec
+  has no `<modelrule>`), `override` (no override commands in the corpora), `userop` (x86-32
+  declares no segment op and no `callotherfixup`), the core types of `type` (prototypes keep no
+  types until S6), the `.pspec`'s register data (read by later stages).
+- `<data_organization>` and `<global>` are skipped (types S6, scopes); any other unknown
+  `.cspec` element is an error.
+- Harness fix: a name mapped twice finds its first function, as the C++ does (mercs2 has
+  several `__onexit`, `__SEH_prolog`, ...).
 
 ## Running stages in parallel
 

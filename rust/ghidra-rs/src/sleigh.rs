@@ -865,6 +865,12 @@ impl Sleigh {
         self.uniq_space
     }
 
+    /// The first unique-space offset free after the `.sla`'s own temporaries
+    /// (`Translate::unique_base`).
+    pub fn uniq_base(&self) -> u64 {
+        self.uniq_base
+    }
+
     pub fn new_parse(&self) -> Parse {
         Parse {
             buf: [0; 48],

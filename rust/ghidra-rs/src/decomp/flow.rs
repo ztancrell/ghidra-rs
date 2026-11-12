@@ -7,7 +7,8 @@
 //! starts and the deletion of ops after a branch follow the C++ step by step.
 
 use super::block::BlockId;
-use super::funcdata::{CallId, CallSpec, Funcdata, JumpTable};
+use super::fspec::CallSpec;
+use super::funcdata::{CallId, Funcdata, JumpTable};
 use super::op::{OpFlags, OpId, SeqNum};
 use super::opcode::Opcode;
 use super::varnode::Space;
@@ -55,6 +56,8 @@ struct Flow<'a> {
     visited: BTreeMap<u64, VisitStat>,
     addrlist: Vec<u64>,
     tablelist: Vec<OpId>,
+    /// calls to replace by their call fixup (`FlowInfo::injectlist`)
+    injectlist: Vec<CallId>,
     insn_count: u32,
     baddata_count: u32,
 }
@@ -69,6 +72,7 @@ pub(crate) fn follow_flow(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
         visited: BTreeMap::new(),
         addrlist: Vec::new(),
         tablelist: Vec::new(),
+        injectlist: Vec::new(),
         insn_count: 0,
         baddata_count: 0,
     };
@@ -88,25 +92,83 @@ impl Flow<'_> {
         self.fd.op_mut(op).flags.set(f);
     }
 
-    /// Port of `FlowInfo::generateOps`. (Inlining, injection and multistage tables are not
-    /// ported: the console reference has no call fixups or inline functions.)
+    /// Port of `FlowInfo::generateOps`. (Inlining and multistage tables are not ported: the
+    /// console has no inline functions, and the jump-table stand-in recovers in one stage.)
     fn generate_ops(&mut self) -> Result<()> {
         self.addrlist.push(self.fd.entry);
         while !self.addrlist.is_empty() {
             self.fallthru()?;
         }
-        while !self.tablelist.is_empty() {
-            let tables = self.recover_jump_tables()?;
-            for jt in tables {
-                for i in 0..self.fd.jumptables[jt].targets.len() {
-                    self.new_address(self.fd.jumptables[jt].targets[i])?;
-                }
-                while !self.addrlist.is_empty() {
-                    self.fallthru()?;
+        self.inject_pcode()?;
+        loop {
+            while !self.tablelist.is_empty() {
+                let tables = self.recover_jump_tables()?;
+                for jt in tables {
+                    for i in 0..self.fd.jumptables[jt].targets.len() {
+                        self.new_address(self.fd.jumptables[jt].targets[i])?;
+                    }
+                    while !self.addrlist.is_empty() {
+                        self.fallthru()?;
+                    }
                 }
             }
+            self.check_contained_call()?;
+            self.inject_pcode()?;
+            if self.tablelist.is_empty() {
+                return Ok(());
+            }
         }
-        self.check_contained_call()
+    }
+
+    /// Port of `FlowInfo::injectPcode` for call fixups (`injectSubFunction`, `deleteCallSpec`):
+    /// each queued call is replaced by its fixup's p-code.
+    fn inject_pcode(&mut self) -> Result<()> {
+        for call in std::mem::take(&mut self.injectlist) {
+            let Some(inject) = self.fd.call(call).proto.inject else { continue };
+            let arch = self.arch;
+            self.do_injection(&arch.spec.injects.payload(inject).ops, call)?;
+            self.fd.qlst.retain(|&c| c != call);
+        }
+        Ok(())
+    }
+
+    /// Port of `FlowInfo::doInjection` for a call: the snippet's ops are made at the end of the
+    /// dead list, walked for control flow, moved to just after the call, and the call is deleted.
+    fn do_injection(&mut self, ops: &[crate::sleigh::PcodeOp], call: CallId) -> Result<()> {
+        let op = self.fd.call(call).op;
+        let first = self.fd.dead.len();
+        self.fd.emit_pcode(self.fd.op(op).seq.addr, ops)?;
+        let Some(&firstop) = self.fd.dead.get(first) else {
+            return err("Empty injection");
+        };
+        let mut startbasic = self.fd.op(op).flags.has(OpFlags::START_BASIC);
+        self.xref_control_flow(first, &mut startbasic)?;
+        let pos = self
+            .fd
+            .dead
+            .iter()
+            .position(|&o| o == op)
+            .ok_or_else(|| LowlevelError("injected call is not in the dead list".into()))?;
+        if startbasic {
+            // the injection does not fall through: the op after the call starts a block
+            if let Some(&next) = self.fd.dead.get(pos + 1) {
+                self.mark(next, OpFlags::START_BASIC);
+            }
+        }
+        // PcodeOpBank::moveSequenceDead, then the call leaves the list (opDestroyRaw)
+        let run = self.fd.dead.split_off(first);
+        self.fd.dead.splice(pos..=pos, run);
+        self.update_target(op, firstop);
+        self.fd.op_destroy_raw(op);
+        Ok(())
+    }
+
+    /// Port of `FlowInfo::updateTarget`: an instruction whose first op was `old` now starts at `new`.
+    fn update_target(&mut self, old: OpId, new: OpId) {
+        let seq = self.fd.op(old).seq;
+        if let Some(stat) = self.visited.get_mut(&seq.addr).filter(|s| s.seq == Some(seq)) {
+            stat.seq = Some(self.fd.op(new).seq);
+        }
     }
 
     /// Port of `FlowInfo::fallthru`: decode straight-line code from the top of the address
@@ -220,16 +282,7 @@ impl Flow<'_> {
             PcodeError::Unimplemented => EmitError::Unimplemented,
             PcodeError::Invalid(e) => EmitError::Fatal(LowlevelError(e)),
         })?;
-        for p in ops {
-            let opc = Opcode::from_u8(p.opc)
-                .ok_or_else(|| EmitError::Fatal(LowlevelError(format!("bad opcode {}", p.opc))))?;
-            let op = self.fd.new_op(opc, addr);
-            if let Some(o) = p.out {
-                self.fd.new_varnode_out(o.size, Space::Sleigh(o.space), o.offset, op);
-            }
-            let ins = p.ins.iter().map(|v| self.fd.new_varnode(v.size, Space::Sleigh(v.space), v.offset)).collect();
-            self.fd.op_mut(op).ins = ins;
-        }
+        self.fd.emit_pcode(addr, &ops).map_err(EmitError::Fatal)?;
         Ok(len as u64)
     }
 
@@ -381,21 +434,30 @@ impl Flow<'_> {
         op
     }
 
-    /// Port of `FlowInfo::setupCallSpecs` with `queryCall`: name the callee and replace the
-    /// target with the call's annotation. (The console's functions carry no prototype, so a call
-    /// never ends flow as non-returning.)
+    /// Port of `FlowInfo::setupCallSpecs` with `queryCall` and `checkForFlowModification`: name
+    /// the callee, take its flow effects, replace the target with the call's annotation and
+    /// queue a call with a fixup for injection. (The console's prototypes never say a function
+    /// does not return, so a call never ends flow.)
     fn setup_call_specs(&mut self, op: OpId) -> Result<()> {
         let entry = self.fd.vn(self.fd.input(op, 0)?).offset;
-        let name = self.arch.functions.get(&entry).cloned();
-        let call = self.new_call(CallSpec { op, entry: Some(entry), name });
+        let callee = self.arch.functions.get(&entry);
+        let mut spec = CallSpec::new(op, Some(entry), callee.map(|f| f.name.clone()));
+        if let Some(f) = callee {
+            spec.proto.copy_flow_effects(&f.proto);
+        }
+        let inline = spec.proto.inject.is_some();
+        let call = self.new_call(spec);
         let vn = self.fd.new_varnode_callspecs(call);
         self.fd.op_mut(op).ins[0] = vn;
+        if inline {
+            self.injectlist.push(call);
+        }
         Ok(())
     }
 
-    /// Port of `FlowInfo::setupCallindSpecs`.
+    /// Port of `FlowInfo::setupCallindSpecs` (without overrides, an indirect call stays one).
     fn setup_callind_specs(&mut self, op: OpId) {
-        self.new_call(CallSpec { op, entry: None, name: None });
+        self.new_call(CallSpec::new(op, None, None));
     }
 
     fn new_call(&mut self, spec: CallSpec) -> CallId {

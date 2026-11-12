@@ -8,6 +8,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 pub struct Section {
     pub name: String,
     pub exec: bool,
+    /// not writable (no `IMAGE_SCN_MEM_WRITE`): bfd's `SEC_READONLY`, which the decompiler reads as constant
+    pub readonly: bool,
     pub addr: u32,
     pub data: Vec<u8>, // virtual size, zero filled past the raw data
 }
@@ -34,6 +36,7 @@ impl Image {
         img.sections.push(Section {
             name: "Headers".into(),
             exec: false,
+            readonly: false, // not a section of the file, so not in bfd's list
             addr: base,
             data: bytes[..hdr.min(bytes.len())].to_vec(),
         });
@@ -43,7 +46,8 @@ impl Image {
             data.resize(s.virtual_size.get(LE) as usize, 0);
             let exec =
                 s.characteristics.get(LE) & (object::pe::IMAGE_SCN_CNT_CODE | object::pe::IMAGE_SCN_MEM_EXECUTE) != 0;
-            img.sections.push(Section { name, exec, addr: base + s.virtual_address.get(LE), data });
+            let readonly = s.characteristics.get(LE) & object::pe::IMAGE_SCN_MEM_WRITE == 0;
+            img.sections.push(Section { name, exec, readonly, addr: base + s.virtual_address.get(LE), data });
         }
         let entry = opt.address_of_entry_point();
         img.entry = (entry != 0).then_some(base + entry);
