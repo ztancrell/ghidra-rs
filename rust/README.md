@@ -46,8 +46,11 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   (basic blocks, spanning tree), `action.rs` (the universal action up to `funclink`),
   `print.rs` (`print raw`), `stdsort.rs` (libstdc++'s `std::sort`). See "Decompiler
   (Milestone 3)" below.
-- `ghidra-rs/tests/decomp.rs`, `tests/data/raw-funclink-40a110.txt`: `print raw` at `funclink`
-  for mercs2's 0x40a110 (rebuilt from its bytes) against the reference's output.
+- `ghidra-rs/tests/decomp.rs`, `tests/data/raw-funclink-*.txt`: `print raw` at `funclink` against
+  the reference's output, for mercs2's 0x40a110 (rebuilt from its bytes) and for `INTO; RET` (a
+  relative branch to the end of its own instruction).
+- `tools/stdsort_ref.cc`, `ghidra-rs/tests/data/stdsort-gxx.txt`: libstdc++ `std::sort` tie orders
+  that `decomp/stdsort.rs` must reproduce.
 - `tools/decomp-ref.sh`, `tools/decomp-ref.patch`: build the reference decompiler `decomp_dbg`.
 - `tools/decomp-diff.sh`: runs a corpus on both decompilers and compares.
 - `tools/decomp-corpus.sh`, `tools/corpus/m8.txt`, `tools/corpus/m500.txt`: the mercs2 corpora.
@@ -560,7 +563,8 @@ No differences remain. What the port keeps from the C++ because the output depen
 - Calls are sorted (`sortCallSpecs`) by block index and the op's order key. The key is
   `BlockBasic::insert`'s, not the position: in a block of more than about 280 ops the keys
   saturate at `0xfffffffd` and tie, so the INDIRECTs of `extrapopsetup` come out in the order
-  libstdc++'s unstable `std::sort` leaves the ties in (0x73a340); `stdsort.rs` ports it.
+  libstdc++'s unstable `std::sort` leaves the ties in (0x73a340); `stdsort.rs` ports it, and
+  its unit test pins g++'s exact tie order (`tools/stdsort_ref.cc`, `tests/data/stdsort-gxx.txt`).
 - `print raw` writes to a stream whose number base is sticky (an address leaves it hex, a block
   index or register offset decimal); `print.rs` tracks it.
 
@@ -568,10 +572,13 @@ What S1a does not port, because the console reference never reaches it on mercs2
 and inlining (the console applies no `callfixup` by name), non-returning calls (the console's
 functions have no prototypes), p-code injection, multistage jump tables, and flow limits other
 than the instruction count and bad-data count. Jump tables (stage S3) have a stand-in: the
-MSVC switch `JMP dword ptr [reg*4 + table]` bounded by a `CMP reg,imm`, possibly through a
-byte index table, gives one target per switch value in order, as `JumpBasic` does; any other
+MSVC switch `JMP dword ptr [reg*4 + table]` bounded by a `CMP reg,imm` (imm8 sign-extended) with a
+`JA` before the jump, possibly through a byte index table, gives one target per switch value in
+order, as `JumpBasic` does, and fails past `max_jumptable_size` (1024) entries; any other
 indirect jump becomes a call and a halt (`truncateIndirectJump`). It covers the 5 switches in
-M8 and M500.
+M8 and M500. As in the C++, an instruction at an unmapped address ends the decompile with an
+error (`DataUnavailError`), and only a constructor without p-code counts as unimplemented
+(`Sleigh::pcode` returns `PcodeError::Unimplemented` for it, `Invalid` for anything else).
 
 ## Speed
 

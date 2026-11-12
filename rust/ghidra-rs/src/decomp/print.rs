@@ -52,7 +52,7 @@ pub fn print_raw(fd: &Funcdata, arch: &Arch) -> Result<String> {
         return err("No operations to print");
     }
     let mut p = Printer { fd, arch, out: Out { s: String::new(), hex: false } };
-    p.graph();
+    p.graph()?;
     Ok(p.out.s)
 }
 
@@ -73,7 +73,7 @@ impl<'a> Printer<'a> {
 
     /// Port of `BlockGraph::printRaw`: the graph's header (its index, 0), then each block and
     /// the implied gotos between them.
-    fn graph(&mut self) {
+    fn graph(&mut self) -> Result<()> {
         self.out.dec(0);
         self.out.str("\n");
         let list = &self.fd().blocks.list;
@@ -81,12 +81,13 @@ impl<'a> Printer<'a> {
             if let Some(&prev) = i.checked_sub(1).and_then(|j| list.get(j)) {
                 self.implied_goto(prev, b);
             }
-            self.basic_block(b);
+            self.basic_block(b)?;
         }
+        Ok(())
     }
 
     /// Port of `BlockBasic::printRaw`.
-    fn basic_block(&mut self, b: BlockId) {
+    fn basic_block(&mut self, b: BlockId) -> Result<()> {
         let bl = self.block(b);
         self.out.str("Basic Block ");
         self.out.dec(bl.index as u64);
@@ -98,9 +99,10 @@ impl<'a> Printer<'a> {
         for &op in &bl.ops {
             self.out.seq(self.fd().op(op).seq);
             self.out.str(":\t");
-            self.op(op);
+            self.op(op)?;
             self.out.str("\n");
         }
+        Ok(())
     }
 
     /// Port of `BlockBasic::printRawImpliedGoto`: a block that flows to a block other than the
@@ -191,9 +193,10 @@ impl<'a> Printer<'a> {
         4
     }
 
-    fn space_name(&self, vn: VarnodeId) -> &str {
+    fn space_name(&self, vn: VarnodeId) -> &'a str {
+        let arch = self.arch;
         let idx = self.fd().vn(vn).offset as usize;
-        self.arch.sleigh.spaces.get(idx).map_or("?", |s| s.name.as_str())
+        arch.sleigh.spaces.get(idx).map_or("?", |s| s.name.as_str())
     }
 
     /// `out = ` for ops with an output.
@@ -218,41 +221,47 @@ impl<'a> Printer<'a> {
     }
 
     /// Port of `PcodeOp::printRaw`, dispatching to the `TypeOp` of the opcode.
-    fn op(&mut self, id: OpId) {
-        let op = self.fd().op(id);
-        let ins = op.ins.clone();
-        let in_size = |i: usize| ins.get(i).map_or(0, |&v| self.fd().vn(v).size);
+    fn op(&mut self, id: OpId) -> Result<()> {
+        let fd = self.fd();
+        let op = fd.op(id);
+        let ins = &op.ins;
+        let in_size = |i: usize| ins.get(i).map_or(0, |&v| fd.vn(v).size);
         match op.opc.raw_form() {
             RawForm::Binary(name) => {
                 self.assign(id);
                 self.vn(ins[0]);
-                self.out.str(&format!(" {name} "));
+                self.out.str(" ");
+                self.out.str(name);
+                self.out.str(" ");
                 self.vn(ins[1]);
             }
             RawForm::Unary(name) => {
                 self.assign(id);
-                self.out.str(&format!("{name} "));
+                self.out.str(name);
+                self.out.str(" ");
                 self.vn(ins[0]);
             }
             RawForm::Func(name, sizes) => {
-                let out_size = op.out.map_or(0, |o| self.fd().vn(o).size);
-                let suffix = match sizes {
-                    Sizes::None => String::new(),
-                    Sizes::In0 => in_size(0).to_string(),
-                    Sizes::In0Out => format!("{}{out_size}", in_size(0)),
-                    Sizes::In0In1 => format!("{}{}", in_size(0), in_size(1)),
-                };
+                let out_size = op.out.map_or(0, |o| fd.vn(o).size);
                 self.assign(id);
                 self.out.str(name);
-                self.out.str(&suffix);
+                // getOperatorName writes the sizes to its own stream, always in decimal
+                let s = &mut self.out.s;
+                let _ = match sizes {
+                    Sizes::None => Ok(()),
+                    Sizes::In0 => write!(s, "{}", in_size(0)),
+                    Sizes::In0Out => write!(s, "{}{out_size}", in_size(0)),
+                    Sizes::In0In1 => write!(s, "{}{}", in_size(0), in_size(1)),
+                };
                 self.args(id, 0);
             }
-            RawForm::Special => self.special(id, &ins),
+            RawForm::Special => return self.special(id, ins),
         }
+        Ok(())
     }
 
     /// The ops with their own `printRaw`.
-    fn special(&mut self, id: OpId, ins: &[VarnodeId]) {
+    fn special(&mut self, id: OpId, ins: &[VarnodeId]) -> Result<()> {
         let op = self.fd().op(id);
         let parent = op.parent.map(|b| self.block(b));
         match op.opc {
@@ -262,14 +271,18 @@ impl<'a> Printer<'a> {
             }
             Opcode::Load => {
                 self.assign(id);
-                let space = self.space_name(ins[0]).to_string();
-                self.out.str(&format!("*({space},"));
+                let space = self.space_name(ins[0]);
+                self.out.str("*(");
+                self.out.str(space);
+                self.out.str(",");
                 self.vn(ins[1]);
                 self.out.str(")");
             }
             Opcode::Store => {
-                let space = self.space_name(ins[0]).to_string();
-                self.out.str(&format!("*({space},"));
+                let space = self.space_name(ins[0]);
+                self.out.str("*(");
+                self.out.str(space);
+                self.out.str(",");
                 self.vn(ins[1]);
                 self.out.str(") = ");
                 self.vn(ins[2]);
@@ -349,12 +362,8 @@ impl<'a> Printer<'a> {
                     self.vn(v);
                 }
             }
-            opc => {
-                // CAST, PTRADD, PTRSUB, SEGMENTOP, CPOOLREF, NEW: made by later stages only
-                self.assign(id);
-                self.out.str(&format!("{opc:?}"));
-                self.args(id, 0);
-            }
+            opc => return err(format!("print raw: {opc:?} is made by later stages, not ported yet")),
         }
+        Ok(())
     }
 }

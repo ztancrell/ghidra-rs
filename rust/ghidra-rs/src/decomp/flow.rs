@@ -12,13 +12,15 @@ use super::op::{OpFlags, OpId, SeqNum};
 use super::opcode::Opcode;
 use super::varnode::Space;
 use super::{err, Arch, LowlevelError, Result};
-use crate::sleigh::Parse;
+use crate::sleigh::{Parse, PcodeError};
 use std::collections::BTreeMap;
 
 /// `Architecture::max_instructions`
 const MAX_INSTRUCTIONS: u32 = 100_000;
 /// `Architecture::max_baddata`
 const MAX_BADDATA: u32 = 4;
+/// `Architecture::max_jumptable_size`
+const MAX_JUMPTABLE_SIZE: u64 = 1024;
 /// `FlowInfo::eaddr`: the end of the code space (flow is not bounded within it)
 const END_ADDR: u64 = u64::MAX;
 
@@ -38,10 +40,12 @@ enum RelTarget {
 
 /// Why an instruction produced no p-code.
 enum EmitError {
-    /// `BadDataError`: no constructor matches (or reading failed)
+    /// `BadDataError`: no constructor matches
     BadData(String),
     /// `UnimplError`: the constructor has no p-code
     Unimplemented,
+    /// an error that ends the decompile (`LowlevelError`)
+    Fatal(LowlevelError),
 }
 
 struct Flow<'a> {
@@ -184,15 +188,18 @@ impl Flow<'_> {
                 self.artificial_halt(addr);
                 1
             }
+            Err(EmitError::Fatal(e)) => return Err(e),
         };
-        let mut seq = None;
+        // Recorded before the ops are walked: a relative branch to the end of its own
+        // instruction (x86 INTO) finds the fall-through address through `visited`.
+        let first_op = self.fd.dead.get(first).copied();
+        let seq = first_op.map(|op| self.fd.op(op).seq);
+        self.visited.insert(addr, VisitStat { size: step, seq });
         let mut isfallthru = true;
-        if let Some(&op) = self.fd.dead.get(first) {
-            seq = Some(self.fd.op(op).seq);
+        if let Some(op) = first_op {
             self.mark(op, OpFlags::START_INSTRUCTION);
             isfallthru = self.xref_control_flow(first, startbasic)?;
         }
-        self.visited.insert(addr, VisitStat { size: step, seq });
         if isfallthru {
             self.addrlist.push(addr + step);
         }
@@ -203,12 +210,19 @@ impl Flow<'_> {
     /// `PcodeEmitFd::dump`); returns the instruction length.
     fn emit(&mut self, addr: u64) -> std::result::Result<u64, EmitError> {
         let sl = &self.arch.sleigh;
-        let bytes =
-            self.arch.bytes_at(addr).ok_or_else(|| EmitError::BadData(format!("Unable to read {}", ram_addr(addr))))?;
+        // LoadImageBfd::loadFill: an unmapped address is a DataUnavailError, which ends the decompile
+        let bytes = self
+            .arch
+            .bytes_at(addr)
+            .ok_or_else(|| EmitError::Fatal(LowlevelError(format!("Unable to load bytes at r0x{addr:08x}"))))?;
         let len = sl.decode(&mut self.parse, addr, bytes).map_err(EmitError::BadData)?;
-        let ops = sl.pcode(&self.parse).map_err(|_| EmitError::Unimplemented)?;
+        let ops = sl.pcode(&self.parse).map_err(|e| match e {
+            PcodeError::Unimplemented => EmitError::Unimplemented,
+            PcodeError::Invalid(e) => EmitError::Fatal(LowlevelError(e)),
+        })?;
         for p in ops {
-            let opc = Opcode::from_u8(p.opc).ok_or_else(|| EmitError::BadData(format!("bad opcode {}", p.opc)))?;
+            let opc = Opcode::from_u8(p.opc)
+                .ok_or_else(|| EmitError::Fatal(LowlevelError(format!("bad opcode {}", p.opc))))?;
             let op = self.fd.new_op(opc, addr);
             if let Some(o) = p.out {
                 self.fd.new_varnode_out(o.size, Space::Sleigh(o.space), o.offset, op);
@@ -237,7 +251,7 @@ impl Flow<'_> {
             let opc = self.opc(op);
             match opc {
                 Opcode::Branch | Opcode::Cbranch => {
-                    let dest = *self.fd.vn(self.fd.op(op).ins[0]);
+                    let dest = *self.fd.vn(self.fd.input(op, 0)?);
                     if dest.is_constant() {
                         match self.find_rel_target(op)? {
                             RelTarget::Op(d) => {
@@ -261,7 +275,7 @@ impl Flow<'_> {
                     self.end_instruction_at(op, i, maxtime);
                     *startbasic = true;
                 }
-                Opcode::Call => self.setup_call_specs(op),
+                Opcode::Call => self.setup_call_specs(op)?,
                 Opcode::Callind => {
                     self.setup_callind_specs(op);
                 }
@@ -316,7 +330,7 @@ impl Flow<'_> {
     /// Port of `FlowInfo::findRelTarget`: the op a constant (p-code relative) branch reaches.
     fn find_rel_target(&self, op: OpId) -> Result<RelTarget> {
         let o = self.fd.op(op);
-        let id = o.seq.time.wrapping_add(self.fd.vn(o.ins[0]).offset as u32);
+        let id = o.seq.time.wrapping_add(self.fd.vn(self.fd.input(op, 0)?).offset as u32);
         if let Some(t) = self.fd.find_op(SeqNum { addr: o.seq.addr, time: id }) {
             return Ok(RelTarget::Op(t));
         }
@@ -335,7 +349,7 @@ impl Flow<'_> {
 
     /// Port of `FlowInfo::branchTarget`.
     fn branch_target(&self, op: OpId) -> Result<OpId> {
-        let dest = self.fd.vn(self.fd.op(op).ins[0]);
+        let dest = self.fd.vn(self.fd.input(op, 0)?);
         if !dest.is_constant() {
             return self.target(dest.offset);
         }
@@ -364,24 +378,24 @@ impl Flow<'_> {
         let op = self.fd.new_op(Opcode::Return, addr);
         let one = self.fd.new_constant(4, 1);
         self.fd.op_mut(op).ins = vec![one];
-        self.mark(op, OpFlags::HALT);
         op
     }
 
     /// Port of `FlowInfo::setupCallSpecs` with `queryCall`: name the callee and replace the
     /// target with the call's annotation. (The console's functions carry no prototype, so a call
     /// never ends flow as non-returning.)
-    fn setup_call_specs(&mut self, op: OpId) {
-        let entry = self.fd.vn(self.fd.op(op).ins[0]).offset;
+    fn setup_call_specs(&mut self, op: OpId) -> Result<()> {
+        let entry = self.fd.vn(self.fd.input(op, 0)?).offset;
         let name = self.arch.functions.get(&entry).cloned();
         let call = self.new_call(CallSpec { op, entry: Some(entry), name });
         let vn = self.fd.new_varnode_callspecs(call);
         self.fd.op_mut(op).ins[0] = vn;
+        Ok(())
     }
 
     /// Port of `FlowInfo::setupCallindSpecs`.
-    fn setup_callind_specs(&mut self, op: OpId) -> CallId {
-        self.new_call(CallSpec { op, entry: None, name: None })
+    fn setup_callind_specs(&mut self, op: OpId) {
+        self.new_call(CallSpec { op, entry: None, name: None });
     }
 
     fn new_call(&mut self, spec: CallSpec) -> CallId {
@@ -420,7 +434,9 @@ impl Flow<'_> {
     /// partial decompile: the MSVC switch `JMP dword ptr [reg*4 + table]`, bounded by the
     /// `CMP reg,imm` of its guard, possibly through a byte index table (`MOVZX reg,byte ptr
     /// [idx + bytetable]`). As `JumpBasic` does, it gives one target per value of the switch
-    /// variable, 0 to the bound, in order (duplicates included). Any other indirect jump fails.
+    /// variable, 0 to the bound, in order (duplicates included). The guard must be a `JA`
+    /// between the `CMP` and the jump, and a table over `max_jumptable_size` entries fails, as the
+    /// `JumpBasic` model does. Any other indirect jump fails.
     fn jump_table(&self, op: OpId) -> Option<Vec<u64>> {
         let at = self.fd.op(op).seq.addr;
         let b = self.arch.bytes_at(at)?.get(..7)?;
@@ -429,31 +445,40 @@ impl Flow<'_> {
         }
         let mut reg = (b[2] >> 3) & 7;
         let table = u64::from(u32::from_le_bytes([b[3], b[4], b[5], b[6]]));
+        let imm32 = |i: &[u8]| Some(u32::from_le_bytes(i.get(..4)?.try_into().ok()?));
         let mut index_table = None;
         let mut bound = None;
+        let mut guarded = false; // a JA seen between the CMP and the jump
         for prev in self.preceding_instructions(at, 8) {
             let c = self.arch.bytes_at(prev)?;
             if let [0x0f, 0xb6, m, d @ ..] = c {
                 if index_table.is_none() && m & 0xc0 == 0x80 && m & 7 != 4 && (m >> 3) & 7 == reg {
-                    index_table = Some(u64::from(u32::from_le_bytes(d.get(..4)?.try_into().ok()?)));
+                    index_table = Some(u64::from(imm32(d)?));
                     reg = m & 7;
                     continue;
                 }
             }
             bound = match c {
-                [0x83, m, i, ..] if *m == 0xf8 | reg => Some(u64::from(*i)),
-                [0x81, m, i @ ..] if *m == 0xf8 | reg => {
-                    Some(u64::from(u32::from_le_bytes(i.get(..4)?.try_into().ok()?)))
-                }
-                [0x3d, i @ ..] if reg == 0 => Some(u64::from(u32::from_le_bytes(i.get(..4)?.try_into().ok()?))),
+                // CMP r/m32,imm8 sign-extends its immediate
+                [0x83, m, i, ..] if *m == 0xf8 | reg => Some(*i as i8 as i32 as u32),
+                [0x81, m, i @ ..] if *m == 0xf8 | reg => Some(imm32(i)?),
+                [0x3d, i @ ..] if reg == 0 => Some(imm32(i)?),
                 _ => None,
             };
             if bound.is_some() {
+                if !guarded {
+                    return None;
+                }
                 break;
             }
+            guarded |= matches!(c, [0x77, ..] | [0x0f, 0x87, ..]);
+        }
+        let bound = u64::from(bound?);
+        if bound >= MAX_JUMPTABLE_SIZE {
+            return None;
         }
         let read = |a: u64| self.arch.image.read_u32(u32::try_from(a).ok()?).map(u64::from);
-        (0..=bound?)
+        (0..=bound)
             .map(|i| match index_table {
                 Some(bt) => {
                     let idx = self.arch.bytes_at(bt + i)?.first()?;
@@ -500,8 +525,9 @@ impl Flow<'_> {
             }
             let vn = self.fd.new_varnode(4, Space::Sleigh(self.arch.sleigh.code_space()), addr);
             self.fd.op_mut(op).ins[0] = vn;
-            i -= 1;
-            self.fd.qlst.remove(i);
+            // C++ `iter = qlst.erase(iter)` followed by the loop's `++iter` skips the next call; kept
+            self.fd.qlst.remove(i - 1);
+            i += 1;
         }
         Ok(())
     }

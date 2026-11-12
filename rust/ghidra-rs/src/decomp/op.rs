@@ -7,12 +7,12 @@ use super::varnode::VarnodeId;
 
 /// Index of an op in its function's arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct OpId(pub(crate) u32);
+pub(crate) struct OpId(pub(crate) u32);
 
 /// Port of `SeqNum`: the instruction address and the creation counter (`uniq`), which the
 /// C++ hands out in op creation order. `print raw` shows both, so creation order is kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SeqNum {
+pub(crate) struct SeqNum {
     pub(crate) addr: u64,
     pub(crate) time: u32,
 }
@@ -26,8 +26,6 @@ impl OpFlags {
     pub(crate) const START_BASIC: OpFlags = OpFlags(1);
     /// `startmark`: the op is the first of its instruction
     pub(crate) const START_INSTRUCTION: OpFlags = OpFlags(2);
-    /// `halt`: an artificial RETURN that ends flow (bad data, unimplemented, a truncated jump)
-    pub(crate) const HALT: OpFlags = OpFlags(4);
 
     pub(crate) fn has(self, f: OpFlags) -> bool {
         self.0 & f.0 != 0
@@ -39,7 +37,7 @@ impl OpFlags {
 
 /// Port of `PcodeOp`, the fields the early stages use.
 #[derive(Debug, Clone)]
-pub struct PcodeOp {
+pub(crate) struct PcodeOp {
     pub(crate) opc: Opcode,
     pub(crate) seq: SeqNum,
     pub(crate) out: Option<VarnodeId>,

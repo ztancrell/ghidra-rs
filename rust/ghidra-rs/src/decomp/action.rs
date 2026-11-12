@@ -87,7 +87,7 @@ fn extrapop_setup(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
         let sp = fd.new_varnode(size, Space::Sleigh(space), off);
         let iop = fd.new_varnode_iop(call);
         fd.op_mut(op).ins = vec![sp, iop];
-        fd.op_insert_before(op, call);
+        fd.op_insert_before(op, call)?;
     }
     Ok(())
 }

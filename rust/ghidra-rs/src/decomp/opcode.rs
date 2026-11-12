@@ -5,7 +5,7 @@
 /// Port of `enum OpCode` (opcodes.hh); the discriminants are Ghidra's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
-pub enum Opcode {
+pub(crate) enum Opcode {
     Copy = 1,
     Load,
     Store,

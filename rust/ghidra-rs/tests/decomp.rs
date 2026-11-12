@@ -9,8 +9,6 @@ use ghidra_rs::sleigh::Sleigh;
 
 #[test]
 fn print_raw_at_funclink() {
-    let path = Sleigh::sla_path("x86");
-    assert!(path.exists(), "{} is missing: run rust/build-sla.sh first", path.display());
     let section = |addr: u32, data: Vec<u8>| Section { name: ".text".into(), exec: true, addr, data };
     let img = Image {
         sections: vec![
@@ -34,9 +32,26 @@ fn print_raw_at_funclink() {
         ],
         ..Image::default()
     };
+    assert_eq!(raw_at_funclink(img, 0x40a110), include_str!("data/raw-funclink-40a110.txt"));
+}
+
+/// INTO branches inside its own p-code to the end of the instruction (a relative branch to the
+/// fall-through), which needs the instruction recorded as visited before its ops are walked.
+/// Expected output: decomp_dbg on a `load test file` image holding `INTO; RET` at 0x401000.
+#[test]
+fn print_raw_relative_branch_to_own_end() {
+    let img = Image {
+        sections: vec![Section { name: ".text".into(), exec: true, addr: 0x401000, data: vec![0xce, 0xc3] }],
+        ..Image::default()
+    };
+    assert_eq!(raw_at_funclink(img, 0x401000), include_str!("data/raw-funclink-into.txt"));
+}
+
+fn raw_at_funclink(img: Image, entry: u64) -> String {
+    let path = Sleigh::sla_path("x86");
+    assert!(path.exists(), "{} is missing: run rust/build-sla.sh first", path.display());
     let arch = Arch::new(Sleigh::load(&path).unwrap(), img).unwrap();
-    let mut fd = Funcdata::new(0x40a110);
+    let mut fd = Funcdata::new(entry);
     action::perform(&mut fd, &arch, Some("funclink")).unwrap();
-    let want = include_str!("data/raw-funclink-40a110.txt");
-    assert_eq!(print_raw(&fd, &arch).unwrap(), want);
+    print_raw(&fd, &arch).unwrap()
 }

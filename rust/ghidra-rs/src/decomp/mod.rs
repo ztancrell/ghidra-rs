@@ -6,14 +6,14 @@
 //! `funclink` ([`action`]) and `print raw` ([`print`]).
 
 pub mod action;
-pub mod block;
+mod block;
 mod flow;
-pub mod funcdata;
-pub mod op;
-pub mod opcode;
+mod funcdata;
+mod op;
+mod opcode;
 mod print;
 mod stdsort;
-pub mod varnode;
+mod varnode;
 
 use crate::analysis::Image;
 use crate::sleigh::Sleigh;

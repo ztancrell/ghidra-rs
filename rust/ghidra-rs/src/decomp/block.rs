@@ -8,7 +8,7 @@ use super::{err, Result};
 
 /// Index of a block in its graph's arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BlockId(pub(crate) u32);
+pub(crate) struct BlockId(pub(crate) u32);
 
 /// `FlowBlock` edge flags (block.hh), kept on both ends of an edge.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -23,6 +23,11 @@ impl EdgeFlags {
     const LOOP: EdgeFlags = EdgeFlags(32);
     /// every spanning-tree label, `f_loop_exit_edge` (64) included
     const SPANNING: EdgeFlags = EdgeFlags(127);
+    /// the labels `structureLoops` clears before rebuilding the tree
+    const CLASSIFIED: EdgeFlags =
+        EdgeFlags(Self::TREE.0 | Self::FORWARD.0 | Self::CROSS.0 | Self::BACK.0 | Self::LOOP.0);
+    const BACK_LOOP: EdgeFlags = EdgeFlags(Self::BACK.0 | Self::LOOP.0);
+    const CROSS_FORWARD: EdgeFlags = EdgeFlags(Self::CROSS.0 | Self::FORWARD.0);
 
     fn has(self, f: EdgeFlags) -> bool {
         self.0 & f.0 != 0
@@ -141,26 +146,27 @@ impl BlockGraph {
     /// irreducible ones, and put the blocks in reverse post-order. (`calcLoop` and the dominator
     /// tree only label edges further, which nothing before `funclink` reads.)
     pub(crate) fn structure_loops(&mut self) -> Result<()> {
-        loop {
-            let (preorder, _rootlist) = self.find_spanning_tree()?;
+        // each rebuild follows a newly irreducible tree edge, so there are at most edges + 1 rounds
+        let edges: usize = self.blocks.iter().map(|b| b.outs.len()).sum();
+        for _ in 0..=edges {
+            let preorder = self.find_spanning_tree()?;
             if !self.find_irreducible(&preorder) {
                 return Ok(());
             }
-            self.clear_edge_flags(EdgeFlags(
-                EdgeFlags::TREE.0 | EdgeFlags::FORWARD.0 | EdgeFlags::CROSS.0 | EdgeFlags::BACK.0 | EdgeFlags::LOOP.0,
-            ));
+            self.clear_edge_flags(EdgeFlags::CLASSIFIED);
         }
+        err("Could not resolve irreducible edges")
     }
 
     /// Port of `BlockGraph::findSpanningTree`: a depth-first search from the roots, labelling
     /// tree/forward/cross/back edges; the list becomes the reverse post-order. Returns the
-    /// pre-order and the roots.
-    fn find_spanning_tree(&mut self) -> Result<(Vec<BlockId>, Vec<BlockId>)> {
+    /// pre-order.
+    fn find_spanning_tree(&mut self) -> Result<Vec<BlockId>> {
         let n = self.list.len();
         let mut preorder = Vec::with_capacity(n);
         let mut rootlist = Vec::new();
         if n == 0 {
-            return Ok((preorder, rootlist));
+            return Ok(preorder);
         }
         let mut rpostorder = vec![self.list[0]; n];
         for i in 0..n {
@@ -224,12 +230,8 @@ impl BlockGraph {
             }
             preorder.clear();
         }
-        if rootlist.len() > 1 {
-            let last = rootlist.len() - 1;
-            rootlist.swap(0, last);
-        }
         self.list = rpostorder;
-        Ok((preorder, rootlist))
+        Ok(preorder)
     }
 
     fn reset_visit(&mut self, b: BlockId) {
@@ -271,7 +273,7 @@ impl BlockGraph {
                 self.block_mut(child).numdesc = 1;
                 state.push((child, 0));
             } else if cindex == -1 {
-                self.set_out_edge_flag(cur, e, EdgeFlags(EdgeFlags::BACK.0 | EdgeFlags::LOOP.0));
+                self.set_out_edge_flag(cur, e, EdgeFlags::BACK_LOOP);
             } else if self.block(cur).visitcount < cvisit {
                 self.set_out_edge_flag(cur, e, EdgeFlags::FORWARD);
             } else {
@@ -312,11 +314,7 @@ impl BlockGraph {
                         if edge.label.has(EdgeFlags::TREE) {
                             needrebuild = true;
                         } else {
-                            self.clear_out_edge_flag(
-                                y,
-                                edge.reverse,
-                                EdgeFlags(EdgeFlags::CROSS.0 | EdgeFlags::FORWARD.0),
-                            );
+                            self.clear_out_edge_flag(y, edge.reverse, EdgeFlags::CROSS_FORWARD);
                         }
                     } else if !self.block(yprime).mark && yprime != x {
                         reachunder.push(yprime);

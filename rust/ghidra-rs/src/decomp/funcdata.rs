@@ -5,7 +5,7 @@ use super::block::{BlockGraph, BlockId};
 use super::op::{OpFlags, OpId, PcodeOp, SeqNum};
 use super::opcode::Opcode;
 use super::varnode::{Space, Varnode, VarnodeId, CONST_SPACE};
-use super::{flow, stdsort, Arch, Result};
+use super::{err, flow, stdsort, Arch, LowlevelError, Result};
 use std::collections::BTreeMap;
 
 /// Size of the annotation varnodes that hold an op or call reference: the C++ stores a pointer
@@ -14,7 +14,7 @@ const POINTER_SIZE: u32 = 8;
 
 /// Index of a call in [`Funcdata::calls`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CallId(pub(crate) u32);
+pub(crate) struct CallId(pub(crate) u32);
 
 /// Port of the parts of `FuncCallSpecs` (fspec.cc) S1a needs.
 #[derive(Debug, Clone)]
@@ -154,12 +154,29 @@ impl Funcdata {
         self.dead.insert(at, op);
     }
 
-    /// Port of `Funcdata::opInsertBefore`: put `op` into the block of `follow`, just before it.
-    pub(crate) fn op_insert_before(&mut self, op: OpId, follow: OpId) {
-        let Some(bl) = self.op(follow).parent else { return };
+    /// Port of `Funcdata::opInsertBefore`: put `op` into the block of `follow`, before it and
+    /// before any INDIRECTs right in front of it (unless `op` is an INDIRECT itself).
+    pub(crate) fn op_insert_before(&mut self, op: OpId, follow: OpId) -> Result<()> {
+        let Some(bl) = self.op(follow).parent else { return err("opInsertBefore: op outside any block") };
         let ops = &self.blocks.block(bl).ops;
-        let at = ops.iter().position(|&o| o == follow).unwrap_or(ops.len());
+        let Some(mut at) = ops.iter().position(|&o| o == follow) else {
+            return err("opInsertBefore: op missing from its block");
+        };
+        if self.op(op).opc != Opcode::Indirect {
+            while at > 0 && self.op(ops[at - 1]).opc == Opcode::Indirect {
+                at -= 1;
+            }
+        }
         self.op_insert(op, bl, at);
+        Ok(())
+    }
+
+    /// Input `slot` of `op`, or an error when the p-code gave it fewer inputs.
+    pub(crate) fn input(&self, op: OpId, slot: usize) -> Result<VarnodeId> {
+        let o = self.op(op);
+        o.ins.get(slot).copied().ok_or_else(|| {
+            LowlevelError(format!("{:?} at 0x{:08x}:{:x} has no input {slot}", o.opc, o.seq.addr, o.seq.time))
+        })
     }
 
     /// Port of `Funcdata::opInsertBegin`: put `op` at the start of `bl`, after any MULTIEQUAL.
@@ -172,6 +189,10 @@ impl Funcdata {
     /// between its neighbours' (`SeqNum::order`, 32 bits as `uintm`). The key is not always the
     /// position: halving the gap can repeat the previous key, and `sortCallSpecs` sorts by it.
     pub(crate) fn op_insert(&mut self, op: OpId, bl: BlockId, at: usize) {
+        // PcodeOpBank::markAlive: the op leaves the dead list (an op an action made is its last)
+        if let Some(p) = self.dead.iter().rposition(|&o| o == op) {
+            self.dead.remove(p);
+        }
         self.blocks.block_mut(bl).ops.insert(at, op);
         self.op_mut(op).parent = Some(bl);
         let ops = &self.blocks.block(bl).ops;
@@ -183,9 +204,8 @@ impl Funcdata {
         if after.wrapping_sub(before) <= 1 {
             // BlockBasic::setOrder: renumber the block evenly
             let step = u32::MAX / ops.len() as u32 - 1;
-            let ops = ops.clone();
-            for (i, o) in ops.into_iter().enumerate() {
-                self.op_mut(o).order = step.wrapping_mul(i as u32 + 1);
+            for (i, o) in self.blocks.block(bl).ops.iter().enumerate() {
+                self.ops[o.0 as usize].order = step.wrapping_mul(i as u32 + 1);
             }
         } else {
             self.op_mut(op).order = after / 2 + before / 2;

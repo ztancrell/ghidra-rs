@@ -293,6 +293,8 @@ pub struct Sleigh {
     regnames: HashMap<(u32, u64, u32), usize>,
     /// the .pspec `<tracked_set>`: registers with a known value at every address (x86: DF = 0)
     pub tracked: Vec<(String, u32)>,
+    /// user-defined op names by index
+    userops: Vec<Option<String>>,
 }
 
 // ---------------------------------------------------------------- parse state
@@ -410,6 +412,32 @@ pub struct PcodeOp {
     pub out: Option<Varnode>,
     pub ins: Vec<Varnode>,
 }
+
+/// Why an instruction has no p-code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PcodeError {
+    /// a constructor of the instruction has no p-code body (C++ `UnimplError`)
+    Unimplemented,
+    /// anything else (a malformed template, an unsupported directive)
+    Invalid(String),
+}
+
+impl std::fmt::Display for PcodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PcodeError::Unimplemented => f.write_str("instruction not implemented in p-code"),
+            PcodeError::Invalid(e) => f.write_str(e),
+        }
+    }
+}
+
+impl From<String> for PcodeError {
+    fn from(e: String) -> Self {
+        PcodeError::Invalid(e)
+    }
+}
+
+pub type PcodeResult<T> = std::result::Result<T, PcodeError>;
 
 #[derive(Debug, Clone)]
 pub struct Insn {
@@ -797,6 +825,14 @@ impl Sleigh {
                 ctx_default[num] = (ctx_default[num] & !mask) | ((val << shift) & mask);
             }
         }
+        let mut userops: Vec<Option<String>> = Vec::new();
+        for s in &syms {
+            if let Kind::UserOp(i) = s.kind {
+                let i = i as usize;
+                userops.resize(userops.len().max(i + 1), None);
+                userops[i] = Some(s.name.clone());
+            }
+        }
         let mut regnames = HashMap::new();
         for (i, s) in syms.iter().enumerate() {
             if let Kind::Varnode { space, off, size } = s.kind {
@@ -815,6 +851,7 @@ impl Sleigh {
             ctx_default,
             regnames,
             tracked: Vec::new(),
+            userops,
         })
     }
 
@@ -1678,7 +1715,7 @@ impl Sleigh {
     // ------------------------------------------------------------ p-code (SleighBuilder)
 
     /// P-code for the instruction last decoded into `p`.
-    pub fn pcode(&self, p: &Parse) -> Result<Vec<PcodeOp>> {
+    pub fn pcode(&self, p: &Parse) -> PcodeResult<Vec<PcodeOp>> {
         let mut b = Builder {
             s: self,
             p,
@@ -1689,12 +1726,15 @@ impl Sleigh {
             label_refs: Vec::new(),
             uniqoff: (p.addr & self.uniq_mask) << 8,
         };
-        let t = self.ctors[p.states[0].ct].templ.as_ref().ok_or("instruction not implemented in p-code")?;
+        let t = self.ctors[p.states[0].ct].templ.as_ref().ok_or(PcodeError::Unimplemented)?;
         b.build(t, -1, 0)?;
         for &i in &b.label_refs {
             let vn = &mut b.ops[i].ins[0];
-            let target =
-                *b.labels.get(vn.offset as usize).filter(|&&l| l != NONE).ok_or("reference to missing sleigh label")?;
+            let target = *b
+                .labels
+                .get(vn.offset as usize)
+                .filter(|&&l| l != NONE)
+                .ok_or_else(|| PcodeError::Invalid("reference to missing sleigh label".into()))?;
             vn.offset = (target as u64).wrapping_sub(i as u64) & calc_mask(vn.size);
         }
         Ok(b.ops)
@@ -1728,7 +1768,7 @@ impl Sleigh {
 
     /// The name of user-defined p-code op `index` (CALLOTHER's first input).
     pub fn userop_name(&self, index: u64) -> Option<&str> {
-        self.syms.iter().find(|s| matches!(s.kind, Kind::UserOp(i) if i as u64 == index)).map(|s| s.name.as_str())
+        self.userops.get(usize::try_from(index).ok()?).and_then(|n| n.as_deref())
     }
 
     pub fn fmt_varnode(&self, v: &Varnode) -> String {
@@ -1773,7 +1813,7 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
-    fn build(&mut self, t: &Tpl, secnum: i64, point: u32) -> Result<()> {
+    fn build(&mut self, t: &Tpl, secnum: i64, point: u32) -> PcodeResult<()> {
         let old = self.labelbase;
         self.labelbase = self.labelcount;
         self.labelcount += t.labels;
@@ -1785,7 +1825,9 @@ impl Builder<'_> {
                     self.labels.resize(self.labels.len().max(id + 1), NONE);
                     self.labels[id] = self.ops.len() as u32;
                 }
-                OP_DELAY_SLOT | OP_CROSSBUILD => return Err("delay slots / crossbuild are not supported".into()),
+                OP_DELAY_SLOT | OP_CROSSBUILD => {
+                    return Err(PcodeError::Invalid("delay slots / crossbuild are not supported".into()))
+                }
                 _ => self.dump(op, point)?,
             }
         }
@@ -1793,7 +1835,7 @@ impl Builder<'_> {
         Ok(())
     }
 
-    fn build_sub(&mut self, point: u32, secnum: i64) -> Result<()> {
+    fn build_sub(&mut self, point: u32, secnum: i64) -> PcodeResult<()> {
         let ct = &self.s.ctors[self.p.states[point as usize].ct];
         if secnum >= 0 {
             match ct.named.get(secnum as usize).and_then(|t| t.as_ref()) {
@@ -1801,12 +1843,12 @@ impl Builder<'_> {
                 None => self.build_empty(point, secnum),
             }
         } else {
-            let t = ct.templ.as_ref().ok_or("instruction not implemented in p-code")?;
+            let t = ct.templ.as_ref().ok_or(PcodeError::Unimplemented)?;
             self.build(t, -1, point)
         }
     }
 
-    fn append_build(&mut self, op: &OpTpl, secnum: i64, point: u32) -> Result<()> {
+    fn append_build(&mut self, op: &OpTpl, secnum: i64, point: u32) -> PcodeResult<()> {
         let index = self.s.fix(&op.ins[0].off, self.p, point)? as usize;
         let ct = self.p.states[point as usize].ct;
         let o = self.s.operand(self.s.ctors[ct].operands[index]);
@@ -1816,7 +1858,7 @@ impl Builder<'_> {
         }
     }
 
-    fn build_empty(&mut self, point: u32, secnum: i64) -> Result<()> {
+    fn build_empty(&mut self, point: u32, secnum: i64) -> PcodeResult<()> {
         let ct = self.p.states[point as usize].ct;
         for (i, &osym) in self.s.ctors[ct].operands.iter().enumerate() {
             if let Some(t) = self.s.operand(osym).triple {
@@ -1869,7 +1911,7 @@ impl Builder<'_> {
         }
     }
 
-    fn dump(&mut self, op: &OpTpl, point: u32) -> Result<()> {
+    fn dump(&mut self, op: &OpTpl, point: u32) -> PcodeResult<()> {
         let mut ins = Vec::with_capacity(op.ins.len());
         for vt in &op.ins {
             let vn = self.loc(vt, point)?;

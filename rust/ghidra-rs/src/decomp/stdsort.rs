@@ -143,23 +143,42 @@ fn adjust_heap<T: Copy>(v: &mut [T], mut hole: usize, len: usize, val: T, less: 
 mod tests {
     use super::*;
 
-    #[test]
-    fn sorts_by_key() {
+    /// The seeded input of `rust/tools/stdsort_ref.cc`: (key, original index).
+    fn input(n: u32, keys: u32) -> Vec<(u32, u32)> {
         let mut seed = 12345u32;
-        let mut v: Vec<(u32, usize)> = (0..1000)
+        (0..n)
             .map(|i| {
                 seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
-                ((seed >> 16) % 50, i)
+                ((seed >> 16) % keys, i)
             })
-            .collect();
-        sort(&mut v, |a, b| a.0 < b.0);
-        assert!(v.windows(2).all(|w| w[0].0 <= w[1].0));
-        let mut ids: Vec<usize> = v.iter().map(|x| x.1).collect();
-        ids.sort_unstable();
-        assert!(ids.iter().enumerate().all(|(i, &x)| i == x));
-        // the depth limit forces heapsort on this many equal-key runs too
-        let mut w: Vec<u32> = (0..300).rev().collect();
-        sort(&mut w, |a, b| a < b);
-        assert!(w.windows(2).all(|p| p[0] < p[1]));
+            .collect()
+    }
+
+    /// The index permutation g++'s libstdc++ produced for `name` (tests/data/stdsort-gxx.txt).
+    fn gxx(name: &str) -> Vec<u32> {
+        let data = include_str!("../../tests/data/stdsort-gxx.txt");
+        let line = data.lines().find_map(|l| l.strip_prefix(name)?.strip_prefix(':')).unwrap();
+        line.split_whitespace().map(|n| n.parse().unwrap()).collect()
+    }
+
+    fn ids(v: &[(u32, u32)]) -> Vec<u32> {
+        v.iter().map(|x| x.1).collect()
+    }
+
+    /// Ties come out exactly as in libstdc++: introsort with its final insertion sort, a short
+    /// input (insertion sort only), and the heapsort used past the depth limit
+    /// (`std::partial_sort(first, last, last)`).
+    #[test]
+    fn tie_order_matches_gxx() {
+        let less = |a: &(u32, u32), b: &(u32, u32)| a.0 < b.0;
+        let mut v = input(1000, 50);
+        sort(&mut v, less);
+        assert_eq!(ids(&v), gxx("sort1000_50"));
+        let mut v = input(40, 3);
+        sort(&mut v, less);
+        assert_eq!(ids(&v), gxx("sort40_3"));
+        let mut v = input(40, 3);
+        heap_sort(&mut v, &less);
+        assert_eq!(ids(&v), gxx("heap40_3"));
     }
 }
