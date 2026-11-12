@@ -105,6 +105,11 @@ impl BlockGraph {
     }
 
     /// Port of `BlockGraph::addEdge` (`FlowBlock::addInEdge`).
+    /// `isLoopIn`: the `i`-th edge into `bl` is a loop edge.
+    pub(crate) fn is_loop_in(&self, bl: BlockId, i: usize) -> bool {
+        self.block(bl).ins[i].label.has(EdgeFlags::LOOP)
+    }
+
     pub(crate) fn add_edge(&mut self, from: BlockId, to: BlockId) {
         let ourrev = self.block(from).outs.len();
         let brev = self.block(to).ins.len();

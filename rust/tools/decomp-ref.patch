@@ -28,3 +28,35 @@
    if ((flags&(Varnode::insert|Varnode::constant))==0) {
      s << "(free)";
      return;
+--- a/funcdata_block.cc
++++ b/funcdata_block.cc
+@@ -14,6 +14,9 @@
+  * limitations under the License.
+  */
+ #include "funcdata.hh"
++
++#include <cstdlib>
++#include <iostream>
+ #include "flow.hh"
+ 
+ namespace ghidra {
+@@ -529,6 +531,10 @@
+       }
+ #endif
+       glb->allacts.setCurrent(oldactname); // Restore old action
++      // ghidra-rs (rust/tools/decomp-ref.patch): with DECOMP_JT_RAW set, print the partial function
++      // the jumptable action leaves, for debugging jump-table recovery (stage S3)
++      if (getenv("DECOMP_JT_RAW") != (char *)0)
++	partial.printRaw(std::cerr);
+     }
+     catch(LowlevelError &err) {
+       glb->allacts.setCurrent(oldactname);
+@@ -559,6 +565,8 @@
+     return JumpTable::fail_thunk;
+   }
+   catch(LowlevelError &err) {
++    if (getenv("DECOMP_JT_RAW") != (char *)0)
++      std::cerr << "jumptable: " << err.explain << endl;
+     warning(err.explain,op->getAddr());
+     return JumpTable::fail_normal;
+   }

@@ -30,7 +30,9 @@ pub(crate) struct JumpTable {
     pub(crate) targets: Vec<u64>,
 }
 
-/// One function being decompiled.
+/// One function being decompiled. Jump-table recovery clones it as the partial function
+/// (`Funcdata::truncatedFlow`).
+#[derive(Clone)]
 pub struct Funcdata {
     pub(crate) entry: u64,
     pub(crate) ops: Vec<PcodeOp>,
@@ -64,6 +66,12 @@ pub struct Funcdata {
     next_unique: u64,
     /// header warnings (`Funcdata::warningHeader`), for `print C`
     pub(crate) warnings: Vec<String>,
+    /// each varnode's non-zero mask (`Varnode::nzm`) once `ActionNonzeroMask` has run; so far
+    /// only jump-table recovery runs it, on its partial function (`jumptable::calc_nz_mask`)
+    pub(crate) nzm: Vec<u64>,
+    /// jump-table recovery's partial function: each varnode's value where it folds to a
+    /// constant (`jumptable::calc_folded`)
+    pub(crate) folded: Vec<Option<u64>>,
 }
 
 impl Funcdata {
@@ -88,6 +96,8 @@ impl Funcdata {
             heritage: Heritage::default(),
             next_unique: UNIQUE_ANALYSIS,
             warnings: Vec::new(),
+            nzm: Vec::new(),
+            folded: Vec::new(),
         }
     }
 
@@ -679,8 +689,12 @@ impl Funcdata {
     }
 
     /// Port of `Funcdata::startProcessing`: follow flow, build blocks, order them and the calls.
+    /// A partial function for jump-table recovery has its blocks already (`followFlow` returns
+    /// at once for `blocks_generated`).
     pub(crate) fn start_processing(&mut self, arch: &Arch) -> Result<()> {
-        flow::follow_flow(self, arch)?;
+        if self.blocks.list.is_empty() {
+            flow::follow_flow(self, arch)?;
+        }
         self.blocks.structure_loops()?;
         self.sort_call_specs();
         Ok(())

@@ -100,6 +100,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `print raw` at `break start paramdouble` identical on M8 (8 / 8) and M500 (500 / 500);
    later heritage passes (ram, stack) wait for the main loop's other actions (S4 on). Debugging
    tools: verbose diff, easy-first order, first-differing-step bisect (`rust/tools/`).
+   S3 (jump tables) done on branch `m3-s3`: the C++ recovery (`JumpBasic`, `JumpBasic2`,
+   `CircleRange`, the emulator, non-zero masks) on a partial function replaces S1a's stand-in;
+   `print raw` at `paramdouble` identical on M8 (8 / 8), M500 (500 / 500) and 1,934 of the
+   2,050 functions with a jump table (the rest: obfuscated code needing stack heritage, and one
+   garbage target the reference reads). Rule-pool stand-ins in `jumptable.rs` wait for R1/R2.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.

@@ -9,10 +9,11 @@
 use super::block::BlockId;
 use super::fspec::CallSpec;
 use super::funcdata::{CallId, Funcdata, JumpTable};
+use super::jumptable::{self, Fail};
 use super::op::{Halt, OpFlags, OpId, SeqNum};
 use super::opcode::Opcode;
 use super::varnode::Space;
-use super::{err, Arch, LowlevelError, Result};
+use super::{action, err, Arch, LowlevelError, Result};
 use crate::sleigh::{Parse, PcodeError};
 use std::collections::BTreeMap;
 
@@ -20,8 +21,6 @@ use std::collections::BTreeMap;
 const MAX_INSTRUCTIONS: u32 = 100_000;
 /// `Architecture::max_baddata`
 const MAX_BADDATA: u32 = 4;
-/// `Architecture::max_jumptable_size`
-const MAX_JUMPTABLE_SIZE: u64 = 1024;
 /// `FlowInfo::eaddr`: the end of the code space (flow is not bounded within it)
 const END_ADDR: u64 = u64::MAX;
 
@@ -93,7 +92,7 @@ impl Flow<'_> {
     }
 
     /// Port of `FlowInfo::generateOps`. (Inlining and multistage tables are not ported: the
-    /// console has no inline functions, and the jump-table stand-in recovers in one stage.)
+    /// console has no inline functions and no jump-table overrides.)
     fn generate_ops(&mut self) -> Result<()> {
         self.addrlist.push(self.fd.entry);
         while !self.addrlist.is_empty() {
@@ -475,20 +474,91 @@ impl Flow<'_> {
         id
     }
 
-    /// Port of `FlowInfo::recoverJumpTables`: the tables of the queued indirect jumps; a jump
-    /// without one becomes a call (`truncateIndirectJump`). Returns the new tables' indices.
+    /// Port of `FlowInfo::recoverJumpTables` and `Funcdata::recoverJumpTable`: the tables of
+    /// the queued indirect jumps, recovered on one partial function (a clone of this one,
+    /// `stageJumpTable`); a jump without one becomes a call (`truncateIndirectJump`). Returns
+    /// the new tables' indices. A table whose switch looks unreachable (`isPartial`) is taken
+    /// as complete: the C++ retries it once more flow is in, which needs a guard folded to a
+    /// constant, which nothing before the rule stages makes.
     fn recover_jump_tables(&mut self) -> Result<Vec<usize>> {
         let mut tables = Vec::new();
+        let mut partial: Option<Funcdata> = None;
         for op in std::mem::take(&mut self.tablelist) {
-            match self.jump_table(op) {
-                Some(targets) => {
+            let res = match jumptable::early_fail(self.fd, op) {
+                Some(f) => Err(f),
+                None => self.stage_jump_table(&mut partial, op)?,
+            };
+            match res {
+                Ok(targets) => {
+                    if std::env::var_os("GHIDRA_RS_JT_DEBUG").is_some() {
+                        eprintln!(
+                            "jumptable in 0x{:x} at 0x{:x}: {} targets {:x?}",
+                            self.fd.entry,
+                            self.fd.op(op).seq.addr,
+                            targets.len(),
+                            targets
+                        );
+                    }
                     tables.push(self.fd.jumptables.len());
                     self.fd.jumptables.push(JumpTable { op, targets });
                 }
-                None => self.truncate_indirect_jump(op)?,
+                Err(f @ (Fail::Normal(_) | Fail::Thunk)) => {
+                    if std::env::var_os("GHIDRA_RS_JT_DEBUG").is_some() {
+                        let why = if let Fail::Normal(m) = &f { m.as_str() } else { "likely thunk" };
+                        eprintln!("jumptable in 0x{:x} at 0x{:x}: {why}", self.fd.entry, self.fd.op(op).seq.addr);
+                    }
+                    self.truncate_indirect_jump(op)?
+                }
+                Err(Fail::Callother) => {
+                    return err("jump table: an address made by a CALLOTHER (fail_callother) is not implemented");
+                }
             }
         }
         Ok(tables)
+    }
+
+    /// Port of `Funcdata::stageJumpTable`: build the partial function on first use
+    /// (`truncatedFlow`, then the `jumptable` root action) and recover the table from it.
+    /// The outer `Result` is an error that ends the decompile, the inner one the recovery.
+    fn stage_jump_table(
+        &mut self,
+        partial: &mut Option<Funcdata>,
+        op: OpId,
+    ) -> Result<std::result::Result<Vec<u64>, Fail>> {
+        if partial.is_none() {
+            let mut p = self.fd.clone();
+            let mut pflow = Flow {
+                fd: &mut p,
+                arch: self.arch,
+                parse: self.arch.sleigh.new_parse(),
+                visited: self.visited.clone(),
+                addrlist: Vec::new(),
+                tablelist: Vec::new(),
+                injectlist: Vec::new(),
+                insn_count: 0,
+                baddata_count: 0,
+            };
+            pflow.generate_blocks()?;
+            if let Err(e) = action::jumptable_partial(&mut p, self.arch) {
+                return Ok(Err(Fail::Normal(e.0)));
+            }
+            jumptable::calc_nz_mask(&mut p, self.arch);
+            *partial = Some(p);
+        }
+        let p = partial.as_ref().unwrap();
+        if std::env::var("GHIDRA_RS_JT_DEBUG").is_ok_and(|v| v == "2") {
+            eprintln!("{}", super::print_raw(p, self.arch).unwrap_or_default());
+        }
+        let partop = p.op(op);
+        if partop.opc != Opcode::Branchind || partop.seq != self.fd.op(op).seq {
+            return err("Error recovering jumptable: Bad partial clone");
+        }
+        if partop.is_dead() {
+            return Ok(Ok(Vec::new()));
+        }
+        // `testForReturnAddress` (fail_return) is left out: x86's return address is on the
+        // stack, which the ported heritage pass leaves as LOADs, so it cannot match yet.
+        Ok(jumptable::recover_addresses(p, self.arch, op).map(|(t, _partial)| t))
     }
 
     /// Port of `FlowInfo::truncateIndirectJump` for a failed recovery (`fail_normal`,
@@ -499,79 +569,6 @@ impl Flow<'_> {
         let halt = self.artificial_halt(self.fd.op(op).seq.addr, None)?;
         self.fd.op_dead_insert_after(halt, op);
         Ok(())
-    }
-
-    /// Stand-in for jump-table recovery (`Funcdata::recoverJumpTable`, stage S3), which needs a
-    /// partial decompile: the MSVC switch `JMP dword ptr [reg*4 + table]`, bounded by the
-    /// `CMP reg,imm` of its guard, possibly through a byte index table (`MOVZX reg,byte ptr
-    /// [idx + bytetable]`). As `JumpBasic` does, it gives one target per value of the switch
-    /// variable, 0 to the bound, in order (duplicates included). The guard must be a `JA`
-    /// between the `CMP` and the jump, and a table over `max_jumptable_size` entries fails, as the
-    /// `JumpBasic` model does. Any other indirect jump fails.
-    fn jump_table(&self, op: OpId) -> Option<Vec<u64>> {
-        let at = self.fd.op(op).seq.addr;
-        let b = self.arch.bytes_at(at)?.get(..7)?;
-        if b[0] != 0xff || b[1] != 0x24 || b[2] & 0xc7 != 0x85 {
-            return None;
-        }
-        let mut reg = (b[2] >> 3) & 7;
-        let table = u64::from(u32::from_le_bytes([b[3], b[4], b[5], b[6]]));
-        let imm32 = |i: &[u8]| Some(u32::from_le_bytes(i.get(..4)?.try_into().ok()?));
-        let mut index_table = None;
-        let mut bound = None;
-        let mut guarded = false; // a JA seen between the CMP and the jump
-        for prev in self.preceding_instructions(at, 8) {
-            let c = self.arch.bytes_at(prev)?;
-            if let [0x0f, 0xb6, m, d @ ..] = c {
-                if index_table.is_none() && m & 0xc0 == 0x80 && m & 7 != 4 && (m >> 3) & 7 == reg {
-                    index_table = Some(u64::from(imm32(d)?));
-                    reg = m & 7;
-                    continue;
-                }
-            }
-            bound = match c {
-                // CMP r/m32,imm8 sign-extends its immediate
-                [0x83, m, i, ..] if *m == 0xf8 | reg => Some(*i as i8 as i32 as u32),
-                [0x81, m, i @ ..] if *m == 0xf8 | reg => Some(imm32(i)?),
-                [0x3d, i @ ..] if reg == 0 => Some(imm32(i)?),
-                _ => None,
-            };
-            if bound.is_some() {
-                if !guarded {
-                    return None;
-                }
-                break;
-            }
-            guarded |= matches!(c, [0x77, ..] | [0x0f, 0x87, ..]);
-        }
-        let bound = u64::from(bound?);
-        if bound >= MAX_JUMPTABLE_SIZE {
-            return None;
-        }
-        let read = |a: u64| self.arch.image.read_u32(u32::try_from(a).ok()?).map(u64::from);
-        (0..=bound)
-            .map(|i| match index_table {
-                Some(bt) => {
-                    let idx = self.arch.bytes_at(bt + i)?.first()?;
-                    read(table + 4 * u64::from(*idx))
-                }
-                None => read(table + 4 * i),
-            })
-            .collect()
-    }
-
-    /// The decoded instructions straight before `at`, nearest first, at most `n`.
-    fn preceding_instructions(&self, at: u64, n: usize) -> Vec<u64> {
-        let mut v = Vec::new();
-        let mut next = at;
-        for (&a, stat) in self.visited.range(..at).rev().take(n) {
-            if a + stat.size != next {
-                break;
-            }
-            v.push(a);
-            next = a;
-        }
-        v
     }
 
     /// Port of `FlowInfo::checkContainedCall`: a call into the middle of this function's code,

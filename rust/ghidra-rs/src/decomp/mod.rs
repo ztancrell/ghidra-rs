@@ -5,20 +5,24 @@
 //! the SLEIGH engine of milestone 1 ([`flow`]) with call fixups ([`inject`]), basic blocks
 //! ([`block`]), the compiler spec ([`cspec`]) and prototypes ([`fspec`]), the action framework
 //! ([`actiontree`]) and the actions up to `paramdouble` ([`action`]), SSA construction
-//! ([`heritage`]) and `print raw` ([`print`]).
+//! ([`heritage`]) and `print raw` ([`print`]). Stage S3: jump-table recovery on a partial
+//! function ([`jumptable`], with [`rangeutil`] and [`emulate`]).
 
 pub mod action;
 pub mod actiontree;
 mod block;
 mod cspec;
+mod emulate;
 mod flow;
 mod fspec;
 mod funcdata;
 mod heritage;
 mod inject;
+mod jumptable;
 mod op;
 mod opcode;
 mod print;
+mod rangeutil;
 mod readers;
 mod stdsort;
 mod varnode;
