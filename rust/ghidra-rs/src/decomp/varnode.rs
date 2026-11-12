@@ -82,8 +82,6 @@ impl VnFlags {
     pub(crate) const CONSUME_LIST: VnFlags = VnFlags(1 << 13);
     /// `consume_vacuous`
     pub(crate) const CONSUME_VACUOUS: VnFlags = VnFlags(1 << 14);
-    /// `mark` (traversals)
-    pub(crate) const MARK: VnFlags = VnFlags(1 << 15);
     /// `annotation` on a code reference (`Funcdata::newCodeRef`): the target of a BRANCH,
     /// CBRANCH or CALL
     pub(crate) const CODEREF: VnFlags = VnFlags(1 << 17);

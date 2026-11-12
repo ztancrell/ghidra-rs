@@ -28,7 +28,7 @@ use crate::analysis::Image;
 use crate::sleigh::Sleigh;
 use cspec::{CompilerSpec, SleighNames};
 use fspec::FuncProto;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 pub use funcdata::Funcdata;
 pub use print::print_raw;

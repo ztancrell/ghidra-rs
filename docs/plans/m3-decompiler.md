@@ -1,6 +1,6 @@
 # Milestone 3 plan: the decompiler
 
-Written 2026-11-12 as a plan. Built so far: S0, S1a, S1b and S2 (see their sections below).
+Written 2026-11-12 as a plan. Built so far: S0, S1a, S1b, S2 and S4 (see their sections below).
 
 ## Goal
 
@@ -304,6 +304,31 @@ tools". Where it differs from the table row:
   (8 duplicate names pick an import first), and an unmapped address reads `Unable to load 512
   bytes` as the C++ loader words it. Of the 101 Mall failures, 97 match decomp_dbg; 4 in
   garbage code differ in flow (one verified: a switch the S1a stand-in does not recover, S3).
+
+### S4: done on branch `m3-s4` (2026-11-12)
+
+`print raw` at `break start assignhigh` with `rust/tools/corpus/s4-options.txt` on both sides:
+M8 8 / 8, M500 446 / 500 (53 functions need `ActionLaneDivide`, below); the
+paramdouble check stays 500 / 500. Details in `rust/README.md`, "Stage S4". Where it
+differs from the table row:
+
+- The check switches off every group of a later stage and the remaining rules, not only
+  `analysis`, `cleanup`, `typerecovery` (those three leave the `subvar`, `stackvars`,
+  `blockrecovery`, ... groups on, whose rules and structuring change the output).
+- `ActionLaneDivide` (R3 in the table) is in group `base` and cannot be switched off: the
+  M500 functions using whole SSE registers differ until R3 ports it. Pass bar: 446 / 447 (every function the reference finishes)
+  identical without them; with them the bar is not reached.
+- `multicse` and `conditionalconst` are in group `analysis` (off), so they wait for the rule
+  stages; `paramid.cc` belongs to the `paramid` root action, which the console's `decompile`
+  does not run, so it is not ported. `condexe.cc` and `ActionNodeJoin` are detected only: a
+  candidate fails loudly (none in M500).
+- Also needed and ported: the ram heritage pass (store and return guards, call placeholders),
+  join varnodes for two-piece outputs, the `.pspec` `<incidentalcopy>` registers, code
+  references as annotations, and the CFG edits of `funcdata_block.cc` the actions use.
+- The S1b/S2 required item: `fillinExtrapop` is only called from `callgraph.cc`, so a
+  decompile records no extrapop for later ones; nothing to port for the console.
+  Superseded: "S2/S4 must port `fillinExtrapop`" above.
+- Locked prototypes (decision 6) are not needed by S4; the locked paths of `fspec.cc` remain.
 
 ## Running stages in parallel
 

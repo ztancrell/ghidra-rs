@@ -30,7 +30,7 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
         "floatprecision", "conditionalexe",
     ];
     let on = |g: &str| DECOMPILE.contains(&g) && !disabled.contains(g);
-    let mut leaves = |t: &mut ActionTree, list: &[(&'static str, &str, super::actiontree::ApplyFn)]| -> Vec<_> {
+    let leaves = |t: &mut ActionTree, list: &[(&'static str, &str, super::actiontree::ApplyFn)]| -> Vec<_> {
         list.iter().filter(|(_, g, _)| on(g)).map(|&(name, _, f)| t.leaf(name, f)).collect()
     };
     let mut root = leaves(

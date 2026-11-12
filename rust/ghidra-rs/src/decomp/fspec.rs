@@ -596,7 +596,6 @@ impl ParamTrial {
     pub(crate) const USED: u32 = 2;
     pub(crate) const DEFNOUSE: u32 = 4;
     pub(crate) const ACTIVE: u32 = 8;
-    pub(crate) const UNREF: u32 = 0x10;
     pub(crate) const KILLEDBYCALL: u32 = 0x20;
     pub(crate) const REM_FORMED: u32 = 0x40;
     pub(crate) const INDCREATE_FORMED: u32 = 0x80;
@@ -643,7 +642,6 @@ pub(crate) struct ParamActive {
     pub(crate) numpasses: i32,
     pub(crate) maxpass: i32,
     pub(crate) fully_checked: bool,
-    pub(crate) needs_final_check: bool,
 }
 
 impl ParamActive {
@@ -657,7 +655,6 @@ impl ParamActive {
             numpasses: 0,
             maxpass: if maxdelay > 0 { 3 } else { 0 },
             fully_checked: false,
-            needs_final_check: false,
         }
     }
 
@@ -699,11 +696,6 @@ impl ParamActive {
             t.slot = i + 1;
         }
     }
-    /// `ParamActive::getTrialForInputVarnode`.
-    pub(crate) fn trial_for_slot(&self, slot: usize) -> Option<&ParamTrial> {
-        let i = if self.stackplaceholder < 0 || (slot as i32) < self.stackplaceholder { slot } else { slot - 1 };
-        self.trials.get(i.checked_sub(1)?)
-    }
     /// Port of `ParamActive::sortTrials` (`ParamTrial::operator<`): by the entry's group, then
     /// address and size; trials without an entry last. (The C++ `std::sort` on these few
     /// trials is an insertion sort, which keeps ties in order, as this stable sort does.)
@@ -736,11 +728,6 @@ impl ParamList {
             }
         }
         i
-    }
-
-    /// `ParamEntry::isFirstInClass`.
-    fn first_in_class(&self, i: usize) -> bool {
-        i == 0 || self.entries[i - 1].class != self.entries[i].class
     }
 
     /// `isParamCheckLow`/`isParamCheckHigh` of a join entry: which pieces have an entry of

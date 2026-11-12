@@ -100,6 +100,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `print raw` at `break start paramdouble` identical on M8 (8 / 8) and M500 (500 / 500);
    later heritage passes (ram, stack) wait for the main loop's other actions (S4 on). Debugging
    tools: verbose diff, easy-first order, first-differing-step bisect (`rust/tools/`).
+   S4 (main-loop actions without rules) done on branch `m3-s4`: dead code, parameter and
+   return recovery, stack-pointer flow, deindirect, branch cleanup, the ram heritage pass;
+   `print raw` at `break start assignhigh` with every later stage's groups off identical on
+   M8 (8 / 8) and M500 (446 / 500); the rest need `ActionLaneDivide` (R3).
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.

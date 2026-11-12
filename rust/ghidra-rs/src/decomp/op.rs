@@ -32,12 +32,8 @@ impl OpFlags {
     pub(crate) const RETURN_COPY: OpFlags = OpFlags(16);
     /// `indirect_store`: an INDIRECT guarding a STORE
     pub(crate) const INDIRECT_STORE: OpFlags = OpFlags(32);
-    /// `spacebase_ptr`: a LOAD or STORE through the stack pointer
-    pub(crate) const SPACEBASE_PTR: OpFlags = OpFlags(64);
     /// `indirect_source` (`ActionDeadCode`)
     pub(crate) const INDIRECT_SOURCE: OpFlags = OpFlags(128);
-    /// `mark` (traversals)
-    pub(crate) const MARK: OpFlags = OpFlags(256);
     /// `boolean_flip` of a CBRANCH
     pub(crate) const BOOLEAN_FLIP: OpFlags = OpFlags(512);
 

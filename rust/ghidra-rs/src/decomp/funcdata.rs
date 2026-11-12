@@ -772,13 +772,6 @@ impl Funcdata {
         }
     }
 
-    /// Port of `Funcdata::opUnlink`: no output, no inputs, out of its block.
-    pub(crate) fn op_unlink(&mut self, op: OpId) {
-        self.op_unset_output(op);
-        self.op_clear_inputs(op);
-        self.op_uninsert(op);
-    }
-
     /// Port of `Funcdata::opDestroy`: the output varnode is destroyed (its readers keep a stale
     /// reference, the C++ null input, and are expected to go too), the inputs unlinked, and the
     /// op made dead; [`Funcdata::clear_dead_ops`] frees it.
@@ -851,12 +844,6 @@ impl Funcdata {
             .filter(|k| k.size == size)
             .map(|k| k.id)
             .collect()
-    }
-
-    /// Port of `Funcdata::findVarnodeInput`.
-    pub(crate) fn find_input(&self, space: Space, off: u64, size: u32) -> Option<VarnodeId> {
-        let s = space.index();
-        self.inputs.range((s, off, size, VarnodeId(0))..=(s, off, size, VarnodeId(u32::MAX))).next().map(|k| k.3)
     }
 
     /// Port of `Funcdata::findCoveredInput`: the input containing the range.

@@ -517,13 +517,15 @@ rust/tools/decomp-diff.sh --script <file>      # one script on both engines, ful
 - `decompile -i` reads `load file`, `source`, `map function`, `map externalref`, `readonly`,
   `option`, `fixup apply`, `load function`, `load addr`, `break start`, `decompile`,
   `print raw`, `continue` and `quit`, and echoes them as `decomp_dbg -i` does. `decompile`
-  runs up to the `break start` action (stage S2: at most `paramdouble`) and `continue`
-  resumes it; a function mapped `nocode` prints `No code for <name>` instead. `print
+  runs up to the `break start` action (stage S4: at most `assignhigh`, see "Stage S4") and
+  `continue` resumes it; a function mapped `nocode` prints `No code for <name>` instead. `print
   C|tree block` and `parse line` fail with "not implemented in ghidra-rs yet (milestone 3,
   later stages)"; any other command fails with "not implemented in ghidra-rs".
-  Superseded: until S2, `decompile` stopped at most at `heritage` and `continue` failed. Of the options only
-  `option readonly on|off` has an effect (and prints the reference's message); the others
-  switch rules and actions not ported yet and are read and ignored. A name mapped twice
+  Superseded: until S2, `decompile` stopped at most at `heritage` and `continue` failed. Of the options
+  `option readonly on|off` and `option currentaction decompile <group> on|off` have an
+  effect (and print the reference's message); the others (`togglerule`: no rule is ported
+  yet) are read and ignored. Superseded: until S4, `decompile` stopped at most at
+  `paramdouble` and `option currentaction` was ignored. A name mapped twice
   (`map function`) finds its first function, as the C++ `findFirstByName` does.
   Superseded: S0 and S1a ignored `option` and `map externalref`; S1b reads them (read-only
   propagation, external-reference slots).
@@ -815,6 +817,78 @@ What S2 does not port, and why:
 - Prototype state across decompiles (S1b's required item): `fillinExtrapop` belongs to
   `ActionStackPtrFlow`, after `paramdouble` (S4). The 21 datatests that decompile several
   functions cannot be compared yet: the Rust console does not load a test's `<binaryimage>`.
+
+### Stage S4: main-loop actions without rules
+
+Stage S4 (branch `m3-s4`) runs the universal action up to `assignhigh` with every rule and
+every group that belongs to a later stage switched off, on both engines:
+`tools/corpus/s4-options.txt` turns off the groups `analysis`, `cleanup`, `typerecovery`,
+`stackvars`, `subvar`, `floatprecision`, `doubleload`, `doubleprecis`, `segment`,
+`blockrecovery`, `localrecovery`, `switchnorm`, `returnsplit`, `splitcopy`, `splitpointer`,
+`constsequence`, `bitfields`, `dynamic` and the remaining rules (`earlyremoval`, `push_multi`,
+`conditionalmove`, `orpredicate`, `piecepathology`). The rule toggles must come after the group
+toggles: each `option currentaction` rebuilds the root action and drops earlier `togglerule`s.
+(The plan named only `analysis`, `cleanup`, `typerecovery`; with just those, rules of the other
+groups still fire on the reference and structuring (`blockrecovery`) flips branches.)
+
+```sh
+BREAK=assignhigh OPTIONS=$PWD/tools/corpus/s4-options.txt rust/tools/decomp-diff.sh m8
+BREAK=assignhigh OPTIONS=$PWD/tools/corpus/s4-options.txt TIMEOUT=60 rust/tools/decomp-diff.sh m500
+```
+
+Ported (`coreaction.rs`, plus `heritage.rs`, `fspec.rs`, `block.rs`, `funcdata.rs`):
+
+- The tree (`action.rs`): every action of `universalAction` with its group; `option
+  currentaction decompile <group> on|off` filters it as `ActionDatabase` does; an action not
+  ported fails when it runs with its group on. Rule pools hold no rule.
+- Heritage of ram (pass 1): ram is the global scope's, so its varnodes are `persist` and
+  `addrtied`; guards for calls (`addrforce` on the INDIRECTs), STOREs (`indirect_store`
+  INDIRECTs) and returns (a `persist` COPY before each RETURN). The stack's first pass clears
+  the call placeholders (`abortSpacebaseRelative`, which also ends the 3-pass delay of the
+  parameter trials). Dead code is tracked per space (`deadRemovalAllowed`, `seenDeadCode`).
+- `directwrite`, `activeparam` and `activereturn` (`ParamActive`, `ParamTrial`), `returnrecovery`
+  with `AncestorRealistic`, `ancestorOpUse`, `onlyOpUse` and the output `fillinMapFallback`;
+  a return value or call output in two pieces gets a join varnode (`j{EDX,EAX}:8`, printed as
+  the reference does) and its PIECE/SUBPIECE ops.
+- `deadcode` (consume masks, `neverConsumed`, `lastChanceLoad`), the late part of
+  `varnodeprops` (auto-live holds), `spacebase` with `splitUses`, `stackptrflow` (`checkClog`,
+  `StackSolver`), `deindirect` (calls through an external-reference slot or to a constant
+  become direct calls; `lateRestriction` only copies the callee's prototype), `redundbranch`,
+  `determinedbranch`, `donothing` (with `pushMultiequals`), `likelytrash`.
+- `.pspec` `<incidentalcopy>` (x87 ST0..ST7): copies there are incidental for parameter and
+  return recovery. Branch and call targets are code references (`newCodeRef`: one byte,
+  annotation), so heritage never links them.
+- `decomp-diff.sh`: `TIMEOUT` (default 120 s per engine and function), and a reference that
+  printed nothing no longer stops the summary.
+
+| corpus | identical at `break start assignhigh` (S4 options) | at `paramdouble` |
+|---|---|---|
+| m8 | 8 / 8 | 8 / 8 |
+| m500 | 446 / 500 | 500 / 500 |
+
+Remaining differences, by cause:
+
+- 53 functions: the reference splits SSE registers into lanes (`XMM0` into `XMM0_Da` ..
+  `XMM0_Dd`, `ActionLaneDivide`, `subflow.cc`/`transform.cc`). It is in group `base`, so no
+  option turns it off; the plan puts it in R3. Excluding these, 446 / 447 (every function the reference finishes).
+- 0x4c48d0: the reference does not finish within 60 s (`TIMEOUT`), so it is not compared.
+- Not ported and failing loudly when reached (no M500 function needs them): removing
+  unreachable blocks, `ActionNodeJoin` and `ActionConditionalExe` (a candidate on the same
+  condition varnode fails; functionally equal conditions in different varnodes are not looked
+  for), `ActionUnjustifiedParams` widening (`adjustInputVarnodes`), heritage after dead-code
+  removal in a processor space (needs the restart with a longer dead-code delay), removing a
+  revisited marker, parameter trials of calls (calls take `__stdcall`, whose parameters live on
+  the stack, and no stack varnode exists before the `stackvars` rules), a varnode consumed by
+  nothing but read (`varnodeprops` zero replacement), INSERT/ZPULL/SPULL in dead code.
+- `Funcdata::fillinExtrapop` is only called from `callgraph.cc` (not ported), so nothing in a
+  decompile records a function's extrapop for later decompiles; `ActionStackPtrFlow` sets only
+  the call sites' `effective_extrapop`. Superseded: S1b and S2 placed it in `ActionStackPtrFlow`.
+- Kept from the C++ where it orders by pointer: `StackSolver::build` looks variables up with
+  `lower_bound` by pointer in a list sorted by location; the port finds the varnode itself
+  (the intent, and what the C++ gets while varnodes are allocated in creation order).
+- Locked prototypes (plan decision 6, mercs2's `register_abi.csv`): S4 needs none of them;
+  their paths (`transferLockedInput`, `commitNewInputs`, locked parameter trials, `paramdouble`
+  on stack trials) are still to come.
 
 ## Speed
 

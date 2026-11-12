@@ -600,9 +600,6 @@ pub(crate) fn return_recovery(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
                     trial.mark_active();
                 }
             }
-            if std::env::var_os("S4_DEBUG").is_some() {
-                eprintln!("return trial {:?} real {real} flags {:x}", (trial.space, trial.off, trial.size), trial.flags);
-            }
             active.trials[i] = trial;
             count += 1;
         }
