@@ -71,6 +71,7 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    identical, and the last three missing `violation` rows (0x84af20 at 0x41d7be, 0x41d834,
    0x675611) are found.
 3. Decompilation: a Rust decompiler, or FFI to the existing C++ decompiler as a stopgap.
+   Plan: `docs/plans/m3-decompiler.md` (stages, reference checks, open decisions).
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.
