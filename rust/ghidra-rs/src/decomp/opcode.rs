@@ -188,6 +188,57 @@ impl Opcode {
     }
 
     /// `PcodeOp::isBranch`: BRANCH, CBRANCH and BRANCHIND carry the `branch` flag.
+    /// `PcodeOp::getEvalType` has `unary` or `binary`: every op with an `OpBehavior` of one or
+    /// two inputs (CAST included: `unary|special`). The special and ternary ops are not.
+    pub(crate) fn is_unary_or_binary(self) -> bool {
+        use Opcode::*;
+        !matches!(
+            self,
+            Load | Store
+                | Branch
+                | Cbranch
+                | Branchind
+                | Call
+                | Callind
+                | Callother
+                | Return
+                | Multiequal
+                | Indirect
+                | Ptradd
+                | Segmentop
+                | Cpoolref
+                | New
+                | Insert
+                | Zpull
+                | Spull
+                | Unused1
+        )
+    }
+
+    /// `PcodeOp::isCommutative`.
+    pub(crate) fn is_commutative(self) -> bool {
+        use Opcode::*;
+        matches!(
+            self,
+            IntEqual
+                | IntNotequal
+                | IntAdd
+                | IntCarry
+                | IntScarry
+                | IntXor
+                | IntAnd
+                | IntOr
+                | IntMult
+                | BoolXor
+                | BoolAnd
+                | BoolOr
+                | FloatEqual
+                | FloatNotequal
+                | FloatAdd
+                | FloatMult
+        )
+    }
+
     pub(crate) fn is_branch(self) -> bool {
         matches!(self, Opcode::Branch | Opcode::Cbranch | Opcode::Branchind)
     }

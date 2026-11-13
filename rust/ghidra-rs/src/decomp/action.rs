@@ -16,8 +16,9 @@ use super::{err, heritage, Arch, Funcdata, Result};
 /// off (`option currentaction decompile <group> off`): the root `universal` (restart group,
 /// once per function), its first actions, the repeating groups `fullloop`, `mainloop` and
 /// `stackstall`, and the root's actions after `fullloop` up to `assignhigh`. `oppool1` holds the
-/// ported rules (`rules::OPPOOL1`) less those `togglerule` switched off. An action that is not
-/// ported fails when it runs with its group on.
+/// ported rules (`rules::OPPOOL1`) less those `togglerule` switched off (`rule:<name>` in
+/// `disabled`); the actions named `action:<name>` there (`DECOMP_SKIP_ACTIONS`) are left out. An
+/// action that is not ported fails when it runs with its group on, except `lanedivide` (see there).
 pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
     use super::coreaction as c;
     let mut t = ActionTree::default();
@@ -84,6 +85,9 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
     let mut stackstall = leaves(
         &mut t,
         &[
+            // ActionLaneDivide (R3) is in group `base` and cannot be switched off, so it is the one
+            // action not ported that does nothing instead of failing: the functions that need it
+            // differ from the reference (`rust/tools/corpus/m500-lanedivide.txt`) rather than fail
             ("lanedivide", "base", c::nothing),
             ("multicse", "analysis", not_ported),
             ("shadowvar", "analysis", not_ported),
@@ -394,9 +398,10 @@ fn varnode_props(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
 }
 
 /// The parts of `ActionVarnodeProps::apply` that act after dead code ran: an auto-live hold
-/// (`lastChanceLoad`) is released unless its LOAD reads a constant address, and a varnode
-/// nothing consumes but something reads is replaced by zero (with no `nonzeromask`, every mask
-/// is all ones, so only an unconsumed varnode qualifies), which is not ported.
+/// (`lastChanceLoad`) is released unless its LOAD reads a constant address, and every read of a
+/// varnode whose non-zero mask and consume mask share no bit is replaced by zero
+/// (`totalReplaceConstant`; before `nonzeromask` first runs every mask is all ones, so only an
+/// unconsumed varnode qualifies).
 fn varnode_props_late(fd: &mut Funcdata) -> Result<i32> {
     let mut changes = 0;
     let pass = fd.heritage.pass();
@@ -443,7 +448,7 @@ fn varnode_props_late(fd: &mut Funcdata) -> Result<i32> {
                 }
             }
             if !fd.vn(vn).descend.is_empty() {
-                super::rules::total_replace_constant(fd, vn, 0)?;
+                fd.total_replace_constant(vn, 0)?;
                 changes += 1;
             }
         }

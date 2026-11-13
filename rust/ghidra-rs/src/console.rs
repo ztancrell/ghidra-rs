@@ -231,11 +231,19 @@ impl Console {
                     return Ok(true);
                 }
                 writeln!(out, "Decompiling {name}").map_err(io)?;
-                // the checks' `DECOMP_SKIP_ACTIONS` (comma list), which the reference patch reads
-                // too: those actions do nothing on both sides
+                // `DECOMP_SKIP_ACTIONS` (comma list): a check-only switch the reference patch reads
+                // too; those actions do nothing on both sides. It is read on every decompile, so a
+                // name that is not a single action of the tree (with every group on) is an error:
+                // the C++ would skip a group of that name and the engines would disagree.
                 let mut disabled = self.disabled.clone();
                 if let Ok(skip) = std::env::var("DECOMP_SKIP_ACTIONS") {
-                    disabled.extend(skip.split(',').filter(|s| !s.is_empty()).map(|s| format!("action:{s}")));
+                    let all = action::universal(&Default::default());
+                    for s in skip.split(',').filter(|s| !s.is_empty()) {
+                        all.has_leaf(s)
+                            .then_some(())
+                            .ok_or(format!("DECOMP_SKIP_ACTIONS: {s} is not an action of the decompile tree"))?;
+                        disabled.insert(format!("action:{s}"));
+                    }
                 }
                 let mut actions = action::universal(&disabled);
                 let set = match &self.break_start {

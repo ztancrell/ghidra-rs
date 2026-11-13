@@ -32,7 +32,7 @@ enum Kind {
         restart: bool,
     },
     /// `ActionPool`: the rules it applies to every op
-    Pool(Vec<&'static super::rules::Rule>),
+    Pool(super::rules::Pool),
 }
 
 /// One action with the C++ `Action` fields that drive `perform`.
@@ -109,8 +109,13 @@ impl ActionTree {
     }
 
     /// An `ActionPool` (`rule_repeatapply`).
-    pub(crate) fn pool(&mut self, name: &'static str, rules: Vec<&'static super::rules::Rule>) -> ActionId {
+    pub(crate) fn pool(&mut self, name: &'static str, rules: super::rules::Pool) -> ActionId {
         self.add(name, Kind::Pool(rules), true, false)
+    }
+
+    /// Whether the tree has a single action (not a group or pool) named `name`.
+    pub fn has_leaf(&self, name: &str) -> bool {
+        self.nodes.iter().any(|n| n.name == name && matches!(n.kind, Kind::Leaf(_)))
     }
 
     fn root(&self) -> ActionId {

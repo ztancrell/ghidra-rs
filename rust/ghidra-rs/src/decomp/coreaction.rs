@@ -1795,7 +1795,7 @@ fn descend_to_undef(fd: &mut Funcdata, vn: VarnodeId, dead: &[BlockId]) -> Resul
                 let copyop = fd.new_op(Opcode::Copy, fd.blocks.block(inbl).start);
                 let out = fd.new_unique_out(size, uniq, copyop);
                 fd.op_set_input(copyop, bad, 0)?;
-                super::rules::op_insert_end(fd, copyop, inbl);
+                fd.op_insert_end(copyop, inbl);
                 out
             }
             Opcode::Indirect => {

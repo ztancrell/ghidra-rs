@@ -1042,10 +1042,12 @@ Remaining differences, by cause:
 
 ### Stage R1: rules for copies, constants, arithmetic
 
-Stage R1 (branch `m3-r1`) adds the rule pools (`ActionPool` in `actiontree.rs`:
-every op in sequence-number order, dead ops freed on the way, the rules for an op's opcode in
-table order, from the first again when a rule changes the opcode) and 19 rules of `oppool1` in
-`decomp/rules/mod.rs`: `earlyremoval`, `termorder`, `selectcse`, `collect_terms`,
+Stage R1 (branch `m3-r1`) adds the rule pools (`ActionPool`: a pool node in `actiontree.rs`, the walk in
+`rules::pool_apply`: every op in sequence-number order, dead ops freed on the way, the rules for
+an op's opcode in table order (filed by opcode once per pool), from the first again when a rule
+changes the opcode) and 19 rules of `oppool1` in `decomp/rules/` (`mod.rs` holds the table;
+`copy.rs`, `arith.rs` the rules, `cse.rs` the shared expression helpers, `float.rs` float
+folding; the `Funcdata` methods they need are in `funcdata.rs`): `earlyremoval`, `termorder`, `selectcse`, `collect_terms`,
 `pullsub_multi`, `push_multi`, `trivialarith`, `trivialbool`, `trivialshift`, `identityel`,
 `multicollapse`, `2comp2mult`, `sub2add`, `carryelim`, `addmultcollapse`,
 `collapseconstants`, `propagatecopy`, `negateidentity`, `negatenegate`, with the helpers they
@@ -1062,7 +1064,9 @@ the groups that are on and not ported switched off (97 `togglerule`s), written b
 not ported yet, `multicse`, `shadowvar` and `condconst` (`ActionConditionalConst`). A console
 command cannot switch an action off, so, as a check-only switch, the reference patch
 (`decomp-ref.patch`, `Action::perform`) and `ghidra-rs decompile` both skip the actions named
-in `DECOMP_SKIP_ACTIONS`; each action leaves the list when it is ported.
+in `DECOMP_SKIP_ACTIONS`; each action leaves the list when it is ported. `ghidra-rs decompile`
+reads the variable on every run (not only in the checks) and fails on a name that is not a
+single action of the tree, so the two engines cannot skip different things silently.
 
 ```sh
 export DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst
@@ -1082,7 +1086,7 @@ The bar is taken over M500 less the functions that need `ActionLaneDivide` (R3),
 | m500 less `m500-lanedivide.txt`, functions the reference finishes | 451 / 453 (99.6 %, bar 98 %: reached) |
 
 `print raw` at `paramdouble` stays 500 / 500 on M500 (the pool runs after it), and the S4 check
-(`s4-options.txt`) is unchanged. (446 / 500). Remaining differences, by cause:
+(`s4-options.txt`) is unchanged (446 / 500). Remaining differences, by cause:
 
 - 46 functions need `ActionLaneDivide` (R3).
 - 0x47a6b0: the reference merges two blocks testing the same condition (`ActionConditionalExe`,
@@ -1103,7 +1107,14 @@ non-zero masks in the reference's dead code (not committed):
   the 11 x87/SSE compare functions and 0x440590. A varnode over 8 bytes defined by a ZEXT of 0
   (`handleExtendedZero`) still fails loudly.
 - Removing unreachable blocks (`removeUnreachableBlocks`, `blockRemoveInternal` for
-  unreachable blocks, `descend2Undef`): 0x6c2570.
+  unreachable blocks, `descend2Undef`): 0x6c2570. Its header warning prints the block start as
+  `ram,0x%08x`, right for 32-bit code only.
+
+Float folding follows `FloatFormat`: a NaN is read as the quiet NaN with its sign and written as
+`getNaNEncoding` does; FLOAT_TRUNC gives `0x8000000000000000` for a NaN or an out-of-range value, as
+`(intb)val` does on x86. The C++ flushes a result below the smallest denormal to zero where IEEE
+would round it up to the smallest one; ghidra-rs rounds as IEEE does (a known difference, not
+met in the checks).
 
 Not ported, with no effect on `print raw`: `isPrecisLo`/`isPrecisHi` (set by R5's
 double-precision rules), big-endian address arithmetic. A `pullsub_multi` on a join varnode
