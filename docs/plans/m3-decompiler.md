@@ -567,6 +567,29 @@ DECOMP_RAW_EXTRA=1 BREAK=inputprototype OPTIONS=tools/corpus/s6-options.txt tool
 - Regressions on the final binary: R3 check 495 / 499, S3 paramdouble 500 / 500, S4 498 / 500, S6
   498 / 500.
 
+Review round (same branch, 2026-11-13), after an independent line-by-line review:
+
+- `Cover::intersect(PcodeOpSet)` ported with its exact walk (sorted set, block starts, the
+  skipped set block after a tested one); the first round answered "any call strictly inside
+  the cover", which refused merges the C++ allows. Superseded: "the C++ sort by block is left
+  out".
+- The create-index difference above was `ActionExtraPopSetup` making the unknown-extrapop
+  INDIRECT's iop varnode last (the C++ `newIndirect` makes it first); fixed. Superseded: "its
+  cause is not found yet".
+- The `<code() *>` misses were global symbol types: the C++ gives them when a varnode is made,
+  ghidra-rs before each inference pass, and with `typerecovery` off none runs; `assignhigh` now
+  applies them too. Superseded: the 3 type misses above.
+- Also: dead RETURNs skipped in `ActionPrototypeTypes`; `groupPartials` fails loudly on a
+  registered proto-partial root; no common dominator is an error; wrapping end offsets; cover
+  dirtying as the C++ (`totalReplace` only through `opSetInput`).
+- New check mode `DECOMP_RAW_EXTRA=2`: also each varnode's create index (`{cN}`), since `{hN}`
+  only labels the merge partition of printed varnodes (no create indices, representatives,
+  covers or unprinted highs).
+- Results: M8 8 / 8 in all four runs; M500 `r1-options` 492 / 499, `s6-options` 492 / 499, the
+  same with create indices (no extra difference). Misses: `VariablePiece` (3 rules on, 6 types
+  on), and the R1/R3 misses (0x47a6b0, 0x4891e0, 0x4919f0, 0x6fa6e0; only 0x4919f0 with
+  types on). Superseded: 489 / 499 above. Regressions: R3 check 495 / 499, S3 paramdouble 500 / 500, S4 check 498 / 500, S6 check 498 / 500, all unchanged (the varnode creation-order fix shows only in create indices, which those checks do not print).
+
 ## Running stages in parallel
 
 Strict chain first: S0 → S1a → S1b → S2. After S2 the work fans out. Under the cap of two

@@ -81,8 +81,6 @@ fn total_replace(fd: &mut Funcdata, vn: VarnodeId, newvn: VarnodeId) -> Result<(
             set_input(fd, op, newvn, slot)?;
         }
     }
-    vn_cover_dirty(fd, vn);
-    vn_cover_dirty(fd, newvn);
     Ok(())
 }
 
@@ -433,7 +431,7 @@ fn read_intersects(fd: &Funcdata, vn: VarnodeId, op: OpId, single: &Cover, block
                 if op != indirect_effect(fd, indop)? {
                     continue;
                 }
-                let in0 = fd.op(indop).ins[0];
+                let in0 = fd.input(indop, 0)?;
                 let shadow =
                     if overlap != 1 { copy_shadow(fd, vn, in0) } else { partial_copy_shadow(fd, vn, in0, off) };
                 if shadow {
@@ -473,7 +471,7 @@ fn end_loc(fd: &Funcdata, loc: &[VarnodeId], i: usize, with_free: bool) -> usize
 /// Port of `VarnodeBank::overlapLoc`: the runs of overlapping varnodes from `loc[i]` on.
 fn overlap_loc(fd: &Funcdata, loc: &[VarnodeId], mut i: usize) -> (Vec<usize>, VnFlags) {
     let v = fd.vn(loc[i]);
-    let (space, mut max_off, mut flags) = (v.space, v.offset + u64::from(v.size - 1), v.flags);
+    let (space, mut max_off, mut flags) = (v.space, v.offset.wrapping_add(u64::from(v.size) - 1), v.flags);
     let mut bounds = vec![i];
     i = end_loc(fd, loc, i, false);
     bounds.push(i);
@@ -486,7 +484,7 @@ fn overlap_loc(fd: &Funcdata, loc: &[VarnodeId], mut i: usize) -> (Vec<usize>, V
             i = end_loc(fd, loc, i, true);
             continue;
         }
-        max_off = max_off.max(v.offset + u64::from(v.size - 1));
+        max_off = max_off.max(v.offset.wrapping_add(u64::from(v.size) - 1));
         flags.set(v.flags);
         bounds.push(i);
         i = end_loc(fd, loc, i, false);
@@ -564,7 +562,7 @@ fn trim_op_input(fd: &mut Funcdata, op: OpId, slot: usize) -> Result<()> {
         None if multi => return err("trimOpInput: MULTIEQUAL without the block"),
         None => fd.op(op).seq.addr,
     };
-    let vn = fd.op(op).ins[slot];
+    let vn = fd.input(op, slot)?;
     let copy = allocate_copy_trim(fd, vn, pc)?;
     set_input(fd, op, out_of(fd, copy)?, slot)?;
     match pred {
@@ -576,7 +574,7 @@ fn trim_op_input(fd: &mut Funcdata, op: OpId, slot: usize) -> Result<()> {
 
 /// The high of input `i` of `op`.
 fn in_high(fd: &mut Funcdata, op: OpId, i: usize) -> Result<HighId> {
-    let vn = fd.op(op).ins[i];
+    let vn = fd.input(op, i)?;
     high(fd, vn)
 }
 
@@ -677,7 +675,7 @@ fn snip_output_interference(fd: &mut Funcdata, indop: OpId) -> Result<bool> {
     correctable = keyed.iter().map(|&(_, o, s)| (o, s)).collect();
     let mut snip: Option<(OpId, HighId)> = None;
     for (insert, slot) in correctable {
-        let vn = fd.op(insert).ins[slot];
+        let vn = fd.input(insert, slot)?;
         let h = high(fd, vn)?;
         let copy = match snip {
             Some((c, cur)) if cur == h => c,
@@ -712,7 +710,7 @@ fn merge_indirect(fd: &mut Funcdata, indop: OpId) -> Result<()> {
     if snip_output_interference(fd, indop)? && try_indirect(fd, indop)? {
         return Ok(());
     }
-    let in0 = fd.op(indop).ins[0];
+    let in0 = fd.input(indop, 0)?;
     let copy = allocate_copy_trim(fd, in0, fd.op(indop).seq.addr)?;
     set_input(fd, indop, out_of(fd, copy)?, 0)?;
     fd.op_insert_before(copy, indop)?;
@@ -805,7 +803,7 @@ fn merge_adjacent(fd: &mut Funcdata) -> Result<()> {
             if ct != super::infertypes::input_local(fd, op, i) {
                 continue;
             }
-            let vn2 = fd.op(op).ins[i];
+            let vn2 = fd.input(op, i)?;
             let v2 = fd.vn(vn2);
             if !test_basic(fd, Some(vn2)) || fd.vn(vn1).size != v2.size || (v2.def.is_none() && !v2.is_input()) {
                 continue;
@@ -916,10 +914,12 @@ fn build_dominant_copy(fd: &mut Funcdata, h: HighId, copy: &[OpId]) -> Result<()
     let parents: Vec<BlockId> = copy.iter().filter_map(|&c| fd.op(c).parent).collect();
     let Some(mut dom_bl) = parents.first().copied() else { return err("buildDominantCopy: dead COPY") };
     for &b in &parents[1..] {
-        dom_bl = fd.find_common_block(dom_bl, b).unwrap_or(dom_bl);
+        dom_bl = fd
+            .find_common_block(dom_bl, b)
+            .ok_or_else(|| super::LowlevelError("buildDominantCopy: no common dominator".into()))?;
     }
     let mut dom_copy = copy[0];
-    let root = fd.op(dom_copy).ins[0];
+    let root = fd.input(dom_copy, 0)?;
     let mut dom_vn = out_of(fd, dom_copy)?;
     let is_new = fd.op(dom_copy).parent != Some(dom_bl);
     if is_new {
@@ -934,7 +934,7 @@ fn build_dominant_copy(fd: &mut Funcdata, h: HighId, copy: &[OpId]) -> Result<()
     let mut bcover = Cover::default();
     for vn in fd.highs.get(h).inst.clone() {
         if let Some(op) = fd.vn(vn).def {
-            if fd.op(op).opc == Opcode::Copy && copy_shadow(fd, fd.op(op).ins[0], root) {
+            if fd.op(op).opc == Opcode::Copy && copy_shadow(fd, fd.input(op, 0)?, root) {
                 continue;
             }
         }
@@ -992,12 +992,12 @@ fn check_copy_pair(fd: &mut Funcdata, h: HighId, dom_op: OpId, sub_op: OpId) -> 
     }
     let mut range = Cover::default();
     add_def_point(fd, &mut range, out_of(fd, dom_op)?);
-    add_ref_point(fd, &mut range, sub_op, fd.op(sub_op).ins[0]);
-    let inv = fd.op(dom_op).ins[0];
+    add_ref_point(fd, &mut range, sub_op, fd.input(sub_op, 0)?);
+    let inv = fd.input(dom_op, 0)?;
     let ui = |o| op_uindex(fd, o);
     for &vn in &fd.highs.get(h).inst {
         let Some(op) = fd.vn(vn).def else { continue };
-        if fd.op(op).opc == Opcode::Copy && fd.op(op).ins[0] == inv {
+        if fd.op(op).opc == Opcode::Copy && fd.input(op, 0)? == inv {
             continue;
         }
         if range.contain(op_block_index(fd, op), op, 1, &ui) {
@@ -1245,7 +1245,7 @@ fn decided(fd: &Funcdata, vn: VarnodeId) -> bool {
 
 /// Port of `ActionMarkImplied::apply`: depth first from each undecided varnode through its
 /// readers' outputs, each marked implied or explicit after its descendants.
-fn mark_implied_action(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
+pub(crate) fn mark_implied_action(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
     let mut count = 0;
     for vn in fd.loc_all() {
         if fd.vn(vn).is_free() || decided(fd, vn) {
@@ -1368,7 +1368,7 @@ fn base_explicit(fd: &Funcdata, vn: VarnodeId, mut maxref: usize) -> Result<i32>
                     o.has(VnFlags::ADDRTIED)
                         && o.space == v.space
                         && v.offset >= o.offset
-                        && v.offset + u64::from(v.size) <= o.offset + u64::from(o.size)
+                        && v.offset.wrapping_add(u64::from(v.size)) <= o.offset.wrapping_add(u64::from(o.size))
                 });
                 if !contains {
                     return Ok(-1);
@@ -1523,7 +1523,7 @@ const MAX_IMPLIED_REF: usize = 2;
 const MAX_TERM_DUPLICATION: i32 = 2;
 
 /// Port of `ActionMarkExplicit::apply`.
-fn mark_explicit(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
+pub(crate) fn mark_explicit(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
     let mut count = 0;
     let mut multi = Vec::new();
     let mut marks = HashSet::new();
@@ -1578,27 +1578,36 @@ fn check_indirect_use(fd: &Funcdata, vn: VarnodeId) -> bool {
 // ---- the actions ----
 
 /// `ActionAssignHigh`
-pub(crate) fn assign_high_action(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
+pub(crate) fn assign_high_action(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
+    // the C++ gives a ram varnode its global symbol's type when it is made
+    // (`setSymbolProperties`); ghidra-rs applies it before each inference pass, which do not run
+    // with `typerecovery` off, so once more here, before anything merging reads types
+    super::infertypes::symbol_types(fd, arch);
     set_high_level(fd);
     Ok(0)
 }
 
-/// `ActionMergeRequired`: `mergeAddrTied`, `groupPartials` (no proto-partial roots are ever
-/// registered: only R3b's `SplitFlow` and R5's `RulePieceStructure` make them), `mergeMarker`.
+/// `ActionMergeRequired`: `mergeAddrTied`, `groupPartials`, `mergeMarker`.
 pub(crate) fn merge_required(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
     merge_addr_tied(fd)?;
+    group_partials(fd)?;
     merge_marker(fd)?;
     Ok(0)
 }
 
-/// `ActionMarkExplicit`
-pub(crate) fn mark_explicit_action(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
-    mark_explicit(fd, arch)
+/// `Merge::registerProtoPartialRoot`: for the rules that make proto-partial PIECEs.
+#[allow(dead_code)] // ponytail: no ported rule makes one yet; R3b's SplitFlow will call it
+pub(crate) fn register_proto_partial_root(fd: &mut Funcdata, piece: OpId) {
+    fd.highs.proto_partial.push(piece);
 }
 
-/// `ActionMarkImplied`
-pub(crate) fn mark_implied_leaf(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
-    mark_implied_action(fd, arch)
+/// `Merge::groupPartials`: grouping the pieces needs `VariablePiece`, not ported, so a live
+/// registered root fails loudly.
+fn group_partials(fd: &Funcdata) -> Result<()> {
+    if fd.highs.proto_partial.iter().any(|&op| !fd.op(op).is_dead()) {
+        return err("groupPartials: proto-partial pieces need VariablePiece, not ported");
+    }
+    Ok(())
 }
 
 /// `ActionMergeMultiEntry`: the local scope holds no symbols (`localrecovery` is not ported),

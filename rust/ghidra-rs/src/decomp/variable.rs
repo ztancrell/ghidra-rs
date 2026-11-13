@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use super::cover::{op_uindex, Cover, Pt};
+use super::cover::{op_block_index, op_uindex, Cover, OpSet};
 use super::funcdata::Funcdata;
 use super::op::OpId;
 use super::types::{Meta, TypeId};
@@ -52,9 +52,12 @@ pub struct Highs {
     /// `HighIntersectTest::highedgemap`
     edges: BTreeMap<(HighId, HighId), bool>,
     /// `StackAffectingOps`, once populated
-    affecting: Option<Vec<OpId>>,
+    affecting: Option<OpSet>,
     /// `Merge::copyTrims`
     pub(crate) copy_trims: Vec<OpId>,
+    /// `Merge::protoPartial`: the PIECE ops `registerProtoPartialRoot` recorded (no ported rule
+    /// registers one yet; `SplitFlow` and `RulePieceStructure` will)
+    pub(crate) proto_partial: Vec<OpId>,
 }
 
 impl Highs {
@@ -289,6 +292,8 @@ pub(crate) fn high_remove(fd: &mut Funcdata, vn: VarnodeId) {
         hv.inst.remove(start + p);
         hv.cover_dirty = true;
     }
+    // the varnode is destroyed next: it no longer names a high
+    fd.highs.of[vn.0 as usize] = None;
 }
 
 /// `HighVariable::updateInternalCover`: the union of the members' covers.
@@ -509,19 +514,17 @@ fn untied_call_intersection(fd: &mut Funcdata, tied: HighId, untied: HighId) -> 
         fd.highs.affecting = Some(stack_affecting_ops(fd));
     }
     let ui = |o| op_uindex(fd, o);
-    let cover = h_cover(fd, untied);
-    let ops = fd.highs.affecting.as_deref().unwrap_or_default();
-    Ok(ops.iter().any(|&op| {
-        let blk = super::cover::op_block_index(fd, op);
-        cover.blocks.get(&blk).is_some_and(|b| b.contain(Pt::Op(op), &ui) && b.boundary(Pt::Op(op), &ui) == 0)
-    }))
+    let set = fd.highs.affecting.as_ref().map(|s| s.intersects(h_cover(fd, untied), &ui));
+    Ok(set.unwrap_or(false))
 }
 
-/// Port of `StackAffectingOps::populate`: every call. The STORE guards of the stack heritage
-/// pass are not ported (no stack varnode exists before the `stackvars` rules), so none join.
-/// Only whether one lies in the cover counts, so the C++ sort by block is left out.
-fn stack_affecting_ops(fd: &Funcdata) -> Vec<OpId> {
-    fd.qlst.iter().map(|&c| fd.call(c).op).collect()
+/// Port of `StackAffectingOps::populate`: every call, sorted by block
+/// (`PcodeOpSet::finalize`). The STORE guards of the stack heritage pass are not ported (no
+/// stack varnode exists before the `stackvars` rules), so none join and `affectsTest` is
+/// always true.
+fn stack_affecting_ops(fd: &Funcdata) -> OpSet {
+    let ops = fd.qlst.iter().map(|&c| fd.call(c).op).map(|op| (op_block_index(fd, op), fd.op(op).order, op));
+    OpSet::finalize(ops.collect())
 }
 
 /// Port of `Varnode::copyShadow`: the two hold the same value through COPYs.

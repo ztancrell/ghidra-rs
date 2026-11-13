@@ -1331,33 +1331,52 @@ indices of the `return(#0x0)` constants.
 Check: `print raw` with types and high variables (`DECOMP_RAW_EXTRA=1`) at `break start
 inputprototype`, the first action after `copymarker` with its group on and not ported. The
 reference patch numbers each high variable by its first appearance in that print (`{hN}`,
-reset per print), the Rust side the same, so the check compares merging decisions, not
-pointers or create indices. Between `assignhigh` and `inputprototype` the options switch off
-`blockrecovery` (`latedonothing`, `blockstructure`, `prefercomplement`, `structuretransform`),
-`localrecovery` (`outputprototype`) and `dynamic` (`dynamicsymbols`) on both sides, so nothing
-else needs skipping:
+reset per print), the Rust side the same. `{hN}` is a canonical labelling of the merge
+partition of the printed varnodes: it shows which printed varnodes share a high, but not
+create indices, name or type representatives, covers, or highs no printed varnode belongs to.
+`DECOMP_RAW_EXTRA=2` also prints each varnode's create index (`{cN}`) on both engines; those
+feed `compareCopyByInVarnode`, the location and definition orders and later naming, so a
+difference there is a real one. Between `assignhigh` and `inputprototype` the options switch
+off `blockrecovery` (`latedonothing`, `blockstructure`, `prefercomplement`,
+`structuretransform`), `localrecovery` (`outputprototype`) and `dynamic` (`dynamicsymbols`) on
+both sides, so nothing else needs skipping:
 
 ```sh
 cd rust
 DECOMP_RAW_EXTRA=1 DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst BREAK=inputprototype \
   OPTIONS=tools/corpus/r1-options.txt tools/decomp-diff.sh m500   # rules on
 DECOMP_RAW_EXTRA=1 BREAK=inputprototype OPTIONS=tools/corpus/s6-options.txt tools/decomp-diff.sh m500   # types on
+# DECOMP_RAW_EXTRA=2 for the same two with create indices
 ```
 
-| options | M8 | M500 (of the functions the reference finishes) |
-|---|---|---|
-| `r1-options.txt` (rules on) | 8 / 8 | 489 / 499 (98.0 %) |
-| `s6-options.txt` (types on) | 8 / 8 | 492 / 499 (98.6 %) |
+| options | M8 | M500 (of the 499 the reference finishes) | with create indices |
+|---|---|---|---|
+| `r1-options.txt` (rules on) | 8 / 8 | 492 / 499 (98.6 %) | 492 / 499 |
+| `s6-options.txt` (types on) | 8 / 8 | 492 / 499 (98.6 %) | 492 / 499 |
 
-Misses with `r1-options`: 3 need `VariablePiece` (0x402c20, 0x405990, 0x62f0d0: overlapping address-tied varnodes of different sizes, fail loudly); 4 are the R1/R3 misses (0x47a6b0, 0x4891e0, 0x4919f0, 0x6fa6e0); 3 print `<code() *>` on the reference for a global INDIRECT output where ghidra-rs keeps `xunknown4` (0x48a430, 0x5c5940, 0x6b3730: a type set before merging that only this check shows, as the R1/R3 check prints no types). With `s6-options`: 6 need `VariablePiece` (0x402c20, 0x405990, 0x4c0070, 0x62f0d0, 0x757810, 0x7586e0) and 0x4919f0 (as in S4).
+Misses: with `r1-options` 3 need `VariablePiece` (0x402c20, 0x405990, 0x62f0d0: overlapping
+address-tied varnodes of different sizes; they fail loudly) and 4 are the R1/R3 misses
+(0x47a6b0, 0x4891e0, 0x4919f0, 0x6fa6e0); with `s6-options` 6 need `VariablePiece` (also
+0x4c0070, 0x757810, 0x7586e0) and 0x4919f0 (as in S4). The create-index mode adds none.
+
+Fixed with the review (round two): `Cover::intersect(PcodeOpSet)` is ported with its walk
+(`OpSet` in `cover.rs`: calls sorted by block, block starts, and the C++ quirk that skips the
+set block after one it tested; unit test `op_set_walk`); `ActionExtraPopSetup` makes an
+unknown-extrapop INDIRECT through `newIndirect` (iop varnode first), which was the varnode
+create-index difference of 0x401080 and 0x9eec5e; `ActionPrototypeTypes` skips dead RETURNs;
+global symbol types (`code *` of external references) are applied at `assignhigh` too, as the
+C++ gives them when a varnode is made (with `typerecovery` off no inference pass applied them:
+0x48a430, 0x5c5940, 0x6b3730); `groupPartials` fails loudly on a registered proto-partial root
+(`register_proto_partial_root`, for R3b); a missing common dominator in `buildDominantCopy` is an
+error; storage end offsets wrap as `uintb`; cover-dirty marking matches the C++ (`totalReplace`
+dirties only through its `opSetInput`s).
 
 Not ported (each fails loudly, or cannot arise with the ported rules): `VariablePiece` and
 `VariableGroup` (overlapping address-tied varnodes of different sizes, proto-partial PIECEs),
 symbols and `mergeMultiEntry`'s multi-entry symbols (the local scope holds none), union
 resolution of trimmed COPYs, `stripType`, join padding records (`markPurePaddingCopies`),
 `dynamic.cc` (only `ActionDynamicSymbols` needs it, group `dynamic` is off), the STORE guards of
-`StackAffectingOps` (stack heritage). Later regressions held: R3 check 495 / 499, S3 paramdouble
-500 / 500, S4 check 498 / 500, S6 check 498 / 500 (M500).
+`StackAffectingOps` (stack heritage). Regressions on the final binary: R3 check 495 / 499, S3 paramdouble 500 / 500, S4 check 498 / 500, S6 check 498 / 500, all unchanged (the varnode creation-order fix shows only in create indices, which those checks do not print).
 
 ## Speed
 

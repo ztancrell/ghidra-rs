@@ -952,7 +952,7 @@ pub(crate) fn stack_pointer_type(fd: &mut Funcdata, size: u32) -> TypeId {
 /// symbol kinds are type-locked. `Funcdata::new_varnode` has no architecture to ask, so this
 /// runs over the ram varnodes before each inference pass instead; nothing reads a varnode's
 /// type before then.
-fn symbol_types(fd: &mut Funcdata, arch: &Arch) {
+pub(crate) fn symbol_types(fd: &mut Funcdata, arch: &Arch) {
     let Some(ram) = fd.ram else { return };
     let ptr_size = arch.spec.stack_pointer.2;
     for vn in fd.loc_space(Space::Sleigh(ram)) {

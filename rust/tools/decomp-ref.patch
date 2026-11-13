@@ -22,12 +22,13 @@
  namespace ghidra {
 
  AttributeId ATTRIB_ADDRTIED = AttributeId("addrtied",30);
-@@ -750,6 +765,18 @@
+@@ -750,6 +765,22 @@
      s << "(i)";
    if (isWritten())
      s << '(' << def->getSeqNum() << ')';
 +  // ghidra-rs (rust/tools/decomp-ref.patch): with DECOMP_RAW_EXTRA set, also print the data-type and
-+  // the high variable (numbered by first appearance in this print), for stages S6 and S7
++  // the high variable (numbered by first appearance in this print), and with DECOMP_RAW_EXTRA=2 the
++  // create index, for stages S6 and S7
 +  static const bool extra = getenv("DECOMP_RAW_EXTRA") != (char *)0;
 +  if (extra) {
 +    if (type != (Datatype *)0) {
@@ -37,6 +38,9 @@
 +    }
 +    if (high != (HighVariable *)0)
 +      s << "{h" << dec << rawHighNumber(high) << '}';
++    static const bool index = getenv("DECOMP_RAW_EXTRA")[0] == '2';
++    if (index)
++      s << "{c" << dec << create_index << '}';
 +  }
    if ((flags&(Varnode::insert|Varnode::constant))==0) {
      s << "(free)";

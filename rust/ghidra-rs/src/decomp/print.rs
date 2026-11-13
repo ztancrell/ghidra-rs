@@ -193,6 +193,12 @@ impl<'a> Printer<'a> {
                 self.out.dec(n as u64);
                 self.out.str("}");
             }
+            // DECOMP_RAW_EXTRA=2: the create index too (stage S7)
+            if raw_index() {
+                self.out.str("{c");
+                self.out.dec(u64::from(id.0));
+                self.out.str("}");
+            }
         }
         if v.def.is_none() && !v.is_input() && !v.is_constant() {
             self.out.str("(free)");
@@ -412,4 +418,10 @@ impl<'a> Printer<'a> {
 fn raw_extra() -> bool {
     static EXTRA: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *EXTRA.get_or_init(|| std::env::var_os("DECOMP_RAW_EXTRA").is_some())
+}
+
+/// `DECOMP_RAW_EXTRA=2`: print raw also shows each varnode's create index (stage S7).
+fn raw_index() -> bool {
+    static INDEX: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *INDEX.get_or_init(|| std::env::var("DECOMP_RAW_EXTRA").is_ok_and(|v| v.starts_with('2')))
 }

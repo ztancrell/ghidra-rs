@@ -166,8 +166,8 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
             // stage S7 (`merge.rs`)
             ("assignhigh", "merge", super::merge::assign_high_action),
             ("mergerequired", "merge", super::merge::merge_required),
-            ("markexplicit", "merge", super::merge::mark_explicit_action),
-            ("markimplied", "merge", super::merge::mark_implied_leaf),
+            ("markexplicit", "merge", super::merge::mark_explicit),
+            ("markimplied", "merge", super::merge::mark_implied_action),
             ("mergemultientry", "merge", super::merge::merge_multi_entry),
             ("mergecopy", "merge", super::merge::merge_copy),
             ("dominantcopy", "merge", super::merge::dominant_copy),
@@ -290,11 +290,11 @@ fn extrapop_setup(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
                 fd.op_insert_after(op, call)?;
             }
             ExtraPop::Unknown => {
-                let op = fd.new_op(Opcode::Indirect, addr);
+                // newIndirect makes the iop varnode first, then the output and the base
+                let op = fd.new_indirect(call)?;
                 fd.new_varnode_out(size, sp, off, op);
                 let base = fd.new_varnode(size, sp, off);
-                let iop = fd.new_varnode_iop(call);
-                fd.op_set_all_input(op, &[base, iop])?;
+                fd.set_indirect_input(op, base)?;
                 fd.op_insert_before(op, call)?;
             }
         }
@@ -316,6 +316,9 @@ fn prototype_types(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     // the C++ walks the per-opcode RETURN list (creation order), which decides the constants'
     // create indices (high-variable ids, stage S7)
     for op in fd.ops_created_with(Opcode::Return) {
+        if fd.op(op).is_dead() {
+            continue;
+        }
         let Some(&in0) = fd.op(op).ins.first() else { continue };
         if !fd.vn(in0).is_constant() {
             let size = fd.vn(in0).size;

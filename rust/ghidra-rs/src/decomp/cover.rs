@@ -348,6 +348,73 @@ pub(crate) fn rebuild(fd: &Funcdata, vn: VarnodeId, implied: &dyn Fn(VarnodeId) 
     cover
 }
 
+/// Port of `PcodeOpSet` (finalized): ops sorted by block index, then position, with the index
+/// where each block's ops start.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct OpSet {
+    /// (block index, op)
+    ops: Vec<(i32, OpId)>,
+    /// `blockStart`
+    starts: Vec<usize>,
+}
+
+impl OpSet {
+    /// Port of `PcodeOpSet::finalize` over `(block index, order, op)`: `std::sort` by
+    /// `compareByBlock` (ties as libstdc++ leaves them), then the block starts.
+    pub(crate) fn finalize(mut list: Vec<(i32, u32, OpId)>) -> OpSet {
+        super::stdsort::sort(&mut list, |a, b| if a.0 != b.0 { a.0 < b.0 } else { a.1 < b.1 });
+        let mut set = OpSet::default();
+        let mut block = -1;
+        for (i, &(b, _, op)) in list.iter().enumerate() {
+            if b > block {
+                set.starts.push(i);
+                block = b;
+            }
+            set.ops.push((b, op));
+        }
+        set
+    }
+
+    /// Port of `Cover::intersect(const PcodeOpSet &, Varnode *)` (`affectsTest` always true):
+    /// some op lies strictly inside `cover`. Ported with its walk exactly: after a block it
+    /// tested, the set's block index is not refreshed, so the set block right after it is
+    /// skipped when the cover moves on.
+    pub(crate) fn intersects(&self, cover: &Cover, ui: &dyn Fn(OpId) -> u32) -> bool {
+        let Some(&(first, _)) = self.ops.first() else { return false };
+        let mut set_block = 0;
+        let mut op_index = self.starts[0];
+        let mut set_index = self.ops[op_index].0;
+        let mut iter = cover.blocks.range(first..).peekable();
+        while let Some(&(&cover_index, cblock)) = iter.peek() {
+            if cover_index < set_index {
+                iter.next();
+            } else if cover_index > set_index {
+                set_block += 1;
+                if set_block >= self.starts.len() {
+                    break;
+                }
+                op_index = self.starts[set_block];
+                set_index = self.ops[op_index].0;
+            } else {
+                iter.next();
+                set_block += 1;
+                let op_max = self.starts.get(set_block).copied().unwrap_or(self.ops.len());
+                while op_index < op_max {
+                    let pt = Pt::Op(self.ops[op_index].1);
+                    if cblock.contain(pt, ui) && cblock.boundary(pt, ui) == 0 {
+                        return true;
+                    }
+                    op_index += 1;
+                }
+                if set_block >= self.starts.len() {
+                    break;
+                }
+            }
+        }
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,5 +483,22 @@ mod tests {
         assert_eq!(a.intersect_list(&b, 2, &ui), vec![0]);
         assert_eq!(a.compare_to(&b), std::cmp::Ordering::Equal);
         assert_eq!(Cover::default().compare_to(&b), std::cmp::Ordering::Greater);
+    }
+
+    #[test]
+    fn op_set_walk() {
+        // calls in blocks 2, 4 and 6 (given out of order: finalize sorts them)
+        let set = OpSet::finalize(vec![(6, 9, OpId(9)), (2, 5, OpId(5)), (4, 7, OpId(7))]);
+        let mut cover = Cover::default();
+        cover.blocks.insert(2, CoverBlock { start: Pt::Op(OpId(10)), stop: Pt::End });
+        cover.blocks.insert(4, CoverBlock { start: Pt::Begin, stop: Pt::End });
+        // the block 2 call is before the cover starts; the C++ walk then skips block 4's call
+        assert!(!set.intersects(&cover, &ui));
+        cover.blocks.insert(2, CoverBlock { start: Pt::Op(OpId(3)), stop: Pt::End });
+        assert!(set.intersects(&cover, &ui));
+        // a cover starting at block 4 reaches its call
+        cover.blocks.remove(&2);
+        assert!(set.intersects(&cover, &ui));
+        assert!(!OpSet::default().intersects(&cover, &ui));
     }
 }
