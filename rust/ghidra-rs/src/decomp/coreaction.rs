@@ -1568,12 +1568,20 @@ pub(crate) fn deindirect(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         };
         let Some(entry) = target.filter(|e| arch.functions.contains_key(e)) else { continue };
         let callee = arch.functions[&entry].proto.clone();
-        if callee.locked.is_some() {
-            return err("deindirect to a locked prototype (lateRestriction, transferLockedInput/Output): not implemented in ghidra-rs yet");
-        }
         let call = fd.call_mut(c);
         call.entry = Some(entry);
         call.known = true;
+        if callee.locked.is_some() {
+            // FuncCallSpecs::deindirect with lateRestriction (stage S6, lateres.rs)
+            let fspec = fd.new_varnode_callspecs(c);
+            fd.op_set_input(op, fspec, 0)?;
+            fd.op_set_opcode(op, Opcode::Call);
+            if !super::lateres::late_restriction(fd, arch, c, &callee)? {
+                return err("deindirect: restarting for a locked prototype the call cannot take is not implemented in ghidra-rs yet");
+            }
+            count += 1;
+            continue;
+        }
         // lateRestriction: the call has a model, and neither prototype is locked
         call.proto.copy(&callee);
         if call.proto.model.is_none() {

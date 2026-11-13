@@ -175,7 +175,7 @@ ported, then estimated Rust lines.
 | R2 | Rules: bit ops, compares, booleans, cleanup pool | `And*`, `Or*`, `Less*`, `Equal*`, `Bool*`, `CondNegate`, `RangeMeld`, the `cleanup` group | 4k → 2k | same | M500 ≥ 98% | S4 |
 | R3 | Rules: extension, concat, sub-pieces | `Zext*`, `Concat*`, `Piece*`, `HumptyDumpty`, `Subvar*`, `SplitFlow`, `ActionLaneDivide`; `subflow`, `transform`, `prefersplit` | 9k → 4.5k | same | M500 ≥ 98% | S4 |
 | R4 | Rules: division, modulo, float | `DivOpt`, `ModOpt`, `Sign*`, `Float*`, `floatprecision` group; `float.cc` | 4k → 2k | same | M500 ≥ 98% | S4 |
-| S6 | Types | `type`, `cast`, type parts of `typeop`, `ActionInferTypes` and friends, `database` (scopes), `unionresolve`, a C declaration parser (replaces `grammar.cc`) | 14k → 7k | `print raw` with types (see below) at `assignhigh`; `parse line` datatests | D files using `parse line` pass; M500 ≥ 95% | S2 |
+| S6 | Types | `type`, `cast`, type parts of `typeop`, `ActionInferTypes` and friends, `database` (scopes), `unionresolve`, a C declaration parser (replaces `grammar.cc`) | 14k → 7k | `print raw` with types (see below) at `assignhigh`, also with locked prototypes (`decomp-locked-options.sh`) | M500 ≥ 95% and locked-prototype M500 ≥ 95% of non-SSE (superseded: "D files using `parse line` pass", moved to the x86-64 stage) | S2 |
 | R5 | Rules needing types; 64-bit splits; strings; bitfields | `typerecovery`/`stackvars` rules (`PtrArith`, `StructOffset0`, `PushPtr`, `LoadVarnode`, ...), `double.cc`, `constseq`, `bitfield` | 10k → 5k | as R1 | M500 ≥ 95% | S6, R1–R4 |
 | S7 | Merge, high variables | `merge`, `variable`, merge actions, `dynamic` (hashes, needed for saved locals) | 5k → 2.5k | `print raw` with high-variable ids after `copymarker` | M500 ≥ 95% | S6 |
 | S8 | Structuring | rest of `block`, `blockaction`, CFG edits of `funcdata_block` | 5k → 3k | `print tree block` at the end, rules off and then on | M500 ≥ 98% | S4 |
@@ -410,6 +410,28 @@ Round two (same branch, 2026-11-13):
   beyond `map`), `unionresolve`, partial types and `TypePointerRel`, x86-64 and `load test
   file` for the D corpus. `cast.cc`/`ActionSetCasts` belong to S9: they run after `assignhigh`,
   so no S6 check can see them.
+
+
+Round three (same branch, 2026-11-13):
+
+- `lateres.rs`: `FuncCallSpecs::lateRestriction` for a locked prototype with
+  `transferLockedInput/Output` and `commitNewInputs/Outputs` (inputs rebuilt from the trials
+  that found them or as stack loads through the placeholder's pointer, `buildParam`; the
+  output moved to the call from the INDIRECT that created it, `clearActiveOutput`), so
+  `ActionDeindirect` resolving a call to a locked callee works.
+- Bar changed (user decision, 2026-11-13): the D-corpus `parse line` check moves to the stage
+  that adds x86-64 (58 of its 69 files are x86-64; the Rust decompiler is x86-32 only). S6 is
+  checked with the locked-prototype stand-in instead: M8 8 / 8 and M500 at least 95% of the
+  non-SSE functions the reference finishes, for both `void` and `int4`. Superseded: the
+  "D files using `parse line` pass" bar of the stage table, and round two's 5 / 8 with the
+  `lateRestriction` failures.
+- Results: unlocked (`s6-options.txt`) M8 8 / 8, M500 446 / 446 non-SSE; locked `void`
+  M8 8 / 8, M500 446 / 446 non-SSE; locked `int4` M8 8 / 8, M500 446 / 446 non-SSE; S4 regression M8 8 / 8.
+- Left for a later S6b: locked stack parameters of the decompiled function (stack heritage),
+  varargs and hidden-return locked prototypes, resizing an output in `commitNewOutputs` and
+  truncating a trial in `buildParam`, the restart when a call cannot take a locked prototype,
+  the scopes of `database.cc` (parameter symbols, `type varnode`), `unionresolve`, partial
+  types and `TypePointerRel`. `cast.cc`/`ActionSetCasts` are S9.
 
 
 ## Running stages in parallel

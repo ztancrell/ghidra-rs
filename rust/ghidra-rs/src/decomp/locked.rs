@@ -149,7 +149,7 @@ fn location(fd: &mut Funcdata, st: &Storage) -> Result<(Space, u64, u32)> {
 
 /// Port of `Address::justifiedContain(sz, addr, size, false)` (little-endian) and
 /// `containedBy`, between a storage and a varnode range.
-fn containment(st: &Storage, space: Space, off: u64, size: u32) -> Containment {
+pub(crate) fn containment(st: &Storage, space: Space, off: u64, size: u32) -> Containment {
     let (s, base, sz) = match st {
         Storage::Space { space, offset, size } => (Space::Sleigh(*space), *offset, *size),
         Storage::Stack { offset, size } => (Space::Stack, *offset, *size),

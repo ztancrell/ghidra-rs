@@ -22,6 +22,7 @@ mod heritage;
 mod infertypes;
 mod inject;
 mod jumptable;
+mod lateres;
 mod locked;
 mod op;
 mod opcode;

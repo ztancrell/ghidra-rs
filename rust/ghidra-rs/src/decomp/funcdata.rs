@@ -574,6 +574,29 @@ impl Funcdata {
     /// Port of `Funcdata::opStackLoad`: a LOAD of `size` bytes at stack offset `off`, computed
     /// from the stack pointer `sp` (space, offset, size) just before `op`; `ram` is the space the
     /// stack lives in. Returns the loaded value.
+    /// `opStackLoad` with a stack reference to reuse (`stackref`, stage S6: `buildParam`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn op_stack_load_ref(
+        &mut self,
+        sp: (u32, u64, u32),
+        ram: u32,
+        uniq: u32,
+        off: u64,
+        size: u32,
+        op: OpId,
+        stackref: VarnodeId,
+    ) -> Result<VarnodeId> {
+        let addout = self.create_stack_ref(sp, uniq, off, op, Some(stackref))?;
+        let addop = self.vn(addout).def.ok_or_else(|| LowlevelError("stack reference without its op".into()))?;
+        let addr = self.op(op).seq.addr;
+        let loadop = self.new_op(Opcode::Load, addr);
+        let spc = self.new_varnode_space(ram);
+        self.op_set_all_input(loadop, &[spc, addout])?;
+        let res = self.new_unique_out(size, uniq, loadop);
+        self.op_insert_after(loadop, addop)?;
+        Ok(res)
+    }
+
     pub(crate) fn op_stack_load(
         &mut self,
         sp: (u32, u64, u32),
@@ -583,7 +606,7 @@ impl Funcdata {
         size: u32,
         op: OpId,
     ) -> Result<VarnodeId> {
-        let addout = self.create_stack_ref(sp, uniq, off, op)?;
+        let addout = self.create_stack_ref(sp, uniq, off, op, None)?;
         let addop = self.vn(addout).def.ok_or_else(|| LowlevelError("stack reference without its op".into()))?;
         let addr = self.op(op).seq.addr;
         let loadop = self.new_op(Opcode::Load, addr);
@@ -597,9 +620,19 @@ impl Funcdata {
 
     /// Port of `Funcdata::createStackRef` (no reused stack pointer, inserted before `op`):
     /// `u = SP + off`. x86 declares no segment op, so there is no `SEGMENTOP` around it.
-    fn create_stack_ref(&mut self, sp: (u32, u64, u32), uniq: u32, off: u64, op: OpId) -> Result<VarnodeId> {
+    fn create_stack_ref(
+        &mut self,
+        sp: (u32, u64, u32),
+        uniq: u32,
+        off: u64,
+        op: OpId,
+        stackref: Option<VarnodeId>,
+    ) -> Result<VarnodeId> {
         let (space, spoff, size) = sp;
-        let stackptr = self.new_varnode(size, Space::Sleigh(space), spoff);
+        let stackptr = match stackref {
+            Some(r) => r,
+            None => self.new_varnode(size, Space::Sleigh(space), spoff),
+        };
         let addop = self.new_op(Opcode::IntAdd, self.op(op).seq.addr);
         let addout = self.new_unique_out(size, uniq, addop);
         let c = self.new_constant(size, off);

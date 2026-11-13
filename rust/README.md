@@ -1109,6 +1109,28 @@ Round two (same branch, 2026-11-13):
   so no S6 check can see them.
 
 
+Round three (same branch, 2026-11-13):
+
+- `lateres.rs`: `FuncCallSpecs::lateRestriction` for a locked prototype with
+  `transferLockedInput/Output` and `commitNewInputs/Outputs` (inputs rebuilt from the trials
+  that found them or as stack loads through the placeholder's pointer, `buildParam`; the
+  output moved to the call from the INDIRECT that created it, `clearActiveOutput`), so
+  `ActionDeindirect` resolving a call to a locked callee works.
+- Bar changed (user decision, 2026-11-13): the D-corpus `parse line` check moves to the stage
+  that adds x86-64 (58 of its 69 files are x86-64; the Rust decompiler is x86-32 only). S6 is
+  checked with the locked-prototype stand-in instead: M8 8 / 8 and M500 at least 95% of the
+  non-SSE functions the reference finishes, for both `void` and `int4`. Superseded: the
+  "D files using `parse line` pass" bar of the stage table, and round two's 5 / 8 with the
+  `lateRestriction` failures.
+- Results: unlocked (`s6-options.txt`) M8 8 / 8, M500 446 / 446 non-SSE; locked `void`
+  M8 8 / 8, M500 446 / 446 non-SSE; locked `int4` M8 8 / 8, M500 446 / 446 non-SSE; S4 regression M8 8 / 8.
+- Left for a later S6b: locked stack parameters of the decompiled function (stack heritage),
+  varargs and hidden-return locked prototypes, resizing an output in `commitNewOutputs` and
+  truncating a trial in `buildParam`, the restart when a call cannot take a locked prototype,
+  the scopes of `database.cc` (parameter symbols, `type varnode`), `unionresolve`, partial
+  types and `TypePointerRel`. `cast.cc`/`ActionSetCasts` are S9.
+
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The
