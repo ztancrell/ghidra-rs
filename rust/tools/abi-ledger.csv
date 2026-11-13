@@ -1,0 +1,233 @@
+address,site,java,ghidra_rs,truth,evidence,cause
+0x0047d050,00bab638,unknown,(none),unknown,word at 0xbab638 is 0x47d050; ghidra-rs finds it only with --data-pointers,data-pointer-missed
+0x0047d050,output:00bab638,unconcluded,(none),unverified,group:data-pointer-missed; checked 00bcd238,data-pointer-missed
+0x0047d070,00bab63c,unknown,(none),unverified,group:data-pointer-missed; checked 00bcd238,data-pointer-missed
+0x0047d070,output:00bab63c,unconcluded,(none),unverified,group:data-pointer-missed; checked 00bcd238,data-pointer-missed
+0x00495e80,00bac4bc,unknown,(none),unverified,group:data-pointer-missed; checked 00bcd238,data-pointer-missed
+0x004be160,00bb0424,trivial,(none),ok,contract trivial; the --data-pointers run finds this ref as trivial,data-pointer-missed
+0x004be180,00bb0428,trivial,(none),ok,contract trivial; the --data-pointers run finds this ref as trivial,data-pointer-missed
+0x004cc310,00bb0b70,unknown,(none),unverified,group:data-pointer-missed; checked 00bcd238,data-pointer-missed
+0x004d5410,00bb1330,unknown,(none),unverified,group:data-pointer-missed; checked 00bcd238,data-pointer-missed
+0x004d5410,output:00bb1330,unconcluded,(none),unverified,group:data-pointer-missed; checked 00bcd238,data-pointer-missed
+0x004fd630,00bb1458,unknown,(none),unverified,group:data-pointer-missed; checked 00bcd238,data-pointer-missed
+0x004fd630,output:00bb1458,unconcluded,(none),unverified,group:data-pointer-missed; checked 00bcd238,data-pointer-missed
+0x0053c8d0,00bce808,trivial,(none),ok,contract trivial; the --data-pointers run finds this ref as trivial,data-pointer-missed
+0x00606700,00bbb994,trivial,(none),ok,contract trivial; the --data-pointers run finds this ref as trivial,data-pointer-missed
+0x0060dbc0,00bbc0bc,unknown,(none),unverified,group:data-pointer-missed; checked 00bcd238,data-pointer-missed
+0x0060dbc0,00bd97a4,unknown,(none),unverified,group:data-pointer-missed; checked 00bcd238,data-pointer-missed
+0x0060dbc0,00bd97c0,unknown,(none),unverified,group:data-pointer-missed; checked 00bcd238,data-pointer-missed
+0x00640d00,00bc2d1c,trivial,(none),ok,contract trivial; the --data-pointers run finds this ref as trivial,data-pointer-missed
+0x00667a50,00bcc574,trivial,(none),ok,contract trivial; the --data-pointers run finds this ref as trivial,data-pointer-missed
+0x00667a60,00bcc56c,unknown,(none),unverified,group:data-pointer-missed; checked 00bcd238,data-pointer-missed
+0x00667a60,output:00bcc56c,unconcluded,(none),unverified,group:data-pointer-missed; checked 00bcd238,data-pointer-missed
+0x00667b60,00bcc570,unknown,(none),unverified,group:data-pointer-missed; checked 00bcd238,data-pointer-missed
+0x00667b60,output:00bcc570,unconcluded,(none),unverified,group:data-pointer-missed; checked 00bcd238,data-pointer-missed
+0x00671bc0,00bcd238,unknown,(none),unknown,word at 0xbcd238 is 0x671bc0 in a vtable run (0x840fc0 0x840fc0 0x671bc0 0x671be0 ...); ghidra-rs finds it only with --data-pointers,data-pointer-missed
+0x00671bc0,output:00bcd238,unconcluded,(none),unverified,group:data-pointer-missed; checked 00bcd238,data-pointer-missed
+0x00672e30,00bcd260,unknown,(none),unverified,group:data-pointer-missed; checked 00bcd238,data-pointer-missed
+0x006aa6e0,00bce754,unknown,(none),unverified,group:data-pointer-missed; checked 00bcd238,data-pointer-missed
+0x006aa740,00bce758,unknown,(none),unverified,group:data-pointer-missed; checked 00bcd238,data-pointer-missed
+0x006e65a0,00bd1310,trivial,(none),ok,contract trivial; the --data-pointers run finds this ref as trivial,data-pointer-missed
+0x006e65a0,output:00bd1310,unconcluded,(none),unverified,group:data-pointer-missed; checked 00bcd238,data-pointer-missed
+0x0070b680,00bd200c,trivial,(none),ok,contract trivial; the --data-pointers run finds this ref as trivial,data-pointer-missed
+0x0070b710,00bd2014,trivial,(none),ok,contract trivial; the --data-pointers run finds this ref as trivial,data-pointer-missed
+0x00753f40,input:00753f64,unconcluded,(none),unverified,group:input-indirect-call; checked none,input-indirect-call
+0x004074e0,input:004074e0,unconcluded,(none),unverified,group:input-relocated-slot; checked none,input-relocated-slot
+0x0040a020,input:0040a020,unconcluded,(none),unverified,group:input-relocated-slot; checked none,input-relocated-slot
+0x0057c870,input:0057c870,unconcluded,(none),unverified,group:input-relocated-slot; checked none,input-relocated-slot
+0x0057de50,input:0057de50,unconcluded,(none),unverified,group:input-relocated-slot; checked none,input-relocated-slot
+0x005e68d0,input:005e68d0,unconcluded,(none),unverified,group:input-relocated-slot; checked none,input-relocated-slot
+0x005e6a20,input:005e6a20,unconcluded,(none),unverified,group:input-relocated-slot; checked none,input-relocated-slot
+0x00751ac0,input:00751bb6,unconcluded,(none),unverified,group:input-rs-concludes-some-regs; checked none,input-rs-concludes-some-regs
+0x00751ac0,input:00751d23,unconcluded,(none),unverified,group:input-rs-concludes-some-regs; checked none,input-rs-concludes-some-regs
+0x0075b260,input:00759c95,unconcluded,(none),unverified,group:input-rs-concludes-some-regs; checked none,input-rs-concludes-some-regs
+0x005439b0,input:00543b55,unconcluded,(none),unverified,group:input-switch-resolved; checked input:00667aa1,input-switch-resolved
+0x005c37f0,input:005c43ed,unconcluded,(none),unverified,group:input-switch-resolved; checked input:00667aa1,input-switch-resolved
+0x005d0750,input:005d07dc,unconcluded,(none),unverified,group:input-switch-resolved; checked input:00667aa1,input-switch-resolved
+0x005e6c20,input:005e6ce8,unconcluded,(none),unverified,group:input-switch-resolved; checked input:00667aa1,input-switch-resolved
+0x00667a60,input:00667aa1,unconcluded,(none),ok,switch cases 0x667aa8-0x667ae2 only store constants; EBX/ESI/EDI/EBP pushed then written before any read; XMM0 loaded by MOVSS,input-switch-resolved
+0x00667b60,input:00667b8b,unconcluded,(none),unverified,group:input-switch-resolved; checked input:00667aa1,input-switch-resolved
+0x0066ac90,input:0066ac9e,unconcluded,(none),unverified,group:input-switch-resolved; checked input:00667aa1,input-switch-resolved
+0x006c4230,input:006c4240,unconcluded,(none),unverified,group:input-switch-resolved; checked input:00667aa1,input-switch-resolved
+0x0043f010,input:008f944d,unconcluded,(none),unknown,ghidra-rs input:008f959b unconcluded on the same registers,input-walk-stops-elsewhere
+0x0047d7e0,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x004842b0,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x004843e0,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x00749080,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x007490f0,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x0074a180,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 input:0074a758 unconcluded on the same registers,input-walk-stops-elsewhere
+0x0074aaa0,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x0074ac30,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x0074adf0,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x0074aec0,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x0074af30,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x0074d1b0,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 input:0074d352 unconcluded on the same registers,input-walk-stops-elsewhere
+0x0074d620,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 input:00a59e09 unconcluded on the same registers,input-walk-stops-elsewhere
+0x0074daa0,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x0074dea0,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 input:0074e8f5 unconcluded on the same registers,input-walk-stops-elsewhere
+0x0074ed70,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x00751380,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x007516d0,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x00751740,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x00751ac0,input:00751d45,unconcluded,(none),unknown,ghidra-rs input:00751dd0 unconcluded on the same registers,input-walk-stops-elsewhere
+0x007521d0,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x007522d0,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x00752370,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x007527e0,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x007528f0,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x00752990,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x00752c50,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x00752f70,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x00753050,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 input:007533a2 unconcluded on the same registers,input-walk-stops-elsewhere
+0x00755080,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x007554b0,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x00757910,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x008564a0,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x008565d0,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
+0x008569d0,input:00856a7d,unconcluded,(none),unknown,ghidra-rs input:00856d0d input:00856d3d unconcluded on the same registers,input-walk-stops-elsewhere
+0x008569d0,input:00856b34,unconcluded,(none),unknown,ghidra-rs input:00856d0d input:00856d3d unconcluded on the same registers,input-walk-stops-elsewhere
+0x00521120,input:02964000,unconcluded,(none),unverified,group:input-wrapper-code; checked none,input-wrapper-code
+0x00601c30,input:029b7025,unconcluded,(none),unverified,group:input-wrapper-code; checked none,input-wrapper-code
+0x00601c30,input:EXTERNAL:0000006f,unconcluded,(none),unverified,group:input-wrapper-code; checked none,input-wrapper-code
+0x004a4ba0,,unknown,(none),unverified,group:java-no-refs-rs-has-refs; checked ,java-no-refs-rs-has-refs
+0x004dfa70,,trivial,(none),unverified,group:java-no-refs-rs-has-refs; checked ,java-no-refs-rs-has-refs
+0x00538e70,,unknown,(none),unverified,group:java-no-refs-rs-has-refs; checked ,java-no-refs-rs-has-refs
+0x005453d0,,unknown,(none),unverified,group:java-no-refs-rs-has-refs; checked ,java-no-refs-rs-has-refs
+0x00545530,,unknown,(none),unverified,group:java-no-refs-rs-has-refs; checked ,java-no-refs-rs-has-refs
+0x005455b0,,unknown,(none),unverified,group:java-no-refs-rs-has-refs; checked ,java-no-refs-rs-has-refs
+0x0054c150,,trivial,(none),ok,Java says no references but 0x54e574 is CALL 0x54c150 (ghidra-rs lists it); contract trivial,java-no-refs-rs-has-refs
+0x0054c500,,unknown,(none),unverified,group:java-no-refs-rs-has-refs; checked ,java-no-refs-rs-has-refs
+0x0054d580,,unknown,(none),unverified,group:java-no-refs-rs-has-refs; checked ,java-no-refs-rs-has-refs
+0x0054d630,,unknown,(none),unverified,group:java-no-refs-rs-has-refs; checked ,java-no-refs-rs-has-refs
+0x00550cb0,,unknown,(none),unverified,group:java-no-refs-rs-has-refs; checked ,java-no-refs-rs-has-refs
+0x006d6d50,,unknown,(none),unverified,group:java-no-refs-rs-has-refs; checked ,java-no-refs-rs-has-refs
+0x00755b50,,trivial,(none),ok,Java says no references but 0x755f67 is CALL 0x755b50 (ghidra-rs lists it); contract trivial,java-no-refs-rs-has-refs
+0x00827a60,,trivial,(none),unverified,group:java-no-refs-rs-has-refs; checked ,java-no-refs-rs-has-refs
+0x00626f00,00619b29,unknown,ok,unverified,group:java-stops-at-call; checked none,java-stops-at-call
+0x00434f70,004fd6b0,unknown,ok,unverified,group:live-at-return-rule; checked 0073feae,live-at-return-rule
+0x00434fe0,00665afc,unknown,ok,unverified,group:live-at-return-rule; checked 0073feae,live-at-return-rule
+0x0050e610,0050dd3b,unknown,ok,unverified,group:live-at-return-rule; checked 0073feae,live-at-return-rule
+0x0056b0c0,0057702e,unknown,ok,unverified,group:live-at-return-rule; checked 0073feae,live-at-return-rule
+0x0056b0c0,00577054,unknown,ok,unverified,group:live-at-return-rule; checked 0073feae,live-at-return-rule
+0x0056b0c0,005775c2,unknown,ok,unverified,group:live-at-return-rule; checked 0073feae,live-at-return-rule
+0x0056b0c0,005776dc,unknown,ok,unverified,group:live-at-return-rule; checked 0073feae,live-at-return-rule
+0x0060e390,004bc9ce,unknown,ok,unverified,group:live-at-return-rule; checked 0073feae,live-at-return-rule
+0x0060e5f0,00609da6,unknown,ok,unverified,group:live-at-return-rule; checked 0073feae,live-at-return-rule
+0x006180e0,0062e663,unknown,ok,unverified,group:live-at-return-rule; checked 0073feae,live-at-return-rule
+0x00665500,00521a8a,unknown,ok,unverified,group:live-at-return-rule; checked 0073feae,live-at-return-rule
+0x00665a60,004fd81c,unknown,ok,unverified,group:live-at-return-rule; checked 0073feae,live-at-return-rule
+0x006b3670,004bcb5c,unknown,ok,unverified,group:live-at-return-rule; checked 0073feae,live-at-return-rule
+0x006b3670,004bcb7d,unknown,ok,unverified,group:live-at-return-rule; checked 0073feae,live-at-return-rule
+0x006b3670,004bcb9e,unknown,ok,unverified,group:live-at-return-rule; checked 0073feae,live-at-return-rule
+0x0073c970,0073feae,unknown,ok,ok,after call: XMM0/XMM1 written by MOVSS loads at 0x73fec1/0x73fec9; ECX only at PUSH ECX 0x73ff0e overwritten by FSTP [ESP] (stack reserve); main paths checked,live-at-return-rule
+0x0073c970,0073ff68,unknown,ok,unverified,group:live-at-return-rule; checked 0073feae,live-at-return-rule
+0x00874760,008735ad,unknown,ok,unverified,group:live-at-return-rule; checked 0073feae,live-at-return-rule
+0x00401740,00548f51,trivial,(none),ok,bytes e8: CALL 0x401740; contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
+0x004b2a50,005b2afb,unknown,(none),unknown,bytes e8 at site: CALL 0x4b2a50 then POP EDI/ESI/ECX: EDX live at return; same undecoded tail of 0x5b2950,missed-code-undecoded
+0x00538cc0,005491be,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
+0x00541180,00545e1a,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
+0x00544610,00545ce0,trivial,(none),ok,bytes e8: CALL 0x544610; contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
+0x00544610,00545eeb,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
+0x00544610,005469c5,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
+0x0056b830,00549183,unknown,(none),unknown,bytes e8 at site: CALL 0x56b830 then MOV EAX;3/ADD ESP/RET: ECX/EDX/XMM0 live at return; site past 0x549020's extent; not decoded,missed-code-undecoded
+0x00587d80,00545da3,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
+0x00587d80,00545db7,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
+0x00597e80,0062307e,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
+0x0059f770,005b2a56,unknown,(none),unknown,bytes e8 at site: CALL 0x59f770 then CMP EAX; site past 0x5b2950's extent; not decoded,missed-code-undecoded
+0x0059f770,005b2a98,unknown,(none),unknown,bytes e8 at site: CALL 0x59f770; same undecoded tail of 0x5b2950 as 0x5b2a56,missed-code-undecoded
+0x0059f770,005b2ad6,unknown,(none),unverified,group:missed-code-undecoded; checked 005b2afb,missed-code-undecoded
+0x0059f770,005b2aed,unknown,(none),unverified,group:missed-code-undecoded; checked 005b2afb,missed-code-undecoded
+0x005ffb10,004cd401,unknown,(none),unknown,PUSH 0x5ffb10 at site (code constant in undecoded tail of 0x4cd090),missed-code-undecoded
+0x005ffe90,004cd3e5,unknown,(none),unknown,JMP 0x5ffe90 at site (tail jump); site past 0x4cd090's extent; not decoded,missed-code-undecoded
+0x0064a000,005d961a,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
+0x00672e30,004c07be,unknown,(none),unknown,CALL EAX at site with EAX=[EDX+0x14] vtable load (Java resolved it to 0x672e30); site past 0x4c06e0's extent; not decoded,missed-code-undecoded
+0x006774c0,004c08b3,unknown,(none),unknown,CALL EAX at site (Java resolved it to 0x6774c0); same undecoded tail of 0x4c06e0 as 0x4c07be,missed-code-undecoded
+0x0084af20,0060f1e0,unknown,(none),unknown,bytes e8 at site: CALL 0x84af20 then MOV EAX;ESI/POP ESI/RET 4 (same destructor shape as 0x752050); code past functions.csv extent not decoded,missed-code-undecoded
+0x0084af20,0061bb70,unknown,(none),unknown,bytes e8 at site: CALL 0x84af20 then MOV EAX;ESI/POP ESI/RET 4 (same destructor shape as 0x752050); not decoded,missed-code-undecoded
+0x0084af20,00752050,unknown,(none),unknown,bytes e8 at site: CALL 0x84af20 (GameFree) in deleting destructor 0x752040 (vtable 0xbd4fac only); ECX/EDX live at its RET 0x752058; ghidra-rs never decodes 0x752040,missed-code-undecoded
+0x0088cdc0,00891372,trivial,(none),ok,bytes e8: CALL 0x88cdc0; contract trivial (ghidra-rs rows for it are trivial); site past 0x891320's extent,missed-code-undecoded
+0x0088cdc0,0089c0f3,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
+0x0088cdc0,0089c302,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
+0x0088cdc0,00956d0d,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
+0x0088cdc0,0095c862,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
+0x0088cdc0,0096aab2,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
+0x0088cdc0,00a06b12,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
+0x0088cdc0,00a089c4,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
+0x0088cdc0,00a08b64,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
+0x0049f960,024d8150,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-ref-securom-section
+0x0049f960,output:024d8150,unconcluded,(none),unverified,group:missed-ref-securom-section; checked 024fd24e,missed-ref-securom-section
+0x004bdf30,024fd24e,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-ref-securom-section
+0x00587d80,0296809d,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-ref-securom-section
+0x00627bf0,024f8bba,unknown,(none),unknown,bytes 68 f0 7b 62 00 at 0x24f8bba: PUSH 0x627bf0 (code constant in SecuROM code); ghidra-rs does not decode it,missed-ref-securom-section
+0x0068c240,024dd66c,unknown,(none),unknown,word at 0x24dd66c (SecuROM section) is 0x68c240; no ref in ghidra-rs even with --data-pointers,missed-ref-securom-section
+0x0068c240,output:024dd66c,unconcluded,(none),unverified,group:missed-ref-securom-section; checked 024fd24e,missed-ref-securom-section
+0x0083dec0,008397fa,ok,trivial,ok,trivial by the shared rule: real body runs 0x83dec0 -> fragment 0x52f391 -> 0x83def2 (Java makes 0x83def2 a separate function); it writes XMM0 at 0x83df6e,outlined-tail-body
+0x0083dec0,00839876,unknown,trivial,ok,as 008397fa (tail jump): contract trivial over the real body,outlined-tail-body
+0x0083dec0,0083dd29,ok,trivial,ok,as 008397fa: body through outlined fragment 0x52f391 writes every clobber,outlined-tail-body
+0x0083dec0,00be23d4,unknown,trivial,ok,as 008397fa (data ref): contract trivial over the real body,outlined-tail-body
+0x006f19b0,output:006e693b,unconcluded,(none),unverified,group:output-java-no-instruction; checked none,output-java-no-instruction
+0x008df760,output:00402a08,unconcluded,(none),unverified,group:output-java-no-instruction; checked none,output-java-no-instruction
+0x0051e690,output:0051f005,unconcluded,(none),unverified,group:output-live-at-return-rule; checked output:006f70c7,output-live-at-return-rule
+0x0051e690,output:006f7cd7,unconcluded,(none),unverified,group:output-live-at-return-rule; checked output:006f70c7,output-live-at-return-rule
+0x00665a60,output:006f739e,unconcluded,(none),unverified,group:output-live-at-return-rule; checked output:006f70c7,output-live-at-return-rule
+0x00674620,output:006f70c7,unconcluded,(none),unknown,containing 0x6f6f80 is a switch on EAX; rs drops EAX#1-3 by never_returned but an unwritten path returns the caller's EAX (the index); callers of 0x6f6f80 not checked,output-live-at-return-rule
+0x0041b7b0,output:00ba8cb0,unconcluded,(none),unverified,group:output-not-returned-by-original; checked output:00bbcaa0,output-not-returned-by-original
+0x0042f850,output:00ba90d8,unconcluded,(none),ok,X87#0 not lost: path 0x42f858 CALL EDX/TEST EAX/JZ 0x42f86a RET returns with no x87 push so the original never returns st0,output-not-returned-by-original
+0x0042f850,output:00ba9280,unconcluded,(none),ok,X87#0 not lost: path 0x42f858 CALL EDX/TEST EAX/JZ 0x42f86a RET returns with no x87 push so the original never returns st0,output-not-returned-by-original
+0x0042f850,output:00ba93e8,unconcluded,(none),ok,X87#0 not lost: path 0x42f858 CALL EDX/TEST EAX/JZ 0x42f86a RET returns with no x87 push so the original never returns st0,output-not-returned-by-original
+0x0042f850,output:00ba9520,unconcluded,(none),ok,X87#0 not lost: path 0x42f858 CALL EDX/TEST EAX/JZ 0x42f86a RET returns with no x87 push so the original never returns st0,output-not-returned-by-original
+0x0042f850,output:00ba9668,unconcluded,(none),ok,X87#0 not lost: path 0x42f858 CALL EDX/TEST EAX/JZ 0x42f86a RET returns with no x87 push so the original never returns st0,output-not-returned-by-original
+0x0042f850,output:00ba97a0,unconcluded,(none),ok,X87#0 not lost: path 0x42f858 CALL EDX/TEST EAX/JZ 0x42f86a RET returns with no x87 push so the original never returns st0,output-not-returned-by-original
+0x0042f850,output:00ba9900,unconcluded,(none),ok,X87#0 not lost: path 0x42f858 CALL EDX/TEST EAX/JZ 0x42f86a RET returns with no x87 push so the original never returns st0,output-not-returned-by-original
+0x0042f850,output:00ba9a38,unconcluded,(none),ok,X87#0 not lost: path 0x42f858 CALL EDX/TEST EAX/JZ 0x42f86a RET returns with no x87 push so the original never returns st0,output-not-returned-by-original
+0x0042f850,output:00ba9b70,unconcluded,(none),ok,X87#0 not lost: path 0x42f858 CALL EDX/TEST EAX/JZ 0x42f86a RET returns with no x87 push so the original never returns st0,output-not-returned-by-original
+0x0042f850,output:00ba9ca8,unconcluded,(none),ok,X87#0 not lost: path 0x42f858 CALL EDX/TEST EAX/JZ 0x42f86a RET returns with no x87 push so the original never returns st0,output-not-returned-by-original
+0x0042f850,output:00ba9e80,unconcluded,(none),ok,X87#0 not lost: path 0x42f858 CALL EDX/TEST EAX/JZ 0x42f86a RET returns with no x87 push so the original never returns st0,output-not-returned-by-original
+0x0042f850,output:00ba9fe8,unconcluded,(none),ok,X87#0 not lost: path 0x42f858 CALL EDX/TEST EAX/JZ 0x42f86a RET returns with no x87 push so the original never returns st0,output-not-returned-by-original
+0x0042f850,output:00baa120,unconcluded,(none),ok,X87#0 not lost: path 0x42f858 CALL EDX/TEST EAX/JZ 0x42f86a RET returns with no x87 push so the original never returns st0,output-not-returned-by-original
+0x0042f850,output:00baa258,unconcluded,(none),ok,X87#0 not lost: path 0x42f858 CALL EDX/TEST EAX/JZ 0x42f86a RET returns with no x87 push so the original never returns st0,output-not-returned-by-original
+0x005c37f0,output:00b99ddc,unconcluded,(none),unverified,group:output-not-returned-by-original; checked output:00bbcaa0,output-not-returned-by-original
+0x005d0750,output:00b997ec,unconcluded,(none),unverified,group:output-not-returned-by-original; checked output:00bbcaa0,output-not-returned-by-original
+0x005e6c20,output:00b9891c,unconcluded,(none),unverified,group:output-not-returned-by-original; checked output:00bbcaa0,output-not-returned-by-original
+0x00627540,output:00bbc830,unconcluded,(none),ok,nothing lost: path JZ 0x6275ac -> POP EDI/RET 8 leaves EAX unwritten and pushes no x87 value,output-not-returned-by-original
+0x00627540,output:00bbc8b0,unconcluded,(none),ok,nothing lost: path JZ 0x6275ac -> POP EDI/RET 8 leaves EAX unwritten and pushes no x87 value,output-not-returned-by-original
+0x00627540,output:00bbc9a0,unconcluded,(none),ok,nothing lost: path JZ 0x6275ac -> POP EDI/RET 8 leaves EAX unwritten and pushes no x87 value,output-not-returned-by-original
+0x00627540,output:00bbca20,unconcluded,(none),ok,nothing lost: path JZ 0x6275ac -> POP EDI/RET 8 leaves EAX unwritten and pushes no x87 value,output-not-returned-by-original
+0x00627540,output:00bbcaa0,unconcluded,(none),ok,nothing lost: path JZ 0x6275ac -> POP EDI/RET 8 leaves EAX unwritten and pushes no x87 value,output-not-returned-by-original
+0x00627540,output:00bbcea0,unconcluded,(none),ok,nothing lost: path JZ 0x6275ac -> POP EDI/RET 8 leaves EAX unwritten and pushes no x87 value,output-not-returned-by-original
+0x00627540,output:00bbcf20,unconcluded,(none),ok,nothing lost: path JZ 0x6275ac -> POP EDI/RET 8 leaves EAX unwritten and pushes no x87 value,output-not-returned-by-original
+0x0041d7a0,output:0041e69a,violation,unconcluded,unverified,Java reader 0x621837 MOV BL;AL is real code after disguised call 0x621822 (PUSH 0x621830; JMP slot 0x413230); path from 0x41e69a not traced; ghidra-rs stops at wrapper 0x25621c0,output-walk-stops-wrapper
+0x00579860,00576c54,unknown,violation,unverified,group:rs-walks-further-violation; checked none,rs-walks-further-violation
+0x005806a0,005745d2,unknown,violation,unverified,group:rs-walks-further-violation; checked none,rs-walks-further-violation
+0x00589640,0062937c,unknown,violation,unverified,group:rs-walks-further-violation; checked none,rs-walks-further-violation
+0x0059d660,0070043d,unknown,violation,unverified,group:rs-walks-further-violation; checked none,rs-walks-further-violation
+0x00655b10,004c9502,unknown,violation,unverified,group:rs-walks-further-violation; checked none,rs-walks-further-violation
+0x006cdc60,006a7abe,unknown,violation,unverified,group:rs-walks-further-violation; checked none,rs-walks-further-violation
+0x0074d620,007528d2,unknown,violation,unverified,group:rs-walks-further-violation; checked none,rs-walks-further-violation
+0x00824a50,004394f6,unknown,violation,unverified,group:rs-walks-further-violation; checked none,rs-walks-further-violation
+0x00824a50,0043a146,unknown,violation,unverified,group:rs-walks-further-violation; checked none,rs-walks-further-violation
+0x0082ed10,0082dfad,unknown,violation,unverified,group:rs-walks-further-violation; checked none,rs-walks-further-violation
+0x0084af20,00633f7f,unknown,violation,unverified,group:rs-walks-further-violation; checked none,rs-walks-further-violation
+0x0084af20,00635079,unknown,violation,unverified,group:rs-walks-further-violation; checked none,rs-walks-further-violation
+0x0084af20,007384ba,unknown,violation,unverified,group:rs-walks-further-violation; checked none,rs-walks-further-violation
+0x0084af20,00826513,unknown,violation,unverified,group:rs-walks-further-violation; checked none,rs-walks-further-violation
+0x0084af20,008271a6,unknown,violation,unverified,group:rs-walks-further-violation; checked none,rs-walks-further-violation
+0x0085d9a0,0059d886,unknown,violation,unverified,group:rs-walks-further-violation; checked none,rs-walks-further-violation
+0x0085d9a0,0059f7cd,unknown,violation,unverified,group:rs-walks-further-violation; checked none,rs-walks-further-violation
+0x00869b70,00869962,unknown,violation,unverified,group:rs-walks-further-violation; checked none,rs-walks-further-violation
+0x008731a0,0084ed5f,unknown,violation,unverified,group:rs-walks-further-violation; checked none,rs-walks-further-violation
+0x0056b0c0,0055ed37,ok,unknown,unverified,group:rs-walk-stops-unknown; checked none,rs-walk-stops-unknown
+0x0056b0c0,0055f2c8,ok,unknown,unverified,group:rs-walk-stops-unknown; checked none,rs-walk-stops-unknown
+0x00665a60,00667aea,ok,unknown,unverified,group:rs-walk-stops-unknown; checked none,rs-walk-stops-unknown
+0x00665a60,00667b9a,ok,unknown,unverified,group:rs-walk-stops-unknown; checked none,rs-walk-stops-unknown
+0x00406570,006aa920,unknown,ok,ok,no FNSTSW/FSTSW/SAHF reader of C0-C3 in 0x6aa920-0x6aab40 (switch cases incl.); x87 status is volatile at return,switch-resolved
+0x00406570,006aa961,unknown,ok,ok,same function as 006aa920: no reader of C0-C3,switch-resolved
+0x0041f3d0,008e690b,unknown,ok,unverified,group:switch-resolved; checked 006aa920,switch-resolved
+0x0041f3d0,008e692d,unknown,ok,unverified,group:switch-resolved; checked 006aa920,switch-resolved
+0x006a3980,007060a6,unknown,ok,unverified,group:switch-resolved; checked 006aa920,switch-resolved
+0x00736bf0,00740334,unknown,ok,unverified,group:switch-resolved; checked 006aa920,switch-resolved
+0x00736bf0,00740864,unknown,ok,unverified,group:switch-resolved; checked 006aa920,switch-resolved
+0x0088ec60,008e6ba7,unknown,ok,unverified,group:switch-resolved; checked 006aa920,switch-resolved
+0x0088ec60,008e6bd1,unknown,ok,unverified,group:switch-resolved; checked 006aa920,switch-resolved
+0x005439b0,,unknown,trivial,not-a-caller,both report no references (status differs: written-by-original sets differ),written-by-original-differs
+0x0054c990,,trivial,unknown,not-a-caller,both report no references,written-by-original-differs

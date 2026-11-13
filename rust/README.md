@@ -476,6 +476,17 @@ By cause:
 - inputs: some rows (e.g. 0x54c990 HumanExit_Update) come from mercs2's DefineTableFunctions
   and ClearFalseNoReturn passes, which the `--functions-from` export lacks.
 
+`tools/abi-ledger.csv` judges the shadow diff by safety rather than agreement with Java (see
+`../DESIGN.md`). It has one row for each `differ` and `Java-only` row of the shadow run at
+ghidra-rs bd56d2f09a against mercs2 395ba6b (58 and 174 rows; that run gave same 55,362, differ
+58, Java only 174, ghidra-rs only 309; the ghidra-rs-only rows are not in the ledger yet).
+The columns are `address,site,java,ghidra_rs` (from the diff), `truth` (`ok`, `violation`,
+`unknown`, `not-a-caller`, or `unverified` for a row grouped but not checked by itself),
+`evidence` (the bytes or reasoning behind the truth, or `group:<cause>; checked <site>` naming
+a checked row of the group) and `cause` (a kebab-case group). mercs2's abi_test callee trace
+(`build/abi_callees.csv`) held one row at that commit, so every truth comes from the
+disassembly and the contracts.
+
 Every `violation` site of the reference is written with that status: the eight missing
 before the coverage changes (0x4793ff, 0x47940e, 0x479440, 0x479445, 0x479450, 0x47945b,
 0x479466 through the folded pointer at 0x553224, and 0x6fd52b through the address table at

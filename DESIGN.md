@@ -58,6 +58,26 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   and a mercs2 function that shows it. User's decision (chosen over a separate p-code checker
   first).
 
+
+- 2026-11-12: Goal: ghidra-rs replaces Java CheckAbiCallers as the decider of mercs2's caller check
+  (today a second opinion, `tools/ghidra-rs-shadow.sh` in mercs2). It goes before the pending
+  R1/S6 decompiler decision, since mercs2 uses the check daily. Claude's decisions (the user left
+  them to Claude, not being a reverse engineer):
+  - What counts: safety, not agreement with Java. The check exists so a rewrite never clobbers a
+    register a caller relies on. The costly error is a missed `violation` (a real caller missing,
+    or `ok` where a register is read). An extra caller or `unknown` only costs a manual look.
+  - Who judges a disagreement: not Java. In order: (1) mercs2's abi_test trace of calls the
+    original actually made, which proves a caller exists but never that one doesn't; (2) the
+    bytes at the call site, checked by hand (disassembly and the callee's contract). Each verdict
+    goes in a ledger in this repo (`rust/tools/abi-ledger.csv`: address, site, java, ghidra_rs,
+    truth, evidence), grouped by cause.
+  - The bar to switch: every row of the shadow diff is in the ledger, and in none is ghidra-rs
+    wrong on the unsafe side (missing a true caller, or `ok`/`(none)` where the truth is
+    `violation`). Then three mercs2 sweeps with the roles swapped (ghidra-rs decides, Java shadows)
+    with no new unsafe-side error. mercs2's own DESIGN.md records the switch; this repo doesn't
+    write there.
+  - Speed is not part of the bar (already seconds against minutes); timing is reported, not gated.
+
 ## Milestones
 
 1. Load ELF/PE/Mach-O, decode x86-64 via `.sla`, and lift to p-code. A CLI dumps the disassembly and p-code.
