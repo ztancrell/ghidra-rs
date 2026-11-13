@@ -1,6 +1,6 @@
 //! The rules on concatenation: `RuleConcatShift`, `RuleConcatCommute`, `RuleConcatZext`,
 //! `RuleConcatZero`, `RuleConcatLeftShift`, `RuleHumptyDumpty`, `RuleDumptyHump`,
-//! `RuleHumptyOr`, `RulePiece2Zext`, `RulePiece2Sext` (ruleaction.cc).
+//! `RuleHumptyOr`, `RulePiece2Zext`, `RulePiece2Sext`, `RulePiecePathology` (ruleaction.cc).
 
 use super::*;
 
@@ -298,4 +298,118 @@ pub(super) fn piece_2_sext(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32>
     fd.op_remove_input(op, 0);
     fd.op_set_opcode(op, IntSext);
     Ok(1)
+}
+
+/// Port of `RulePiecePathology::isPathology`: whether `vn`, through COPYs and MULTIEQUALs,
+/// comes from an unmapped input or from a call whose output is not being recovered: bytes a
+/// PIECE takes from there are not a real value.
+fn is_pathology(fd: &Funcdata, start: VarnodeId) -> Result<bool> {
+    let silent_call = |call: OpId| fd.call_of(call).is_some_and(|c| fd.call(c).active_output.is_none());
+    let mut worklist: Vec<OpId> = Vec::new();
+    let mut marked = HashSet::new();
+    let (mut pos, mut slot, mut vn) = (0, 0, start);
+    loop {
+        if fd.vn(vn).is_input() && !fd.vn(vn).has(VnFlags::PERSIST) {
+            return Ok(true);
+        }
+        let mut cur = def(fd, vn);
+        while let Some(op) = cur {
+            cur = None;
+            match fd.op(op).opc {
+                Copy => {
+                    vn = inp(fd, op, 0)?;
+                    cur = def(fd, vn);
+                }
+                Multiequal if marked.insert(op) => worklist.push(op),
+                Indirect => {
+                    let target = fd.iop_target(inp(fd, op, 1)?);
+                    if target.is_some_and(|t| fd.op(t).is_call() && silent_call(t)) {
+                        return Ok(true);
+                    }
+                }
+                Call | Callind if silent_call(op) => return Ok(true),
+                // the C++ loop does not leave this op
+                Call | Callind => return err("piecepathology: a call with an active output is not ported"),
+                _ => {}
+            }
+        }
+        let Some(&multi) = worklist.get(pos) else { return Ok(false) };
+        if slot < ins(fd, multi).len() {
+            vn = inp(fd, multi, slot)?;
+            slot += 1;
+        } else {
+            pos += 1;
+            let Some(&next) = worklist.get(pos) else { return Ok(false) };
+            vn = inp(fd, next, 0)?;
+            slot = 1;
+        }
+    }
+}
+
+/// Port of `RulePiecePathology::tracePathologyForward`: the calls and RETURNs the PIECE `op`
+/// flows into, through COPY, INDIRECT and MULTIEQUAL, consume only its least significant
+/// part (`setInputBytesConsumed`, `setReturnBytesConsumed`). Returns the records changed.
+fn trace_pathology_forward(fd: &mut Funcdata, op: OpId) -> Result<i32> {
+    let bytes = fd.vn(inp(fd, op, 1)?).size;
+    let mut count = 0;
+    let mut worklist = vec![op];
+    let mut marked = HashSet::from([op]);
+    let mut pos = 0;
+    while let Some(&cur) = worklist.get(pos) {
+        pos += 1;
+        let out_vn = out(fd, cur)?;
+        let readers: Vec<OpId> = fd.vn(out_vn).descend.iter().copied().collect();
+        for reader in readers {
+            let opc = fd.op(reader).opc;
+            match opc {
+                Copy | Indirect | Multiequal if marked.insert(reader) => worklist.push(reader),
+                Call | Callind => {
+                    let Some(c) = fd.call_of(reader) else { continue };
+                    if fd.call(c).active_input.is_some() || fd.call(c).proto.locked.is_some() {
+                        continue;
+                    }
+                    for slot in 1..ins(fd, reader).len() {
+                        if inp(fd, reader, slot)? == out_vn && fd.call_mut(c).set_input_bytes_consumed(slot, bytes) {
+                            count += 1;
+                        }
+                    }
+                }
+                Return if fd.proto.locked.is_none() && fd.proto.set_return_bytes_consumed(bytes) => count += 1,
+                _ => {}
+            }
+        }
+    }
+    Ok(count)
+}
+
+/// Port of `RulePiecePathology`: a PIECE whose high part is pathological (a SUBPIECE of an
+/// unmapped input or of a dead call output, or an indirect creation next to a real low part).
+pub(super) fn piece_pathology(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
+    let vn = inp(fd, op, 0)?;
+    let Some(sub_op) = def(fd, vn) else { return Ok(0) };
+    match fd.op(sub_op).opc {
+        Subpiece => {
+            if fd.vn(inp(fd, sub_op, 1)?).offset == 0 || !is_pathology(fd, inp(fd, sub_op, 0)?)? {
+                return Ok(0);
+            }
+        }
+        Indirect if fd.op(sub_op).flags.has(OpFlags::INDIRECT_CREATION) => {
+            let lsb_vn = inp(fd, op, 1)?;
+            let Some(lsb_op) = def(fd, lsb_vn) else { return Ok(0) };
+            // from a unary or binary operation, or a call with a locked output
+            if !fd.op(lsb_op).opc.is_unary_or_binary() {
+                let locked = fd.call_of(lsb_op).is_some_and(|c| fd.call(c).proto.locked.is_some());
+                if !fd.op(lsb_op).is_call() || !locked {
+                    return Ok(0);
+                }
+            }
+            // into a contiguous register
+            let (lsb, hi) = (fd.vn(lsb_vn), fd.vn(vn));
+            if (lsb.space, lsb.offset.wrapping_add(u64::from(lsb.size))) != (hi.space, hi.offset) {
+                return Ok(0);
+            }
+        }
+        _ => return Ok(0),
+    }
+    trace_pathology_forward(fd, op)
 }

@@ -425,9 +425,21 @@ pub(crate) struct FuncProto {
     pub(crate) output: Option<(Space, u64, u32)>,
     /// a locked prototype (`parse line extern`, stage S6): inputs, output, model locked
     pub(crate) locked: Option<Box<super::locked::Locked>>,
+    /// `returnBytesConsumed`: the bytes of the return value the callers are known to use, 0
+    /// for all (a hint to dead code, from `RulePiecePathology`)
+    pub(crate) return_bytes_consumed: u32,
 }
 
 impl FuncProto {
+    /// Port of `FuncProto::setReturnBytesConsumed`: the value only gets smaller.
+    pub(crate) fn set_return_bytes_consumed(&mut self, val: u32) -> bool {
+        let smaller = val != 0 && (self.return_bytes_consumed == 0 || val < self.return_bytes_consumed);
+        if smaller {
+            self.return_bytes_consumed = val;
+        }
+        smaller
+    }
+
     /// Port of `FuncProto::setModel`: the model and its extrapop, except that a model replacing
     /// another does not overwrite the extrapop with unknown.
     pub(crate) fn set_model(&mut self, models: &Models, id: ModelId) {
@@ -474,9 +486,24 @@ pub(crate) struct CallSpec {
     pub(crate) active_output: Option<ParamActive>,
     /// `effective_extrapop`, from `ActionStackPtrFlow`
     pub(crate) effective_extrapop: Option<i32>,
+    /// `inputConsume`: per input slot of the CALL, the bytes the callee is known to use, 0
+    /// for all
+    pub(crate) input_consume: Vec<u32>,
 }
 
 impl CallSpec {
+    /// Port of `FuncCallSpecs::setInputBytesConsumed`: the value only gets smaller.
+    pub(crate) fn set_input_bytes_consumed(&mut self, slot: usize, val: u32) -> bool {
+        if self.input_consume.len() <= slot {
+            self.input_consume.resize(slot + 1, 0);
+        }
+        let smaller = self.input_consume[slot] == 0 || val < self.input_consume[slot];
+        if smaller {
+            self.input_consume[slot] = val;
+        }
+        smaller
+    }
+
     /// A call site before analysis (the `FuncCallSpecs` constructor).
     pub(crate) fn new(op: OpId, entry: Option<u64>, known: bool) -> CallSpec {
         CallSpec {
@@ -488,6 +515,7 @@ impl CallSpec {
             active_input: None,
             active_output: None,
             effective_extrapop: None,
+            input_consume: Vec::new(),
         }
     }
 

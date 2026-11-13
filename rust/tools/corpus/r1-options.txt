@@ -90,4 +90,3 @@ option togglerule orpredicate off
 option togglerule funcptrencoding off
 option togglerule unsigned2float off
 option togglerule int2floatcollapse off
-option togglerule piecepathology off

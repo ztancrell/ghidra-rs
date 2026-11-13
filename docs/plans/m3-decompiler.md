@@ -531,6 +531,24 @@ M500 498 / 500; S6 unlocked, locked `void`, locked `int4` and callees `int4(int4
 M8 8 / 8, M500 498 / 500 (498 / 499 the reference finishes; the miss is 0x4919f0).
 Superseded: the "446 / 446 non-SSE" results of the S6 section above.
 
+### R3 part two: done on branch `m3-r3b` (2026-11-13)
+
+The `subvar` group: `SubvariableFlow` (`decomp/subflow.rs`), `SplitFlow` (`decomp/splitflow.rs`,
+on `transform.rs`), the rules `subvar_and`, `subvar_subpiece`, `splitflow`, `subvar_compzero`,
+`subvar_shift`, `subvar_zext`, `subvar_sext` (`rules/subvar.rs`), and `piecepathology` with the
+consumed-bytes hints dead code reads. Superseded: the "Not ported, left for a follow-up (R3b)"
+items above for the `subvar` rules and `RulePiecePathology`. Still not ported: `RulePtrFlow`
+(group `subvar`; switched off in the check), `RuleSubfloatConvert`/`SubfloatFlow` (group
+`floatprecision`, R4), `SplitDatatype` (cleanup pool), `prefersplit.cc` (no x86 use).
+
+New check, group `subvar` on (`rust/tools/corpus/subvar-options.txt`, from `r1-options.sh`):
+M8 8 / 8, M500 497 / 499 (99.6 %, bar 98 %: reached). Existing bars: R3 check 497 / 499 (was
+495; R1 set 452 / 453, lane-divide set 45 / 46), paramdouble 500 / 500, S4 and the four S6
+checks 498 / 500 each. Two older faults fixed on the way (details in `rust/README.md`, "Stage
+R3 part two"): the main loop's non-zero masks folded constants (0x6fa6e0, 0x4891e0), and
+unreachable-block removal refused readers in other dead blocks. Left: 0x47a6b0
+(`ActionConditionalExe`), 0x4919f0 (a block the reference empties).
+
 ## Running stages in parallel
 
 Strict chain first: S0 → S1a → S1b → S2. After S2 the work fans out. Under the cap of two
