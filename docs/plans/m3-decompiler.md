@@ -368,7 +368,7 @@ differs from the table row:
 
 `print raw` with types at `break start assignhigh` (`DECOMP_RAW_EXTRA=1`,
 `rust/tools/corpus/s6-options.txt`: the S4 options with `typerecovery` on and its five R5 rules
-toggled off): M8 8 / 8, M500 446 / 500: identical on every function the reference finishes (499) except the 53 that use whole SSE registers and wait for `ActionLaneDivide` (R3), as in S4. Superseded: with R3 merged, 498 / 499 (0x4919f0 differs), see "R3". Details in `rust/README.md`, "Stage S6". Where it differs
+toggled off; superseded (R5): they are on now): M8 8 / 8, M500 446 / 500: identical on every function the reference finishes (499) except the 53 that use whole SSE registers and wait for `ActionLaneDivide` (R3), as in S4. Superseded: with R3 merged, 498 / 499 (0x4919f0 differs), see "R3". Details in `rust/README.md`, "Stage S6". Where it differs
 from the table row:
 
 - Ported: the type store (`types.rs`, the kinds inference reaches with the rules off, plus
@@ -607,6 +607,61 @@ not finish); subvar check and R3 check 497 / 499 each; paramdouble 500 / 500; S4
 four S6 checks (unlocked, `void`, `int4`, callees) 498 / 500 each (0x4919f0; 0x4c48d0).
 Superseded: the 495 / 499 above (0x4891e0 and 0x6fa6e0 are fixed by part two's non-zero masks)
 and the callee check's 497 (the reference ran 0x5b59c0 this time).
+
+### R5: in part on branch `m3-r5` (2026-11-13)
+
+Slice 1 of five (the plan's suggested slices: pointer rules; `RuleLoadVarnode`/`RuleStoreVarnode`
+and removing `jumptable::fold_constants`; double.cc; the `cleanup` leftovers; constseq and
+bitfield). Ported: the `typerecovery` pointer rules `RulePtrArith` (with `AddTreeState`),
+`RuleStructOffset0`, `RulePushPtr` (pool `oppool2`, until now an empty leaf) and `RulePtraddUndo`,
+`RulePtrsubUndo` (`oppool1`), in `rules/ptrarith.rs`; `PcodeOp::stopsTypePropagation` in
+`getLocalType` and `Varnode::stopsUpPropagation` in `propagateTypeEdge` (they land with the rules
+that set them); `TypeOpPtradd::propagateType` (S6 failed on it) and `print raw` of PTRADD.
+Superseded: the S6 notes "`stopsTypePropagation`/`stopsUpPropagation` stay unported" and "five
+R5 rules toggled off" (`s6-options.txt` no longer switches them off).
+
+Not ported, failing loudly where reached: `TypePointerRel` (the type store never makes one, so
+`isFormalPointerRel` is false), struct sub-types inside the rules (`TypeStruct::getSubType`,
+`isOffsetValid`, `nearestArrayedComponent`), unions (`needsResolution`), and
+`AddTreeState::assignPropagatedType` (only after type recovery gives up). Space-base types answer
+`nearestArrayedComponent` with false: their scopes hold only functions and external references,
+neither arrayed.
+
+Check: `rust/tools/corpus/r5-options.txt` from `r1-options.sh` (groups `analysis`, `cleanup`,
+`typerecovery` on; the script now also reads `oppool2`), with and without types:
+
+```sh
+export DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst
+DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=$PWD/rust/tools/corpus/r5-options.txt rust/tools/decomp-diff.sh m8
+DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=$PWD/rust/tools/corpus/r5-options.txt TIMEOUT=60 rust/tools/decomp-diff.sh m500
+BREAK=assignhigh OPTIONS=$PWD/rust/tools/corpus/r5-options.txt TIMEOUT=60 rust/tools/decomp-diff.sh m500
+```
+
+| check (`r5-options.txt`) | identical |
+|---|---|
+| M8, types printed | 8 / 8 |
+| M500, `print raw` without types | 497 / 500; 497 / 498 of the functions the reference finishes (99.8 %) |
+| M500, types printed (`DECOMP_RAW_EXTRA=1`) | 487 / 500; 487 / 498 (97.8 %, bar 95 %: reached) |
+| S6 check (`s6-options.txt`, the five rules now on), M500 | 498 / 500 (as before: 0x4919f0; 0x4c48d0 the reference does not finish) |
+
+The reference does not finish 0x4c48d0 and 0x6b21e0 (on 0x6b21e0 ghidra-rs stops at
+`assignPropagatedType`: type recovery gave up). Misses: 0x47a6b0 (`ActionConditionalExe`, as in
+R1); with types, ten more, all one cause: the constant of an INT_SUB that the `cleanup` pool's
+`2comp2sub` builds after the last inference pass (`#0x1 - x`) is `int4` on the reference and
+`xunknown4` here (0x40ff50, 0x442c90, 0x479ac0, 0x494400, 0x4ea3ba, 0x5dec80, 0x5ffba0, 0x6b0260,
+0x74c9b0, 0x75e5a9). Not traced further: no pointer rule touches those ops, and no earlier check
+ran `analysis`, `cleanup` and `typerecovery` together with types printed.
+The rules are exercised: PTRADD/PTRSUB they make appear in 5 of the 8 M8 outputs. Not rerun at
+the commit (bars whose options leave the new code off: `typerecovery` is off in the R1, subvar,
+R4, S3 and S4 options and in the jump-table partial function): r1/subvar/r4 498 / 499,
+paramdouble 500 / 500, switch corpus 1,947 / 2,050, S4 498 / 500. The locked S6 checks (`void`,
+`int4`, callees) were still running at the commit.
+
+Left for R5 (slices 2 to 5, not started): `RuleLoadVarnode`/`RuleStoreVarnode` (group
+`stackvars`; a load or store through the stack pointer makes a stack-space varnode, which needs
+the stack heritage pass, not ported; the constant-pointer path also needs `fillinReadOnly` after
+the ram pass to replace `fold_constants` in the jump-table partial function, where `stackvars` is
+on), double.cc, constseq.cc, bitfield.cc, and the `cleanup` rules that read types.
 
 ## Running stages in parallel
 

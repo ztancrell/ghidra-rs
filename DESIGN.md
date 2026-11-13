@@ -171,6 +171,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    (`SubfloatFlow`) included; the R1 check with `floatprecision` on: M8 8 / 8, M500 495 / 499
    (99.2 %, bar 98 %); 90 M500 functions exercise the rules, 89 of them identical. Merged with R3 part two:
    R4 check M500 497 / 499; subvar, R3, S3, S4 and S6 bars all held.
+   R5 (in part) on branch `m3-r5`: the five `typerecovery` pointer rules (`RulePtrArith` with
+   `AddTreeState`, `RuleStructOffset0`, `RulePushPtr` in `oppool2`, `RulePtraddUndo`,
+   `RulePtrsubUndo`) and the stop-propagation flags; R5 check M8 8 / 8, M500 497 / 498 without
+   types, 487 / 498 with types (bar 95 %); S6 check 498 / 500 with the rules on. Open: stack
+   loads/stores, double.cc, constseq, bitfield, typed `cleanup` rules.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.

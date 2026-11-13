@@ -98,6 +98,9 @@ impl VnFlags {
     /// `spacebase_placeholder`: the value a call loads from the stack to learn its stack offset
     /// (the placeholder, or a locked call's first stack parameter; stage S6)
     pub(crate) const SPACEBASE_PLACEHOLDER: VnFlags = VnFlags(1 << 22);
+    /// `stop_uppropagation` (an additional flag in C++): data-types do not propagate from a
+    /// reader into this varnode (`ActionInferTypes::buildLocaltypes`, stage R5)
+    pub(crate) const STOP_UPPROPAGATION: VnFlags = VnFlags(1 << 26);
 
     pub(crate) fn has(self, f: VnFlags) -> bool {
         self.0 & f.0 != 0

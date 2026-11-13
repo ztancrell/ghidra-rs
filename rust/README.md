@@ -1544,6 +1544,49 @@ four S6 checks (unlocked, `void`, `int4`, callees) 498 / 500 each (0x4919f0; 0x4
 Superseded: the 495 / 499 above (0x4891e0 and 0x6fa6e0 are fixed by part two's non-zero masks)
 and the callee check's 497 (the reference ran 0x5b59c0 this time).
 
+### Stage R5 (in part): pointer rules
+
+Stage R5 slice 1 (branch `m3-r5`) ports the pointer rules of group `typerecovery` in
+`rules/ptrarith.rs`: `ptrarith` (`RulePtrArith` with `AddTreeState`), `structoffset0`, `pushptr`
+(the `oppool2` pool, which runs after `constantptr` in the main loop; until now an empty leaf;
+table `OPPOOL2` in `rules/mod.rs`), `ptraddundo` and `ptrsubundo` (`oppool1`, before
+`piecepathology`), with `Funcdata::opUndoPtradd`, `collapseIntMultMult`, `newOpBefore` and the
+type queries the rules make (`isPtrsubMatching`, `isOffsetValid` of arrays, code and space-base
+types, `testForArraySlack`). Type inference now reads the two flags the rules set:
+`PcodeOp::stopsTypePropagation` (`OpFlags::STOP_TYPE_PROPAGATION`, bit 1 << 17) in
+`getLocalType` and `Varnode::stopsUpPropagation` (`VnFlags::STOP_UPPROPAGATION`, bit 1 << 26)
+in `propagateTypeEdge`; PTRADD propagates types (`TypeOpPtradd::propagateType`) and prints in
+`print raw` as `out = p + i(*size)`. Not ported, failing loudly: `TypePointerRel`, struct
+sub-types and `nearestArrayedComponent` of structs, unions (`needsResolution`),
+`assignPropagatedType` (after type recovery gives up). Recursion over add trees is capped at
+depth 1,000 (an error past it). `tools/r1-options.sh` also reads `oppool2` (skipping commented
+`addRule` lines) and writes `tools/corpus/r5-options.txt` (groups `analysis`, `cleanup`,
+`typerecovery`); `tools/corpus/s6-options.txt` no longer switches the five rules off.
+
+| check (`r5-options.txt`) | identical |
+|---|---|
+| M8, types printed | 8 / 8 |
+| M500, `print raw` without types | 497 / 500; 497 / 498 of the functions the reference finishes (99.8 %) |
+| M500, types printed (`DECOMP_RAW_EXTRA=1`) | 487 / 500; 487 / 498 (97.8 %, bar 95 %: reached) |
+| S6 check (`s6-options.txt`, the five rules now on), M500 | 498 / 500 (as before: 0x4919f0; 0x4c48d0 the reference does not finish) |
+
+The reference does not finish 0x4c48d0 and 0x6b21e0 (on 0x6b21e0 ghidra-rs stops at
+`assignPropagatedType`: type recovery gave up). Misses: 0x47a6b0 (`ActionConditionalExe`, as in
+R1); with types, ten more, all one cause: the constant of an INT_SUB that the `cleanup` pool's
+`2comp2sub` builds after the last inference pass (`#0x1 - x`) is `int4` on the reference and
+`xunknown4` here (0x40ff50, 0x442c90, 0x479ac0, 0x494400, 0x4ea3ba, 0x5dec80, 0x5ffba0, 0x6b0260,
+0x74c9b0, 0x75e5a9). Not traced further: no pointer rule touches those ops, and no earlier check
+ran `analysis`, `cleanup` and `typerecovery` together with types printed.
+The rules are exercised: PTRADD/PTRSUB they make appear in 5 of the 8 M8 outputs. Not rerun at
+the commit (bars whose options leave the new code off: `typerecovery` is off in the R1, subvar,
+R4, S3 and S4 options and in the jump-table partial function): r1/subvar/r4 498 / 499,
+paramdouble 500 / 500, switch corpus 1,947 / 2,050, S4 498 / 500. The locked S6 checks (`void`,
+`int4`, callees) were still running at the commit.
+
+Left for R5: `RuleLoadVarnode`/`RuleStoreVarnode` and removing `jumptable::fold_constants`
+(stack loads need the stack heritage pass), double.cc, constseq.cc, bitfield.cc and the
+`cleanup` rules that read types (see the plan, "R5").
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The
