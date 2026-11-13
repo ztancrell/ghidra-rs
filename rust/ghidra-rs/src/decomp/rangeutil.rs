@@ -289,6 +289,36 @@ impl CircleRange {
         }
     }
 
+    /// Port of `CircleRange::translate2Op`: the range as one comparison with a constant: the
+    /// opcode, the constant and its slot, with result 0; else 1 (everything), 2 (cannot be
+    /// one comparison) or 3 (empty).
+    pub(crate) fn translate_2_op(&self) -> (i32, Opcode, u64, usize) {
+        let (left, right, mask) = (self.left, self.right, self.mask);
+        let none = |res: i32| (res, Opcode::Copy, 0, 0);
+        let half = (mask >> 1) + 1;
+        if self.isempty {
+            none(3)
+        } else if self.step != 1 {
+            none(2)
+        } else if right == (left.wrapping_add(1) & mask) {
+            (0, Opcode::IntEqual, left, 0)
+        } else if left == (right.wrapping_add(1) & mask) {
+            (0, Opcode::IntNotequal, right, 0)
+        } else if left == right {
+            none(1)
+        } else if left == 0 {
+            (0, Opcode::IntLess, right, 1)
+        } else if right == 0 {
+            (0, Opcode::IntLess, left.wrapping_sub(1) & mask, 0)
+        } else if left == half {
+            (0, Opcode::IntSless, right, 1)
+        } else if right == half {
+            (0, Opcode::IntSless, left.wrapping_sub(1) & mask, 0)
+        } else {
+            none(2)
+        }
+    }
+
     /// `intersect`: 0 on success, 2 when the result would be two pieces (`self` unchanged)
     pub(crate) fn intersect(&mut self, o: &CircleRange) -> i32 {
         if self.isempty {

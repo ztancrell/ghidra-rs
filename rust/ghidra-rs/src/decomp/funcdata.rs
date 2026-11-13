@@ -93,6 +93,8 @@ pub struct Funcdata {
     pub(crate) constptr_passes: u32,
     /// `typerecovery_exceeded`: inference gave up after 7 passes
     pub(crate) typerecovery_exceeded: bool,
+    /// `typerecovery_on` (`ActionStartTypes::reset`): the running action has group `typerecovery`
+    pub(crate) typerecovery_on: bool,
 }
 
 impl Funcdata {
@@ -129,6 +131,7 @@ impl Funcdata {
             infer_passes: 0,
             constptr_passes: 0,
             typerecovery_exceeded: false,
+            typerecovery_on: false,
         }
     }
 

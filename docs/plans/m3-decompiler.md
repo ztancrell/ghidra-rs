@@ -317,7 +317,9 @@ past 0x1000000 and 0x7c1f30, where the reference reads a garbage target. Details
   later heritage passes. Neither exists yet, so `jumptable.rs` has three stand-ins that read
   the raw p-code as the rules leave it (constant folding, x86 guard flag logic as one
   comparison, constants in slot 1). R1/R2 replace them: when those rules land, the partial
-  should run them (`action::jumptable_partial`) and the stand-ins should go. The 115
+  should run them (`action::jumptable_partial`) and the stand-ins should go. Superseded
+  (R2): the partial runs the `jumptable` root action and two stand-ins are gone; the fold
+  through read-only loads stays until R5 (see "R2" below). The 115
   obfuscated-code differences need stack heritage (S4 and later).
 - `ActionNonzeroMask` is ported inside `jumptable.rs` (`calc_nz_mask`), because the guards
   read the masks; the main loop's `ActionNonzeroMask` (group `analysis`, which S4
@@ -494,6 +496,27 @@ whose non-zero and consume masks share no bit by 0 (the x87/SSE carry flags, 11 
 (`ActionConditionalExe` merging two blocks on equal conditions) and 0x6fa6e0 (a zero
 replacement the reference makes later than ghidra-rs). The jump-table stand-ins stay until R2 (the
 partial function needs the comparison rules too).
+
+### R2: done on branch `m3-r2` (2026-11-13)
+
+51 rules of `oppool1` (bit operations, shifts, comparisons, booleans) and 2 of the `cleanup` pool
+(list in `rust/README.md`, "Stage R2"), in `rules/bits.rs`, `compare.rs`, `boolean.rs`,
+`cleanup.rs`. Check as R1, with `r1-options.txt` regenerated (56 `togglerule`s; group
+`cleanup` on, its nine other rules off): M8 8 / 8; M500 452 / 453 of R1's set (99.8 %, bar
+98 %: reached; 452 / 500 in all). Where it differs from the table row:
+
+- Not ported: `threewaycomp`, `conditionalmove`, `orpredicate`, and the `cleanup` rules that read
+  data-types (`addunsigned`, `subright`, `piecestructure`, `andstructure`) or belong to R3 to R5.
+- The partial function of jump-table recovery runs the `jumptable` root action (the tree of
+  `universal` with its groups, eight unported actions skipped) instead of S3's stand-ins;
+  `analyzeGuards` is the C++ loop. Left: the fold through read-only loads (`RuleLoadVarnode`,
+  R5). S3 recheck at `paramdouble`: M8 8 / 8, M500 500 / 500, switch corpus 1,946 / 2,050
+  (1,934 before).
+- `ActionNonzeroMask` on the function itself no longer reads folded constants (an R1
+  shortcut that sharpened masks beyond the C++'s).
+- S4 M8 8 / 8, M500 446 / 500; S6 unlocked M8 8 / 8, M500 446 / 500; locked `void`
+  446 / 500, `int4` 446 / 500, callees with a stack parameter 446 / 500.
+- Left: 0x47a6b0 (`ActionConditionalExe`, as in R1).
 
 ## Running stages in parallel
 

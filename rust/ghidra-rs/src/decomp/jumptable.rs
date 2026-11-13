@@ -8,16 +8,15 @@
 //!
 //! What differs from the C++, and why:
 //!
-//! - The partial function is simplified only as far as the actions are ported (heritage of
-//!   registers and temporaries, read-only constants; `action::jumptable_partial`), not by the
-//!   rule pool. Three stand-ins read the raw p-code as the rules would have left it, until the
-//!   rule stages replace them: [`konst`] folds constants (copies, constant operations,
-//!   `xor r,r`, loads from read-only memory); [`cond_range`] reads a guard's x86 flag logic
-//!   (`!(CF || ZF)`, `OF != SF`, `x - c == 0`) as the one comparison the rules rewrite it into,
-//!   counted as one pull-back; [`split_const`] puts a commutative op's constant in slot 1
-//!   (`RuleTermOrder`). The stack is not heritaged, so a switch variable kept on the stack is
-//!   matched through its two LOADs (`GuardRecord::valueMatch` code 2), as the C++ does for
-//!   memory it cannot heritage.
+//! - The partial function is simplified by the `jumptable` root action as far as it is ported
+//!   (`action::jumptable_partial`: the main loop with dead code, heritage and the rule pool of
+//!   stages R1 and R2), so the guards are read as the C++ reads them (`analyzeGuards`: the
+//!   CBRANCH condition and two pull-backs). One stand-in is left: [`konst`] also folds what the
+//!   rules of later stages would (a load from read-only memory, `RuleLoadVarnode`, stage R5, and
+//!   the constant operations after it). Superseded (stage R2): the stand-ins reading x86 flag
+//!   logic as one comparison (`cond_range`) and a commutative op's constant in slot 0 are gone.
+//!   The stack is not heritaged, so a switch variable kept on the stack is matched through its
+//!   two LOADs (`GuardRecord::valueMatch` code 2), as the C++ does for memory it cannot heritage.
 //! - Not ported: `JumpAssisted` (x86 has no `jumpassist` user op), `JumpBasicOverride` and
 //!   `JumpModelTrivial` (overrides; the console sets none), multistage tables, label recovery
 //!   and guard folding (`recoverLabels`, `foldInGuards`: after `paramdouble`), unrolled
@@ -26,7 +25,7 @@
 
 use super::block::BlockId;
 use super::emulate::{eval_binary, eval_unary, EmuError, EmulateFunction};
-use super::op::OpId;
+use super::op::{OpFlags, OpId};
 use super::opcode::Opcode;
 use super::rangeutil::{calc_mask, CircleRange};
 use super::varnode::{Space, VarnodeId};
@@ -60,7 +59,7 @@ fn nz_mask(fd: &Funcdata, vn: VarnodeId) -> u64 {
     }
 }
 
-fn pcode_left(v: u64, sa: u64) -> u64 {
+pub(crate) fn pcode_left(v: u64, sa: u64) -> u64 {
     if sa >= 64 {
         0
     } else {
@@ -68,7 +67,7 @@ fn pcode_left(v: u64, sa: u64) -> u64 {
     }
 }
 
-fn pcode_right(v: u64, sa: u64) -> u64 {
+pub(crate) fn pcode_right(v: u64, sa: u64) -> u64 {
     if sa >= 64 {
         0
     } else {
@@ -216,7 +215,6 @@ fn nz_mask_local(fd: &Funcdata, arch: &Arch, op: OpId, cliploop: bool) -> u64 {
 /// along the data flow without loop edges, then to a fixed point through the MULTIEQUALs. The
 /// stack pointer's input counts as aligned (`isSpacebase`), as `ActionSpacebase` marks it.
 pub(crate) fn calc_nz_mask(fd: &mut Funcdata, arch: &Arch) {
-    fd.folded = calc_folded(fd, arch);
     let n = fd.vns.len();
     let mut nzm: Vec<u64> = fd.vns.iter().map(|v| if v.is_constant() { v.offset } else { calc_mask(v.size) }).collect();
     let (sps, spo, spz) = arch.spec.stack_pointer;
@@ -269,10 +267,10 @@ pub(crate) fn calc_nz_mask(fd: &mut Funcdata, arch: &Arch) {
     debug_assert_eq!(fd.nzm.len(), n);
 }
 
-/// The value `vn` has when it is a constant, or folds to one through ops whose inputs do: what
-/// the C++ rules (`RulePropagateCopy`, `RuleCollapseConstants`, `xor r,r` to 0,
-/// `RuleLoadVarnode` with read-only memory) leave as a constant in the partial function. From
-/// [`calc_folded`] once it has run, else only literal constants.
+/// The value `vn` has when it is a constant, or (in the partial function, after
+/// [`fold_constants`]) folds to one through ops whose inputs do: what the rules not ported yet
+/// (`RuleLoadVarnode` with read-only memory, stage R5) would leave as a constant. In the function
+/// itself only literal constants count, as in the C++.
 fn konst(fd: &Funcdata, _arch: &Arch, vn: VarnodeId) -> Option<u64> {
     match fd.folded.get(vn.0 as usize) {
         Some(&v) => v,
@@ -301,6 +299,11 @@ fn fold(fd: &Funcdata, arch: &Arch, op: OpId, val: &[Option<u64>]) -> Option<u64
         opc if o.ins.len() == 2 => eval_binary(opc, size, fd.vn(o.ins[0]).size, get(0)?, get(1)?).ok(),
         _ => None,
     }
+}
+
+/// Sets [`Funcdata::folded`] for the partial function of jump-table recovery ([`konst`]).
+pub(crate) fn fold_constants(fd: &mut Funcdata, arch: &Arch) {
+    fd.folded = calc_folded(fd, arch);
 }
 
 /// Folds every varnode of the partial function to a constant where it can ([`konst`]),
@@ -347,7 +350,7 @@ fn def(fd: &Funcdata, vn: VarnodeId) -> Option<OpId> {
 }
 
 /// `PcodeOp::isBoolOutput`
-fn is_bool_output(opc: Opcode) -> bool {
+pub(crate) fn is_bool_output(opc: Opcode) -> bool {
     use Opcode::*;
     matches!(
         opc,
@@ -374,7 +377,7 @@ fn is_bool_output(opc: Opcode) -> bool {
 
 /// `CircleRange::pullBack` from `vn` through the op defining it: the input varnode and its
 /// range of values for which `vn` lies in `rng`.
-fn pull_back(
+pub(crate) fn pull_back(
     fd: &Funcdata,
     arch: &Arch,
     vn: VarnodeId,
@@ -424,77 +427,6 @@ fn pull_back(
         }
     }
     Some((res, rng))
-}
-
-/// The value a copy chain starts from: what `RulePropagateCopy` reads in place of `vn`.
-fn copy_source(fd: &Funcdata, mut vn: VarnodeId) -> VarnodeId {
-    while let Some(op) = def(fd, vn) {
-        let o = fd.op(op);
-        if o.opc != Opcode::Copy || fd.vn(o.ins[0]).is_constant() {
-            break;
-        }
-        vn = o.ins[0];
-    }
-    vn
-}
-
-/// `x s< c` from x86's `OF != SF` after `CMP x,c`: `OF = SBORROW(x,c)`, `SF = (x - c) s< 0`.
-fn signed_less(fd: &Funcdata, arch: &Arch, a: VarnodeId, b: VarnodeId) -> Option<(VarnodeId, u64)> {
-    let side = |of: VarnodeId, sf: VarnodeId| -> Option<(VarnodeId, u64)> {
-        let o = fd.op(def(fd, of)?);
-        let s = fd.op(def(fd, sf)?);
-        if o.opc != Opcode::IntSborrow || s.opc != Opcode::IntSless {
-            return None;
-        }
-        let (x, c) = (o.ins[0], o.ins[1]);
-        let c = konst(fd, arch, c)?;
-        if konst(fd, arch, s.ins[1]) != Some(0) {
-            return None;
-        }
-        let t = fd.op(def(fd, s.ins[0])?);
-        (t.opc == Opcode::IntSub && t.ins[0] == x && konst(fd, arch, t.ins[1]) == Some(c)).then_some((x, c))
-    };
-    side(a, b).or_else(|| side(b, a))
-}
-
-/// The guard condition `vn == val` as a range of the variable it compares, the form the C++
-/// rule pool rewrites x86 flag logic into (see the module notes): BOOL_NEGATE, BOOL_OR and
-/// BOOL_AND of comparisons of one variable, `OF != SF` (signed less), `x - c == 0` (equality
-/// with `c`), and plain comparisons with a constant.
-fn cond_range(fd: &Funcdata, arch: &Arch, vn: VarnodeId, val: bool) -> Option<(VarnodeId, CircleRange)> {
-    let op = fd.op(def(fd, vn)?);
-    match op.opc {
-        Opcode::BoolNegate => cond_range(fd, arch, op.ins[0], !val),
-        Opcode::BoolOr | Opcode::BoolAnd => {
-            let (x, mut r) = cond_range(fd, arch, op.ins[0], val)?;
-            let (y, r2) = cond_range(fd, arch, op.ins[1], val)?;
-            if x != y {
-                return None;
-            }
-            let ok = if (op.opc == Opcode::BoolOr) == val { r.circle_union(&r2) } else { r.intersect(&r2) };
-            (ok == 0).then_some((x, r))
-        }
-        Opcode::IntEqual | Opcode::IntNotequal
-            if fd.vn(op.ins[0]).size == 1
-                && konst(fd, arch, op.ins[0]).is_none()
-                && konst(fd, arch, op.ins[1]).is_none() =>
-        {
-            let (x, c) = signed_less(fd, arch, op.ins[0], op.ins[1])?;
-            let mut r = CircleRange::boolean((op.opc == Opcode::IntNotequal) == val);
-            r.pull_back_binary(Opcode::IntSless, c, 0, fd.vn(x).size).then_some((copy_source(fd, x), r))
-        }
-        opc => {
-            let (mut x, mut r) = pull_back(fd, arch, vn, CircleRange::boolean(val), true)?;
-            if matches!(opc, Opcode::IntEqual | Opcode::IntNotequal) {
-                if let Some(d) = def(fd, x).map(|d| fd.op(d).opc) {
-                    if matches!(d, Opcode::IntAdd | Opcode::IntSub) {
-                        (x, r) = pull_back(fd, arch, x, r, true)?;
-                    }
-                }
-            }
-            Some((copy_source(fd, x), r))
-        }
-    }
 }
 
 /// Port of `GuardRecord`: a range a CBRANCH before the switch puts on a varnode.
@@ -554,20 +486,13 @@ impl GuardRecord {
     }
 }
 
-/// A binary op's variable input and constant, with the constant in slot 1 as `RuleTermOrder`
-/// puts it for commutative ops (raw x86 p-code has `#0x14 + ESP`).
+/// A binary op with a constant in slot 1: its variable input and the constant.
 fn split_const(fd: &Funcdata, arch: &Arch, op: OpId) -> Option<(VarnodeId, u64)> {
-    use Opcode::*;
     let o = fd.op(op);
     if o.ins.len() != 2 {
         return None;
     }
-    if let Some(c) = konst(fd, arch, o.ins[1]) {
-        return Some((o.ins[0], c));
-    }
-    let commutative = matches!(o.opc, IntAdd | IntAnd | IntOr | IntXor | IntMult);
-    let c = konst(fd, arch, o.ins[0]).filter(|_| commutative)?;
-    Some((o.ins[1], c))
+    konst(fd, arch, o.ins[1]).map(|c| (o.ins[0], c))
 }
 
 /// `GuardRecord::oneOffMatch`
@@ -944,7 +869,7 @@ impl<'a> JumpBasic<'a> {
         rng
     }
 
-    /// `analyzeGuards`, the pull-backs of each guard through [`cond_range`] (see the module).
+    /// `analyzeGuards`: each guard's condition and up to two pull-backs of it.
     fn analyze_guards(&mut self, mut bl: BlockId, mut pathout: i32) {
         let (fd, arch) = (self.fd, self.arch);
         let blocks = &fd.blocks;
@@ -983,19 +908,18 @@ impl<'a> JumpBasic<'a> {
                     }
                 }
             }
-            let toswitchval = indpath == 1;
+            let toswitchval = (indpath == 1) != fd.op(cbranch).flags.has(OpFlags::BOOLEAN_FLIP);
             bl = prevbl;
-            let vn = fd.op(cbranch).ins[1];
-            self.guards.push(GuardRecord::new(fd, vn, CircleRange::boolean(toswitchval)));
-            let Some((x, r)) = cond_range(fd, arch, vn, toswitchval) else { continue };
-            if r.is_empty() {
-                continue;
-            }
-            self.guards.push(GuardRecord::new(fd, x, r));
-            if let Some((y, r2)) = pull_back(fd, arch, x, r, true) {
-                if !r2.is_empty() {
-                    self.guards.push(GuardRecord::new(fd, y, r2));
+            let mut vn = fd.op(cbranch).ins[1];
+            let mut rng = CircleRange::boolean(toswitchval);
+            self.guards.push(GuardRecord::new(fd, vn, rng));
+            for _ in 0..2 {
+                let Some((v, r)) = pull_back(fd, arch, vn, rng, true) else { break };
+                if r.is_empty() {
+                    break;
                 }
+                (vn, rng) = (v, r);
+                self.guards.push(GuardRecord::new(fd, vn, rng));
             }
         }
     }

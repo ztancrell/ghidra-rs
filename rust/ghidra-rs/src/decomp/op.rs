@@ -40,6 +40,8 @@ impl OpFlags {
     pub(crate) const CALCULATED_BOOL: OpFlags = OpFlags(1024);
     /// `immed_copy` (an additional flag in C++): a COPY was propagated into a MULTIEQUAL slot
     pub(crate) const IMMED_COPY: OpFlags = OpFlags(2048);
+    /// `fallthru_true` of a CBRANCH (`opFlipCondition`, stage R2)
+    pub(crate) const FALLTHRU_TRUE: OpFlags = OpFlags(4096);
 
     pub(crate) fn has(self, f: OpFlags) -> bool {
         self.0 & f.0 != 0

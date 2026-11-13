@@ -542,6 +542,7 @@ impl Flow<'_> {
             if let Err(e) = action::jumptable_partial(&mut p, self.arch) {
                 return Ok(Err(Fail::Normal(e.0)));
             }
+            jumptable::fold_constants(&mut p, self.arch);
             jumptable::calc_nz_mask(&mut p, self.arch);
             *partial = Some(p);
         }

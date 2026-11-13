@@ -135,6 +135,7 @@ impl ActionTree {
 
     /// Port of `Action::perform` on the root: run, or resume after a breakpoint.
     pub fn perform(&mut self, fd: &mut Funcdata, arch: &Arch) -> Result<Outcome> {
+        fd.typerecovery_on = self.has_leaf("starttypes"); // ActionStartTypes::reset
         let root = self.root();
         if self.perform_node(root, fd, arch)? < 0 {
             let mut path = String::new();
