@@ -10,20 +10,22 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use super::jumptable::{is_bool_output, mostsigbit_set};
+use super::jumptable::is_bool_output;
 use super::op::OpId;
 use super::opcode::Opcode;
-use super::rangeutil::{calc_mask, sign_extend};
+use super::rangeutil::{calc_mask, leastsigbit_set, mostsigbit_set, sign_extend};
 use super::varnode::{Space, VarnodeId, VnFlags};
 use super::{err, Arch, Funcdata, Result};
 
-/// `leastsigbit_set`: the index of the lowest set bit, -1 for 0.
-pub(crate) fn leastsigbit_set(v: u64) -> i32 {
-    if v == 0 {
-        -1
-    } else {
-        v.trailing_zeros() as i32
-    }
+/// How a trace treats its logical value (the flags of the `SubvariableFlow` constructor).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct FlowKind {
+    /// the seed is known to be a sub-variable (`aggressive`)
+    pub(crate) aggressive: bool,
+    /// the value is always sign-extended into its container (`sextrestrictions`)
+    pub(crate) sext: bool,
+    /// the value may be 8 bytes (`big`)
+    pub(crate) big: bool,
 }
 
 /// Index of an [`RVar`].
@@ -203,14 +205,15 @@ pub(crate) struct Replacement {
 
 impl<'a> SubvariableFlow<'a> {
     /// Port of the `SubvariableFlow` constructor: the logical value is the bits `mask` of
-    /// `root`; `big` allows a logical value of 8 bytes.
+    /// `root`.
     pub(crate) fn new(
         fd: &'a Funcdata,
         arch: &'a Arch,
         root: VarnodeId,
         mask: u64,
-        (aggressive, sext, big): (bool, bool, bool),
+        kind: FlowKind,
     ) -> Result<SubvariableFlow<'a>> {
+        let FlowKind { aggressive, sext, big } = kind;
         let bitsize = if mask == 0 { 0 } else { mostsigbit_set(mask) - leastsigbit_set(mask) + 1 };
         let flowsize = match bitsize {
             1..=32 => (bitsize as u32).div_ceil(8),
@@ -1160,27 +1163,35 @@ impl Replacement {
 
     /// One patch of `doReplacement` other than a push.
     fn apply_patch(&mut self, fd: &mut Funcdata, arch: &Arch, p: &Patch) -> Result<()> {
-        let in1 = self.replace_varnode(fd, arch, p.in1)?;
         match p.kind {
             PatchKind::Copy => {
                 while fd.op(p.op).ins.len() > 1 {
                     fd.op_remove_input(p.op, fd.op(p.op).ins.len() - 1);
                 }
+                let in1 = self.replace_varnode(fd, arch, p.in1)?;
                 fd.op_set_input(p.op, in1, 0)?;
                 fd.op_set_opcode(p.op, Opcode::Copy);
             }
             PatchKind::Compare => {
+                let in1 = self.replace_varnode(fd, arch, p.in1)?;
                 fd.op_set_input(p.op, in1, 0)?;
                 let Some(rin2) = p.in2 else { return err("subflow: compare patch without second input") };
                 let in2 = self.replace_varnode(fd, arch, rin2)?;
                 fd.op_set_input(p.op, in2, 1)?;
             }
-            PatchKind::Parameter => fd.op_set_input(p.op, in1, p.slot as usize)?,
-            PatchKind::Extension => Self::apply_extension(fd, p.op, in1, p.slot)?,
+            PatchKind::Parameter => {
+                let in1 = self.replace_varnode(fd, arch, p.in1)?;
+                fd.op_set_input(p.op, in1, p.slot as usize)?;
+            }
+            PatchKind::Extension => {
+                let in1 = self.replace_varnode(fd, arch, p.in1)?;
+                Self::apply_extension(fd, p.op, in1, p.slot)?;
+            }
             PatchKind::Push => {} // handled first
             PatchKind::Int2Float => {
                 let Some(uniq) = fd.uniq else { return err("no unique space") };
                 let zext = fd.new_op(Opcode::IntZext, fd.op(p.op).seq.addr);
+                let in1 = self.replace_varnode(fd, arch, p.in1)?;
                 fd.op_set_input(zext, in1, 0)?;
                 let outvn = fd.new_unique_out(preferred_zext_size(fd.vn(in1).size), uniq, zext);
                 fd.op_insert_before(zext, p.op)?;
@@ -1203,5 +1214,16 @@ impl Replacement {
             self.apply_patch(fd, arch, p)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn int2float_zext_sizes() {
+        // TypeOpFloatInt2Float::preferredZextSize
+        assert_eq!([1, 3, 4, 7, 8].map(preferred_zext_size), [4, 4, 8, 8, 9]);
     }
 }

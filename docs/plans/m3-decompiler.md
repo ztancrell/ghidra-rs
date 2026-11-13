@@ -319,6 +319,8 @@ past 0x1000000 and 0x7c1f30, where the reference reads a garbage target. Details
   comparison, constants in slot 1). R1/R2 replace them: when those rules land, the partial
   should run them (`action::jumptable_partial`) and the stand-ins should go. The 115
   obfuscated-code differences need stack heritage (S4 and later).
+- Superseded (R3 part two): the main loop runs `calc_nz_mask_unfolded`, without the constant
+  folding the partial function needs.
 - `ActionNonzeroMask` is ported inside `jumptable.rs` (`calc_nz_mask`), because the guards
   read the masks; the main loop's `ActionNonzeroMask` (group `analysis`, which S4
   leaves off and unported; the R-stages) should call it and

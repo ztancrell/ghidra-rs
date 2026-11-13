@@ -5,18 +5,21 @@
 //!
 //! `Varnode::isPtrFlow` is false everywhere: only `RulePtrFlow` (not ported, switched off in
 //! the checks) and locked pointer parameters of a truncated space (none on x86) set it. So is
-//! `Architecture::aggressive_ext_trim` (no x86 `.cspec` sets `<aggressivetrim>`). No trace
-//! here is aggressive.
+//! `Architecture::aggressive_ext_trim`: `CompilerSpec::parse` rejects a `.cspec` with
+//! `<aggressivetrim>` (mips64, AARCH64 ilp32, ...; no x86 one has it), so `RuleSubvarSext`
+//! cannot run non-aggressively where Ghidra is aggressive. No trace here is aggressive.
 
 use super::*;
+use crate::decomp::rangeutil::leastsigbit_set;
 use crate::decomp::splitflow::SplitFlow;
-use crate::decomp::subflow::{leastsigbit_set, SubvariableFlow};
+use crate::decomp::subflow::{FlowKind, SubvariableFlow};
 
 /// The tail of every `RuleSubvar*`: trace the bits `mask` of `vn` and, if they are a logical
 /// value, rebuild the flow on it. `sext`: the value is sign-extended into its containers;
 /// `big`: it may be 8 bytes.
 fn shrink(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, mask: u64, sext: bool, big: bool) -> Result<i32> {
-    match SubvariableFlow::new(fd, arch, vn, mask, (false, sext, big))?.do_trace()? {
+    let kind = FlowKind { aggressive: false, sext, big };
+    match SubvariableFlow::new(fd, arch, vn, mask, kind)?.do_trace()? {
         Some(replacement) => {
             replacement.apply(fd, arch)?;
             Ok(1)
@@ -57,7 +60,9 @@ pub(super) fn subvar_subpiece(fd: &mut Funcdata, op: OpId, arch: &Arch) -> Resul
     let outvn = out(fd, op)?;
     let flowsize = fd.vn(outvn).size;
     let sa = int4(fd, inp(fd, op, 1)?);
-    // the mask must fit in the precision
+    // the mask must fit in the precision. A negative offset (never on a real SUBPIECE) is
+    // refused here; the C++ refuses it only when `flowsize + sa` wraps and else shifts by a
+    // negative amount, which is undefined
     if !(0..=8 - i64::from(flowsize)).contains(&sa) {
         return Ok(0);
     }

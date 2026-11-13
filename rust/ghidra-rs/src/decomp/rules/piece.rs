@@ -329,7 +329,9 @@ fn is_pathology(fd: &Funcdata, start: VarnodeId) -> Result<bool> {
                 }
                 Call | Callind if silent_call(op) => return Ok(true),
                 // the C++ loop does not leave this op
-                Call | Callind => return err("piecepathology: a call with an active output is not ported"),
+                Call | Callind => {
+                    return err("piecepathology: a call without a call spec or with an active output is not ported")
+                }
                 _ => {}
             }
         }

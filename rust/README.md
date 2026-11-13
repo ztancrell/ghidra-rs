@@ -1186,10 +1186,11 @@ need (`TermOrder`, `functionalEqualityLevel`, `cseEliminateList`, `cseEliminatio
 `distributeIntMultAdd`, float constant folding through `FloatFormat`). `propagatecopy` marks
 immediate-copy edges (`setCopyImmed`), which `donothing` reads (`hasNoImmediateCopy`): a block
 emptied by copy propagation stays. Group `analysis` is on, so the main loop's `nonzeromask`
-runs (`jumptable::calc_nz_mask`) and dead code reads its masks (`Funcdata::nzmask`).
+runs (`jumptable::calc_nz_mask`; superseded in R3 part two: `calc_nz_mask_unfolded`, without
+the constant folding) and dead code reads its masks (`Funcdata::nzmask`).
 
 The check: `tools/corpus/r1-options.txt` is S4's options with `analysis` on and every rule of
-the groups that are on and not ported switched off (97 `togglerule`s at R1, 76 after R3), written by
+the groups that are on and not ported switched off (97 `togglerule`s at R1, 76 after R3 part one, 75 after part two), written by
 `tools/r1-options.sh` from the table in `rules/mod.rs`: rerun it when rules land.
 `ghidra-rs decompile` honours `option togglerule`. Group `analysis` also holds three actions
 not ported yet, `multicse`, `shadowvar` and `condconst` (`ActionConditionalConst`). A console
@@ -1342,6 +1343,9 @@ Two faults found on the way, both older than this stage:
   to constants (`jumptable::calc_nz_mask`), so a mask could be tighter than the reference's
   (`x ^ x` counted as 0 before `trivialarith` rewrote it). It now runs
   `calc_nz_mask_unfolded`; the partial function of jump-table recovery keeps the folding.
+  Interim: branch `m3-r2` solves the same with a single `calc_nz_mask` and an explicit
+  `fold_constants` step on the partial function, and that shape replaces this pair when R2
+  merges.
   This was the cause of 0x6fa6e0 and 0x4891e0. Superseded: "a zero replacement the reference
   makes later" in the R1 and R3 notes.
 - Removing an unreachable block failed with "Deleting op with descendants" when a reader was

@@ -427,6 +427,8 @@ pub(crate) struct FuncProto {
     pub(crate) locked: Option<Box<super::locked::Locked>>,
     /// `returnBytesConsumed`: the bytes of the return value the callers are known to use, 0
     /// for all (a hint to dead code, from `RulePiecePathology`)
+    /// The C++ resets it in `clearUnlockedOutput` (a decompile restart); restarts are not
+    /// ported, and the reset must come with them.
     pub(crate) return_bytes_consumed: u32,
 }
 
