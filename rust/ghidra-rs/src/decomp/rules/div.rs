@@ -531,7 +531,7 @@ pub(super) fn div_chain(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
     }
     let off1 = fd.vn(const_vn1).offset;
     // the C++ `val1 <<= sa` on x86 shifts by sa mod 64
-    let mut val1 = if opc1 == opc2 { off1 } else { 1u64.wrapping_shl(off1 as i32 as u32) };
+    let mut val1 = if opc1 == opc2 { off1 } else { shl(1, off1 as i32) };
     let base_vn = inp(fd, div_op, 0)?;
     if fd.vn(base_vn).is_free() {
         return Ok(0);

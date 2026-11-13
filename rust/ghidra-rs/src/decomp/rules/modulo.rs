@@ -99,7 +99,7 @@ pub(super) fn sign_near_mult(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i3
     }
     // the C++ shifts are by n mod 64 on x86
     let full = calc_mask(shift_size);
-    if full.wrapping_shl(n as u32) & full != fd.vn(mask_vn).offset {
+    if shl(full, n as i32) & full != fd.vn(mask_vn).offset {
         return Ok(0);
     }
     let Some(sshiftop) = def_with(fd, inp(fd, unshiftop, 0)?, IntSright) else { return Ok(0) };
@@ -108,7 +108,7 @@ pub(super) fn sign_near_mult(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i3
     if !is_const(fd, sc) || inp(fd, sshiftop, 0)? != x || int4(fd, sc) != 8 * i64::from(xsize) - 1 {
         return Ok(0);
     }
-    let pow = 1u64.wrapping_shl(n as u32);
+    let pow = shl(1, n as i32);
     let newdiv = fd.new_op(IntSdiv, fd.op(op).seq.addr);
     let divvn = uniq_out(fd, xsize, newdiv)?;
     fd.op_set_input(newdiv, x, 0)?;
@@ -286,7 +286,7 @@ pub(super) fn sign_mod2n_opt(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i3
     let correct_size = fd.vn(correct_vn).size;
     let n = i64::from(fd.vn(a).size) * 8 - shift_amt;
     // the C++ `(1 << n) - 1` shifts by n mod 64 on x86
-    let mask = 1u64.wrapping_shl(n as u32).wrapping_sub(1);
+    let mask = shl(1, n as i32).wrapping_sub(1);
     let readers = fd.vn(correct_vn).descend.to_vec();
     for multop in readers {
         if fd.op(multop).opc != IntMult {

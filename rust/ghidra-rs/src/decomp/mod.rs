@@ -52,6 +52,14 @@ pub use print::print_raw;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LowlevelError(pub String);
 
+impl LowlevelError {
+    /// The error comes from a path ghidra-rs does not port (its text says so), not from the
+    /// decompiled code: the reference would not fail there.
+    pub(crate) fn is_unported(&self) -> bool {
+        ["not implemented", "not ported", "is not supported"].iter().any(|m| self.0.contains(m))
+    }
+}
+
 impl std::fmt::Display for LowlevelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)

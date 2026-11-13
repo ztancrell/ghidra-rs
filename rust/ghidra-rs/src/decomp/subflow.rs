@@ -10,8 +10,8 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use super::jumptable::is_bool_output;
 use super::op::OpId;
+use super::opcode::is_bool_output;
 use super::opcode::Opcode;
 use super::rangeutil::{calc_mask, leastsigbit_set, mostsigbit_set, sign_extend};
 use super::varnode::{Space, VarnodeId, VnFlags};

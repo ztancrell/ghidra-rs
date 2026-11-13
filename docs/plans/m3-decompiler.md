@@ -317,10 +317,13 @@ past 0x1000000 and 0x7c1f30, where the reference reads a garbage target. Details
   later heritage passes. Neither exists yet, so `jumptable.rs` has three stand-ins that read
   the raw p-code as the rules leave it (constant folding, x86 guard flag logic as one
   comparison, constants in slot 1). R1/R2 replace them: when those rules land, the partial
-  should run them (`action::jumptable_partial`) and the stand-ins should go. The 115
+  should run them (`action::jumptable_partial`) and the stand-ins should go. Superseded
+  (R2): the partial runs the `jumptable` root action and two stand-ins are gone; the fold
+  through read-only loads stays until R5 (see "R2" below). The 115
   obfuscated-code differences need stack heritage (S4 and later).
 - Superseded (R3 part two): the main loop runs `calc_nz_mask_unfolded`, without the constant
-  folding the partial function needs.
+  folding the partial function needs. Superseded (R2 merge): `calc_nz_mask` no longer folds;
+  the partial function calls `jumptable::fold_constants` first.
 - `ActionNonzeroMask` is ported inside `jumptable.rs` (`calc_nz_mask`), because the guards
   read the masks; the main loop's `ActionNonzeroMask` (group `analysis`, which S4
   leaves off and unported; the R-stages) should call it and
@@ -497,6 +500,35 @@ whose non-zero and consume masks share no bit by 0 (the x87/SSE carry flags, 11 
 (`ActionConditionalExe` merging two blocks on equal conditions) and 0x6fa6e0 (a zero
 replacement the reference makes later than ghidra-rs). The jump-table stand-ins stay until R2 (the
 partial function needs the comparison rules too).
+
+### R2: done on branch `m3-r2` (2026-11-13)
+
+50 rules of `oppool1` (26 bit and shift, 15 comparison, 9 boolean) and 2 of the `cleanup` pool
+(list in `rust/README.md`, "Stage R2"), in `rules/bits.rs`, `compare.rs`, `boolean.rs`,
+`cleanup.rs`. Check as R1, with `r1-options.txt` regenerated (group `cleanup` on, its nine other
+rules off; 17 `togglerule`s with R3 and R4 merged) and lane division on both sides: M8 8 / 8; M500
+498 / 499 of the functions the reference finishes (99.8 %, bar 98 %: reached; 495 / 499 with
+R3 alone). Superseded: 452 / 453 of R1's set before the merge with R3. Where it differs from the
+table row:
+
+- Not ported: `threewaycomp`, `conditionalmove`, `orpredicate`, and the `cleanup` rules that read
+  data-types (`addunsigned`, `subright`, `piecestructure`, `andstructure`) or belong to R3 to R5.
+- The partial function of jump-table recovery runs the `jumptable` root action (the tree of
+  `universal` with its groups; eight actions left out while they are not ported, of which
+  `restructurevarnode`, `condconst` and `normalizebranches` can change table recovery) instead of
+  S3's stand-ins, with `jumptablerecovery_on` gating heritage's dead-code delay, `lastChanceLoad`
+  and `donothing`; `analyzeGuards` is the C++ loop. Left: the fold through read-only loads
+  (`RuleLoadVarnode`, R5). S3 recheck at `paramdouble`: M8 8 / 8, M500 500 / 500, switch
+  corpus 1,947 / 2,050 (1,934 before).
+- With R3 part two and R4 merged: the R1/R2/R3 check, the subvar check and the R4 check (all
+  with group `cleanup` on) are each M8 8 / 8, M500 498 / 499 (497 / 499 before the merge).
+- `ActionNonzeroMask` on the function itself no longer reads folded constants (an R1
+  shortcut that sharpened masks beyond the C++'s).
+- Fixed on the way: removing unreachable blocks whose values are read in other removed blocks
+  (`descendantsOutside`, 0x74fae0).
+- S4 M8 8 / 8, M500 498 / 500; S6 unlocked M8 8 / 8, M500 498 / 500; locked `void`
+  498 / 500, `int4` 498 / 500, callees with a stack parameter 498 / 500.
+- Left: 0x47a6b0 (`ActionConditionalExe`, as in R1).
 
 ### R3: in part on branch `m3-r3` (2026-11-13)
 

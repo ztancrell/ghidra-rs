@@ -20,6 +20,12 @@ use super::{err, heritage, Arch, Funcdata, Result};
 /// `disabled`); the actions named `action:<name>` there (`DECOMP_SKIP_ACTIONS`) are left out. An
 /// action that is not ported fails when it runs with its group on.
 pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
+    tree(false, disabled)
+}
+
+/// The tree of [`universal`] for the `decompile` root, or (`jumptable`) for the `jumptable` root
+/// that simplifies the partial function of jump-table recovery.
+fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> ActionTree {
     use super::coreaction as c;
     let mut t = ActionTree::default();
     // the groups of the `decompile` root (ActionDatabase::buildDefaultGroups)
@@ -57,10 +63,32 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
         "floatprecision",
         "conditionalexe",
     ];
-    let on = |g: &str| DECOMPILE.contains(&g) && !disabled.contains(g);
+    // the groups of the `jumptable` root
+    const JUMPTABLE: &[&str] = &[
+        "base",
+        "noproto",
+        "localrecovery",
+        "deadcode",
+        "stackptrflow",
+        "stackvars",
+        "analysis",
+        "segment",
+        "subvar",
+        "normalizebranches",
+        "conditionalexe",
+    ];
+    let groups = if jumptable { JUMPTABLE } else { DECOMPILE };
+    let on = |g: &str| groups.contains(&g) && !disabled.contains(g);
     let leaves = |t: &mut ActionTree, list: &[(&'static str, &str, super::actiontree::ApplyFn)]| -> Vec<_> {
         list.iter()
-            .filter(|(name, g, _)| on(g) && !disabled.contains(&format!("action:{name}")))
+            .filter(|&&(name, g, f)| {
+                // the jumptable root runs without its unported actions (`PARTIAL_SKIP`); once one
+                // is ported it runs there too
+                let unported = std::ptr::fn_addr_eq(f, not_ported as super::actiontree::ApplyFn);
+                on(g)
+                    && !disabled.contains(&format!("action:{name}"))
+                    && !(jumptable && unported && PARTIAL_SKIP.contains(&name))
+            })
             .map(|&(name, _, f)| t.leaf(name, f))
             .collect()
     };
@@ -158,8 +186,18 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
         &mut t,
         &[
             ("mappedlocalsync", "localrecovery", not_ported),
-            ("startcleanup", "cleanup", not_ported),
-            ("cleanup", "base", c::nothing),
+            // ActionStartCleanUp only records the varnode create index (`clean_up_index`), which
+            // nothing ported reads
+            ("startcleanup", "cleanup", c::nothing),
+        ],
+    ));
+    let cleanup = super::rules::select(super::rules::CLEANUP, |rl| {
+        on(rl.group) && !disabled.contains(&format!("rule:{}", rl.name))
+    });
+    root.push(t.pool("cleanup", cleanup));
+    root.extend(leaves(
+        &mut t,
+        &[
             ("prefercomplement", "blockrecovery", not_ported),
             ("structuretransform", "blockrecovery", not_ported),
             ("normalizebranches", "normalizebranches", not_ported),
@@ -175,17 +213,34 @@ fn not_ported(_: &mut Funcdata, _: &Arch) -> Result<i32> {
     err("action not implemented in ghidra-rs yet (milestone 3: stage S4 ends before assignhigh, with the rule groups off)")
 }
 
+/// The actions of the `jumptable` root's groups the partial function is simplified without while
+/// they are not ported (an entry is skipped only as long as its leaf is `not_ported`; any other
+/// unported action reached in the partial fails the table and is reported, `flow.rs`). Three
+/// of them can change which tables are recovered: `restructurevarnode` (in the partial it also
+/// runs `protectSwitchPaths`, coreaction.cc), `condconst` (constants along a guarded path) and
+/// `normalizebranches` (flips the CBRANCHs the guards are read from).
+const PARTIAL_SKIP: &[&str] = &[
+    "funclinkoutonly",
+    "restrictlocal",
+    "restructurevarnode",
+    "multicse",
+    "shadowvar",
+    "condconst",
+    "mappedlocalsync",
+    "normalizebranches",
+];
+
 /// The `jumptable` root action (`buildDefaultGroups`: groups `base`, `noproto`, `analysis`, ...)
-/// as far as it is ported, run once on the partial function of jump-table recovery
-/// (`Funcdata::stageJumpTable`): the `base` actions up to the first heritage pass. Left out:
-/// `funclinkoutonly` (`noproto`; output trials only), and the main loop after `heritage`
-/// (dead code, the rule pools, later heritage passes: stages S4 and the rule stages).
-/// `jumptable.rs` reads the guard logic those rules would rewrite.
+/// run on the partial function of jump-table recovery (`Funcdata::stageJumpTable`): the tree of
+/// [`universal`] with the `jumptable` groups, every ported rule on (`togglerule` and `option
+/// currentaction` reach only the `decompile` root), less the actions of [`PARTIAL_SKIP`]. The
+/// rules of later stages (R3 to R5, with `RuleLoadVarnode`) are missing from it; `jumptable.rs`
+/// folds the read-only loads they would resolve.
 pub(crate) fn jumptable_partial(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
-    for f in [start, constbase, default_params, extrapop_setup, unreachable, varnode_props, heritage_pass] {
-        f(fd, arch)?;
+    match tree(true, &std::collections::HashSet::new()).perform(fd, arch)? {
+        super::actiontree::Outcome::Complete => Ok(()),
+        super::actiontree::Outcome::Break(at) => err(format!("the jumptable action stopped at {at}")),
     }
-    Ok(())
 }
 
 /// `ActionStart`: `Funcdata::startProcessing`.

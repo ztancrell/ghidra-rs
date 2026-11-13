@@ -905,7 +905,7 @@ becomes a call and a halt, as before. Modules:
   behaviors. memstate.cc (738 lines) is not needed: `EmulateFunction` keeps a value per
   varnode and ignores STOREs. Float ops fail an emulation (no switch in mercs2 uses one).
 - Hooks: `action::jumptable_partial` (the `jumptable` root's actions as far as they are
-  ported: `start` to `heritage`), `Funcdata` derives `Clone` and keeps the partial's masks
+  ported: `start` to `heritage`) (superseded: the whole `jumptable` tree, see "Stage R2"), `Funcdata` derives `Clone` and keeps the partial's masks
   and folded constants (`nzm`, `folded`), `startProcessing` skips flow for a partial,
   `BlockGraph::is_loop_in`.
 
@@ -923,6 +923,10 @@ op's constant counts in slot 1 (`RuleTermOrder`). Two C++ details reach the outp
 the non-zero masks (a field `(x << 19) s>> 27` gets an empty range on one varnode, so the C++
 gives up on that switch, and so does the port), and a switch variable on the stack matched
 through its two LOADs.
+
+Superseded (stage R2): the partial function runs the `jumptable` root action with the ported
+rules, the guards are read by the C++ loop, and two of the three stand-ins are gone; the fold
+through read-only loads stays until `RuleLoadVarnode` (R5). See "Stage R2".
 
 Check (`print raw` at `paramdouble`; the switch corpus is every function in which ghidra-rs
 meets a jump table, 2,051 of mercs2's 29,240, listed with `GHIDRA_RS_JT_DEBUG`):
@@ -1188,10 +1192,11 @@ need (`TermOrder`, `functionalEqualityLevel`, `cseEliminateList`, `cseEliminatio
 immediate-copy edges (`setCopyImmed`), which `donothing` reads (`hasNoImmediateCopy`): a block
 emptied by copy propagation stays. Group `analysis` is on, so the main loop's `nonzeromask`
 runs (`jumptable::calc_nz_mask`; superseded in R3 part two: `calc_nz_mask_unfolded`, without
-the constant folding) and dead code reads its masks (`Funcdata::nzmask`).
+the constant folding; superseded again at the R2 merge: `calc_nz_mask` itself no longer folds
+and the partial function calls `jumptable::fold_constants` first) and dead code reads its masks (`Funcdata::nzmask`).
 
 The check: `tools/corpus/r1-options.txt` is S4's options with `analysis` on and every rule of
-the groups that are on and not ported switched off (97 `togglerule`s at R1, 76 after R3 part one, 75 after part two, 58 after R4), written by
+the groups that are on and not ported switched off (97 `togglerule`s at R1, 76 after R3 part one, 75 after part two, 58 after R4, 17 with R2 merged, which also turns group `cleanup` on), written by
 `tools/r1-options.sh` from the table in `rules/mod.rs`: rerun it when rules land.
 `ghidra-rs decompile` honours `option togglerule`. Group `analysis` also holds three actions
 not ported yet, `multicse`, `shadowvar` and `condconst` (`ActionConditionalConst`). A console
@@ -1256,6 +1261,115 @@ double-precision rules), big-endian address arithmetic. A `pullsub_multi` on a j
 fails loudly (`Address::renormalize` of join addresses is not ported). The jump-table
 stand-ins (`jumptable.rs`) stay as they are: the partial function would need the `jumptable`
 root action's pool with R2's comparison rules too.
+Superseded: R2 runs that action on the partial function (see "Stage R2").
+
+### Stage R2: rules for bit operations, comparisons, booleans
+
+Stage R2 (branch `m3-r2`) adds 50 rules of `oppool1` and 2 of the `cleanup` pool, in
+`decomp/rules/`, each in the C++ pool order with its `getOpList`:
+
+- `bits.rs`: `ormask`, `andmask`, `orconsume`, `orcollapse`, `andorlump`, `shiftbitops`,
+  `rightshiftand`, `highorderand`, `anddistribute`, `andcommute`, `andpiece`, `andzext`,
+  `andcompare`, `doubleshift`, `doublearithshift`, `leftright`, `shiftcompare`, `signshift`,
+  `shift2mult`, `shiftpiece`, `shiftand`, `bitundistribute`, `xorswap`, `popcountboolxor`,
+  `lzcountshiftbool`, `orcompare`.
+- `compare.rs`: `intlessequal`, `sborrow`, `scarry`, `testsign`, `less2zero`,
+  `lessequal2zero`, `sless2zero`, `equal2zero`, `equal2constant`, `xorcollapse`,
+  `slesstoless`, `lessequal`, `lessnotequal`, `lessone`, `rangemeld`, with
+  `Funcdata::replaceLessequal`, `AddExpression` and `CircleRange::translate2Op`.
+- `boolean.rs`: `bxor2notequal`, `notdistribute`, `booleanundistribute`, `booleandedup`,
+  `booleannegate`, `boolzext`, `logic2bool`, `condnegate`, `boolnegate`, with `BooleanMatch`,
+  `opBoolNegate`, `opNormalizeFlip` and the boolean flips of the opcodes.
+- `cleanup.rs` (the `cleanup` pool, table `CLEANUP`): `multnegone`, `2comp2sub`. The pool runs
+  just before `assignhigh`, so the check sees it: group `cleanup` is now on in
+  `r1-options.txt`, with the pool's nine other rules of that group switched off on the
+  reference (`addunsigned`, `subright`, `piecestructure` and `andstructure` read data-types,
+  `ptrsubcharconstant` is R5's, `dumptyhumplate` and `extensionpush` R3's, `floatsigncleanup`
+  R4's, `expandload` is left for later). `ActionStartCleanUp` only records the varnode create
+  index, which nothing ported reads.
+
+Not ported from the table row: `threewaycomp` (`RuleThreeWayCompare`, 64-bit compare
+idioms), `conditionalmove` and `orpredicate` (group `conditionalexe`); they stay switched off on the
+reference. `r1-options.txt` (from
+`tools/r1-options.sh`, which now reads both pools) holds 17 `togglerule`s with R3 and R4 merged (`subvar-options.txt` 18, `r4-options.txt` 17;
+all three now have group `cleanup` on).
+
+`isBooleanValue` reads `typerecovery_on` (set by `ActionStartTypes::reset` when the root action
+has group `typerecovery`; `Funcdata::typerecovery_on`). `opFlipCondition` flips `boolean_flip`
+only. `copySymbol` carries a constant's data-type and type lock to its replacement
+(`rules::copy_symbol`, in `replaceLessequal` and `andcompare`); symbols and equates are not
+modelled, so `copySymbolIfValid` has nothing to carry. `leftright` on a join-space varnode
+fails loudly (`Address::renormalize`). The helpers the rule files share (`insert_new`,
+`copy_symbol`, `lsb`, `shl`, `shr`, ...) are in `rules/mod.rs`; `pull_back`, `pcode_left`,
+`pcode_right` and `mostsigbit_set` are in `rangeutil.rs` and `is_bool_output` in `opcode.rs`.
+Table tests cover `translate_2_op`, `replace_lessequal`, `same_op_complement`, the boolean
+flips and the bit helpers.
+
+The partial function of jump-table recovery now runs the real `jumptable` root action
+(`action::jumptable_partial`): the tree of `universal` with the `jumptable` groups (`base`,
+`noproto`, `localrecovery`, `deadcode`, `stackptrflow`, `stackvars`, `analysis`, `segment`,
+`subvar`, `normalizebranches`, `conditionalexe`), every ported rule on (`togglerule` and
+`option currentaction` reach only the `decompile` root, on the reference too). Eight actions of
+those groups are not ported and are left out of the partial's tree while they are
+(`action::PARTIAL_SKIP`: `funclinkoutonly`, `restrictlocal`, `restructurevarnode`, `multicse`,
+`shadowvar`, `condconst`, `mappedlocalsync`, `normalizebranches`); an entry is skipped only as
+long as its leaf is `not_ported`, so a later port runs in the partial too. Three of them can
+change which tables are recovered: `restructurevarnode` (in the partial it also runs
+`protectSwitchPaths`), `condconst` and `normalizebranches`. The partial carries
+`Funcdata::jumptablerecovery_on` (`isJumptableRecoveryOn`): heritage does not bump the
+dead-code delay in it, dead code skips `lastChanceLoad`, and `donothing` removes an empty block
+whatever was copied into it. An error of the partial's action fails the table, as in the C++;
+when the error comes from a path ghidra-rs does not port (`LowlevelError::is_unported`) it is
+also written to stderr, which `decomp-diff.sh` compares, so it cannot pass for a failure the
+reference has (none occurs in the switch corpus). `analyzeGuards` is the C++ loop (the CBRANCH
+condition, `boolean_flip`, two pull-backs). Two of S3's three stand-ins are gone (x86 flag
+logic read as one comparison; a commutative op's constant in slot 0). One is left: constants
+folded through a load from read-only memory (`jumptable::fold_constants`), because
+`RuleLoadVarnode` is stage R5. The folded constants no longer reach the non-zero masks of the
+function itself (`ActionNonzeroMask` used them in R1, which sharpened masks beyond the C++'s).
+
+Found with the merged rules and fixed: removing unreachable blocks failed with "Deleting op
+with descendants" when a removed block's value was read in another removed block
+(`descendantsOutside` asks for a reader in a block that is not dead; 0x74fae0).
+
+The check is R1's, with the regenerated options and lane division on both sides (R3):
+
+```sh
+rust/tools/r1-options.sh
+export DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst
+BREAK=assignhigh OPTIONS=$PWD/tools/corpus/r1-options.txt rust/tools/decomp-diff.sh m8
+BREAK=assignhigh OPTIONS=$PWD/tools/corpus/r1-options.txt TIMEOUT=60 rust/tools/decomp-diff.sh m500
+```
+
+| corpus | identical (R2 check, merged with R3) |
+|---|---|
+| m8 | 8 / 8 |
+| m500 | 498 / 500; 498 / 499 of the functions the reference finishes (99.8 %, bar 98 %: reached; 495 / 499 with R3 alone) |
+
+Superseded: before the merge with R3 the check was 452 / 453 of R1's set (the 46 lane-division
+functions left out).
+
+Other checks on the same binary: `paramdouble` (S3) M8 8 / 8, M500 500 / 500, and the
+switch corpus (every function in which ghidra-rs meets a jump table, 0xa4e8c2 left out)
+1,947 / 2,050 (1,934 with the stand-ins); S4 (`s4-options.txt`) M8 8 / 8, M500 498 / 500;
+S6 with types (`s6-options.txt`) M8 8 / 8, M500 498 / 500; locked `void` M8 8 / 8, M500
+498 / 500; locked `int4` M8 8 / 8, M500 498 / 500; callees with a stack parameter M8
+8 / 8, M500 498 / 500. With R3 part two and R4 merged (2026-11-13) the three rule
+checks, all with group `cleanup` on, are each M8 8 / 8 and M500 498 / 499 the reference
+finishes: `r1-options.txt`, `subvar-options.txt` and `r4-options.txt` (superseded: 497 / 499 in
+"Stage R3" part two and "Stage R4", measured without the R2 rules).
+
+Remaining differences of the R2 check, by cause:
+
+- 0x47a6b0: `ActionConditionalExe` merging two blocks on equal conditions (as in R1).
+- 0x4c48d0: the reference does not finish within 60 s.
+- The S4 and S6 checks differ on 0x4919f0 (as with R3 alone); the R2 check does not.
+
+Switch corpus: the reference finishes 2,004 of the 2,050 (120 s limit, errors). Of the 103
+that differ, 102 are in the obfuscated code past 0x1000000 and one in the game code: 0x7c1f30
+(as in S3: the reference reads a garbage target). No partial function fails on an unported path.
+0x831db0, which differed after the first R2 round (two tables not recovered), is identical
+with the `jumptablerecovery_on` gates and R3's rules in the partial.
 
 ### Stage R3 (in part): lane division; extension, concat and sub-piece rules
 
@@ -1344,9 +1458,8 @@ Two faults found on the way, both older than this stage:
   to constants (`jumptable::calc_nz_mask`), so a mask could be tighter than the reference's
   (`x ^ x` counted as 0 before `trivialarith` rewrote it). It now runs
   `calc_nz_mask_unfolded`; the partial function of jump-table recovery keeps the folding.
-  Interim: branch `m3-r2` solves the same with a single `calc_nz_mask` and an explicit
-  `fold_constants` step on the partial function, and that shape replaces this pair when R2
-  merges.
+  Superseded (R2 merge): `calc_nz_mask_unfolded` is gone; the single `calc_nz_mask` does not
+  fold, and the partial function calls `jumptable::fold_constants` before it.
   This was the cause of 0x6fa6e0 and 0x4891e0. Superseded: "a zero replacement the reference
   makes later" in the R1 and R3 notes.
 - Removing an unreachable block failed with "Deleting op with descendants" when a reader was
