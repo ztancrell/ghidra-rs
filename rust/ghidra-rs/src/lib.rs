@@ -4,6 +4,7 @@ pub mod analysis;
 pub mod console;
 pub mod decomp;
 pub mod fid;
+pub mod pipeline;
 pub mod scripts;
 pub mod sla;
 pub mod sleigh;

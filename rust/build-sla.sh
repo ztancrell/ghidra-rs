@@ -11,7 +11,7 @@ build="$here/target/sleigh-build"
 mkdir -p "$build"
 cp "$src"/*.cc "$src"/*.hh "$src"/*.h "$src"/*.y "$src"/*.l "$src"/Makefile "$build"/
 # -o: use the checked-in bison/flex outputs instead of regenerating them
-make -C "$build" -j"$(nproc)" -o xml.cc -o pcodeparse.cc -o slghparse.cc -o slghparse.hh -o slghscan.cc sleigh_opt
+make -C "$build" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" -o xml.cc -o pcodeparse.cc -o slghparse.cc -o slghparse.hh -o slghscan.cc sleigh_opt
 for spec in x86-64 x86; do
     "$build/sleigh_opt" "$lang/$spec.slaspec" "$lang/$spec.sla"
 done

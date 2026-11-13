@@ -67,10 +67,17 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   `tools/decomp-rank.sh`, `tools/decomp-bisect.sh`: the S2 debugging tools (verbose diff,
   easy-first order, first differing step; see "Debugging tools").
 - `tools/decomp-corpus.sh`, `tools/corpus/m8.txt`, `tools/corpus/m500.txt`: the mercs2 corpora.
+- `ghidra-rs/src/pipeline.rs`, `ghidra-rs/tests/pipeline.rs`: the mercs2 pipeline passes
+  (milestone 2c, `docs/plans/m2c-pipeline.md`). So far only the signature of `slot_rewrites`
+  and its test, which fails until the function is written.
+- `tools/m2c-reference.sh`, `tools/m2c-compare.sh`: make the Java Ghidra reference of
+  milestone 2c, and compare ghidra-rs CSV files with it (see "Match against Ghidra").
 
 ## Build
 
-Needs Rust (stable), and g++, make and zlib headers for the SLEIGH compiler.
+Needs Rust (stable), and g++, make and zlib headers for the SLEIGH compiler. `build-sla.sh`
+runs on Linux and macOS (it takes the job count from `nproc`, or `sysctl -n hw.ncpu` where
+that is missing).
 
 ```sh
 cd rust
@@ -212,6 +219,46 @@ pipeline's `build/functions*.csv` from 2026-10-14 predate those steps. Column ra
 always 0. Superseded (branch `fid`): `fid` and the library names come from Function ID, see
 below.
 
+Superseded: the two rows above were measured against an older reference. The current
+reference is Java Ghidra 12.2 on mercs2 395ba6b, run 2026-11-12, made by
+`rust/tools/m2c-reference.sh` (an ExportFunctions/ExportGaps snapshot after every pipeline
+script, for both images; see `docs/plans/m2c-pipeline.md`, "Reference data"). Re-measured
+against it on 2026-11-12 (milestone 2c, stage S0; Intel MacBook, no Function ID databases):
+
+| run | reference | functions | size | callees | callers | data_refs | gaps rows |
+|---|---|---|---|---|---|---|---|
+| analysis image, plain discovery | `a0-import` (23,289) | 22,392 common, 897 missing, 361 extra | 95.9% | 87.7% | 88.5% | 87.7% | 21,104 of 23,516 identical (ours: 22,621 rows) |
+| analysis image, plain discovery | `a5-final` (37,619) | 20,422 common, 17,197 missing, 2,331 extra | 91.5% | 86.0% | 85.6% | 83.1% | (not compared) |
+| analysis image, `--functions-from a5-final` | `a5-final` (37,619) | 37,617 of 37,619 | 99.0% | 97.2% | 97.5% | 89.9% | 39,242 of 39,557 identical (ours: 39,367 rows) |
+| original image, plain discovery | `o0-import` (20,866) | 19,966 common, 900 missing, 358 extra | 95.9% | 91.1% | 91.4% | 81.2% | 18,898 of 21,210 identical (ours: 20,334 rows) |
+| original image, `--functions-from o2-recover` | `o2-recover` (37,331) | 37,329 of 37,331 | 97.7% | 97.4% | 97.1% | 86.4% | 36,758 of 37,484 identical (ours: 37,050 rows) |
+
+The reference moved (import 23,323 to 23,289, final list 37,635 to 37,619; cause not
+established, see the plan), ghidra-rs did not: plain discovery exports 22,753 functions as
+before (22,388 + 365 then, 22,392 + 361 now). Missing with `--functions-from`: 0x475541 and
+0x98248c on the analysis image (as before), 0x7f369c and 0x98248c on the original image.
+
+The numbers come from `tools/m2c-compare.sh` (sh and awk). `functions <ours.csv> <ref.csv>`
+prints common / missing / extra entry addresses and, over the common rows, how many have the
+same `size`, `callees`, `callers` and `data_refs`; it writes the address lists to
+`<ours.csv>.missing` and `<ours.csv>.extra`. `gaps <ours.csv> <ref.csv>` counts rows identical
+as whole lines. `rows <ours.csv> <ref.csv> <key-col> <value-col>` counts, for report CSVs,
+common keys and those with the same value. The commands (in `mercs2-rearmed`, `R=build/m2c-ref`,
+output outside both repos in `$S`; the original image the same way with `orig/Mercenaries2.exe`,
+`o2-recover` and `o0-import`):
+
+```sh
+ghidra-rs analyze orig/Mercenaries2.analysis.exe --functions-from $R/a5-final-functions.csv \
+    --functions $S/a-from-functions.csv --gaps $S/a-from-gaps.csv
+m2c-compare.sh functions $S/a-from-functions.csv $R/a5-final-functions.csv
+m2c-compare.sh gaps $S/a-from-gaps.csv $R/a5-final-gaps.csv
+ghidra-rs analyze orig/Mercenaries2.analysis.exe \
+    --functions $S/a-plain-functions.csv --gaps $S/a-plain-gaps.csv
+m2c-compare.sh functions $S/a-plain-functions.csv $R/a0-import-functions.csv
+m2c-compare.sh gaps $S/a-plain-gaps.csv $R/a0-import-gaps.csv
+m2c-compare.sh functions $S/a-plain-functions.csv $R/a5-final-functions.csv
+```
+
 Known differences:
 - Constant propagation still differs from Ghidra's in places (see CheckAbiCallers below):
   with `--functions-from`, `data_refs` is lower than Ghidra's on 2,251 rows and higher on
@@ -244,6 +291,10 @@ thread), measured before `--functions` ran the whole-function propagation, which
 1.5 s on 12 threads (10.5 s to 12.1 s analysis with `--functions-from`). Ghidra's
 auto-analysis of the same game (`Mercenaries2.exe`, mercs2 `build/ghidra-import.log`) took
 723 s, before the post-scripts. Function ID adds about 3 s (see below).
+
+On the Intel MacBook (2026-11-12, the runs of the second table above, `--functions` and
+`--gaps`, no Function ID databases): 28.8 s to 30.3 s wall with `--functions-from` (22.6 s to
+23.5 s analysis), 29.7 s to 37.3 s for plain discovery (23.0 s to 30.5 s analysis).
 
 ### Function ID
 
