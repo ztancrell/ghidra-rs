@@ -15,9 +15,10 @@ use super::{err, heritage, Arch, Funcdata, Result};
 /// `universalAction` as the `decompile` root has it, with the groups in `disabled` switched
 /// off (`option currentaction decompile <group> off`): the root `universal` (restart group,
 /// once per function), its first actions, the repeating groups `fullloop`, `mainloop` and
-/// `stackstall`, and the root's actions after `fullloop` up to `assignhigh`. Rule pools hold no
-/// ported rule, so they do nothing: the checks switch every rule off. An action that is not
-/// ported fails when it runs with its group on.
+/// `stackstall`, and the root's actions after `fullloop` up to `assignhigh`. `oppool1` holds the
+/// ported rules (`rules::OPPOOL1`) less those `togglerule` switched off (`rule:<name>` in
+/// `disabled`); the actions named `action:<name>` there (`DECOMP_SKIP_ACTIONS`) are left out. An
+/// action that is not ported fails when it runs with its group on, except `lanedivide` (see there).
 pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
     use super::coreaction as c;
     let mut t = ActionTree::default();
@@ -58,8 +59,16 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
     ];
     let on = |g: &str| DECOMPILE.contains(&g) && !disabled.contains(g);
     let leaves = |t: &mut ActionTree, list: &[(&'static str, &str, super::actiontree::ApplyFn)]| -> Vec<_> {
-        list.iter().filter(|(_, g, _)| on(g)).map(|&(name, _, f)| t.leaf(name, f)).collect()
+        list.iter()
+            .filter(|(name, g, _)| on(g) && !disabled.contains(&format!("action:{name}")))
+            .map(|&(name, _, f)| t.leaf(name, f))
+            .collect()
     };
+    // the rules of the groups that are on, less those `togglerule` switched off ("rule:<name>")
+    let pool1 = super::rules::select(super::rules::OPPOOL1, |rl| {
+        on(rl.group) && !disabled.contains(&format!("rule:{}", rl.name))
+    });
+    let pool1 = t.pool("oppool1", pool1);
     let mut root = leaves(
         &mut t,
         &[
@@ -73,10 +82,12 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
             ("funclinkoutonly", "noproto", not_ported),
         ],
     );
-    let stackstall = leaves(
+    let mut stackstall = leaves(
         &mut t,
         &[
-            ("oppool1", "base", c::nothing),
+            // ActionLaneDivide (R3) is in group `base` and cannot be switched off, so it is the one
+            // action not ported that does nothing instead of failing: the functions that need it
+            // differ from the reference (`rust/tools/corpus/m500-lanedivide.txt`) rather than fail
             ("lanedivide", "base", c::nothing),
             ("multicse", "analysis", not_ported),
             ("shadowvar", "analysis", not_ported),
@@ -84,6 +95,7 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
             ("stackptrflow", "stackptrflow", c::stack_ptr_flow),
         ],
     );
+    stackstall.insert(0, pool1);
     let stackstall = t.group("stackstall", stackstall, true);
     let mut mainloop = leaves(
         &mut t,
@@ -103,8 +115,8 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
             ("deadcode", "deadcode", c::dead_code),
             ("dynamicmapping", "dynamic", c::nothing),
             ("spacebase", "base", c::spacebase),
-            ("nonzeromask", "analysis", not_ported),
             ("infertypes", "typerecovery", super::infertypes::infer_types),
+            ("nonzeromask", "analysis", super::rules::nonzero_mask),
             ("restructurevarnode", "localrecovery", not_ported),
         ],
     );
@@ -120,7 +132,7 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
             ("unreachable", "unreachable", c::unreachable),
             ("nodejoin", "nodejoin", c::node_join),
             ("conditionalexe", "conditionalexe", c::conditional_exe),
-            ("conditionalconst", "analysis", not_ported),
+            ("condconst", "analysis", not_ported),
         ],
     ));
     let mainloop = t.group("mainloop", mainloop, true);
@@ -393,9 +405,10 @@ fn varnode_props(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
 }
 
 /// The parts of `ActionVarnodeProps::apply` that act after dead code ran: an auto-live hold
-/// (`lastChanceLoad`) is released unless its LOAD reads a constant address, and a varnode
-/// nothing consumes but something reads is replaced by zero (with no `nonzeromask`, every mask
-/// is all ones, so only an unconsumed varnode qualifies), which is not ported.
+/// (`lastChanceLoad`) is released unless its LOAD reads a constant address, and every read of a
+/// varnode whose non-zero mask and consume mask share no bit is replaced by zero
+/// (`totalReplaceConstant`; before `nonzeromask` first runs every mask is all ones, so only an
+/// unconsumed varnode qualifies).
 fn varnode_props_late(fd: &mut Funcdata) -> Result<i32> {
     let mut changes = 0;
     let pass = fd.heritage.pass();
@@ -423,15 +436,27 @@ fn varnode_props_late(fd: &mut Funcdata) -> Result<i32> {
             }
             continue;
         }
-        if v.consume == 0 && !v.is_constant() && !v.descend.is_empty() {
-            let zero_copy = v.def.is_some_and(|d| {
+        // no bit that may be non-zero is consumed: every read becomes 0
+        if fd.nzmask(vn) & v.consume == 0 && !v.is_constant() {
+            if let Some(d) = v.def {
                 let o = fd.op(d);
-                o.opc == Opcode::Copy && fd.vn(o.ins[0]).is_constant() && fd.vn(o.ins[0]).offset == 0
-            });
-            if !zero_copy {
-                return err(
-                    "varnodeprops: replacing an unconsumed varnode by zero is not implemented in ghidra-rs yet",
-                );
+                if v.size > 8 {
+                    // handleExtendedZero acts on a ZEXT of 0 only
+                    let zext0 =
+                        o.opc == Opcode::IntZext && fd.vn(o.ins[0]).is_constant() && fd.vn(o.ins[0]).offset == 0;
+                    if zext0 {
+                        return err("varnodeprops: handleExtendedZero is not implemented in ghidra-rs yet");
+                    }
+                    continue;
+                }
+                // a COPY of 0 is left to constant propagation
+                if o.opc == Opcode::Copy && fd.vn(o.ins[0]).is_constant() && fd.vn(o.ins[0]).offset == 0 {
+                    continue;
+                }
+            }
+            if !fd.vn(vn).descend.is_empty() {
+                fd.total_replace_constant(vn, 0)?;
+                changes += 1;
             }
         }
     }

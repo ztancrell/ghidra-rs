@@ -463,6 +463,38 @@ Review fixes (same branch, 2026-11-13), after an independent review of the S6 di
 - Results (final binary): unlocked M8 8 / 8, M500 446 / 446 non-SSE; `void` M8 8 / 8, M500 446 / 446 non-SSE; `int4` M8 8 / 8,
   M500 446 / 446 non-SSE; callees with a stack parameter M8 8 / 8, M500 446 / 446 non-SSE; S4 regression M8 8 / 8.
 
+Merged with R1 (2026-11-13, `master` into `m3-s6`): `infertypes` and `nonzeromask` are both in
+the tree; `ActionInferTypes` reads R1's computed non-zero masks (`Funcdata::nzmask`, the C++
+`getNZMask`) for its boolean guards. `PcodeOp::stopsTypePropagation` and
+`Varnode::stopsUpPropagation` stay unported: only `RulePtrArith`, `RuleStructOffset0` and
+`RulePushPtr` (R5) set the flag, and no R1 rule sets it or makes a PTRSUB/PTRADD; both checks
+come with R5. Every bar rerun on the merged binary: S6 unlocked, locked `void`, locked `int4`
+and callees with a stack parameter each M8 8 / 8, M500 446 / 446 non-SSE (446 / 500; the misses
+are the 53 SSE functions and 0x4c48d0, which the reference does not finish); S4 regression
+M8 8 / 8; R1 check M8 8 / 8, M500 451 / 453.
+
+### R1: done on branch `m3-r1` (2026-11-13)
+
+The rule pool and 19 rules (list in `rust/README.md`, "Stage R1"). Check: `print raw` at
+`break start assignhigh` with `rust/tools/corpus/r1-options.txt` (S4's groups, `analysis` on,
+the 97 unported rules of the groups that are on switched off) and
+`DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst` (the three `analysis` actions not
+ported; a check-only switch the reference patch reads too, and each action leaves the list
+when it is ported). The options come from `rust/tools/r1-options.sh`.
+
+Bar (user decision 2026-11-13): M500 ≥ 98 % identical among the functions that do not need
+`ActionLaneDivide` (R3), listed in `rust/tools/corpus/m500-lanedivide.txt` (46: the reference
+output changes when `lanedivide` is skipped too). M8 8 / 8; M500 451 / 453 (99.6 %) of the
+others the reference finishes (451 / 500 in all): the bar is reached; S3's paramdouble check stays
+500 / 500. Fixed in round two: the action is `condconst`, not `conditionalconst` (the skip
+missed it), `setCopyImmed`/`hasNoImmediateCopy` (blocks emptied by copy propagation stay), dead
+code reads the computed non-zero masks. Round three: `varnodeprops` replaces reads of a varnode
+whose non-zero and consume masks share no bit by 0 (the x87/SSE carry flags, 11 functions, and
+0x440590), and removing unreachable blocks is ported (0x6c2570). Left: 0x47a6b0
+(`ActionConditionalExe` merging two blocks on equal conditions) and 0x6fa6e0 (a zero
+replacement the reference makes later than ghidra-rs). The jump-table stand-ins stay until R2 (the
+partial function needs the comparison rules too).
+
 ## Running stages in parallel
 
 Strict chain first: S0 → S1a → S1b → S2. After S2 the work fans out. Under the cap of two

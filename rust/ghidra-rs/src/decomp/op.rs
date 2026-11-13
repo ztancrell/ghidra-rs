@@ -38,6 +38,8 @@ impl OpFlags {
     pub(crate) const BOOLEAN_FLIP: OpFlags = OpFlags(512);
     /// `calculated_bool`: the output is a boolean (`opMarkCalculatedBool`, stage S6)
     pub(crate) const CALCULATED_BOOL: OpFlags = OpFlags(1024);
+    /// `immed_copy` (an additional flag in C++): a COPY was propagated into a MULTIEQUAL slot
+    pub(crate) const IMMED_COPY: OpFlags = OpFlags(2048);
 
     pub(crate) fn has(self, f: OpFlags) -> bool {
         self.0 & f.0 != 0

@@ -148,6 +148,9 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    its 69 files are x86-64), the locked-prototype stand-in replaces it. Superseded: "D files
    using `parse line` pass". S6b: locked stack parameters of the decompiled function, varargs
    and hidden-return prototypes, scopes, unions, partial types; casts are S9.
+   R1 (rule pools; 19 copy, constant and arithmetic rules) done on branch `m3-r1`: M8 8 / 8;
+   M500 less the 46 `ActionLaneDivide` functions 451 / 453 (99.6 %, bar 98 %). S6 and R1 are
+   merged on `m3-s6`: every S6 and R1 number above holds on the merged binary.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.

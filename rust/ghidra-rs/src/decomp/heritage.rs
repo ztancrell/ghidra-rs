@@ -241,6 +241,12 @@ impl Heritage {
         self.maxdepth = -1;
     }
 
+    /// `Funcdata::isHeritaged` (`Heritage::heritagePass(addr) >= 0`): whether a pass has
+    /// heritaged the address.
+    pub(crate) fn heritaged(&self, space: Space, off: u64) -> bool {
+        self.globaldisjoint.find(space, u64::MAX, off).is_some()
+    }
+
     /// `Funcdata::getHeritagePass`.
     pub(crate) fn pass(&self) -> i32 {
         self.pass

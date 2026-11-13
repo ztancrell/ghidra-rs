@@ -60,3 +60,15 @@
      warning(err.explain,op->getAddr());
      return JumpTable::fail_normal;
    }
+--- a/action.cc
++++ b/action.cc
+@@ -299,6 +299,9 @@
+ 
+ {
+   int4 res;
++  // ghidra-rs check device: the actions named in DECOMP_SKIP_ACTIONS (a comma list) do nothing
++  static const char *skip = getenv("DECOMP_SKIP_ACTIONS");
++  if (skip != (char *)0 && ("," + string(skip) + ",").find("," + name + ",") != string::npos) return 0;
+ 
+   do {
+     switch(status) {

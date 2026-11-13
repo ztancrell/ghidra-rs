@@ -138,7 +138,9 @@ fn input_local(fd: &mut Funcdata, op: OpId, slot: usize) -> TypeId {
     }
 }
 
-/// Port of `Varnode::getLocalType` (no op stops type propagation before the rules).
+/// Port of `Varnode::getLocalType`. No `stopsTypePropagation`/`stopsUpPropagation` check: the
+/// flag is set only by `RulePtrArith`, `RuleStructOffset0` and `RulePushPtr` (stage R5, toggled off
+/// in every check); none of R1's rules sets it or makes a PTRSUB/PTRADD. Port both checks with R5.
 fn local_type(fd: &mut Funcdata, vn: VarnodeId) -> Result<TypeId> {
     if fd.vn(vn).has(VnFlags::TYPELOCK) {
         return Ok(vn_type(fd, vn));
@@ -528,7 +530,7 @@ fn propagate_edge(fd: &mut Funcdata, arch: &Arch, st: &mut Infer, op: OpId, insl
     if (outslot >= 0 && ov.is_annotation()) || ov.has(VnFlags::TYPELOCK) {
         return Ok(false);
     }
-    if fd.types.meta(alt) == Meta::Bool && fd.vn(outvn).nzmask() > 1 {
+    if fd.types.meta(alt) == Meta::Bool && fd.nzmask(outvn) > 1 {
         return Ok(false);
     }
     let Some(newtype) = propagate_type(fd, arch, st, alt, op, invn, outvn, inslot, outslot)? else { return Ok(false) };
@@ -645,7 +647,7 @@ fn propagate_across_returns(fd: &mut Funcdata, arch: &Arch, st: &mut Infer) -> R
             continue;
         }
         let vn = fd.op(r).ins[1];
-        if fd.vn(vn).size != base_size || (is_bool && fd.vn(vn).nzmask() > 1) || st.temp(fd, vn) == ct {
+        if fd.vn(vn).size != base_size || (is_bool && fd.nzmask(vn) > 1) || st.temp(fd, vn) == ct {
             continue;
         }
         st.set_temp(vn, ct);
