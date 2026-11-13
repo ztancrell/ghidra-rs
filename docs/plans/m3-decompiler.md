@@ -567,10 +567,14 @@ and edge swaps of the collapse rules on the basic blocks.
 | check | M8 | M500 |
 |---|---|---|
 | rule groups off (`s8-options.txt`) | 8 / 8 | 499 / 500; 499 / 499 of the functions the reference finishes |
-| rule-stage options (`s8-r-options.txt`) | not run yet | not run yet |
+| rule-stage options (`s8-r-options.txt`) | 8 / 8 | 496 / 500; 496 / 499 of the functions the reference finishes (99.4 %) |
 
-The miss is 0x4c48d0, which neither engine finishes within the timeout. Existing bars on this
-branch: not rerun yet.
+The miss in both is 0x4c48d0, which neither engine finishes within the timeout. The other
+misses with the rule-stage options are R3's, unchanged: 0x47a6b0 (`ActionConditionalExe`), 0x4891e0
+and 0x6fa6e0 (a zero replacement one main-loop pass apart). R3's fourth miss, 0x4919f0, is identical
+here: it differs only with `blockrecovery` off. Existing bars on this branch: the R3 check M500 495 / 500 (495 / 499),
+paramdouble 500 / 500, the S4 check 498 / 500, the S6 check (unlocked) 498 / 500: unchanged. Those
+checks keep `blockrecovery` off, so `blockstructure` never runs in them.
 
 Not ported, left for part two:
 

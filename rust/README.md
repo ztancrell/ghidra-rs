@@ -1330,10 +1330,11 @@ sides (`DECOMP_SKIP_ACTIONS`). The commands and the reasons are in
 
 | corpus | rule groups off | rule-stage options |
 |---|---|---|
-| m8 | 8 / 8 | not run yet |
-| m500 | 499 / 500 (499 / 499 the reference finishes) | not run yet |
+| m8 | 8 / 8 | 8 / 8 |
+| m500 | 499 / 500 (499 / 499 the reference finishes) | 496 / 500 (496 / 499; the misses are R3's 0x47a6b0, 0x4891e0, 0x6fa6e0) |
 
-The miss is 0x4c48d0 (neither engine finishes within the timeout). Not ported yet:
+The miss is 0x4c48d0 (neither engine finishes within the timeout). The existing bars hold on
+this branch (R3 check 495 / 499, paramdouble 500 / 500, S4 and S6 checks 498 / 500). Not ported yet:
 `prefercomplement` and `structuretransform` (they wait for R2's flip helpers), `finalstructure`,
 `returnsplit` and structured `printRaw`.
 
