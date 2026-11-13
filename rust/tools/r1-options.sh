@@ -2,10 +2,12 @@
 # Writes the options of the rule-stage checks: S4's options (s4-options.txt) with more groups on,
 # and `option togglerule <rule> off` for every rule of `oppool1` and of the `cleanup` pool whose
 # group is on and which ghidra-rs does not port yet (the tables in
-# ghidra-rs/src/decomp/rules/mod.rs). Rerun it when rules land. It writes three files:
+# ghidra-rs/src/decomp/rules/mod.rs). Rerun it when rules land. It writes five files:
 #   rust/tools/corpus/r1-options.txt      groups `analysis`, `cleanup` on (the R1/R2/R3 check)
 #   rust/tools/corpus/subvar-options.txt  also `subvar` on (the R3 subvar check)
 #   rust/tools/corpus/r4-options.txt      also `floatprecision` on (the R4 check)
+#   rust/tools/corpus/s8-options.txt      s4-options.txt with `blockrecovery` on (the S8 check)
+#   rust/tools/corpus/s8-r-options.txt    r1-options.txt with `blockrecovery` on (S8, rule stages)
 set -e
 rust=$(cd "$(dirname "$0")/.." && pwd)
 cpp=$rust/../Ghidra/Features/Decompiler/src/decompile/cpp
@@ -43,3 +45,7 @@ echo "ported:$ported"
 write r1-options.txt "analysis cleanup"
 write subvar-options.txt "analysis cleanup subvar"
 write r4-options.txt "analysis cleanup floatprecision"
+# stage S8's checks: the S4 and rule-stage options with group `blockrecovery` on
+grep -v "decompile blockrecovery off" "$rust/tools/corpus/s4-options.txt" > "$rust/tools/corpus/s8-options.txt"
+grep -v "decompile blockrecovery off" "$rust/tools/corpus/r1-options.txt" > "$rust/tools/corpus/s8-r-options.txt"
+echo "s8-options.txt, s8-r-options.txt: blockrecovery on"

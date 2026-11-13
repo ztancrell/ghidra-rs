@@ -1543,6 +1543,39 @@ not finish); subvar check and R3 check 497 / 499 each; paramdouble 500 / 500; S4
 four S6 checks (unlocked, `void`, `int4`, callees) 498 / 500 each (0x4919f0; 0x4c48d0).
 Superseded: the 495 / 499 above (0x4891e0 and 0x6fa6e0 are fixed by part two's non-zero masks)
 and the callee check's 497 (the reference ran 0x5b59c0 this time).
+### Stage S8 (in part): structuring
+
+Stage S8 (branch `m3-s8`) ports `ActionBlockStructure`: `decomp/structure.rs` (the structured
+block hierarchy of block.cc as an arena with a block-kind enum, `buildCopy`,
+`installSwitchDefaults`, the `newBlock*` constructors, `negateCondition`, `printTree`) and
+`decomp/collapse.rs` (`CollapseStructure`, `LoopBody`, `TraceDAG`, `FloatingEdge` of
+blockaction.cc). `print tree block` prints the hierarchy (nothing before `blockstructure` ran),
+and `print raw` prints a flipped CBRANCH as `== 0`, as `TypeOpCbranch::printRaw` does.
+
+Check: `print tree block` and `print raw` at `break start assignhigh`, group `blockrecovery` on
+(`tools/corpus/s8-options.txt`, `s8-r-options.txt`: the S4 and rule-stage options without the
+`blockrecovery off` line), with `prefercomplement` and `structuretransform` skipped on both
+sides (`DECOMP_SKIP_ACTIONS`). The commands and the reasons are in
+`docs/plans/m3-decompiler.md`, "S8".
+
+| corpus | rule groups off | rule-stage options |
+|---|---|---|
+| m8 | 8 / 8 | 8 / 8 |
+| m500 | 499 / 500 (499 / 499 the reference finishes) | 496 / 500 (496 / 499; the misses are R3's 0x47a6b0, 0x4891e0, 0x6fa6e0) |
+
+The miss is 0x4c48d0 (neither engine finishes within the timeout). After the R2 merge the
+rule-stage column was 463 / 499: the reference joined branches whose conditions `RuleCondNegate`
+made equal (`ActionNodeJoin`), which ghidra-rs did not port. Superseded: `ActionNodeJoin` is now
+ported (`decomp/nodejoin.rs`, `ConditionalJoin` and `nodeJoinCreateBlock`), and the rule-stage
+column is 498 / 499 with `nodejoin` on (it changes 35 M500 outputs; all match). The S4 and S6 checks rise to 499 / 500 with it (0x4919f0). Not ported yet:
+`prefercomplement` and `structuretransform` (R2's flip helpers they need are now on master), `finalstructure`,
+`returnsplit` and structured `printRaw`.
+
+New flag bit: `OpFlags::FALLTHRU_TRUE` (`1 << 16`).
+
+Review round: `ActionNodeJoin` skips a CBRANCH with `boolean_flip` set (`findDups`), the switch
+leaf check of `newBlockSwitch`, no recursion in `printTree`, `negateCondition`, `isComplex`, and
+unit tests on hand-built graphs (`structure.rs`). Details in the plan, "S8".
 
 ## Speed
 

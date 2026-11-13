@@ -1612,9 +1612,10 @@ pub(crate) fn deindirect(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
 // Block edits: ActionRedundBranch, ActionDeterminedBranch, ActionUnreachable, ActionDoNothing
 
 /// Port of `Funcdata::structureReset`.
-fn structure_reset(fd: &mut Funcdata) -> Result<()> {
+pub(crate) fn structure_reset(fd: &mut Funcdata) -> Result<()> {
     fd.blocks.structure_loops()?;
     fd.heritage.force_restructure();
+    fd.structure.clear();
     Ok(())
 }
 
@@ -2168,41 +2169,9 @@ pub(crate) fn unjustified_params(fd: &mut Funcdata, arch: &Arch) -> Result<i32> 
     Ok(0)
 }
 
-/// `ActionNodeJoin`: two CBRANCHes on the same condition into a shared block are joined
-/// (`ConditionalJoin`), which is not ported; finding one fails loudly. (Functionally equal
-/// conditions in different varnodes are not looked for.)
-pub(crate) fn node_join(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
-    for &bb in &fd.blocks.list {
-        let b = fd.blocks.block(bb);
-        if b.outs.len() != 2 {
-            continue;
-        }
-        let (o1, o2) = (b.outs[0].point, b.outs[1].point);
-        let (leastout, inslot) = if fd.blocks.block(o1).ins.len() < fd.blocks.block(o2).ins.len() {
-            (o1, b.outs[0].reverse)
-        } else {
-            (o2, b.outs[1].reverse)
-        };
-        if fd.blocks.block(leastout).ins.len() == 1 || o1 == o2 {
-            continue;
-        }
-        for (j, e) in fd.blocks.block(leastout).ins.iter().enumerate() {
-            let bb2 = e.point;
-            if j == inslot || bb2 == bb || fd.blocks.block(bb2).outs.len() != 2 {
-                continue;
-            }
-            let cond = |b: BlockId| {
-                let op = *fd.blocks.block(b).ops.last()?;
-                (fd.op(op).opc == Opcode::Cbranch).then(|| fd.op(op).ins[1])
-            };
-            if cond(bb).is_some() && cond(bb) == cond(bb2) {
-                return err(
-                    "ActionNodeJoin: joining two branches on one condition is not implemented in ghidra-rs yet",
-                );
-            }
-        }
-    }
-    Ok(0)
+/// `ActionNodeJoin`: ported in [`super::nodejoin`] (stage S8).
+pub(crate) fn node_join(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
+    super::nodejoin::node_join(fd, arch)
 }
 
 /// `ActionConditionalExe`: a block re-testing the condition of the block that decided how it

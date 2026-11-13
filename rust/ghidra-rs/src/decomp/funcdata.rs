@@ -60,6 +60,8 @@ pub struct Funcdata {
     /// the live calls, sorted by `sortCallSpecs` once blocks exist (`Funcdata::qlst`)
     pub(crate) qlst: Vec<CallId>,
     pub(crate) jumptables: Vec<JumpTable>,
+    /// the structured block hierarchy (`sblocks`, stage S8)
+    pub(crate) structure: super::structure::Structure,
     /// the function's own prototype (`Funcdata::funcp`)
     pub(crate) proto: FuncProto,
     /// the return-value trials (`Funcdata::activeoutput`), from `ActionPrototypeTypes` on
@@ -128,6 +130,7 @@ impl Funcdata {
             calls: Vec::new(),
             qlst: Vec::new(),
             jumptables: Vec::new(),
+            structure: Default::default(),
             proto: FuncProto::default(),
             active_output: None,
             heritage: Heritage::default(),
