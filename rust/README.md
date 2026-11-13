@@ -226,6 +226,18 @@ Known differences:
 - The 2 functions missing with `--functions-from` (0x475541, 0x98248c) start inside an
   instruction that ghidra-rs decoded first from another flow (overlapping code); ghidra-rs
   keeps the first decode and drops the entry.
+- Sizes against mercs2's row walk (`./tool fix_sizes --table`, mercs2 docs/notes/row-sizes.md,
+  2026-11-12, `analyze --functions` on Mercenaries2.analysis.exe): `size` is a body byte count
+  like Ghidra's, so it is short of the extent wherever a body has padding between its pieces
+  (1,540 mercs2 rows) and adds the bytes of SecuROM's outlined fragments. Beyond that:
+  - shared epilogue left out: 0x51e690 (WeaponAmmo_FireProjectile) 2,112 against 2,121; several
+    paths jump to a shared epilogue at 0x51eed0 whose `ret` is at 0x51eed8;
+  - slot entries count only the entry jump: 0x4061a0 5 (body 146), 0x41dd60 11 (432);
+  - a tail after an outlined fragment is taken into the function (0x478350 1,159 with the
+    piece at 0x478794), which is right; mercs2 had two rows there;
+  - 44 rows shorter than the code reached even as a byte count (0x444740: 920 of 947)
+    and 116 longer than the walk (mostly pieces such as 0x417b10, a switch dispatch whose
+    cases lie past the next mercs2 row: 136 against 7; not checked one by one).
 
 Time on the same machine: ghidra-rs `analyze` takes about 9.5 s wall (8.3 s analysis, one
 thread), measured before `--functions` ran the whole-function propagation, which adds about
