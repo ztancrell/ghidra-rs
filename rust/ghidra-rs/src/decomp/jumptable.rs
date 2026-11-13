@@ -150,7 +150,14 @@ fn nz_mask_local(fd: &Funcdata, arch: &Arch, op: OpId, cliploop: bool) -> u64 {
         Lzcount => covering_mask(u64::from(fd.vn(o.ins[0]).size * 8)) & full,
         Subpiece => {
             let sz1 = fd.vn(o.ins[1]).offset; // always a constant
-            let m = if sz1 < 8 { nz(0) >> (8 * sz1) } else { 0 };
+            let m = match (fd.vn(o.ins[0]).size <= 8, sz1 < 8) {
+                (true, true) => nz(0) >> (8 * sz1),
+                (true, false) => 0,
+                // extended precision: the bits above the 64 shift in as possibly non-zero
+                (false, true) if sz1 > 0 => (nz(0) >> (8 * sz1)) | (u64::MAX << (8 * (8 - sz1))),
+                (false, true) => nz(0),
+                (false, false) => u64::MAX,
+            };
             m & full
         }
         Piece => {

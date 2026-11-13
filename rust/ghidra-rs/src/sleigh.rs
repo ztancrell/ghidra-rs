@@ -284,6 +284,11 @@ pub struct Sleigh {
     pub tracked: Vec<(String, u32)>,
     /// the .pspec `<incidentalcopy>` registers (x86: ST0..ST7): copies into them are side effects
     pub incidental: Vec<String>,
+    /// the .pspec `<register_data>` registers with `vector_lane_sizes` (x86: XMM, YMM, ZMM):
+    /// name and lane sizes
+    pub laned: Vec<(String, String)>,
+    /// the `.sla` `bigendian` attribute
+    pub big_endian: bool,
     /// user-defined op names by index
     userops: Vec<Option<String>>,
 }
@@ -694,19 +699,25 @@ impl Sleigh {
 
     /// Load a `.sla`; context defaults come from the `.pspec` of the same name next to it, if any.
     pub fn load(path: &Path) -> Result<Sleigh> {
-        let (context, tracked, incidental) = match std::fs::read_to_string(path.with_extension("pspec")) {
+        let (context, tracked, incidental, laned) = match std::fs::read_to_string(path.with_extension("pspec")) {
             Ok(text) => {
                 let root = crate::xml::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
                 let incidental = root.find("incidentalcopy").map_or(Ok(Vec::new()), |el| {
                     el.kids_named("register").map(|r| r.req("name").map(str::to_string)).collect::<Result<Vec<_>>>()
                 })?;
-                (pspec_sets(&root, "context_set")?, pspec_sets(&root, "tracked_set")?, incidental)
+                let laned = root.find("register_data").map_or_else(Vec::new, |el| {
+                    el.kids_named("register")
+                        .filter_map(|r| Some((r.attr("name")?.to_string(), r.attr("vector_lane_sizes")?.to_string())))
+                        .collect()
+                });
+                (pspec_sets(&root, "context_set")?, pspec_sets(&root, "tracked_set")?, incidental, laned)
             }
-            Err(_) => (Vec::new(), Vec::new(), Vec::new()),
+            Err(_) => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
         };
         let mut sl = Self::load_with_context(path, &context)?;
         sl.tracked = tracked;
         sl.incidental = incidental;
+        sl.laned = laned;
         Ok(sl)
     }
 
@@ -854,11 +865,13 @@ impl Sleigh {
             code_space,
             uniq_space,
             uniq_base: root.uint(a::UNIQBASE).unwrap_or(0),
+            big_endian: root.boolean(a::BIGENDIAN).unwrap_or(false),
             uniq_mask: root.uint(a::UNIQMASK).unwrap_or(0),
             ctx_default,
             regnames,
             tracked: Vec::new(),
             incidental: Vec::new(),
+            laned: Vec::new(),
             userops,
         })
     }

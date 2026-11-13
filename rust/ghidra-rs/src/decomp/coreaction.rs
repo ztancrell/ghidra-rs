@@ -26,9 +26,10 @@ fn calc_mask(size: u32) -> u64 {
     }
 }
 
-/// An action with nothing to do on x86 without locked prototypes, segment ops, lane registers
-/// or overrides (`paramdouble`: only stack trials split, and none exist before the `stackvars`
-/// rules; `segmentize`, `internalstorage`, `lanedivide`).
+/// An action with nothing to do on x86 without locked prototypes, segment ops or overrides
+/// (`paramdouble`: only stack trials split, and none exist before the `stackvars` rules;
+/// `segmentize`, `internalstorage`). Superseded: `lanedivide` was one until R3
+/// (`lanedivide.rs`).
 pub(crate) fn nothing(_: &mut Funcdata, _: &Arch) -> Result<i32> {
     Ok(0)
 }

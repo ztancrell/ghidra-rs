@@ -73,6 +73,9 @@ pub(crate) struct PcodeOp {
     pub(crate) flags: OpFlags,
     /// the special halt this RETURN stands for (`getHaltType`), if any
     pub(crate) halt: Option<Halt>,
+    /// the position in the per-opcode list (`PcodeOp::codeiter`): an op goes to the end of
+    /// its list when made and on every `opSetOpcode`
+    pub(crate) list_key: u32,
 }
 
 impl PcodeOp {

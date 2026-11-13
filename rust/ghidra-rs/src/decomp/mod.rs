@@ -22,6 +22,7 @@ mod heritage;
 mod infertypes;
 mod inject;
 mod jumptable;
+mod lanedivide;
 mod lateres;
 mod locked;
 mod op;
@@ -31,6 +32,7 @@ mod rangeutil;
 mod readers;
 mod rules;
 mod stdsort;
+mod transform;
 mod types;
 mod varnode;
 
@@ -104,6 +106,8 @@ pub struct Arch {
     /// the `<incidentalcopy>` registers (space, offset, size): varnodes starting in them are
     /// `incidental_copy` (`Database::setPropertyRange`)
     pub(crate) incidental: Vec<(u32, u64, u32)>,
+    /// the laned register records by whole size, smallest first (`Architecture::lanerecords`)
+    pub(crate) laned: Vec<transform::LanedRegister>,
     /// ram ranges `[start, end)` with the `readonly` property: the loader's read-only sections
     /// (`fillinReadOnlyFromLoader`) and the console's `readonly` commands
     readonly: Vec<(u64, u64)>,
@@ -140,6 +144,11 @@ impl Arch {
             type_factory.align_map = m.clone();
         }
         let incidental = sleigh.incidental.iter().map(|n| names.register(n)).collect::<Result<_>>()?;
+        if sleigh.big_endian {
+            // the ported rules, heritage and lane division leave out the big-endian arithmetic
+            return err("the decompiler does not support big-endian processors yet");
+        }
+        let laned = laned_records(&sleigh, &names)?;
         let readonly = image
             .sections
             .iter()
@@ -154,11 +163,17 @@ impl Arch {
             registers,
             tracked,
             incidental,
+            laned,
             readonly,
             externrefs: HashMap::new(),
             readonly_propagate: false,
             types: type_factory,
         })
+    }
+
+    /// `TypeFactory::getSizeOfPointer`: the size of the default code space's addresses.
+    pub(crate) fn pointer_size(&self) -> u32 {
+        self.sleigh.spaces.get(self.sleigh.code_space() as usize).map_or(4, |s| s.size)
     }
 
     /// `map function`: a function at `entry` with the default (empty) prototype.
@@ -248,6 +263,21 @@ impl Arch {
         let sec = self.image.block_of(a)?;
         sec.data.get((a - sec.addr) as usize..)
     }
+}
+
+/// The laned register records (`Architecture::decodeRegisterData` part): each `.pspec`
+/// register with `vector_lane_sizes` adds its lane sizes to the record of its size.
+fn laned_records(sleigh: &Sleigh, names: &SleighNames) -> Result<Vec<transform::LanedRegister>> {
+    let mut by_size: BTreeMap<u32, u32> = BTreeMap::new();
+    for (name, sizes) in &sleigh.laned {
+        let (_, _, size) = names.register(name)?;
+        if sizes.is_empty() {
+            continue; // `Architecture::decodeRegisterData` skips an empty attribute
+        }
+        let reg = transform::LanedRegister::parse(size, sizes)?;
+        *by_size.entry(size).or_default() |= reg.mask;
+    }
+    Ok(by_size.into_iter().map(|(whole_size, mask)| transform::LanedRegister { whole_size, mask }).collect())
 }
 
 /// Port of `IfcParseLine` (`parse_C`): a C declaration. Types (`struct`, `union`, `enum`,

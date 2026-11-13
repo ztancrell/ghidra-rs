@@ -14,8 +14,9 @@ pub(crate) fn calc_mask(size: u32) -> u64 {
     }
 }
 
-/// `sign_extend(val, sizein, sizeout)`
-fn sign_extend(val: u64, sizein: u32, sizeout: u32) -> u64 {
+/// `sign_extend(val, sizein, sizeout)` (address.cc): both sizes are clamped to 8 bytes.
+pub(crate) fn sign_extend(val: u64, sizein: u32, sizeout: u32) -> u64 {
+    let (sizein, sizeout) = (sizein.clamp(1, 8), sizeout.min(8));
     let sh = 64 - 8 * sizein;
     let v = (((val << sh) as i64) >> sh) as u64;
     v & calc_mask(sizeout)

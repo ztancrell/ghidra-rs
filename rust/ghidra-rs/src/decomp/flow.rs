@@ -564,7 +564,7 @@ impl Flow<'_> {
     /// Port of `FlowInfo::truncateIndirectJump` for a failed recovery (`fail_normal`,
     /// `fail_thunk`): the jump becomes a call followed by a halt.
     fn truncate_indirect_jump(&mut self, op: OpId) -> Result<()> {
-        self.fd.op_mut(op).opc = Opcode::Callind;
+        self.fd.op_set_opcode(op, Opcode::Callind);
         self.setup_callind_specs(op);
         let halt = self.artificial_halt(self.fd.op(op).seq.addr, None)?;
         self.fd.op_dead_insert_after(halt, op);
@@ -584,7 +584,7 @@ impl Flow<'_> {
             if start != addr || start + stat.size <= addr {
                 continue; // "Call to offcut address within same function" is only a warning
             }
-            self.fd.op_mut(op).opc = Opcode::Branch;
+            self.fd.op_set_opcode(op, Opcode::Branch);
             let targ = self.target(addr)?;
             self.mark(targ, OpFlags::START_BASIC);
             let pos = self.fd.dead.iter().position(|&o| o == op);
