@@ -2,8 +2,8 @@
 //! (x86: XMM, YMM, ZMM) whose data-flow only moves whole lanes is split into one varnode per
 //! lane. The trace builds [`TransformManager`] placeholders; a trace that succeeds is applied.
 //!
-//! Data types are not locked before stage S6, so `setReplacement`'s check for a locked
-//! primitive or structure type never fires; x86 is little-endian.
+//! Little-endian only: `Arch::new` rejects a big-endian processor, so the big-endian lane
+//! order of `buildStore`/`buildLoad` is left out.
 
 use std::collections::HashSet;
 use std::ops::Bound;
@@ -11,7 +11,8 @@ use std::ops::Bound;
 use super::op::OpId;
 use super::opcode::Opcode;
 use super::transform::{LaneDescription, LanedRegister, TOpId, TVarId, TransformManager, INSERT_AFTER, INSERT_BEFORE};
-use super::varnode::VarnodeId;
+use super::types::{Meta, TypeFactory};
+use super::varnode::{VarnodeId, VnFlags};
 use super::{Arch, Funcdata, Result};
 
 /// One varnode left to trace (`LaneDivide::WorkNode`).
@@ -24,6 +25,7 @@ struct WorkNode {
 /// Port of `LaneDivide`.
 struct LaneDivide<'a> {
     fd: &'a Funcdata,
+    types: &'a TypeFactory,
     tm: TransformManager,
     desc: LaneDescription,
     work: Vec<WorkNode>,
@@ -33,135 +35,161 @@ struct LaneDivide<'a> {
 }
 
 impl<'a> LaneDivide<'a> {
-    /// Port of `LaneDivide::LaneDivide`.
-    fn new(fd: &'a Funcdata, root: VarnodeId, desc: LaneDescription, allow_downcast: bool) -> LaneDivide<'a> {
+    /// Port of `LaneDivide::LaneDivide`: the root's split is not checked, as in the C++ (a
+    /// refused root leaves the work list empty and `doTrace` fails).
+    fn new(
+        fd: &'a Funcdata,
+        types: &'a TypeFactory,
+        root: VarnodeId,
+        desc: LaneDescription,
+        allow_downcast: bool,
+    ) -> Result<LaneDivide<'a>> {
+        let num_lanes = desc.num_lanes();
         let mut ld = LaneDivide {
             fd,
+            types,
             tm: TransformManager::default(),
             work: Vec::new(),
             allow_subpiece_terminator: allow_downcast,
             marks: HashSet::new(),
-            desc: desc.clone(),
+            desc,
         };
-        ld.set_replacement(root, desc.num_lanes(), 0);
-        ld
+        ld.set_replacement(root, num_lanes, 0)?;
+        Ok(ld)
     }
 
-    /// Port of `LaneDivide::setReplacement` (never null: see the module notes).
-    fn set_replacement(&mut self, vn: VarnodeId, num_lanes: i32, skip_lanes: i32) -> TVarId {
+    /// Port of `LaneDivide::setReplacement`: the lanes of `vn`; `None` (the C++ null) for a
+    /// type-locked varnode unless its type is an array (a metatype above `TYPE_ARRAY`, a
+    /// structure or a union is not split; enumerations have an integer metatype).
+    fn set_replacement(&mut self, vn: VarnodeId, num_lanes: i32, skip_lanes: i32) -> Result<Option<TVarId>> {
         let fd = self.fd;
         if self.marks.contains(&vn) {
-            return self.tm.get_split(fd, vn, &self.desc, num_lanes, skip_lanes);
+            return self.tm.get_split(fd, vn, &self.desc, num_lanes, skip_lanes).map(Some);
         }
-        if fd.vn(vn).is_constant() {
-            return self.tm.new_split(fd, vn, &self.desc, num_lanes, skip_lanes);
+        let v = fd.vn(vn);
+        if v.is_constant() {
+            return self.tm.new_split(fd, vn, &self.desc, num_lanes, skip_lanes).map(Some);
+        }
+        // a locked varnode without a recorded type has the default (unknown) one
+        if v.has(VnFlags::TYPELOCK) && v.ty.map(|t| self.types.meta(t)) != Some(Meta::Array) {
+            return Ok(None);
         }
         self.marks.insert(vn);
-        let res = self.tm.new_split(fd, vn, &self.desc, num_lanes, skip_lanes);
-        if !fd.vn(vn).is_free() {
+        let res = self.tm.new_split(fd, vn, &self.desc, num_lanes, skip_lanes)?;
+        if !v.is_free() {
             self.work.push(WorkNode { lanes: res, num_lanes, skip_lanes });
         }
-        res
+        Ok(Some(res))
     }
 
     /// One `newOpReplace` op `out = opc in` (a COPY of a lane, mostly).
-    fn unary(&mut self, opc: Opcode, op: OpId, input: TVarId, out: TVarId) {
+    fn unary(&mut self, opc: Opcode, op: OpId, input: TVarId, out: TVarId) -> Result<()> {
         let rop = self.tm.new_op_replace(1, opc, op);
-        self.tm.set_output(rop, out);
-        self.tm.set_input(rop, input, 0);
+        self.tm.set_output(rop, out)?;
+        self.tm.set_input(rop, input, 0)
     }
 
     /// Port of `LaneDivide::buildUnaryOp`.
-    fn build_unary(&mut self, opc: Opcode, op: OpId, ins: TVarId, outs: TVarId, num_lanes: i32) {
-        for i in 0..num_lanes {
-            self.unary(opc, op, ins.lane(i), outs.lane(i));
-        }
+    fn build_unary(&mut self, opc: Opcode, op: OpId, ins: TVarId, outs: TVarId, num_lanes: i32) -> Result<()> {
+        (0..num_lanes).try_for_each(|i| self.unary(opc, op, ins.lane(i), outs.lane(i)))
     }
 
     /// Port of `LaneDivide::buildBinaryOp`.
-    fn build_binary(&mut self, opc: Opcode, op: OpId, in0: TVarId, in1: TVarId, outs: TVarId, num_lanes: i32) {
+    fn build_binary(&mut self, op: OpId, in0: TVarId, in1: TVarId, outs: TVarId, num_lanes: i32) -> Result<()> {
+        let opc = self.fd.op(op).opc;
         for i in 0..num_lanes {
             let rop = self.tm.new_op_replace(2, opc, op);
-            self.tm.set_output(rop, outs.lane(i));
-            self.tm.set_input(rop, in0.lane(i), 0);
-            self.tm.set_input(rop, in1.lane(i), 1);
+            self.tm.set_output(rop, outs.lane(i))?;
+            self.tm.set_input(rop, in0.lane(i), 0)?;
+            self.tm.set_input(rop, in1.lane(i), 1)?;
         }
+        Ok(())
     }
 
     /// A COPY of the zero constant into lane `out` (`size` bytes).
-    fn zero_lane(&mut self, op: OpId, out: TVarId, size: i32) {
+    fn zero_lane(&mut self, op: OpId, out: TVarId, size: i32) -> Result<()> {
         let rop = self.tm.new_op_replace(1, Opcode::Copy, op);
-        self.tm.set_output(rop, out);
+        self.tm.set_output(rop, out)?;
         let c = self.tm.new_constant(size as u32, 0);
-        self.tm.set_input(rop, c, 0);
+        self.tm.set_input(rop, c, 0)
     }
 
     /// The input of a PIECE or ZEXT covering `lanes` lanes from `skip` (one lane: the varnode
     /// itself), copied into the lanes from `out_start` of `outs` (`buildPiece`, `buildZext`).
-    fn copy_part(&mut self, op: OpId, vn: VarnodeId, (lanes, skip): (i32, i32), outs: TVarId, out_start: i32) {
+    /// False when the input refuses to split.
+    fn copy_part(
+        &mut self,
+        op: OpId,
+        vn: VarnodeId,
+        (lanes, skip): (i32, i32),
+        outs: TVarId,
+        out_start: i32,
+    ) -> Result<bool> {
         if lanes == 1 {
             let rvn = self.tm.get_preexisting_varnode(self.fd, vn);
             let rop = self.tm.new_op_replace(1, Opcode::Copy, op);
-            self.tm.set_input(rop, rvn, 0);
-            self.tm.set_output(rop, outs.lane(out_start));
-        } else {
-            let rvn = self.set_replacement(vn, lanes, skip);
-            for i in 0..lanes {
-                let rop = self.tm.new_op_replace(1, Opcode::Copy, op);
-                self.tm.set_input(rop, rvn.lane(i), 0);
-                self.tm.set_output(rop, outs.lane(out_start + i));
-            }
+            self.tm.set_input(rop, rvn, 0)?;
+            self.tm.set_output(rop, outs.lane(out_start))?;
+            return Ok(true);
         }
+        let Some(rvn) = self.set_replacement(vn, lanes, skip)? else { return Ok(false) };
+        for i in 0..lanes {
+            let rop = self.tm.new_op_replace(1, Opcode::Copy, op);
+            self.tm.set_input(rop, rvn.lane(i), 0)?;
+            self.tm.set_output(rop, outs.lane(out_start + i))?;
+        }
+        Ok(true)
     }
 
     /// Port of `LaneDivide::buildPiece`.
     fn build_piece(&mut self, op: OpId, outs: TVarId, num_lanes: i32, skip_lanes: i32) -> Result<bool> {
         let (high, low) = (self.fd.input(op, 0)?, self.fd.input(op, 1)?);
         let (hs, ls) = (self.fd.vn(high).size as i32, self.fd.vn(low).size as i32);
-        let Some(h) = self.desc.restriction(skip_lanes, ls, hs) else { return Ok(false) };
-        let Some(l) = self.desc.restriction(skip_lanes, 0, ls) else { return Ok(false) };
-        let high_start = if h.0 == 1 { num_lanes - 1 } else { num_lanes - h.0 };
-        self.copy_part(op, high, h, outs, high_start);
-        self.copy_part(op, low, l, outs, 0);
-        Ok(true)
+        let Some(h) = self.desc.restriction(skip_lanes, ls, hs)? else { return Ok(false) };
+        let Some(l) = self.desc.restriction(skip_lanes, 0, ls)? else { return Ok(false) };
+        Ok(self.copy_part(op, high, h, outs, num_lanes - h.0)? && self.copy_part(op, low, l, outs, 0)?)
     }
 
     /// Port of `LaneDivide::buildMultiequal`.
-    fn build_multiequal(&mut self, op: OpId, outs: TVarId, num_lanes: i32, skip_lanes: i32) {
-        let ins: Vec<TVarId> =
-            self.fd.op(op).ins.clone().into_iter().map(|vn| self.set_replacement(vn, num_lanes, skip_lanes)).collect();
+    fn build_multiequal(&mut self, op: OpId, outs: TVarId, num_lanes: i32, skip_lanes: i32) -> Result<bool> {
+        let mut ins = Vec::new();
+        for vn in self.fd.op(op).ins.clone() {
+            let Some(inv) = self.set_replacement(vn, num_lanes, skip_lanes)? else { return Ok(false) };
+            ins.push(inv);
+        }
         for i in 0..num_lanes {
             let rop = self.tm.new_op_replace(ins.len(), Opcode::Multiequal, op);
-            self.tm.set_output(rop, outs.lane(i));
+            self.tm.set_output(rop, outs.lane(i))?;
             for (j, &inv) in ins.iter().enumerate() {
-                self.tm.set_input(rop, inv.lane(i), j);
+                self.tm.set_input(rop, inv.lane(i), j)?;
             }
         }
+        Ok(true)
     }
 
     /// Port of `LaneDivide::buildIndirect`.
-    fn build_indirect(&mut self, op: OpId, outs: TVarId, num_lanes: i32, skip_lanes: i32) -> Result<()> {
-        let inv = self.set_replacement(self.fd.input(op, 0)?, num_lanes, skip_lanes);
+    fn build_indirect(&mut self, op: OpId, outs: TVarId, num_lanes: i32, skip_lanes: i32) -> Result<bool> {
+        let Some(inv) = self.set_replacement(self.fd.input(op, 0)?, num_lanes, skip_lanes)? else { return Ok(false) };
         for i in 0..num_lanes {
             let rop = self.tm.new_indirect_replace(self.fd, op)?;
-            self.tm.set_output(rop, outs.lane(i));
-            self.tm.set_input(rop, inv.lane(i), 0);
+            self.tm.set_output(rop, outs.lane(i))?;
+            self.tm.set_input(rop, inv.lane(i), 0)?;
         }
-        Ok(())
+        Ok(true)
     }
 
     /// The pointer `base + byte_pos` for the lane access `rop` (`buildStore`, `buildLoad`).
-    fn lane_pointer(&mut self, rop: TOpId, base: TVarId, ptr_size: u32, byte_pos: i64) -> TVarId {
+    fn lane_pointer(&mut self, rop: TOpId, base: TVarId, ptr_size: u32, byte_pos: i64) -> Result<TVarId> {
         if byte_pos == 0 {
-            return base;
+            return Ok(base);
         }
         let ptr = self.tm.new_unique(ptr_size);
         let add = self.tm.new_op(2, Opcode::IntAdd, rop, INSERT_BEFORE);
-        self.tm.set_output(add, ptr);
-        self.tm.set_input(add, base, 0);
+        self.tm.set_output(add, ptr)?;
+        self.tm.set_input(add, base, 0)?;
         let c = self.tm.new_constant(ptr_size, byte_pos as u64);
-        self.tm.set_input(add, c, 1);
-        ptr
+        self.tm.set_input(add, c, 1)?;
+        Ok(ptr)
     }
 
     /// The space constant and the base pointer of a LOAD or STORE, unless the pointer is free
@@ -180,7 +208,7 @@ impl<'a> LaneDivide<'a> {
 
     /// Port of `LaneDivide::buildStore`.
     fn build_store(&mut self, op: OpId, num_lanes: i32, skip_lanes: i32) -> Result<bool> {
-        let ins = self.set_replacement(self.fd.input(op, 2)?, num_lanes, skip_lanes);
+        let Some(ins) = self.set_replacement(self.fd.input(op, 2)?, num_lanes, skip_lanes)? else { return Ok(false) };
         let Some((spc_size, spc, base, ptr_size)) = self.access_base(op)? else { return Ok(false) };
         let mut byte_pos = 0i64;
         let mut last: Option<TOpId> = None;
@@ -189,12 +217,12 @@ impl<'a> LaneDivide<'a> {
                 None => self.tm.new_preexisting_op(3, Opcode::Store, op),
                 Some(l) => self.tm.new_op(3, Opcode::Store, l, INSERT_AFTER),
             };
-            let ptr = self.lane_pointer(store, base, ptr_size, byte_pos);
+            let ptr = self.lane_pointer(store, base, ptr_size, byte_pos)?;
             let c = self.tm.new_constant(spc_size, spc);
-            self.tm.set_input(store, c, 0);
-            self.tm.set_input(store, ptr, 1);
-            self.tm.set_input(store, ins.lane(i), 2);
-            byte_pos += i64::from(self.desc.size(skip_lanes + i));
+            self.tm.set_input(store, c, 0)?;
+            self.tm.set_input(store, ptr, 1)?;
+            self.tm.set_input(store, ins.lane(i), 2)?;
+            byte_pos += i64::from(self.desc.size(skip_lanes + i)?);
             last = Some(store);
         }
         Ok(true)
@@ -206,12 +234,12 @@ impl<'a> LaneDivide<'a> {
         let mut byte_pos = 0i64;
         for i in 0..num_lanes {
             let load = self.tm.new_op_replace(2, Opcode::Load, op);
-            let ptr = self.lane_pointer(load, base, ptr_size, byte_pos);
+            let ptr = self.lane_pointer(load, base, ptr_size, byte_pos)?;
             let c = self.tm.new_constant(spc_size, spc);
-            self.tm.set_input(load, c, 0);
-            self.tm.set_input(load, ptr, 1);
-            self.tm.set_output(load, outs.lane(i));
-            byte_pos += i64::from(self.desc.size(skip_lanes + i));
+            self.tm.set_input(load, c, 0)?;
+            self.tm.set_input(load, ptr, 1)?;
+            self.tm.set_output(load, outs.lane(i))?;
+            byte_pos += i64::from(self.desc.size(skip_lanes + i)?);
         }
         Ok(true)
     }
@@ -227,26 +255,32 @@ impl<'a> LaneDivide<'a> {
         if shift & 7 != 0 {
             return Ok(None);
         }
-        let start = self.desc.boundary(shift / 8 + self.desc.position(skip_lanes));
+        let start = self.desc.boundary(shift / 8 + self.desc.position(skip_lanes)?);
         Ok((start >= 0).then_some(start))
+    }
+
+    /// Whether the `count` lanes from `a` and from `b` have the same sizes.
+    fn same_sizes(&self, a: i32, b: i32, count: i32) -> Result<bool> {
+        for i in 0..count {
+            if self.desc.size(a + i)? != self.desc.size(b + i)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Port of `LaneDivide::buildRightShift`.
     fn build_right_shift(&mut self, op: OpId, outs: TVarId, num_lanes: i32, skip_lanes: i32) -> Result<bool> {
         let Some(start) = self.shift_lane(op, skip_lanes)? else { return Ok(false) };
-        let (mut src, mut dest) = (start, skip_lanes);
-        while src - skip_lanes < num_lanes {
-            if self.desc.size(src) != self.desc.size(dest) {
-                return Ok(false);
-            }
-            src += 1;
-            dest += 1;
-        }
-        let ins = self.set_replacement(self.fd.input(op, 0)?, num_lanes, skip_lanes);
         let moved = num_lanes - (start - skip_lanes);
-        self.build_unary(Opcode::Copy, op, ins.lane(start - skip_lanes), outs, moved);
+        if !self.same_sizes(start, skip_lanes, moved)? {
+            return Ok(false);
+        }
+        let Some(ins) = self.set_replacement(self.fd.input(op, 0)?, num_lanes, skip_lanes)? else { return Ok(false) };
+        self.build_unary(Opcode::Copy, op, ins.lane(start - skip_lanes), outs, moved)?;
         for z in moved..num_lanes {
-            self.zero_lane(op, outs.lane(z), self.desc.size(z));
+            // the C++ takes the size of lane `z` of the whole description
+            self.zero_lane(op, outs.lane(z), self.desc.size(z)?)?;
         }
         Ok(true)
     }
@@ -254,19 +288,15 @@ impl<'a> LaneDivide<'a> {
     /// Port of `LaneDivide::buildLeftShift`.
     fn build_left_shift(&mut self, op: OpId, outs: TVarId, num_lanes: i32, skip_lanes: i32) -> Result<bool> {
         let Some(start) = self.shift_lane(op, skip_lanes)? else { return Ok(false) };
-        let (mut src, mut dest) = (skip_lanes, start);
-        while dest - skip_lanes < num_lanes {
-            if self.desc.size(src) != self.desc.size(dest) {
-                return Ok(false);
-            }
-            src += 1;
-            dest += 1;
+        let moved = num_lanes - (start - skip_lanes);
+        if !self.same_sizes(skip_lanes, start, moved)? {
+            return Ok(false);
         }
-        let ins = self.set_replacement(self.fd.input(op, 0)?, num_lanes, skip_lanes);
+        let Some(ins) = self.set_replacement(self.fd.input(op, 0)?, num_lanes, skip_lanes)? else { return Ok(false) };
         for z in 0..start - skip_lanes {
-            self.zero_lane(op, outs.lane(z), self.desc.size(z));
+            self.zero_lane(op, outs.lane(z), self.desc.size(z)?)?;
         }
-        self.build_unary(Opcode::Copy, op, ins, outs.lane(start - skip_lanes), num_lanes - (start - skip_lanes));
+        self.build_unary(Opcode::Copy, op, ins, outs.lane(start - skip_lanes), moved)?;
         Ok(true)
     }
 
@@ -276,14 +306,90 @@ impl<'a> LaneDivide<'a> {
         let v = self.fd.vn(invn);
         let mut in_lanes = 0;
         if !v.is_constant() || v.offset != 0 {
-            let Some(r) = self.desc.restriction(skip_lanes, 0, v.size as i32) else { return Ok(false) };
+            let Some(r) = self.desc.restriction(skip_lanes, 0, v.size as i32)? else { return Ok(false) };
             in_lanes = r.0;
-            self.copy_part(op, invn, r, outs, 0);
+            if !self.copy_part(op, invn, r, outs, 0)? {
+                return Ok(false);
+            }
         }
-        for i in 0..num_lanes - in_lanes {
-            self.zero_lane(op, outs.lane(in_lanes + i), self.desc.size(skip_lanes + in_lanes + i));
+        for i in in_lanes..num_lanes {
+            self.zero_lane(op, outs.lane(i), self.desc.size(skip_lanes + i)?)?;
         }
         Ok(true)
+    }
+
+    /// The output of a traced op takes `lanes` (count, skip), if any and if it may split
+    /// (the placeholder ops are left to `traceBackward`).
+    fn split_out(&mut self, outvn: VarnodeId, lanes: Option<(i32, i32)>) -> Result<bool> {
+        let Some((l, s)) = lanes else { return Ok(false) };
+        Ok(self.set_replacement(outvn, l, s)?.is_some())
+    }
+
+    /// The SUBPIECE case of `LaneDivide::traceForward`: whole lanes of `rvn`, one lane (a
+    /// COPY), or, when allowed, a piece inside one lane, which ends the trace.
+    fn forward_subpiece(&mut self, op: OpId, outvn: VarnodeId, rvn: TVarId, skip_lanes: i32) -> Result<bool> {
+        let fd = self.fd;
+        let byte_pos = fd.vn(fd.input(op, 1)?).offset as i32;
+        let out_size = fd.vn(outvn).size as i32;
+        match self.desc.restriction(skip_lanes, byte_pos, out_size)? {
+            None => {
+                if !self.allow_subpiece_terminator {
+                    return Ok(false);
+                }
+                let lane = self.desc.boundary(byte_pos + self.desc.position(skip_lanes)?);
+                if lane < 0 || lane >= self.desc.num_lanes() || self.desc.size(lane)? <= out_size {
+                    return Ok(false);
+                }
+                let rop = self.tm.new_preexisting_op(2, Opcode::Subpiece, op);
+                self.tm.set_input(rop, rvn.lane(lane - skip_lanes), 0)?;
+                let c = self.tm.new_constant(4, 0);
+                self.tm.set_input(rop, c, 1)?;
+                Ok(true)
+            }
+            Some((1, out_skip)) => {
+                let rop = self.tm.new_preexisting_op(1, Opcode::Copy, op);
+                self.tm.set_input(rop, rvn.lane(out_skip - skip_lanes), 0)?;
+                Ok(true)
+            }
+            lanes => self.split_out(outvn, lanes),
+        }
+    }
+
+    /// One reading op with an output in `LaneDivide::traceForward`.
+    fn forward_op(
+        &mut self,
+        op: OpId,
+        (orig, rvn): (VarnodeId, TVarId),
+        outvn: VarnodeId,
+        num_lanes: i32,
+        skip_lanes: i32,
+    ) -> Result<bool> {
+        let fd = self.fd;
+        let out_size = fd.vn(outvn).size as i32;
+        match fd.op(op).opc {
+            Opcode::Subpiece => self.forward_subpiece(op, outvn, rvn, skip_lanes),
+            Opcode::Piece => {
+                let byte_pos = if fd.input(op, 0)? == orig { fd.vn(fd.input(op, 1)?).size as i32 } else { 0 };
+                let lanes = self.desc.extension(skip_lanes, byte_pos, out_size)?;
+                self.split_out(outvn, lanes)
+            }
+            Opcode::Copy
+            | Opcode::IntNegate
+            | Opcode::IntAnd
+            | Opcode::IntOr
+            | Opcode::IntXor
+            | Opcode::Multiequal
+            | Opcode::Indirect => self.split_out(outvn, Some((num_lanes, skip_lanes))),
+            // the trace must come through input 0
+            Opcode::IntRight | Opcode::IntLeft => {
+                Ok(fd.vn(fd.input(op, 1)?).is_constant() && self.split_out(outvn, Some((num_lanes, skip_lanes)))?)
+            }
+            Opcode::IntZext => {
+                let lanes = self.desc.extension(skip_lanes, 0, out_size)?;
+                self.split_out(outvn, lanes)
+            }
+            _ => Ok(false),
+        }
     }
 
     /// Port of `LaneDivide::traceForward`.
@@ -295,66 +401,14 @@ impl<'a> LaneDivide<'a> {
             if out.is_some_and(|o| self.marks.contains(&o)) {
                 continue;
             }
-            let opc = fd.op(op).opc;
-            if opc == Opcode::Store {
-                if fd.input(op, 2)? != orig || !self.build_store(op, num_lanes, skip_lanes)? {
-                    return Ok(false);
-                }
-                continue;
-            }
-            let Some(outvn) = out else { return Ok(false) };
-            let out_size = fd.vn(outvn).size as i32;
-            match opc {
-                Opcode::Subpiece => {
-                    let byte_pos = fd.vn(fd.input(op, 1)?).offset as i32;
-                    match self.desc.restriction(skip_lanes, byte_pos, out_size) {
-                        None => {
-                            if !self.allow_subpiece_terminator {
-                                return Ok(false);
-                            }
-                            let lane = self.desc.boundary(byte_pos + self.desc.position(skip_lanes));
-                            if lane < 0 || lane >= self.desc.num_lanes() || self.desc.size(lane) <= out_size {
-                                return Ok(false);
-                            }
-                            let rop = self.tm.new_preexisting_op(2, Opcode::Subpiece, op);
-                            self.tm.set_input(rop, rvn.lane(lane - skip_lanes), 0);
-                            let c = self.tm.new_constant(4, 0);
-                            self.tm.set_input(rop, c, 1);
-                        }
-                        Some((1, out_skip)) => {
-                            let rop = self.tm.new_preexisting_op(1, Opcode::Copy, op);
-                            self.tm.set_input(rop, rvn.lane(out_skip - skip_lanes), 0);
-                        }
-                        Some((out_lanes, out_skip)) => {
-                            self.set_replacement(outvn, out_lanes, out_skip);
-                        }
-                    }
-                }
-                Opcode::Piece => {
-                    let byte_pos = if fd.input(op, 0)? == orig { fd.vn(fd.input(op, 1)?).size as i32 } else { 0 };
-                    let Some((l, s)) = self.desc.extension(skip_lanes, byte_pos, out_size) else { return Ok(false) };
-                    self.set_replacement(outvn, l, s);
-                }
-                Opcode::Copy
-                | Opcode::IntNegate
-                | Opcode::IntAnd
-                | Opcode::IntOr
-                | Opcode::IntXor
-                | Opcode::Multiequal
-                | Opcode::Indirect => {
-                    self.set_replacement(outvn, num_lanes, skip_lanes);
-                }
-                Opcode::IntRight | Opcode::IntLeft => {
-                    if !fd.vn(fd.input(op, 1)?).is_constant() {
-                        return Ok(false);
-                    }
-                    self.set_replacement(outvn, num_lanes, skip_lanes);
-                }
-                Opcode::IntZext => {
-                    let Some((l, s)) = self.desc.extension(skip_lanes, 0, out_size) else { return Ok(false) };
-                    self.set_replacement(outvn, l, s);
-                }
-                _ => return Ok(false),
+            let ok = match (fd.op(op).opc, out) {
+                // only the stored value propagates
+                (Opcode::Store, _) => fd.input(op, 2)? == orig && self.build_store(op, num_lanes, skip_lanes)?,
+                (_, Some(outvn)) => self.forward_op(op, (orig, rvn), outvn, num_lanes, skip_lanes)?,
+                (_, None) => false,
+            };
+            if !ok {
+                return Ok(false);
             }
         }
         Ok(true)
@@ -367,25 +421,31 @@ impl<'a> LaneDivide<'a> {
         let opc = fd.op(op).opc;
         match opc {
             Opcode::IntNegate | Opcode::Copy => {
-                let ins = self.set_replacement(fd.input(op, 0)?, num_lanes, skip_lanes);
-                self.build_unary(opc, op, ins, rvn, num_lanes);
+                let Some(ins) = self.set_replacement(fd.input(op, 0)?, num_lanes, skip_lanes)? else {
+                    return Ok(false);
+                };
+                self.build_unary(opc, op, ins, rvn, num_lanes)?;
             }
             Opcode::IntAnd | Opcode::IntOr | Opcode::IntXor => {
-                let in0 = self.set_replacement(fd.input(op, 0)?, num_lanes, skip_lanes);
-                let in1 = self.set_replacement(fd.input(op, 1)?, num_lanes, skip_lanes);
-                self.build_binary(opc, op, in0, in1, rvn, num_lanes);
+                let Some(in0) = self.set_replacement(fd.input(op, 0)?, num_lanes, skip_lanes)? else {
+                    return Ok(false);
+                };
+                let Some(in1) = self.set_replacement(fd.input(op, 1)?, num_lanes, skip_lanes)? else {
+                    return Ok(false);
+                };
+                self.build_binary(op, in0, in1, rvn, num_lanes)?;
             }
-            Opcode::Multiequal => self.build_multiequal(op, rvn, num_lanes, skip_lanes),
-            Opcode::Indirect => self.build_indirect(op, rvn, num_lanes, skip_lanes)?,
             Opcode::Subpiece => {
                 let invn = fd.input(op, 0)?;
                 let byte_pos = fd.vn(fd.input(op, 1)?).offset as i32;
-                let Some((l, s)) = self.desc.extension(skip_lanes, byte_pos, fd.vn(invn).size as i32) else {
+                let Some((l, s)) = self.desc.extension(skip_lanes, byte_pos, fd.vn(invn).size as i32)? else {
                     return Ok(false);
                 };
-                let ins = self.set_replacement(invn, l, s);
-                self.build_unary(Opcode::Copy, op, ins.lane(skip_lanes - s), rvn, num_lanes);
+                let Some(ins) = self.set_replacement(invn, l, s)? else { return Ok(false) };
+                self.build_unary(Opcode::Copy, op, ins.lane(skip_lanes - s), rvn, num_lanes)?;
             }
+            Opcode::Multiequal => return self.build_multiequal(op, rvn, num_lanes, skip_lanes),
+            Opcode::Indirect => return self.build_indirect(op, rvn, num_lanes, skip_lanes),
             Opcode::Piece => return self.build_piece(op, rvn, num_lanes, skip_lanes),
             Opcode::Load => return self.build_load(op, rvn, num_lanes, skip_lanes),
             Opcode::IntRight => return self.build_right_shift(op, rvn, num_lanes, skip_lanes),
@@ -461,10 +521,21 @@ fn collect_lane_sizes(fd: &Funcdata, vn: VarnodeId, allowed: LanedRegister, chec
     Ok(())
 }
 
+/// The passes of `ActionLaneDivide::apply` (its `mode` 0, 1, 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// lane sizes from the pieces the register is cut into or made of
+    Pieces,
+    /// the same, and a SUBPIECE inside one lane may end the trace
+    PiecesOrTerminator,
+    /// the default lane size (the pointer size), with the terminator
+    DefaultSize,
+}
+
 /// Port of `ActionLaneDivide::processVarnode`: whether `vn` was split.
-fn process_varnode(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, laned: LanedRegister, mode: i32) -> Result<bool> {
+fn process_varnode(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, laned: LanedRegister, mode: Mode) -> Result<bool> {
     let mut check = LanedRegister::default();
-    if mode < 2 {
+    if mode != Mode::DefaultSize {
         collect_lane_sizes(fd, vn, laned, &mut check)?;
     } else {
         let default_size = arch.pointer_size() as i32;
@@ -478,7 +549,8 @@ fn process_varnode(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, laned: LanedRe
     }
     for size in check.sizes() {
         let desc = LaneDescription::new(laned.whole_size as i32, size);
-        if let Some(tm) = LaneDivide::new(fd, vn, desc, mode > 0).do_trace()? {
+        let trace = LaneDivide::new(fd, &arch.types, vn, desc, mode != Mode::Pieces)?;
+        if let Some(tm) = trace.do_trace()? {
             tm.apply(fd, arch)?;
             return Ok(true);
         }
@@ -486,12 +558,11 @@ fn process_varnode(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, laned: LanedRe
     Ok(false)
 }
 
-/// Port of `ActionLaneDivide::apply`: the laned accesses recorded since the last run, in three
-/// modes (lane sizes from the pieces; also allowing a SUBPIECE to end a lane; the default lane
-/// size), until every varnode is split or no mode is left.
+/// Port of `ActionLaneDivide::apply`: the laned accesses recorded since the last run, pass by
+/// pass ([`Mode`]) until every varnode is split or no pass is left.
 pub(crate) fn lane_divide(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     let mut count = 0;
-    for mode in 0..3 {
+    for mode in [Mode::Pieces, Mode::PiecesOrTerminator, Mode::DefaultSize] {
         let mut all_storage = true;
         let mut cur = None;
         loop {

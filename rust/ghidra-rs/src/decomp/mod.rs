@@ -12,15 +12,19 @@ pub mod action;
 pub mod actiontree;
 mod block;
 mod coreaction;
+mod cparse;
 mod cspec;
 mod emulate;
 mod flow;
 mod fspec;
 mod funcdata;
 mod heritage;
+mod infertypes;
 mod inject;
 mod jumptable;
 mod lanedivide;
+mod lateres;
+mod locked;
 mod op;
 mod opcode;
 mod print;
@@ -29,6 +33,7 @@ mod readers;
 mod rules;
 mod stdsort;
 mod transform;
+mod types;
 mod varnode;
 
 use crate::analysis::Image;
@@ -111,6 +116,9 @@ pub struct Arch {
     externrefs: HashMap<u64, u64>,
     /// `option readonly`: read-only memory propagates as constants (`readonlypropagate`)
     pub(crate) readonly_propagate: bool,
+    /// the program-wide data-types (`Architecture::types`): the core types and those `parse
+    /// line` defines; each decompile starts from a copy
+    pub(crate) types: types::TypeFactory,
 }
 
 impl Arch {
@@ -131,7 +139,15 @@ impl Arch {
             .map(|(name, val)| names.register(name).map(|(s, o, z)| (s, o, z, u64::from(*val))))
             .collect::<Result<_>>()?;
         let spec = CompilerSpec::parse(cspec, &sleigh, &names)?;
+        let mut type_factory = types::TypeFactory::new();
+        if let Some(m) = &spec.align_map {
+            type_factory.align_map = m.clone();
+        }
         let incidental = sleigh.incidental.iter().map(|n| names.register(n)).collect::<Result<_>>()?;
+        if sleigh.big_endian {
+            // the ported rules, heritage and lane division leave out the big-endian arithmetic
+            return err("the decompiler does not support big-endian processors yet");
+        }
         let laned = laned_records(&sleigh, &names)?;
         let readonly = image
             .sections
@@ -151,6 +167,7 @@ impl Arch {
             readonly,
             externrefs: HashMap::new(),
             readonly_propagate: false,
+            types: type_factory,
         })
     }
 
@@ -160,6 +177,12 @@ impl Arch {
     }
 
     /// `map function`: a function at `entry` with the default (empty) prototype.
+    /// The locked prototype of the function at `entry` (`parse line extern`), which a decompile
+    /// starts from; an unlocked one starts fresh, as every corpus script decompiles once.
+    pub(crate) fn function_proto(&self, entry: u64) -> Option<FuncProto> {
+        self.functions.get(&entry).filter(|f| f.proto.locked.is_some()).map(|f| f.proto.clone())
+    }
+
     pub(crate) fn add_function(&mut self, entry: u64, name: String) {
         self.functions.insert(entry, Function { name, proto: FuncProto::default() });
     }
@@ -248,8 +271,30 @@ fn laned_records(sleigh: &Sleigh, names: &SleighNames) -> Result<Vec<transform::
     let mut by_size: BTreeMap<u32, u32> = BTreeMap::new();
     for (name, sizes) in &sleigh.laned {
         let (_, _, size) = names.register(name)?;
-        let reg = transform::LanedRegister::parse(size, sizes).map_err(LowlevelError)?;
+        if sizes.is_empty() {
+            continue; // `Architecture::decodeRegisterData` skips an empty attribute
+        }
+        let reg = transform::LanedRegister::parse(size, sizes)?;
         *by_size.entry(size).or_default() |= reg.mask;
     }
     Ok(by_size.into_iter().map(|(whole_size, mask)| transform::LanedRegister { whole_size, mask }).collect())
+}
+
+/// Port of `IfcParseLine` (`parse_C`): a C declaration. Types (`struct`, `union`, `enum`,
+/// `typedef`) join the architecture's types; an `extern` function declaration locks the prototype
+/// of the function `find` names (`FuncProto::setPieces`).
+pub fn parse_line(arch: &mut Arch, text: &str, find: &dyn Fn(&str) -> Option<u64>) -> Result<()> {
+    let ptr_size = arch.spec.stack_pointer.2;
+    match cparse::parse_line(&mut arch.types, text, ptr_size)? {
+        cparse::Decl::Type(_) => Ok(()),
+        cparse::Decl::Function { name, model, output, inputs, dotdotdot } => {
+            let addr = find(&name).ok_or_else(|| LowlevelError(format!("Unknown function name: {name}")))?;
+            let proto = locked::lock_prototype(arch, model.as_deref(), (String::new(), output), inputs, dotdotdot)?;
+            match arch.functions.get_mut(&addr) {
+                Some(f) => f.proto = proto,
+                None => return err(format!("Unknown function name: {name}")),
+            }
+            Ok(())
+        }
+    }
 }

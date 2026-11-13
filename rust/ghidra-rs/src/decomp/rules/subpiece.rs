@@ -202,6 +202,13 @@ pub(super) fn sub_commute(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> 
             }
         }
     }
+    commute_subpiece(fd, op, longform, skip, offset)
+}
+
+/// The tail of `RuleSubCommute`: each input of `longform` (but the shift amount `skip`) is
+/// truncated by a new SUBPIECE, and `longform` writes the old SUBPIECE's output.
+fn commute_subpiece(fd: &mut Funcdata, op: OpId, longform: OpId, skip: Option<usize>, offset: i64) -> Result<i32> {
+    let outvn = out(fd, op)?;
     let outsize = fd.vn(outvn).size;
     let mut last_in = None;
     let mut new_vn: Option<VarnodeId> = None;
@@ -234,68 +241,75 @@ pub(super) fn sub_commute(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> 
 pub(super) fn sub_zext(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
     let subvn = inp(fd, op, 0)?;
     let Some(subop) = def(fd, subvn) else { return Ok(0) };
-    let outsize = fd.vn(out(fd, op)?).size;
-    let uniq = fd.uniq.ok_or_else(|| LowlevelError("no unique space".into()))?;
     match fd.op(subop).opc {
-        Subpiece => {
-            let basevn = inp(fd, subop, 0)?;
-            let basesize = fd.vn(basevn).size;
-            if fd.vn(basevn).is_free() || basesize != outsize || basesize > 8 {
-                return Ok(0);
-            }
-            let constvn = inp(fd, subop, 1)?;
-            if fd.vn(constvn).offset != 0 {
-                // truncating from the middle: the truncation becomes a shift
-                if lone_descend(fd, subvn) != Some(op) {
-                    return Ok(0);
-                }
-                let newvn = fd.new_unique(basesize, uniq);
-                let right = fd.vn(constvn).offset.wrapping_mul(8);
-                fd.op_set_input(op, newvn, 0)?;
-                fd.op_set_opcode(subop, IntRight);
-                let c = fd.new_constant(fd.vn(constvn).size, right);
-                fd.op_set_input(subop, c, 1)?;
-                fd.op_set_output(subop, newvn)?;
-            } else {
-                fd.op_set_input(op, basevn, 0)?;
-            }
-            let mask = fd.new_constant(basesize, calc_mask(fd.vn(subvn).size));
-            fd.op_set_opcode(op, IntAnd);
-            fd.op_insert_input(op, mask, 1)?;
-            Ok(1)
-        }
-        IntRight => {
-            let shiftop = subop;
-            let savn = inp(fd, shiftop, 1)?;
-            if !is_const(fd, savn) {
-                return Ok(0);
-            }
-            let midvn = inp(fd, shiftop, 0)?;
-            let Some(subop) = def_with(fd, midvn, Subpiece) else { return Ok(0) };
-            let basevn = inp(fd, subop, 0)?;
-            let basesize = fd.vn(basevn).size;
-            if fd.vn(basevn).is_free() || basesize != outsize {
-                return Ok(0);
-            }
-            if lone_descend(fd, midvn) != Some(shiftop) || lone_descend(fd, subvn) != Some(op) {
-                return Ok(0);
-            }
-            let sa = fd.vn(savn).offset;
-            let val = calc_mask(fd.vn(midvn).size).wrapping_shr(sa as u32);
-            let total = sa.wrapping_add(fd.vn(inp(fd, subop, 1)?).offset.wrapping_mul(8));
-            let newvn = fd.new_unique(basesize, uniq);
-            fd.op_set_input(op, newvn, 0)?;
-            fd.op_set_input(shiftop, basevn, 0)?;
-            let c = fd.new_constant(fd.vn(savn).size, total);
-            fd.op_set_input(shiftop, c, 1)?;
-            fd.op_set_output(shiftop, newvn)?;
-            let mask = fd.new_constant(basesize, val);
-            fd.op_set_opcode(op, IntAnd);
-            fd.op_insert_input(op, mask, 1)?;
-            Ok(1)
-        }
+        Subpiece => sub_zext_truncation(fd, op, subvn, subop),
+        IntRight => sub_zext_shifted(fd, op, subvn, subop),
         _ => Ok(0),
     }
+}
+
+/// `RuleSubZext` on `zext(sub(V,c))`: `c` not 0 makes the truncation a shift.
+fn sub_zext_truncation(fd: &mut Funcdata, op: OpId, subvn: VarnodeId, subop: OpId) -> Result<i32> {
+    let outsize = fd.vn(out(fd, op)?).size;
+    let uniq = fd.uniq.map_or_else(|| err("no unique space"), Ok)?;
+    let basevn = inp(fd, subop, 0)?;
+    let basesize = fd.vn(basevn).size;
+    if fd.vn(basevn).is_free() || basesize != outsize || basesize > 8 {
+        return Ok(0);
+    }
+    let constvn = inp(fd, subop, 1)?;
+    if fd.vn(constvn).offset != 0 {
+        // truncating from the middle: the truncation becomes a shift
+        if lone_descend(fd, subvn) != Some(op) {
+            return Ok(0);
+        }
+        let newvn = fd.new_unique(basesize, uniq);
+        let right = fd.vn(constvn).offset.wrapping_mul(8);
+        fd.op_set_input(op, newvn, 0)?;
+        fd.op_set_opcode(subop, IntRight);
+        let c = fd.new_constant(fd.vn(constvn).size, right);
+        fd.op_set_input(subop, c, 1)?;
+        fd.op_set_output(subop, newvn)?;
+    } else {
+        fd.op_set_input(op, basevn, 0)?;
+    }
+    let mask = fd.new_constant(basesize, calc_mask(fd.vn(subvn).size));
+    fd.op_set_opcode(op, IntAnd);
+    fd.op_insert_input(op, mask, 1)?;
+    Ok(1)
+}
+
+/// `RuleSubZext` on `zext(sub(V,c) >> n)`: one shift of `V` by the combined amount.
+fn sub_zext_shifted(fd: &mut Funcdata, op: OpId, subvn: VarnodeId, shiftop: OpId) -> Result<i32> {
+    let outsize = fd.vn(out(fd, op)?).size;
+    let uniq = fd.uniq.map_or_else(|| err("no unique space"), Ok)?;
+    let savn = inp(fd, shiftop, 1)?;
+    if !is_const(fd, savn) {
+        return Ok(0);
+    }
+    let midvn = inp(fd, shiftop, 0)?;
+    let Some(subop) = def_with(fd, midvn, Subpiece) else { return Ok(0) };
+    let basevn = inp(fd, subop, 0)?;
+    let basesize = fd.vn(basevn).size;
+    if fd.vn(basevn).is_free() || basesize != outsize {
+        return Ok(0);
+    }
+    if lone_descend(fd, midvn) != Some(shiftop) || lone_descend(fd, subvn) != Some(op) {
+        return Ok(0);
+    }
+    let sa = fd.vn(savn).offset;
+    let val = calc_mask(fd.vn(midvn).size).wrapping_shr(sa as u32);
+    let total = sa.wrapping_add(fd.vn(inp(fd, subop, 1)?).offset.wrapping_mul(8));
+    let newvn = fd.new_unique(basesize, uniq);
+    fd.op_set_input(op, newvn, 0)?;
+    fd.op_set_input(shiftop, basevn, 0)?;
+    let c = fd.new_constant(fd.vn(savn).size, total);
+    fd.op_set_input(shiftop, c, 1)?;
+    fd.op_set_output(shiftop, newvn)?;
+    let mask = fd.new_constant(basesize, val);
+    fd.op_set_opcode(op, IntAnd);
+    fd.op_insert_input(op, mask, 1)?;
+    Ok(1)
 }
 
 /// Port of `RuleSubCancel`: `sub(ext(V),0)` becomes `V`, a shorter extension or a shorter

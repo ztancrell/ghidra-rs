@@ -22,7 +22,9 @@ fn zext_against_const(fd: &Funcdata, op: OpId) -> Result<Option<(OpId, usize, Va
 }
 
 /// Port of `RuleZextEliminate`: `zext(V) == c` becomes `V == c` when `c` fits. The shift
-/// wraps as the C++ shift does on x86 (`copySymbolIfValid`: constants carry no symbol here).
+/// wraps as the C++ shift does on x86. `copySymbolIfValid` copies only an `EquateSymbol`, which
+/// the console makes with `map convert` alone; ghidra-rs has no such command (it is rejected as
+/// unknown), so no constant carries one. The symbols `ActionConstantPtr` finds are not equates.
 pub(super) fn zext_eliminate(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
     let Some((zext, slot, cvn)) = zext_against_const(fd, op)? else { return Ok(0) };
     if lone_descend(fd, inp(fd, op, slot)?) != Some(op) {

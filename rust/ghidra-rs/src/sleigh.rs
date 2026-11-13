@@ -287,6 +287,8 @@ pub struct Sleigh {
     /// the .pspec `<register_data>` registers with `vector_lane_sizes` (x86: XMM, YMM, ZMM):
     /// name and lane sizes
     pub laned: Vec<(String, String)>,
+    /// the `.sla` `bigendian` attribute
+    pub big_endian: bool,
     /// user-defined op names by index
     userops: Vec<Option<String>>,
 }
@@ -863,6 +865,7 @@ impl Sleigh {
             code_space,
             uniq_space,
             uniq_base: root.uint(a::UNIQBASE).unwrap_or(0),
+            big_endian: root.boolean(a::BIGENDIAN).unwrap_or(false),
             uniq_mask: root.uint(a::UNIQMASK).unwrap_or(0),
             ctx_default,
             regnames,

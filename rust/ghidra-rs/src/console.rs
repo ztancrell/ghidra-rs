@@ -251,6 +251,13 @@ impl Console {
                     None => Ok(()),
                 };
                 self.fd = Some(Funcdata::new(u64::from(*a)));
+                if let (Some(fd), Some(arch)) = (&mut self.fd, &self.arch) {
+                    fd.types = arch.types.clone();
+                    // the function symbol's prototype (`Funcdata::funcp`), locked by `parse line`
+                    if let Some(p) = arch.function_proto(u64::from(*a)) {
+                        fd.proto = p;
+                    }
+                }
                 self.actions = set.is_ok().then_some(actions);
                 self.run_actions(set, out)?;
             }
@@ -267,8 +274,21 @@ impl Console {
                 };
                 write!(out, "{}", crate::decomp::print_raw(fd, arch).map_err(|e| e.to_string())?).map_err(io)?;
             }
-            // read by the corpora but needing later stages (`parse line`: the types of S6)
-            ["print", "C"] | ["print", "tree", "block"] | ["parse", "line", ..] => {
+            // `IfcParseLine`: a C declaration (types, or a locked function prototype)
+            ["parse", "line", ..] => {
+                let Some(arch) = &mut self.arch else { return Err("parse line: no architecture loaded".into()) };
+                let text = line
+                    .trim_start()
+                    .strip_prefix("parse")
+                    .map(str::trim_start)
+                    .and_then(|s| s.strip_prefix("line"))
+                    .unwrap_or("");
+                let functions = &self.functions;
+                crate::decomp::parse_line(arch, text, &|n| functions.get(n).map(|&a| u64::from(a)))
+                    .map_err(|e| e.to_string())?;
+            }
+            // read by the corpora but needing later stages
+            ["print", "C"] | ["print", "tree", "block"] => {
                 return Err(format!("{line}: not implemented in ghidra-rs yet (milestone 3, later stages)"));
             }
             _ => return Err(format!("not implemented in ghidra-rs: {line}")),

@@ -114,8 +114,8 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
             ("deadcode", "deadcode", c::dead_code),
             ("dynamicmapping", "dynamic", c::nothing),
             ("spacebase", "base", c::spacebase),
+            ("infertypes", "typerecovery", super::infertypes::infer_types),
             ("nonzeromask", "analysis", super::rules::nonzero_mask),
-            ("infertypes", "typerecovery", not_ported),
             ("restructurevarnode", "localrecovery", not_ported),
         ],
     );
@@ -125,7 +125,7 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
         &[
             ("redundbranch", "deadcontrolflow", c::redund_branch),
             ("blockstructure", "blockrecovery", not_ported),
-            ("constantptr", "typerecovery", not_ported),
+            ("constantptr", "typerecovery", super::infertypes::constant_ptr),
             ("oppool2", "base", c::nothing),
             ("determinedbranch", "unreachable", c::determined_branch),
             ("unreachable", "unreachable", c::unreachable),
@@ -145,7 +145,7 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
         ("switchnorm", "switchnorm", not_ported),
         ("returnsplit", "returnsplit", not_ported),
         ("unjustifiedparams", "protorecovery", c::unjustified_params),
-        ("starttypes", "typerecovery", not_ported),
+        ("starttypes", "typerecovery", super::infertypes::start_types),
         ("activereturn", "protorecovery", c::active_return),
     ] {
         if on(g) {
@@ -287,8 +287,6 @@ fn prototype_types(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     if !fd.proto.model_locked && !fd.proto.has_matching_model(evalfp) {
         fd.proto.set_model(models, evalfp);
     }
-    let delay = arch.spec.models.get(evalfp).output.max_delay();
-    fd.active_output = Some(ParamActive::new(delay));
     for op in fd.ops_with(Opcode::Return) {
         let Some(&in0) = fd.op(op).ins.first() else { continue };
         if !fd.vn(in0).is_constant() {
@@ -296,6 +294,11 @@ fn prototype_types(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             let c = fd.new_constant(size, 0);
             fd.op_set_input(op, c, 0)?;
         }
+    }
+    // the locked output and inputs (stage S6), else initActiveOutput
+    if !super::locked::prototype_types(fd, arch)? {
+        let delay = arch.spec.models.get(evalfp).output.max_delay();
+        fd.active_output = Some(ParamActive::new(delay));
     }
     Ok(0)
 }
@@ -311,6 +314,9 @@ fn funclink(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         let model = fd.call(c).proto.model;
         let delays = model.map(|m| arch.spec.models.get(m)).map(|m| (m.input.max_delay(), m.output.max_delay()));
         let (din, dout) = delays.unwrap_or((0, 0));
+        if super::locked::func_link(fd, arch, c)? {
+            continue;
+        }
         let call = fd.call_mut(c);
         call.active_input = Some(ParamActive::new(din));
         call.active_output = Some(ParamActive::new(dout));
@@ -324,14 +330,15 @@ fn funclink(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
 
 /// Port of `FuncCallSpecs::createPlaceholder`: a 1-byte LOAD at stack offset 0, appended to
 /// the call's inputs; heritage later reads the stack offset at the call from it.
-fn create_placeholder(fd: &mut Funcdata, arch: &Arch, c: CallId) -> Result<()> {
+pub(crate) fn create_placeholder(fd: &mut Funcdata, arch: &Arch, c: CallId) -> Result<()> {
     let op = fd.call(c).op;
     let slot = fd.op(op).ins.len();
     let spec = &arch.spec;
     let uniq = arch.sleigh.uniq_space();
-    let loadval = fd.op_stack_load(spec.stack_pointer, spec.stack_container, uniq, 0, 1, op)?;
+    let loadval = fd.op_stack_load(spec.stack_pointer, spec.stack_container, uniq, 0, 1, op, None)?;
     fd.op_insert_input(op, loadval, slot)?;
     fd.call_mut(c).stack_placeholder_slot = Some(slot);
+    fd.vn_set(loadval, VnFlags::SPACEBASE_PLACEHOLDER);
     if let Some(a) = &mut fd.call_mut(c).active_input {
         a.set_placeholder_slot();
     }
@@ -384,7 +391,7 @@ fn varnode_props(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
                     continue;
                 }
                 fd.op_remove_input(op, 1);
-                fd.op_mut(op).opc = Opcode::Copy;
+                fd.op_set_opcode(op, Opcode::Copy);
             }
             Opcode::Multiequal => continue,
             _ => {}

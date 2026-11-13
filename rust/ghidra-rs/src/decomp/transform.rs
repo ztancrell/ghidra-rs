@@ -5,8 +5,8 @@
 //!
 //! The placeholders live in arenas with typed ids. A split varnode's lanes are consecutive in
 //! the variable arena, so `lanes + i` is the C++ pointer arithmetic over a split array. The
-//! varnode marks of the trace are a set in the trace, not varnode flags. x86 is little-endian:
-//! the big-endian address arithmetic is left out.
+//! varnode marks of the trace are a set in the trace, not varnode flags. Little-endian only
+//! (`Arch::new` rejects a big-endian processor): the big-endian address arithmetic is left out.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -37,13 +37,19 @@ impl LaneDescription {
     pub(crate) fn num_lanes(&self) -> i32 {
         self.lane_size.len() as i32
     }
-    /// `getSize`: the size of lane `i` (0 past the lanes, where the C++ reads out of range).
-    pub(crate) fn size(&self, i: i32) -> i32 {
-        usize::try_from(i).ok().and_then(|i| self.lane_size.get(i)).copied().unwrap_or(0)
+    /// `getSize`: the size of lane `i`; an error past the lanes, where the C++ reads out of range.
+    pub(crate) fn size(&self, i: i32) -> Result<i32> {
+        Self::lane(&self.lane_size, i)
     }
     /// `getPosition`: the byte position of lane `i`.
-    pub(crate) fn position(&self, i: i32) -> i32 {
-        usize::try_from(i).ok().and_then(|i| self.lane_position.get(i)).copied().unwrap_or(0)
+    pub(crate) fn position(&self, i: i32) -> Result<i32> {
+        Self::lane(&self.lane_position, i)
+    }
+    fn lane(per_lane: &[i32], i: i32) -> Result<i32> {
+        match usize::try_from(i).ok().and_then(|i| per_lane.get(i)) {
+            Some(&v) => Ok(v),
+            None => err(format!("lane {i} is outside the lane description")),
+        }
     }
 
     /// Port of `LaneDescription::getBoundary`: the lane starting at `byte_pos`, the number of
@@ -60,16 +66,16 @@ impl LaneDescription {
 
     /// Port of `LaneDescription::restriction`: the lanes (count, skip) of the `size` bytes at
     /// `byte_pos` within the lanes starting at `skip_lanes`.
-    pub(crate) fn restriction(&self, skip_lanes: i32, byte_pos: i32, size: i32) -> Option<(i32, i32)> {
-        let base = self.position(skip_lanes) + byte_pos;
-        self.lane_range(base, size)
+    pub(crate) fn restriction(&self, skip_lanes: i32, byte_pos: i32, size: i32) -> Result<Option<(i32, i32)>> {
+        let base = self.position(skip_lanes)? + byte_pos;
+        Ok(self.lane_range(base, size))
     }
 
     /// Port of `LaneDescription::extension`: the lanes (count, skip) of a `size`-byte varnode of
     /// which the lanes starting at `skip_lanes` are the bytes at `byte_pos`.
-    pub(crate) fn extension(&self, skip_lanes: i32, byte_pos: i32, size: i32) -> Option<(i32, i32)> {
-        let base = self.position(skip_lanes) - byte_pos;
-        self.lane_range(base, size)
+    pub(crate) fn extension(&self, skip_lanes: i32, byte_pos: i32, size: i32) -> Result<Option<(i32, i32)>> {
+        let base = self.position(skip_lanes)? - byte_pos;
+        Ok(self.lane_range(base, size))
     }
 
     fn lane_range(&self, base: i32, size: i32) -> Option<(i32, i32)> {
@@ -106,18 +112,42 @@ impl LanedRegister {
         (0..32).filter(move |&s| (self.mask >> s) & 1 != 0)
     }
 
-    /// Port of `LanedRegister::parseSizes`: the mask of a `vector_lane_sizes` list.
-    pub(crate) fn parse(whole_size: u32, sizes: &str) -> std::result::Result<LanedRegister, String> {
+    /// Port of `LanedRegister::parseSizes`: the mask of a `vector_lane_sizes` list. As in the
+    /// C++, nothing is read after a trailing comma and each value is read as a stream reads an
+    /// `int4` with no base set ([`parse_c_int`]).
+    pub(crate) fn parse(whole_size: u32, sizes: &str) -> Result<LanedRegister> {
         let mut res = LanedRegister { whole_size, mask: 0 };
-        for value in sizes.split(',') {
-            let sz: i32 = value.trim().parse().map_err(|_| format!("Bad lane size: {value}"))?;
-            if sz <= 0 || sz as u32 >= whole_size || sz > 16 {
-                return Err(format!("Bad lane size: {value}"));
+        for value in sizes.strip_suffix(',').unwrap_or(sizes).split(',') {
+            match parse_c_int(value) {
+                Some(sz) if sz > 0 && sz < i64::from(whole_size) && sz <= 16 => res.add(sz as i32),
+                _ => return err(format!("Bad lane size: {value}")),
             }
-            res.add(sz);
         }
         Ok(res)
     }
+}
+
+/// What `istream >> int` reads with no base flag set: leading white space, a sign, then the
+/// longest run of digits in base 16 after `0x`, base 8 after `0`, else base 10; the rest of the
+/// text is ignored. `None` without a digit or when the value does not fit.
+fn parse_c_int(text: &str) -> Option<i64> {
+    let s = text.trim_start();
+    let (neg, s) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    let hex = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .filter(|r| r.starts_with(|c: char| c.is_ascii_hexdigit()));
+    let (radix, digits) = match hex {
+        Some(rest) => (16, rest),
+        None if s.starts_with('0') => (8, s),
+        None => (10, s),
+    };
+    let end = digits.find(|c: char| !c.is_digit(radix)).unwrap_or(digits.len());
+    let val = i64::from_str_radix(digits.get(..end)?, radix).ok()?;
+    i32::try_from(if neg { -val } else { val }).ok().map(i64::from)
 }
 
 /// Index of a [`TVar`] in [`TransformManager::vars`].
@@ -242,13 +272,13 @@ impl TransformManager {
         desc: &LaneDescription,
         num_lanes: i32,
         start_lane: i32,
-    ) -> TVarId {
+    ) -> Result<TVarId> {
         let first = TVarId(self.vars.len());
-        let base_bit = desc.position(start_lane) * 8;
+        let base_bit = desc.position(start_lane)? * 8;
         let v = fd.vn(vn);
         for i in 0..num_lanes {
-            let bitpos = desc.position(start_lane + i) * 8 - base_bit;
-            let byte_size = desc.size(start_lane + i) as u32;
+            let bitpos = desc.position(start_lane + i)? * 8 - base_bit;
+            let byte_size = desc.size(start_lane + i)? as u32;
             if v.is_constant() {
                 let val = if (0..64).contains(&bitpos) { (v.offset >> bitpos) & calc_mask(byte_size) } else { 0 };
                 self.push_var(VarType::Constant, Some(vn), byte_size, val);
@@ -261,7 +291,7 @@ impl TransformManager {
             last.split_terminator = true;
         }
         self.piece_map.insert(vn, first);
-        first
+        Ok(first)
     }
 
     /// Port of `TransformManager::getPreexistingVarnode`.
@@ -284,9 +314,9 @@ impl TransformManager {
         desc: &LaneDescription,
         num_lanes: i32,
         start_lane: i32,
-    ) -> TVarId {
+    ) -> Result<TVarId> {
         match self.piece_map.get(&vn) {
-            Some(&res) => res,
+            Some(&res) => Ok(res),
             None => self.new_split(fd, vn, desc, num_lanes, start_lane),
         }
     }
@@ -327,18 +357,22 @@ impl TransformManager {
     }
 
     /// Port of `TransformManager::opSetInput`.
-    pub(crate) fn set_input(&mut self, rop: TOpId, rvn: TVarId, slot: usize) {
-        if let Some(s) = self.ops[rop.0].input.get_mut(slot) {
-            *s = Some(rvn);
+    pub(crate) fn set_input(&mut self, rop: TOpId, rvn: TVarId, slot: usize) -> Result<()> {
+        match self.ops[rop.0].input.get_mut(slot) {
+            Some(s) => *s = Some(rvn),
+            None => return err(format!("transform op has no input slot {slot}")),
         }
+        Ok(())
     }
 
     /// Port of `TransformManager::opSetOutput`.
-    pub(crate) fn set_output(&mut self, rop: TOpId, rvn: TVarId) {
-        self.ops[rop.0].output = Some(rvn);
-        if let Some(v) = self.vars.get_mut(rvn.0) {
-            v.def = Some(rop);
+    pub(crate) fn set_output(&mut self, rop: TOpId, rvn: TVarId) -> Result<()> {
+        match self.vars.get_mut(rvn.0) {
+            Some(v) => v.def = Some(rop),
+            None => return err("transform output is not a lane of its split"),
         }
+        self.ops[rop.0].output = Some(rvn);
+        Ok(())
     }
 
     /// The original varnode a placeholder models (`TransformVar::getOriginal`).
@@ -361,17 +395,24 @@ impl TransformManager {
         if v.replacement.is_some() {
             return Ok(());
         }
-        let def = v.def.and_then(|d| self.ops[d.0].replacement);
-        let uniq = fd.uniq.ok_or_else(|| super::LowlevelError("no unique space".into()))?;
+        // TransformVar::def->replacement: the defining op is made before its output
+        let def = match v.def {
+            None => None,
+            Some(d) => match self.ops[d.0].replacement {
+                Some(op) => Some(op),
+                None => return err("transform varnode made before its defining op"),
+            },
+        };
+        let uniq = fd.uniq.map_or_else(|| err("no unique space"), Ok)?;
         let repl = match v.ty {
-            VarType::Preexisting => v.vn.ok_or_else(|| super::LowlevelError("preexisting without varnode".into()))?,
+            VarType::Preexisting => v.vn.map_or_else(|| err("preexisting without varnode"), Ok)?,
             VarType::Constant => fd.new_constant(v.byte_size, v.val),
             VarType::NormalTemp | VarType::PieceTemp => match def {
                 None => fd.new_unique(v.byte_size, uniq),
                 Some(op) => fd.new_unique_out(v.byte_size, uniq, op),
             },
             VarType::Piece => {
-                let orig = v.vn.ok_or_else(|| super::LowlevelError("piece without varnode".into()))?;
+                let orig = v.vn.map_or_else(|| err("piece without varnode"), Ok)?;
                 if v.val & 7 != 0 {
                     return err("Varnode piece is not byte aligned");
                 }
@@ -402,7 +443,7 @@ impl TransformManager {
             rop.op
         } else if rop.special & OP_INDIRECT != 0 {
             let iop = fd.input(rop.op, 1)?;
-            let target = fd.iop_target(iop).ok_or_else(|| super::LowlevelError("INDIRECT without op".into()))?;
+            let target = fd.iop_target(iop).map_or_else(|| err("INDIRECT without op"), Ok)?;
             let repl = fd.new_indirect(target)?;
             self.ops[id.0].replacement = Some(repl);
             if let Some(out) = rop.output {
@@ -418,7 +459,7 @@ impl TransformManager {
             }
             if rop.anchor.is_none() {
                 if rop.opc == Opcode::Multiequal {
-                    let bl = fd.op(rop.op).parent.ok_or_else(|| super::LowlevelError("dead op".into()))?;
+                    let bl = fd.op(rop.op).parent.map_or_else(|| err("dead op"), Ok)?;
                     fd.op_insert_begin(repl, bl);
                 } else {
                     fd.op_insert_before(repl, rop.op)?;
@@ -441,7 +482,7 @@ impl TransformManager {
             return err("transform op without replacement");
         };
         if rop.opc == Opcode::Multiequal {
-            let bl = fd.op(arepl).parent.ok_or_else(|| super::LowlevelError("dead op".into()))?;
+            let bl = fd.op(arepl).parent.map_or_else(|| err("dead op"), Ok)?;
             fd.op_insert_begin(repl, bl);
         } else if rop.special & INSERT_BEFORE != 0 {
             fd.op_insert_before(repl, arepl)?;
@@ -583,17 +624,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lane_description_ranges() {
+    fn lane_description_ranges() -> Result<()> {
         let d = LaneDescription::new(16, 4);
         assert_eq!(d.boundary(8), 2);
         assert_eq!(d.boundary(16), 4);
         assert_eq!(d.boundary(6), -1);
         // the 8 bytes at 4 of the whole: lanes 1 and 2
-        assert_eq!(d.restriction(0, 4, 8), Some((2, 1)));
+        assert_eq!(d.restriction(0, 4, 8)?, Some((2, 1)));
         // lanes 1.. are bytes 4.. of a 16-byte varnode starting at lane 0
-        assert_eq!(d.extension(1, 4, 16), Some((4, 0)));
-        assert_eq!(d.restriction(0, 2, 4), None);
-        let r = LanedRegister::parse(16, "1,2,4,8").unwrap_or_default();
+        assert_eq!(d.extension(1, 4, 16)?, Some((4, 0)));
+        assert_eq!(d.restriction(0, 2, 4)?, None);
+        assert!(d.size(4).is_err());
+        let r = LanedRegister::parse(16, "1,2,4,8")?;
         assert_eq!(r.sizes().collect::<Vec<_>>(), vec![1, 2, 4, 8]);
+        // parseSizes: hex, octal, a trailing comma
+        let r = LanedRegister::parse(16, "0x4, 010,")?;
+        assert_eq!(r.sizes().collect::<Vec<_>>(), vec![4, 8]);
+        for bad in ["", "4,,8", "16", "0", "x"] {
+            assert!(LanedRegister::parse(16, bad).is_err(), "{bad}");
+        }
+        Ok(())
     }
 }

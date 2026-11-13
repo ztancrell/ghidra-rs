@@ -250,6 +250,8 @@ impl Opcode {
         match self {
             IntEqual | FloatEqual => Binary(if self == IntEqual { "==" } else { "f==" }),
             IntNotequal => Binary("!="),
+            // TypeOpPtrsub::printRaw (ActionConstantPtr, stage S6)
+            Ptrsub => Binary("->"),
             FloatNotequal => Binary("f!="),
             IntSless => Binary("s<"),
             IntSlessequal => Binary("s<="),

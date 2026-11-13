@@ -573,8 +573,9 @@ rust/tools/decomp-diff.sh --script <file>      # one script on both engines, ful
   `print raw`, `continue` and `quit`, and echoes them as `decomp_dbg -i` does. `decompile`
   runs up to the `break start` action (stage S4: at most `assignhigh`, see "Stage S4") and
   `continue` resumes it; a function mapped `nocode` prints `No code for <name>` instead. `print
-  C|tree block` and `parse line` fail with "not implemented in ghidra-rs yet (milestone 3,
-  later stages)"; any other command fails with "not implemented in ghidra-rs".
+  C|tree block` fail with "not implemented in ghidra-rs yet (milestone 3, later stages)";
+  `parse line` defines types and locks `extern` prototypes (stage S6); any other command fails with "not implemented in ghidra-rs".
+  Superseded: until S6, `parse line` failed like `print C`.
   Superseded: until S2, `decompile` stopped at most at `heritage` and `continue` failed. Of the options
   `option readonly on|off` and `option currentaction decompile <group> on|off` have an
   effect (and print the reference's message); the others (`togglerule`: no rule is ported
@@ -1041,6 +1042,135 @@ Remaining differences, by cause:
   their paths (`transferLockedInput`, `commitNewInputs`, locked parameter trials, `paramdouble`
   on stack trials) are still to come.
 
+### Stage S6: types (partial)
+
+Superseded (R3 merged with S6, 2026-11-13): the "446 / 446 non-SSE" and "446 / 500" results in this section predate `ActionLaneDivide`. With it ported and running on both sides, the S6 checks unlocked, locked `void`, locked `int4` and callees `int4(int4 a)` are each M8 8 / 8, M500 498 / 500 (498 / 499 of the functions the reference finishes): the SSE functions are identical but 0x4919f0 (a block the reference empties, also under the S4 options); 0x4c48d0 is the timeout.
+
+Stage S6 (branch `m3-s6`, partial) adds data-types to the IR. The check is `print raw` with
+types at `assignhigh`: `DECOMP_RAW_EXTRA=1` makes both engines print each varnode's type after
+it (`<int4>`, `<xunknown4 *>`, ...; the reference through `tools/decomp-ref.patch`), and
+`tools/corpus/s6-options.txt` is the S4 option set with the `typerecovery` group back on and
+its five rules (`ptraddundo`, `ptrsubundo`, `pushptr`, `structoffset0`, `ptrarith`, stage R5)
+toggled off:
+
+    DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=rust/tools/corpus/s6-options.txt rust/tools/decomp-diff.sh m500
+
+M8 8 / 8, M500 446 / 500: identical on every function the reference finishes (499) except the 53 that use whole SSE registers and wait for `ActionLaneDivide` (R3), as in S4. Ported:
+
+- `decomp/types.rs`: the type store (`TypeFactory`, hash-consed in an arena, so equal types are
+  one id as the C++ compares pointers): the core types of `SleighArchitecture::buildCoreTypes`
+  with `cacheCoreTypes`' choices (`char` over `int1`), `getBase` (unnamed `unkbyteN`, arrays of
+  `xunknown1` past `max_basetype_size`), pointers, `code`, space-base types, `typeOrder`
+  (`compare` with its sub-metatype order) and `printRaw`; for `parse line` also structs,
+  unions, enums and typedefs.
+- `decomp/infertypes.rs`: `ActionStartTypes`, `ActionInferTypes` (local types, edge
+  propagation, returns, write-back, the 7-pass limit) and `ActionConstantPtr` with
+  `Funcdata::spacebaseConstant`; the local types and `propagateType` of every op the rules-off
+  IR has (`typeop.cc`); `TypePointer::downChain`, `TypeSpacebase::getSubType` answered from the
+  global scope (functions and external references of the console's `map` commands) and the
+  local scope's range; the stack pointer's locked space-base type (`Funcdata::spacebase`); the
+  locked types global symbols give the ram varnodes covering them.
+- `decomp/cparse.rs`: the `parse line` C declaration parser (replaces `grammar.y`): `struct`,
+  `union`, `enum`, `typedef`, `extern` functions, pointers, arrays, function declarators,
+  namespaces. 211 of the 232 `parse line` commands of the upstream datatests parse (unit test):
+  all but
+  `bitfields*.xml` (bit-fields, stage R5) and `pointersub.xml` (a relative pointer type made by
+  `pointer setting`). The console's `parse line` defines types and locks prototypes (round two below).
+
+Not ported yet (the S6 remainder): locked prototypes (`parse line extern`, `fspec.cc`'s locked
+paths; so no datatest that uses `parse line` passes yet, and they also need C printing, S9),
+`cast.cc` (`ActionSetCasts`, after `assignhigh`), `unionresolve`, partial structs/unions/enums
+and `TypePointerRel`, `database.cc` beyond the global lookups (scopes are stand-ins), the
+`.cspec`'s `<data_organization>` (struct layout uses natural alignment), function types with
+prototypes. Each fails loudly where the inference would need it.
+
+Round two (same branch, 2026-11-13):
+
+- Locked prototypes (`locked.rs`): `parse line extern` locks the named function's prototype
+  (`FuncProto::setPieces`: storage from the model by `assignAddressFallback`/`getAddrBySlot`,
+  join outputs included; a hidden return pointer is not ported). Locked paths ported:
+  `ActionPrototypeTypes` (locked return values on every RETURN, register parameters as locked
+  inputs), `funcLinkInput`/`funcLinkOutput` (stack parameters as stack loads, register ones,
+  the output varnode), `characterizeAs*`/`possibleInputParam`, `ActionDeadCode`'s consumption,
+  the locked types of `TypeOpCall`/`TypeOpCallind`/`TypeOpReturn`, and `ActionConstantPtr`'s
+  locked checks. A decompile starts from its function's locked prototype.
+- Struct layout and `getAlignSize` from the `.cspec`'s `<data_organization>`
+  (`<size_alignment_map>`; `setDefaultAlignmentMap` without one). Superseded: the natural
+  alignment shortcut of the first slice.
+- Check: `rust/tools/decomp-locked-options.sh <type> <file>` writes the S6 options plus a
+  locked `<type> name(void)` prototype for every mercs2 function with a C name (28,495), so the
+  decompiled function and its callees are locked. M8 5 / 8 with `void` and 5 / 8 with `int4` (the M500 runs had not finished at the commit).
+  The misses are calls resolved by `ActionDeindirect` to a locked callee: `lateRestriction`
+  (`transferLockedInput/Output`, `commitNewInputs/Outputs`) is not ported and fails loudly.
+  Superseded: round three ports `lateRestriction` (M8 8 / 8 for both).
+- Not reached: the D bar (`print raw` with types on the datatests using `parse line`). 58 of
+  the 69 files are x86-64 (`x86:LE:64`), 8 ARM/AArch64/MIPS; the Rust decompiler is x86-32 only
+  and cannot `load test file` yet. The one x86-32 file (`retstruct.xml`) also needs
+  `type varnode` (dynamic symbols). So D: 0 checked.
+- Still left for S6: `lateRestriction`, locked stack parameters of the decompiled function
+  (they need the stack heritage pass), varargs calls to locked prototypes, hidden return
+  pointers, the scopes of `database.cc` (parameter symbols, `type varnode`, the global scope
+  beyond `map`), `unionresolve`, partial types and `TypePointerRel`, x86-64 and `load test
+  file` for the D corpus. `cast.cc`/`ActionSetCasts` belong to S9: they run after `assignhigh`,
+  so no S6 check can see them.
+
+
+Round three (same branch, 2026-11-13):
+
+- `lateres.rs`: `FuncCallSpecs::lateRestriction` for a locked prototype with
+  `transferLockedInput/Output` and `commitNewInputs/Outputs` (inputs rebuilt from the trials
+  that found them or as stack loads through the placeholder's pointer, `buildParam`; the
+  output moved to the call from the INDIRECT that created it, `clearActiveOutput`), so
+  `ActionDeindirect` resolving a call to a locked callee works.
+- Bar changed (user decision, 2026-11-13): the D-corpus `parse line` check moves to the stage
+  that adds x86-64 (58 of its 69 files are x86-64; the Rust decompiler is x86-32 only). S6 is
+  checked with the locked-prototype stand-in instead: M8 8 / 8 and M500 at least 95% of the
+  non-SSE functions the reference finishes, for both `void` and `int4`. Superseded: the
+  "D files using `parse line` pass" bar of the stage table, and round two's 5 / 8 with the
+  `lateRestriction` failures.
+- Results: unlocked (`s6-options.txt`) M8 8 / 8, M500 446 / 446 non-SSE; locked `void`
+  M8 8 / 8, M500 446 / 446 non-SSE; locked `int4` M8 8 / 8, M500 446 / 446 non-SSE; S4 regression M8 8 / 8.
+- Left for a later S6b: locked stack parameters of the decompiled function (stack heritage),
+  varargs and hidden-return locked prototypes, resizing an output in `commitNewOutputs` and
+  truncating a trial in `buildParam`, the restart when a call cannot take a locked prototype,
+  the scopes of `database.cc` (parameter symbols, `type varnode`), `unionresolve`, partial
+  types and `TypePointerRel`. `cast.cc`/`ActionSetCasts` are S9.
+
+
+Review fixes (same branch, 2026-11-13), after an independent review of the S6 diff:
+
+- A locked call's first stack parameter is marked as the spacebase placeholder
+  (`setSpacebasePlaceholder`, a varnode flag) instead of taking the call's placeholder slot,
+  which heritage removes with `abortSpacebaseRelative`: the parameter stayed lost before.
+  `getSpacebaseRelative` checks the flag. New check: `decomp-locked-options.sh int4 <file>
+  "int4 a"` with `OPTIONS_SKIP_SELF=1` locks only the callees, with one stack parameter each.
+- `ActionConstantPtr::isPointer` no longer needs an exact symbol hit for a constant already
+  typed as a pointer; its locked-call check reads the locked parameter's metatype.
+- Struct layout as `TypeStruct::assignFieldOffsets`: fields advance by their align size, the
+  size is padded (`calcAlignSize`), a `void` field is an error; primitives align as
+  `findAdd` (`getAlignment(getPrimitiveAlignSize(size))`); arrays are count times the element's
+  align size. Sizes and counts from `parse line` are checked for overflow, and its recursion is
+  bounded.
+- Type propagation into a struct, union or enum pointee, or to a partial enum, fails loudly
+  (`TypePointerRel`, `getTypePartialEnum` are not ported) instead of returning a wrong type.
+- `commitNewOutputs`/`funcLinkOutput` mark a boolean locked output (`opMarkCalculatedBool`);
+  the 7-pass limit sets `typeRecoveryExceeded`; `Funcdata::spacebase` makes its types before
+  the loop; an alignment of 0 in the `.cspec` is rejected.
+- The "every function locked" checks use `void name(void)` and `int4 name(void)` only (locked
+  stack parameters of the decompiled function need stack heritage, S6b).
+- Results (final binary): unlocked M8 8 / 8, M500 446 / 446 non-SSE; `void` M8 8 / 8, M500 446 / 446 non-SSE; `int4` M8 8 / 8,
+  M500 446 / 446 non-SSE; callees with a stack parameter M8 8 / 8, M500 446 / 446 non-SSE; S4 regression M8 8 / 8.
+
+Merged with R1 (2026-11-13, `master` into `m3-s6`): `infertypes` and `nonzeromask` are both in
+the tree; `ActionInferTypes` reads R1's computed non-zero masks (`Funcdata::nzmask`, the C++
+`getNZMask`) for its boolean guards. `PcodeOp::stopsTypePropagation` and
+`Varnode::stopsUpPropagation` stay unported: only `RulePtrArith`, `RuleStructOffset0` and
+`RulePushPtr` (R5) set the flag, and no R1 rule sets it or makes a PTRSUB/PTRADD; both checks
+come with R5. Every bar rerun on the merged binary: S6 unlocked, locked `void`, locked `int4`
+and callees with a stack parameter each M8 8 / 8, M500 446 / 446 non-SSE (446 / 500; the misses
+are the 53 SSE functions and 0x4c48d0, which the reference does not finish); S4 regression
+M8 8 / 8; R1 check M8 8 / 8, M500 451 / 453.
+
 ### Stage R1: rules for copies, constants, arithmetic
 
 Stage R1 (branch `m3-r1`) adds the rule pools (`ActionPool`: a pool node in `actiontree.rs`, the walk in
@@ -1169,8 +1299,19 @@ Remaining differences, by cause:
 Not ported in this stage (see the plan, "R3"): the `subvar` group (`RuleSubvar*`,
 `RuleSplitFlow`, `SubvariableFlow` and `SplitFlow` of subflow.cc; the group is off in the check),
 `RulePiecePathology` (switched off by `togglerule`; needs the consumed-bytes records of
-`fspec.cc`), `prefersplit.cc` (no x86 `.cspec` uses `<prefersplit>`), and the type-lock test of
-`LaneDivide::setReplacement` (no locked types before S6).
+`fspec.cc`) and `prefersplit.cc` (no x86 `.cspec` uses `<prefersplit>`).
+
+Review round (after the merge with S6): `LaneDivide::setReplacement` refuses a type-locked
+varnode unless its type is an array, as the C++ (superseded: "no locked types before S6");
+`Arch::new` rejects a big-endian processor, which every ported rule and lane division assume
+away; `LanedRegister::parse` reads sizes as `parseSizes` does (hex, octal, a trailing comma;
+an empty attribute is skipped); `sign_extend` clamps its sizes to 8 bytes; every opcode change
+goes through `op_set_opcode`; the transform placeholders fail on an out-of-range lane, slot or
+a varnode made before its defining op. `zext_eliminate` leaves out `copySymbolIfValid`: it
+copies only an `EquateSymbol`, which only the console's `map convert` makes, and ghidra-rs has
+no such command. All bars rerun on the merged binary: R3 check M8 8 / 8, M500 495 / 499 (the
+R1 set 451 / 453, the lane-divide set 44 / 46); paramdouble 500 / 500; S4 check M8 8 / 8,
+M500 498 / 500; the four S6 checks M8 8 / 8, M500 498 / 500 each.
 
 ## Speed
 

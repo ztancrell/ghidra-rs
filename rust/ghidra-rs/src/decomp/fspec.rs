@@ -3,7 +3,8 @@
 //! models (`ProtoModelMerged`, `<resolveprototype>`), a function's prototype (`FuncProto`) and
 //! a call site's (`FuncCallSpecs`).
 //!
-//! The console decompiler never locks a prototype (it has no `parse line` types yet), so the
+//! Superseded: `parse line extern` locks prototypes since stage S6 (`locked.rs`). Before it
+//! the console decompiler never locked a prototype (no `parse line` types yet), so the
 //! locked-parameter paths of the actions are not ported; the models' effect lists and parameter
 //! entries are read in full, since heritage (stage S2) and parameter recovery (S4) query them.
 
@@ -422,6 +423,8 @@ pub(crate) struct FuncProto {
     pub(crate) inject: Option<InjectId>,
     /// the recovered return storage (`deriveOutputMap`), none until return recovery finishes
     pub(crate) output: Option<(Space, u64, u32)>,
+    /// a locked prototype (`parse line extern`, stage S6): inputs, output, model locked
+    pub(crate) locked: Option<Box<super::locked::Locked>>,
 }
 
 impl FuncProto {
@@ -880,6 +883,9 @@ impl FuncProto {
 
     /// Port of `FuncProto::characterizeAsOutput` for an unlocked prototype.
     pub(crate) fn characterize_as_output(&self, arch: &Arch, space: Space, off: u64, size: u32) -> Containment {
+        if let Some(l) = &self.locked {
+            return l.characterize_output(space, off, size);
+        }
         match (self.model_of(arch), space) {
             (Some(m), Space::Sleigh(s)) => m.output.characterize(s, off, size),
             _ => Containment::None,
@@ -888,6 +894,9 @@ impl FuncProto {
 
     /// Port of `FuncProto::characterizeAsInputParam` for an unlocked prototype.
     pub(crate) fn characterize_as_input(&self, arch: &Arch, space: Space, off: u64, size: u32) -> Containment {
+        if let Some(c) = self.locked.as_ref().and_then(|l| l.characterize_input(space, off, size)) {
+            return c;
+        }
         match (self.model_of(arch), space) {
             (Some(m), Space::Sleigh(s)) => m.input.characterize(s, off, size),
             _ => Containment::None,

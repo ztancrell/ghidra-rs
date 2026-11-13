@@ -14,15 +14,16 @@ pub(crate) fn calc_mask(size: u32) -> u64 {
     }
 }
 
-/// `sign_extend(val, sizein, sizeout)`
+/// `sign_extend(val, sizein, sizeout)` (address.cc): both sizes are clamped to 8 bytes.
 pub(crate) fn sign_extend(val: u64, sizein: u32, sizeout: u32) -> u64 {
+    let (sizein, sizeout) = (sizein.clamp(1, 8), sizeout.min(8));
     let sh = 64 - 8 * sizein;
     let v = (((val << sh) as i64) >> sh) as u64;
     v & calc_mask(sizeout)
 }
 
 /// `bit_transitions` (address.cc)
-fn bit_transitions(mut val: u64, sz: u32) -> u32 {
+pub(crate) fn bit_transitions(mut val: u64, sz: u32) -> u32 {
     let mut res = 0;
     let mut last = val & 1;
     for _ in 1..8 * sz {
