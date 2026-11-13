@@ -18,7 +18,7 @@ use super::{err, heritage, Arch, Funcdata, Result};
 /// `stackstall`, and the root's actions after `fullloop` up to `assignhigh`. `oppool1` holds the
 /// ported rules (`rules::OPPOOL1`) less those `togglerule` switched off (`rule:<name>` in
 /// `disabled`); the actions named `action:<name>` there (`DECOMP_SKIP_ACTIONS`) are left out. An
-/// action that is not ported fails when it runs with its group on, except `lanedivide` (see there).
+/// action that is not ported fails when it runs with its group on.
 pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
     use super::coreaction as c;
     let mut t = ActionTree::default();
@@ -85,10 +85,9 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
     let mut stackstall = leaves(
         &mut t,
         &[
-            // ActionLaneDivide (R3) is in group `base` and cannot be switched off, so it is the one
-            // action not ported that does nothing instead of failing: the functions that need it
-            // differ from the reference (`rust/tools/corpus/m500-lanedivide.txt`) rather than fail
-            ("lanedivide", "base", c::nothing),
+            // ActionLaneDivide (R3, `lanedivide.rs`). Superseded: until R3 it was the one action
+            // not ported that did nothing instead of failing (group `base` cannot be switched off)
+            ("lanedivide", "base", super::lanedivide::lane_divide),
             ("multicse", "analysis", not_ported),
             ("shadowvar", "analysis", not_ported),
             ("deindirect", "deindirect", c::deindirect),

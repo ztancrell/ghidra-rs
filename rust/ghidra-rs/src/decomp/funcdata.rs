@@ -8,8 +8,10 @@ use super::fspec::{CallSpec, EffectKind, FuncProto, ParamActive};
 use super::heritage::Heritage;
 use super::op::{OpFlags, OpId, PcodeOp, SeqNum};
 use super::opcode::Opcode;
+use super::transform::LanedRegister;
 use super::varnode::{LocKey, Space, Varnode, VarnodeId, VnFlags, CONST_SPACE};
 use super::{err, flow, stdsort, Arch, LowlevelError, Result};
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Size of the annotation varnodes that hold an op or call reference: the C++ stores a pointer
@@ -50,6 +52,8 @@ pub struct Funcdata {
     pub(crate) dead: Vec<OpId>,
     /// the next `SeqNum::time` (`PcodeOpBank::uniqid`)
     next_time: u32,
+    /// the next per-opcode list position (`PcodeOp::list_key`)
+    next_list_key: u32,
     pub(crate) blocks: BlockGraph,
     /// every call made so far; [`Funcdata::qlst`] lists the live ones
     pub(crate) calls: Vec<CallSpec>,
@@ -75,6 +79,11 @@ pub struct Funcdata {
     pub(crate) joins: Vec<Vec<(u32, u64, u32)>>,
     /// the `<incidentalcopy>` ranges (`Arch::incidental`)
     incidental: Vec<(u32, u64, u32)>,
+    /// the laned register records (`Arch::laned`)
+    laned: Vec<LanedRegister>,
+    /// the storage of laned sizes seen since `ActionLaneDivide` last ran, in `VarnodeData`
+    /// order (`Funcdata::lanedMap`)
+    pub(crate) lane_access: BTreeMap<(u32, u64, Reverse<u32>), (Space, LanedRegister)>,
     /// `ActionStackPtrFlow::analysis_finished` (the action is made per function)
     pub(crate) stackptrflow_done: bool,
     /// each varnode's non-zero mask (`Varnode::nzm`) once `ActionNonzeroMask` has run; so far
@@ -98,6 +107,7 @@ impl Funcdata {
             seqs: BTreeMap::new(),
             dead: Vec::new(),
             next_time: 0,
+            next_list_key: 0,
             blocks: BlockGraph::default(),
             calls: Vec::new(),
             qlst: Vec::new(),
@@ -111,6 +121,8 @@ impl Funcdata {
             uniq: None,
             incidental: Vec::new(),
             joins: Vec::new(),
+            laned: Vec::new(),
+            lane_access: BTreeMap::new(),
             stackptrflow_done: false,
             nzm: Vec::new(),
             folded: Vec::new(),
@@ -209,7 +221,9 @@ impl Funcdata {
             order: 0,
             flags: OpFlags::default(),
             halt: None,
+            list_key: self.next_list_key,
         });
+        self.next_list_key += 1;
         self.seqs.insert((addr, seq.time), id);
         self.dead.push(id);
         id
@@ -221,7 +235,20 @@ impl Funcdata {
         let v = self.scoped(Varnode::new(space, offset, size));
         self.vns.push(v);
         self.loc_add(id);
+        self.check_for_laned_register(space, offset, size);
         id
+    }
+
+    /// Port of `Funcdata::checkForLanedRegister`: storage of a laned register's size is recorded
+    /// for `ActionLaneDivide`. The C++ checks in `newVarnode`, `newVarnodeOut`, `newUnique` and
+    /// `newUniqueOut`, not for constants or annotations.
+    fn check_for_laned_register(&mut self, space: Space, offset: u64, size: u32) {
+        if space == CONST_SPACE || matches!(space, Space::Iop | Space::Fspec) {
+            return;
+        }
+        if let Some(&reg) = self.laned.iter().find(|r| r.whole_size == size) {
+            self.lane_access.insert((space.index(), offset, Reverse(size)), (space, reg));
+        }
     }
 
     /// The scope's properties of a new varnode (`Scope::queryProperties`): the global scope
@@ -251,6 +278,7 @@ impl Funcdata {
         v.def = Some(op);
         self.vns.push(v);
         self.loc_add(id);
+        self.check_for_laned_register(space, offset, size);
         self.op_mut(op).out = Some(id);
         id
     }
@@ -502,7 +530,7 @@ impl Funcdata {
 
     /// Port of `Funcdata::newIndirect`: an INDIRECT at `indeffect`'s address naming it (its
     /// output and first input are the caller's).
-    fn new_indirect(&mut self, indeffect: OpId) -> Result<OpId> {
+    pub(crate) fn new_indirect(&mut self, indeffect: OpId) -> Result<OpId> {
         let op = self.new_op(Opcode::Indirect, self.op(indeffect).seq.addr);
         let iop = self.new_varnode_iop(indeffect);
         // input 1 first, as the C++ sets it before input 0
@@ -512,7 +540,7 @@ impl Funcdata {
     }
 
     /// Sets input 0 of an INDIRECT made by [`Funcdata::new_indirect`].
-    fn set_indirect_input(&mut self, op: OpId, vn: VarnodeId) -> Result<()> {
+    pub(crate) fn set_indirect_input(&mut self, op: OpId, vn: VarnodeId) -> Result<()> {
         let vn = self.unshared_constant(vn);
         self.add_descend(vn, op)?;
         self.op_mut(op).ins.insert(0, vn);
@@ -724,9 +752,13 @@ impl Funcdata {
     }
 
     /// The ops with opcode `opc` in the order the C++ keeps its per-opcode lists (`returnlist`,
-    /// `storelist`: creation order), dead ones included.
+    /// `storelist`, `loadlist`, `useroplist`: an op goes to the end when made and on every
+    /// `opSetOpcode`, see [`PcodeOp::list_key`]), dead ones included.
     pub(crate) fn ops_created_with(&self, opc: Opcode) -> Vec<OpId> {
-        (0..self.ops.len() as u32).map(OpId).filter(|&o| self.op(o).opc == opc && self.op_exists(o)).collect()
+        let mut ops: Vec<OpId> =
+            (0..self.ops.len() as u32).map(OpId).filter(|&o| self.op(o).opc == opc && self.op_exists(o)).collect();
+        ops.sort_by_key(|&o| self.op(o).list_key);
+        ops
     }
 
     /// Port of `Funcdata::startProcessing`: follow flow, build blocks, order them and the calls.
@@ -736,6 +768,7 @@ impl Funcdata {
         self.ram = Some(arch.spec.stack_container);
         self.uniq = Some(arch.sleigh.uniq_space());
         self.incidental = arch.incidental.clone();
+        self.laned = arch.laned.clone();
         if self.blocks.list.is_empty() {
             flow::follow_flow(self, arch)?;
         }
@@ -765,10 +798,14 @@ impl Funcdata {
         }
     }
 
-    /// Port of `Funcdata::opSetOpcode` (the per-opcode lists follow the op's creation order
-    /// here, see [`Funcdata::ops_created_with`]).
+    /// Port of `Funcdata::opSetOpcode`: the op also moves to the end of its per-opcode list
+    /// (`PcodeOpBank::changeOpcode`, see [`Funcdata::ops_created_with`]).
     pub(crate) fn op_set_opcode(&mut self, op: OpId, opc: Opcode) {
-        self.op_mut(op).opc = opc;
+        let key = self.next_list_key;
+        self.next_list_key += 1;
+        let o = self.op_mut(op);
+        o.opc = opc;
+        o.list_key = key;
     }
 
     /// Port of `Funcdata::opUninsert`: take `op` out of its block; it becomes dead.
@@ -780,7 +817,7 @@ impl Funcdata {
     }
 
     /// Port of `Funcdata::opUnsetInput` for every input.
-    fn op_clear_inputs(&mut self, op: OpId) {
+    pub(crate) fn op_clear_inputs(&mut self, op: OpId) {
         for vn in std::mem::take(&mut self.op_mut(op).ins) {
             self.erase_descend(vn, op);
         }
