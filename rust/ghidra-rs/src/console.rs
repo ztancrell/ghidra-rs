@@ -194,7 +194,17 @@ impl Console {
                 }
                 writeln!(out, "Toggled {group} in action decompile").map_err(io)?;
             }
-            // the other options (`togglerule`: no rule is ported) are read and ignored
+            // `option togglerule <rule> on|off` (its message precedes `load function`, which the
+            // checks compare from, so none is printed)
+            ["option", "togglerule", rule, on @ ("on" | "off")] if self.arch.is_some() => {
+                let key = format!("rule:{rule}");
+                if *on == "off" {
+                    self.disabled.insert(key);
+                } else {
+                    self.disabled.remove(&key);
+                }
+            }
+            // the other options are read and ignored
             ["option", ..] if self.arch.is_some() => {}
             // `readonly <addr>:<size>`
             ["readonly", range] => {
@@ -221,7 +231,21 @@ impl Console {
                     return Ok(true);
                 }
                 writeln!(out, "Decompiling {name}").map_err(io)?;
-                let mut actions = action::universal(&self.disabled);
+                // `DECOMP_SKIP_ACTIONS` (comma list): a check-only switch the reference patch reads
+                // too; those actions do nothing on both sides. It is read on every decompile, so a
+                // name that is not a single action of the tree (with every group on) is an error:
+                // the C++ would skip a group of that name and the engines would disagree.
+                let mut disabled = self.disabled.clone();
+                if let Ok(skip) = std::env::var("DECOMP_SKIP_ACTIONS") {
+                    let all = action::universal(&Default::default());
+                    for s in skip.split(',').filter(|s| !s.is_empty()) {
+                        all.has_leaf(s)
+                            .then_some(())
+                            .ok_or(format!("DECOMP_SKIP_ACTIONS: {s} is not an action of the decompile tree"))?;
+                        disabled.insert(format!("action:{s}"));
+                    }
+                }
+                let mut actions = action::universal(&disabled);
                 let set = match &self.break_start {
                     Some(b) => actions.set_break_start(b),
                     None => Ok(()),

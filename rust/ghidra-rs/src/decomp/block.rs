@@ -21,6 +21,8 @@ impl EdgeFlags {
     const CROSS: EdgeFlags = EdgeFlags(8);
     const BACK: EdgeFlags = EdgeFlags(16);
     const LOOP: EdgeFlags = EdgeFlags(32);
+    /// `f_immed_copy`: a COPY has been propagated across the edge (`RulePropagateCopy`)
+    const IMMED_COPY: EdgeFlags = EdgeFlags(128);
     /// every spanning-tree label, `f_loop_exit_edge` (64) included
     const SPANNING: EdgeFlags = EdgeFlags(127);
     /// the labels `structureLoops` clears before rebuilding the tree
@@ -108,6 +110,16 @@ impl BlockGraph {
 
     /// Port of `BlockGraph::addEdge` (`FlowBlock::addInEdge`).
     /// `isLoopIn`: the `i`-th edge into `bl` is a loop edge.
+    /// `FlowBlock::setImmedCopyEdge` on out edge `i` of `bl`.
+    pub(crate) fn set_immed_copy_edge(&mut self, bl: BlockId, i: usize) {
+        self.set_out_edge_flag(bl, i, EdgeFlags::IMMED_COPY);
+    }
+
+    /// `FlowBlock::hasImmedCopyEdge` on out edge `i` of `bl`.
+    pub(crate) fn has_immed_copy_edge(&self, bl: BlockId, i: usize) -> bool {
+        self.block(bl).outs[i].label.has(EdgeFlags::IMMED_COPY)
+    }
+
     pub(crate) fn is_loop_in(&self, bl: BlockId, i: usize) -> bool {
         self.block(bl).ins[i].label.has(EdgeFlags::LOOP)
     }

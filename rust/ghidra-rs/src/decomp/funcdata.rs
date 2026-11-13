@@ -908,8 +908,259 @@ impl Funcdata {
         Ok(at as u64)
     }
 
+    /// The first op (alive or dead, not freed) whose sequence number sorts after `seq`, or the
+    /// first of all (`PcodeOpTree` iteration from `beginOpMain`).
+    pub(crate) fn op_after(&self, seq: Option<SeqNum>) -> Option<OpId> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let lo = seq.map_or(Unbounded, |s| Excluded((s.addr, s.time)));
+        self.seqs.range((lo, Unbounded)).next().map(|(_, &id)| id)
+    }
+
+    /// Port of `Funcdata::opDeadAndGone`: a dead op is freed at once.
+    pub(crate) fn op_dead_and_gone(&mut self, op: OpId) {
+        if let Some(p) = self.dead.iter().position(|&o| o == op) {
+            self.dead.remove(p);
+        }
+        self.op_clear_inputs(op);
+        if let Some(out) = self.op_mut(op).out.take() {
+            self.loc_del(out);
+            self.vn_mut(out).def = None;
+            self.delete_varnode(out);
+        }
+        let seq = self.op(op).seq;
+        self.seqs.remove(&(seq.addr, seq.time));
+    }
+
+    /// `Varnode::getNZMask`: the mask `ActionNonzeroMask` computed last, else (before it runs,
+    /// or for a varnode made since) [`Varnode::nzmask`].
+    pub(crate) fn nzmask(&self, vn: VarnodeId) -> u64 {
+        self.nzm.get(vn.0 as usize).copied().unwrap_or_else(|| self.vn(vn).nzmask())
+    }
+
     /// Port of `Funcdata::warningHeader`.
     pub(crate) fn warning_header(&mut self, msg: impl Into<String>) {
         self.warnings.push(msg.into());
+    }
+}
+
+/// The `Funcdata` and `PcodeOp` methods the rule pools use (stage R1).
+impl Funcdata {
+    fn out_of(&self, op: OpId) -> Result<VarnodeId> {
+        self.op(op).out.ok_or_else(|| LowlevelError(format!("op at 0x{:08x} has no output", self.op(op).seq.addr)))
+    }
+
+    /// Port of `Funcdata::opSwapInput`: inputs `a` and `b` of `op` trade places (the readers
+    /// lists do not change).
+    pub(crate) fn op_swap_input(&mut self, op: OpId, a: usize, b: usize) {
+        self.op_mut(op).ins.swap(a, b);
+    }
+
+    /// Port of `PcodeOp::getCseHash`: output size, opcode and inputs, 0 when the op is not
+    /// hashable. A non-constant input hashes its `VarnodeId`, which is its index in the varnode
+    /// arena and so the C++ `create_index` (both count every varnode made, in order).
+    pub(crate) fn cse_hash(&self, op: OpId) -> u32 {
+        let o = self.op(op);
+        let Some(outvn) = o.out else { return 0 };
+        if !o.opc.is_unary_or_binary() || o.opc == Opcode::Copy {
+            return 0;
+        }
+        let mut hash = (self.vn(outvn).size << 8) | u32::from(o.opc as u8);
+        for &vn in &o.ins {
+            hash = hash.rotate_left(8);
+            let v = self.vn(vn);
+            hash ^= if v.is_constant() { v.offset as u32 } else { vn.0 };
+        }
+        hash
+    }
+
+    /// Port of `PcodeOp::isCseMatch`.
+    pub(crate) fn is_cse_match(&self, a: OpId, b: OpId) -> bool {
+        let (oa, ob) = (self.op(a), self.op(b));
+        if !oa.opc.is_unary_or_binary() || !ob.opc.is_unary_or_binary() {
+            return false;
+        }
+        let (Some(xa), Some(xb)) = (oa.out, ob.out) else { return false };
+        if self.vn(xa).size != self.vn(xb).size
+            || oa.opc != ob.opc
+            || oa.opc == Opcode::Copy
+            || oa.ins.len() != ob.ins.len()
+        {
+            return false;
+        }
+        oa.ins.iter().zip(&ob.ins).all(|(&v1, &v2)| {
+            let (x, y) = (self.vn(v1), self.vn(v2));
+            v1 == v2 || (x.is_constant() && y.is_constant() && x.offset == y.offset)
+        })
+    }
+
+    /// Port of `FlowBlock::findCommonBlock`: the nearest block dominating both.
+    fn find_common_block(&self, b1: BlockId, b2: BlockId) -> Option<BlockId> {
+        let mut up = std::collections::HashSet::new();
+        let mut b = Some(b1);
+        while let Some(x) = b {
+            up.insert(x);
+            b = self.blocks.block(x).idom;
+        }
+        let mut b = Some(b2);
+        while let Some(x) = b {
+            if up.contains(&x) {
+                return Some(x);
+            }
+            b = self.blocks.block(x).idom;
+        }
+        None
+    }
+
+    /// Port of `Funcdata::opInsertEnd`: at the end of `bl`, before a final branch or return.
+    pub(crate) fn op_insert_end(&mut self, op: OpId, bl: BlockId) {
+        let ops = &self.blocks.block(bl).ops;
+        let mut at = ops.len();
+        if let Some(&last) = ops.last() {
+            let o = self.op(last);
+            if o.is_branch() || o.opc == Opcode::Return {
+                at -= 1;
+            }
+        }
+        self.op_insert(op, bl, at);
+    }
+
+    /// Port of `Funcdata::cseElimination`: one op computes what both did.
+    fn cse_elimination(&mut self, op1: OpId, op2: OpId) -> Result<OpId> {
+        let (Some(b1), Some(b2)) = (self.op(op1).parent, self.op(op2).parent) else {
+            return err("cseElimination: op outside any block");
+        };
+        let replace = if b1 == b2 {
+            if self.op(op1).order < self.op(op2).order {
+                op1
+            } else {
+                op2
+            }
+        } else {
+            let common = self.find_common_block(b1, b2).ok_or_else(|| LowlevelError("cse: no common block".into()))?;
+            if common == b1 {
+                op1
+            } else if common == b2 {
+                op2
+            } else {
+                let rep = self.new_op(self.op(op1).opc, self.blocks.block(common).stop);
+                let o1 = self.out_of(op1)?;
+                let (size, space, offset) = (self.vn(o1).size, self.vn(o1).space, self.vn(o1).offset);
+                self.new_varnode_out(size, space, offset, rep);
+                for (i, vn) in self.op(op1).ins.clone().into_iter().enumerate() {
+                    let v = self.vn(vn);
+                    let v = if v.is_constant() { self.new_constant(v.size, v.offset) } else { vn };
+                    self.op_set_input(rep, v, i)?;
+                }
+                self.op_insert_end(rep, common);
+                rep
+            }
+        };
+        let rout = self.out_of(replace)?;
+        for o in [op1, op2] {
+            if replace != o {
+                let ov = self.out_of(o)?;
+                self.total_replace(ov, rout)?;
+                self.op_destroy(o);
+            }
+        }
+        Ok(replace)
+    }
+
+    /// `Funcdata::isHeritaged`.
+    fn is_heritaged(&self, vn: VarnodeId) -> bool {
+        let v = self.vn(vn);
+        self.heritage.heritaged(v.space, v.offset)
+    }
+
+    /// Port of `Funcdata::cseEliminateList`: the pairs with equal hashes that match are merged;
+    /// whether any was.
+    pub(crate) fn cse_eliminate_list(&mut self, mut list: Vec<(u32, OpId)>) -> Result<bool> {
+        list.sort_by_key(|e| e.0);
+        let mut any = false;
+        for w in 1..list.len() {
+            let ((h1, op1), (h2, op2)) = (list[w - 1], list[w]);
+            if h1 != h2 || self.op(op1).is_dead() || self.op(op2).is_dead() || !self.is_cse_match(op1, op2) {
+                continue;
+            }
+            let ok = |o: OpId| self.op(o).out.is_none_or(|v| self.is_heritaged(v));
+            if ok(op1) && ok(op2) {
+                self.cse_elimination(op1, op2)?;
+                any = true;
+            }
+        }
+        Ok(any)
+    }
+
+    /// Port of `Funcdata::distributeIntMultAdd`.
+    pub(crate) fn distribute_int_mult_add(&mut self, op: OpId) -> Result<bool> {
+        let addop =
+            self.vn(self.input(op, 0)?).def.ok_or_else(|| LowlevelError("distributeIntMultAdd: no add".into()))?;
+        let (v0, v1) = (self.input(addop, 0)?, self.input(addop, 1)?);
+        for v in [v0, v1] {
+            if self.vn(v).is_free() && !self.vn(v).is_constant() {
+                return Ok(false);
+            }
+        }
+        let coeff = self.vn(self.input(op, 1)?).offset;
+        let sz = self.vn(self.out_of(op)?).size;
+        let addr = self.op(op).seq.addr;
+        let uniq = self.uniq.ok_or_else(|| LowlevelError("no unique space".into()))?;
+        let mut newvn = [v0, v1];
+        for (i, v) in [v0, v1].into_iter().enumerate() {
+            newvn[i] = if self.vn(v).is_constant() {
+                let val = coeff.wrapping_mul(self.vn(v).offset) & crate::decomp::rangeutil::calc_mask(sz);
+                self.new_constant(sz, val)
+            } else {
+                let m = self.new_op(Opcode::IntMult, addr);
+                let o = self.new_unique_out(sz, uniq, m);
+                self.op_set_input(m, v, 0)?;
+                let c = self.new_constant(sz, coeff);
+                self.op_set_input(m, c, 1)?;
+                self.op_insert_before(m, op)?;
+                o
+            };
+        }
+        self.op_set_input(op, newvn[0], 0)?;
+        self.op_set_input(op, newvn[1], 1)?;
+        self.op_set_opcode(op, Opcode::IntAdd);
+        Ok(true)
+    }
+
+    /// Port of `Funcdata::totalReplaceConstant`: every read of `vn` reads the constant `val`; a
+    /// marker reads one COPY of it made after `vn`'s definition (or at the function's start).
+    pub(crate) fn total_replace_constant(&mut self, vn: VarnodeId, val: u64) -> Result<()> {
+        let size = self.vn(vn).size;
+        let uniq = self.uniq.ok_or_else(|| LowlevelError("no unique space".into()))?;
+        let mut copy_out: Option<VarnodeId> = None;
+        let readers = self.vn(vn).descend.to_vec();
+        for op in readers {
+            let slot = self.slot_of(op, vn).ok_or_else(|| LowlevelError("totalReplaceConstant: reader".into()))?;
+            let newrep = if self.op(op).is_marker() {
+                if let Some(c) = copy_out {
+                    c
+                } else {
+                    let first = *self.blocks.list.first().ok_or_else(|| LowlevelError("no blocks".into()))?;
+                    let def = self.vn(vn).def;
+                    let addr = match def {
+                        Some(d) => self.op(d).seq.addr,
+                        None => self.blocks.block(first).start,
+                    };
+                    let copyop = self.new_op(Opcode::Copy, addr);
+                    let out = self.new_unique_out(size, uniq, copyop);
+                    let k = self.new_constant(size, val);
+                    self.op_set_input(copyop, k, 0)?;
+                    match def {
+                        Some(d) => self.op_insert_after(copyop, d)?,
+                        None => self.op_insert_begin(copyop, first),
+                    }
+                    copy_out = Some(out);
+                    out
+                }
+            } else {
+                self.new_constant(size, val)
+            };
+            self.op_set_input(op, newrep, slot)?;
+        }
+        Ok(())
     }
 }

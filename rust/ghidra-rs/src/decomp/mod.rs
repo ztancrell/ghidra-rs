@@ -25,6 +25,7 @@ mod opcode;
 mod print;
 mod rangeutil;
 mod readers;
+mod rules;
 mod stdsort;
 mod varnode;
 

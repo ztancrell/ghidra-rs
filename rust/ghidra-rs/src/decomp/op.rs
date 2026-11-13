@@ -36,6 +36,8 @@ impl OpFlags {
     pub(crate) const INDIRECT_SOURCE: OpFlags = OpFlags(128);
     /// `boolean_flip` of a CBRANCH
     pub(crate) const BOOLEAN_FLIP: OpFlags = OpFlags(512);
+    /// `immed_copy` (an additional flag in C++): a COPY was propagated into a MULTIEQUAL slot
+    pub(crate) const IMMED_COPY: OpFlags = OpFlags(1024);
 
     pub(crate) fn has(self, f: OpFlags) -> bool {
         self.0 & f.0 != 0

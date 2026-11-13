@@ -949,7 +949,7 @@ fn propagate_consumed(fd: &mut Funcdata, worklist: &mut Vec<VarnodeId>) -> Resul
             }
         },
         Opcode::IntLess | Opcode::IntLessequal | Opcode::IntEqual | Opcode::IntNotequal => {
-            let a = if outc == 0 { 0 } else { fd.vn(ins[0]).nzmask() | fd.vn(ins[1]).nzmask() };
+            let a = if outc == 0 { 0 } else { fd.nzmask(ins[0]) | fd.nzmask(ins[1]) };
             push(fd, a, 0);
             push(fd, a, 1);
         }
@@ -959,7 +959,7 @@ fn propagate_consumed(fd: &mut Funcdata, worklist: &mut Vec<VarnodeId>) -> Resul
         }
         Opcode::Call | Opcode::Callind => {}
         Opcode::FloatInt2float => {
-            let a = if outc != 0 { covering_mask(fd.vn(ins[0]).nzmask()) } else { 0 };
+            let a = if outc != 0 { covering_mask(fd.nzmask(ins[0])) } else { 0 };
             push(fd, a, 0);
         }
         Opcode::Insert | Opcode::Zpull | Opcode::Spull => {
@@ -1025,7 +1025,7 @@ pub(crate) fn dead_code(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
                 continue;
             }
             if let Some(&vn) = fd.op(op).ins.get(1) {
-                cv |= minimal_mask(fd.vn(vn).nzmask());
+                cv |= minimal_mask(fd.nzmask(vn));
             }
         }
         cv
@@ -1082,7 +1082,7 @@ pub(crate) fn dead_code(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         let active = fd.call(c).active_input.is_some();
         for &vn in &ins[1..] {
             let v = fd.vn(vn);
-            let val = if active || v.is_auto_live() { u64::MAX } else { minimal_mask(v.nzmask()) };
+            let val = if active || v.is_auto_live() { u64::MAX } else { minimal_mask(fd.nzmask(vn)) };
             push_consumed(fd, val, vn, &mut worklist);
         }
     }
@@ -1707,11 +1707,109 @@ pub(crate) fn determined_branch(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
 }
 
 /// Port of `ActionUnreachable::apply` (`removeUnreachableBlocks` with the cached check).
-pub(crate) fn unreachable(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
+pub(crate) fn unreachable(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     if !fd.blocks.unreachable {
         return Ok(0);
     }
-    err("removing unreachable blocks: not implemented in ghidra-rs yet")
+    // BlockGraph::collectReachable from the entry point, keeping the blocks not reached
+    let list = fd.blocks.list.clone();
+    let Some(&entry) = list.iter().find(|&&b| fd.blocks.is_entry_point(b)) else { return Ok(0) };
+    let mut reached = vec![entry];
+    let mut seen: std::collections::HashSet<BlockId> = std::collections::HashSet::from([entry]);
+    let mut at = 0;
+    while let Some(&b) = reached.get(at) {
+        at += 1;
+        for e in &fd.blocks.block(b).outs {
+            if seen.insert(e.point) {
+                reached.push(e.point);
+            }
+        }
+    }
+    let dead: Vec<BlockId> = list.into_iter().filter(|b| !seen.contains(b)).collect();
+    for &bb in &dead {
+        let start = fd.blocks.block(bb).start;
+        fd.warning_header(format!("Removing unreachable block (ram,0x{start:08x})"));
+    }
+    for &bb in &dead {
+        while !fd.blocks.block(bb).outs.is_empty() {
+            branch_remove_internal(fd, arch, bb, 0)?;
+        }
+    }
+    for &bb in &dead {
+        block_remove_unreachable(fd, bb, &dead)?;
+    }
+    structure_reset(fd)?;
+    Ok(1)
+}
+
+/// Port of `Funcdata::blockRemoveInternal(bb, true)`: the ops of an unreachable block go; their
+/// reads in live blocks become `0xbaddef` (`descend2Undef`).
+fn block_remove_unreachable(fd: &mut Funcdata, bb: BlockId, dead: &[BlockId]) -> Result<()> {
+    if let Some(&last) = fd.blocks.block(bb).ops.last() {
+        if fd.op(last).opc == Opcode::Branchind {
+            fd.jumptables.retain(|jt| jt.op != last);
+        }
+    }
+    fd.blocks.remove_from_flow(bb);
+    let mut warned = false;
+    for op in fd.blocks.block(bb).ops.clone() {
+        if let Some(out) = fd.op(op).out {
+            if descend_to_undef(fd, out, dead)? && !warned {
+                fd.warning_header("Creating undefined varnodes in (possibly) reachable block");
+                warned = true;
+            }
+            if fd.vn(out).descend.iter().any(|&d| fd.op(d).parent != Some(bb)) {
+                return err("Deleting op with descendants");
+            }
+        }
+        if fd.op(op).is_call() {
+            let calls = &fd.calls;
+            fd.qlst.retain(|&c| calls[c.0 as usize].op != op);
+        }
+        fd.op_destroy(op);
+    }
+    fd.blocks.remove_block(bb);
+    Ok(())
+}
+
+/// Port of `Funcdata::descend2Undef`: reads of `vn` outside the dead blocks read `0xbaddef`
+/// (through a COPY for a MULTIEQUAL or INDIRECT); whether one is in a block with predecessors.
+fn descend_to_undef(fd: &mut Funcdata, vn: VarnodeId, dead: &[BlockId]) -> Result<bool> {
+    let size = fd.vn(vn).size;
+    let uniq = fd.uniq.ok_or_else(|| super::LowlevelError("no unique space".into()))?;
+    let mut res = false;
+    let readers = fd.vn(vn).descend.to_vec();
+    for op in readers {
+        let Some(pb) = fd.op(op).parent else { continue };
+        if dead.contains(&pb) {
+            continue;
+        }
+        if !fd.blocks.block(pb).ins.is_empty() {
+            res = true;
+        }
+        let slot = fd.slot_of(op, vn).ok_or_else(|| super::LowlevelError("descend2Undef: reader".into()))?;
+        let bad = fd.new_constant(size, 0xbaddef);
+        let rep = match fd.op(op).opc {
+            Opcode::Multiequal => {
+                let inbl = fd.blocks.block(pb).ins[slot].point;
+                let copyop = fd.new_op(Opcode::Copy, fd.blocks.block(inbl).start);
+                let out = fd.new_unique_out(size, uniq, copyop);
+                fd.op_set_input(copyop, bad, 0)?;
+                fd.op_insert_end(copyop, inbl);
+                out
+            }
+            Opcode::Indirect => {
+                let copyop = fd.new_op(Opcode::Copy, fd.op(op).seq.addr);
+                let out = fd.new_unique_out(size, uniq, copyop);
+                fd.op_set_input(copyop, bad, 0)?;
+                fd.op_insert_before(copyop, op)?;
+                out
+            }
+            _ => bad,
+        };
+        fd.op_set_input(op, rep, slot)?;
+    }
+    Ok(res)
 }
 
 /// Port of `ActionDoNothing::apply`: a block holding nothing but markers (and a BRANCH) goes,
@@ -1791,10 +1889,22 @@ fn unblocked_multi(fd: &Funcdata, bb: BlockId) -> bool {
     true
 }
 
-/// `BlockBasic::hasNoImmediateCopy`: only copy propagation (`RulePropagateCopy`, stage R1)
-/// marks the immediate-copy edges it looks for, so with the rules off there are none.
-fn has_no_immediate_copy(_: &Funcdata, _: BlockId) -> bool {
-    true
+/// Port of `BlockBasic::hasNoImmediateCopy(0)`: no COPY was propagated across the out edge into
+/// a MULTIEQUAL of the successor (`RulePropagateCopy` marks both, `PcodeOp::setCopyImmed`).
+fn has_no_immediate_copy(fd: &Funcdata, bb: BlockId) -> bool {
+    if !fd.blocks.has_immed_copy_edge(bb, 0) {
+        return true;
+    }
+    let blout = fd.blocks.block(bb).outs[0].point;
+    let b = fd.blocks.block(blout);
+    let Some(idx) = b.ins.iter().position(|e| e.point == bb) else { return true };
+    let (inbl, rev) = (b.ins[idx].point, b.ins[idx].reverse);
+    !b.ops.iter().any(|&o| {
+        let op = fd.op(o);
+        op.opc == Opcode::Multiequal
+            && op.flags.has(super::op::OpFlags::IMMED_COPY)
+            && fd.blocks.has_immed_copy_edge(inbl, rev)
+    })
 }
 
 /// Port of `Funcdata::pushMultiequals`: a MULTIEQUAL of `bb` read past its successor gets a

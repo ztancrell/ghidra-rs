@@ -988,7 +988,8 @@ Ported (`coreaction.rs`, plus `heritage.rs`, `fspec.rs`, `block.rs`, `funcdata.r
 
 - The tree (`action.rs`): every action of `universalAction` with its group; `option
   currentaction decompile <group> on|off` filters it as `ActionDatabase` does; an action not
-  ported fails when it runs with its group on. Rule pools hold no rule.
+  ported fails when it runs with its group on. Rule pools hold no rule (superseded: R1 fills
+  `oppool1`, see "Stage R1").
 - Heritage of ram (pass 1): ram is the global scope's, so its varnodes are `persist` and
   `addrtied`; guards for calls (`addrforce` on the INDIRECTs), STOREs (`indirect_store`
   INDIRECTs) and returns (a `persist` COPY before each RETURN). The stack's first pass clears
@@ -1020,7 +1021,8 @@ Remaining differences, by cause:
   `XMM0_Dd`, `ActionLaneDivide`, `subflow.cc`/`transform.cc`). It is in group `base`, so no
   option turns it off; the plan puts it in R3. Excluding these, 446 / 447 (every function the reference finishes).
 - 0x4c48d0: the reference does not finish within 60 s (`TIMEOUT`), so it is not compared.
-- Not ported and failing loudly when reached (no M500 function needs them): removing
+- Not ported and failing loudly when reached (no M500 function needs them; superseded for
+  removing unreachable blocks and the `varnodeprops` zero replacement, both ported in R1): removing
   unreachable blocks, `ActionNodeJoin` and `ActionConditionalExe` (a candidate on the same
   condition varnode fails; functionally equal conditions in different varnodes are not looked
   for), `ActionUnjustifiedParams` widening (`adjustInputVarnodes`), heritage after dead-code
@@ -1037,6 +1039,88 @@ Remaining differences, by cause:
 - Locked prototypes (plan decision 6, mercs2's `register_abi.csv`): S4 needs none of them;
   their paths (`transferLockedInput`, `commitNewInputs`, locked parameter trials, `paramdouble`
   on stack trials) are still to come.
+
+### Stage R1: rules for copies, constants, arithmetic
+
+Stage R1 (branch `m3-r1`) adds the rule pools (`ActionPool`: a pool node in `actiontree.rs`, the walk in
+`rules::pool_apply`: every op in sequence-number order, dead ops freed on the way, the rules for
+an op's opcode in table order (filed by opcode once per pool), from the first again when a rule
+changes the opcode) and 19 rules of `oppool1` in `decomp/rules/` (`mod.rs` holds the table;
+`copy.rs`, `arith.rs` the rules, `cse.rs` the shared expression helpers, `float.rs` float
+folding; the `Funcdata` methods they need are in `funcdata.rs`): `earlyremoval`, `termorder`, `selectcse`, `collect_terms`,
+`pullsub_multi`, `push_multi`, `trivialarith`, `trivialbool`, `trivialshift`, `identityel`,
+`multicollapse`, `2comp2mult`, `sub2add`, `carryelim`, `addmultcollapse`,
+`collapseconstants`, `propagatecopy`, `negateidentity`, `negatenegate`, with the helpers they
+need (`TermOrder`, `functionalEqualityLevel`, `cseEliminateList`, `cseElimination`,
+`distributeIntMultAdd`, float constant folding through `FloatFormat`). `propagatecopy` marks
+immediate-copy edges (`setCopyImmed`), which `donothing` reads (`hasNoImmediateCopy`): a block
+emptied by copy propagation stays. Group `analysis` is on, so the main loop's `nonzeromask`
+runs (`jumptable::calc_nz_mask`) and dead code reads its masks (`Funcdata::nzmask`).
+
+The check: `tools/corpus/r1-options.txt` is S4's options with `analysis` on and every rule of
+the groups that are on and not ported switched off (97 `togglerule`s), written by
+`tools/r1-options.sh` from the table in `rules/mod.rs`: rerun it when rules land.
+`ghidra-rs decompile` honours `option togglerule`. Group `analysis` also holds three actions
+not ported yet, `multicse`, `shadowvar` and `condconst` (`ActionConditionalConst`). A console
+command cannot switch an action off, so, as a check-only switch, the reference patch
+(`decomp-ref.patch`, `Action::perform`) and `ghidra-rs decompile` both skip the actions named
+in `DECOMP_SKIP_ACTIONS`; each action leaves the list when it is ported. `ghidra-rs decompile`
+reads the variable on every run (not only in the checks) and fails on a name that is not a
+single action of the tree, so the two engines cannot skip different things silently.
+
+```sh
+export DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst
+BREAK=assignhigh OPTIONS=$PWD/tools/corpus/r1-options.txt rust/tools/decomp-diff.sh m8
+BREAK=assignhigh OPTIONS=$PWD/tools/corpus/r1-options.txt TIMEOUT=60 rust/tools/decomp-diff.sh m500
+```
+
+The bar is taken over M500 less the functions that need `ActionLaneDivide` (R3), listed in
+`tools/corpus/m500-lanedivide.txt` (46): those whose reference output changes when
+`lanedivide` is added to `DECOMP_SKIP_ACTIONS` (rerun the M500 line with `,lanedivide` and
+`OUT=.../m500-nolane`, then compare the two `ref/` directories).
+
+| corpus | identical (R1 check) |
+|---|---|
+| m8 | 8 / 8 |
+| m500 | 451 / 500 |
+| m500 less `m500-lanedivide.txt`, functions the reference finishes | 451 / 453 (99.6 %, bar 98 %: reached) |
+
+`print raw` at `paramdouble` stays 500 / 500 on M500 (the pool runs after it), and the S4 check
+(`s4-options.txt`) is unchanged (446 / 500). Remaining differences, by cause:
+
+- 46 functions need `ActionLaneDivide` (R3).
+- 0x47a6b0: the reference merges two blocks testing the same condition (`ActionConditionalExe`,
+  `condexe.cc`: ghidra-rs only detects a candidate on the same condition varnode and does not
+  find this one; R2 or later).
+- 0x6fa6e0: `varnodeprops` replaces a never-consumed `BL` by 0 later on the reference (through a
+  COPY into a MULTIEQUAL); on ghidra-rs the rules have made it `COPY #0` by then, which the
+  replacement skips. Not traced further.
+- 0x4c48d0: the reference does not finish within 60 s.
+
+Round three (2026-11-13) found and fixed, with a temporary print of each varnode's consume and
+non-zero masks in the reference's dead code (not committed):
+
+- `ActionVarnodeProps` replaces every read of a varnode whose non-zero mask and consume mask
+  share no bit by 0 (`totalReplaceConstant`, a COPY for a marker). With `nonzeromask` on, the
+  carry flag of `ucomiss`/`fcomp` + `lahf` (non-zero mask 1, consumed 0x44 through `AH & 0x44`)
+  is one; ghidra-rs failed loudly on it before only when the consume mask was 0. That fixed
+  the 11 x87/SSE compare functions and 0x440590. A varnode over 8 bytes defined by a ZEXT of 0
+  (`handleExtendedZero`) still fails loudly.
+- Removing unreachable blocks (`removeUnreachableBlocks`, `blockRemoveInternal` for
+  unreachable blocks, `descend2Undef`): 0x6c2570. Its header warning prints the block start as
+  `ram,0x%08x`, right for 32-bit code only.
+
+Float folding follows `FloatFormat`: a NaN is read as the quiet NaN with its sign and written as
+`getNaNEncoding` does; FLOAT_TRUNC gives `0x8000000000000000` for a NaN or an out-of-range value, as
+`(intb)val` does on x86. The C++ flushes a result below the smallest denormal to zero where IEEE
+would round it up to the smallest one; ghidra-rs rounds as IEEE does (a known difference, not
+met in the checks).
+
+Not ported, with no effect on `print raw`: `isPrecisLo`/`isPrecisHi` (set by R5's
+double-precision rules), big-endian address arithmetic. A `pullsub_multi` on a join varnode
+fails loudly (`Address::renormalize` of join addresses is not ported). The jump-table
+stand-ins (`jumptable.rs`) stay as they are: the partial function would need the `jumptable`
+root action's pool with R2's comparison rules too.
 
 ## Speed
 
