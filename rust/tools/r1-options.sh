@@ -2,9 +2,10 @@
 # Writes the options of the rule-stage checks: S4's options (s4-options.txt) with more groups on,
 # and `option togglerule <rule> off` for every rule of `oppool1` whose group is on and which
 # ghidra-rs does not port yet (the table in ghidra-rs/src/decomp/rules/mod.rs). Rerun it when
-# rules land. It writes both files:
+# rules land. It writes three files:
 #   rust/tools/corpus/r1-options.txt      group `analysis` on (the R1/R3 check)
 #   rust/tools/corpus/subvar-options.txt  groups `analysis` and `subvar` on (the R3 subvar check)
+#   rust/tools/corpus/r4-options.txt      groups `analysis` and `floatprecision` on (the R4 check)
 set -e
 rust=$(cd "$(dirname "$0")/.." && pwd)
 cpp=$rust/../Ghidra/Features/Decompiler/src/decompile/cpp
@@ -35,3 +36,4 @@ write() {
 echo "ported:$ported"
 write r1-options.txt "analysis"
 write subvar-options.txt "analysis subvar"
+write r4-options.txt "analysis floatprecision"

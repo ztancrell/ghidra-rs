@@ -465,7 +465,7 @@ fn propagate_type(
             add_in2out(fd, arch, st, alt, op, inslot as usize)?
         }
         Opcode::IntXor | Opcode::IntAnd => {
-            if alt_meta != Meta::Float || !float_sign_manipulation(fd, op) {
+            if alt_meta != Meta::Float || float_sign_manipulation(fd, op)?.is_none() {
                 return Ok(None);
             }
             Some(pass(fd))
@@ -502,19 +502,21 @@ fn narrow(fd: &mut Funcdata, arch: &Arch, alt: TypeId, mut off: i64, size: u32) 
     Ok(Some(t))
 }
 
-/// Port of `TypeOp::floatSignManipulation` (true for FLOAT_ABS or FLOAT_NEG done with bits).
-fn float_sign_manipulation(fd: &Funcdata, op: OpId) -> bool {
-    let o = fd.op(op);
-    let c = fd.vn(o.ins[1]);
-    if !c.is_constant() {
-        return false;
+/// Port of `TypeOp::floatSignManipulation`: FLOAT_ABS for an INT_AND clearing the sign bit,
+/// FLOAT_NEG for an INT_XOR flipping it.
+pub(crate) fn float_sign_manipulation(fd: &Funcdata, op: OpId) -> Result<Option<Opcode>> {
+    let opc = fd.op(op).opc;
+    if !matches!(opc, Opcode::IntAnd | Opcode::IntXor) {
+        return Ok(None);
     }
-    let m = calc_mask(c.size);
-    match o.opc {
-        Opcode::IntAnd => c.offset == m >> 1,
-        Opcode::IntXor => c.offset == m ^ (m >> 1),
-        _ => false,
+    let cvn = fd.input(op, 1)?;
+    if !fd.vn(cvn).is_constant() {
+        return Ok(None);
     }
+    let mask = calc_mask(fd.vn(cvn).size);
+    let (val, res) =
+        if opc == Opcode::IntAnd { (mask >> 1, Opcode::FloatAbs) } else { (mask ^ (mask >> 1), Opcode::FloatNeg) };
+    Ok((val == fd.vn(cvn).offset).then_some(res))
 }
 
 /// Port of `ActionInferTypes::propagateTypeEdge`.

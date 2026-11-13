@@ -65,7 +65,7 @@ impl<'a> SplitFlow<'a> {
             },
             (Some(_), None) => return Ok(false),
         };
-        if self.tm.has_def(outvn) {
+        if self.tm.var_def(outvn).is_some() {
             return Ok(true); // already traversed
         }
         let o = fd.op(op);

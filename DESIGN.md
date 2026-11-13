@@ -160,6 +160,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    R3 part two on branch `m3-r3b`: the `subvar` group (`SubvariableFlow`, `SplitFlow`, seven
    rules) and `RulePiecePathology`; new check with `subvar` on: M8 8 / 8, M500 497 / 499;
    R3 check now 497 / 499. Superseded: "Open: the `subvar` rules ... are not ported" above.
+   R4 on branch `m3-r4`: 20 division, remainder, sign and float rules, `floatprecision`
+   (`SubfloatFlow`) included; the R1 check with `floatprecision` on: M8 8 / 8, M500 495 / 499
+   (99.2 %, bar 98 %); 90 M500 functions exercise the rules, 89 of them identical. Merged with R3 part two:
+   R4 check M500 497 / 499; subvar, R3, S3, S4 and S6 bars all held.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.

@@ -204,8 +204,32 @@ impl Console {
                     self.disabled.remove(&key);
                 }
             }
-            // the other options are read and ignored
-            ["option", ..] if self.arch.is_some() => {}
+            // `option nanignore none|compare|all` (`OptionNanIgnore::apply`): `none` disables
+            // rule `ignorenan`, the others enable it; `all` also sets `nan_ignore_all`
+            ["option", "nanignore", mode @ ("none" | "compare" | "all")] => {
+                let arch = self.arch.as_mut().ok_or("option: no program loaded")?;
+                let old = (arch.nan_ignore_all, !self.disabled.contains("rule:ignorenan"));
+                arch.nan_ignore_all = *mode == "all";
+                if *mode == "none" {
+                    self.disabled.insert("rule:ignorenan".to_string());
+                } else {
+                    self.disabled.remove("rule:ignorenan");
+                }
+                if old == (arch.nan_ignore_all, *mode != "none") {
+                    writeln!(out, "NaN ignore configuration unchanged").map_err(io)?;
+                } else {
+                    writeln!(out, "Nan ignore configuration set to: {mode}").map_err(io)?;
+                }
+            }
+            // options that only change the printed C, which ghidra-rs does not print yet: read
+            // and ignored
+            ["option", "nullprinting" | "inplaceops" | "conventionprinting" | "nocastprinting" | "maxlinewidth"
+            | "indentincrement" | "commentindent" | "commentstyle" | "commentheader" | "commentinstruction"
+            | "integerformat" | "braceformat" | "namespacestrategy" | "forloops", ..]
+                if self.arch.is_some() => {}
+            // every other option can change the ported analysis: not ported, so an error rather
+            // than a silent difference
+            ["option", ..] if self.arch.is_some() => return Err(format!("{line}: option not ported")),
             // `readonly <addr>:<size>`
             ["readonly", range] => {
                 let arch = self.arch.as_mut().ok_or("readonly: no program loaded")?;

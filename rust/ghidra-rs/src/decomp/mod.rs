@@ -33,6 +33,7 @@ mod readers;
 mod rules;
 mod splitflow;
 mod stdsort;
+mod subfloat;
 mod subflow;
 mod transform;
 mod types;
@@ -118,6 +119,8 @@ pub struct Arch {
     externrefs: HashMap<u64, u64>,
     /// `option readonly`: read-only memory propagates as constants (`readonlypropagate`)
     pub(crate) readonly_propagate: bool,
+    /// `option nanignore all`: every FLOAT_NAN is taken as false (`nan_ignore_all`)
+    pub(crate) nan_ignore_all: bool,
     /// the program-wide data-types (`Architecture::types`): the core types and those `parse
     /// line` defines; each decompile starts from a copy
     pub(crate) types: types::TypeFactory,
@@ -169,6 +172,7 @@ impl Arch {
             readonly,
             externrefs: HashMap::new(),
             readonly_propagate: false,
+            nan_ignore_all: false,
             types: type_factory,
         })
     }

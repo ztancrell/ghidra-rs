@@ -251,7 +251,7 @@ impl TransformManager {
     }
 
     /// Port of `TransformManager::newPreexistingVarnode`.
-    fn new_preexisting_varnode(&mut self, fd: &Funcdata, vn: VarnodeId) -> TVarId {
+    pub(crate) fn new_preexisting_varnode(&mut self, fd: &Funcdata, vn: VarnodeId) -> TVarId {
         let res = self.push_var(VarType::Preexisting, Some(vn), fd.vn(vn).size, 0);
         self.vars[res.0].split_terminator = true;
         self.piece_map.insert(vn, res);
@@ -383,9 +383,51 @@ impl TransformManager {
         Ok(())
     }
 
-    /// Whether a placeholder has a defining op yet (`TransformVar::getDef`).
-    pub(crate) fn has_def(&self, rvn: TVarId) -> bool {
-        self.vars.get(rvn.0).is_some_and(|v| v.def.is_some())
+    /// Port of `TransformManager::newPiece`: one placeholder for `bit_size` bits of `vn` at
+    /// `lsb_offset`. `preserve` is the manager's `preserveAddress` answer (a subclass may
+    /// override it, as `SubfloatFlow` does).
+    pub(crate) fn new_piece(&mut self, vn: VarnodeId, bit_size: u32, lsb_offset: u32, preserve: bool) -> TVarId {
+        let ty = if preserve { VarType::Piece } else { VarType::PieceTemp };
+        let res = self.push_var(ty, Some(vn), bit_size.div_ceil(8), u64::from(lsb_offset));
+        self.vars[res.0].split_terminator = true;
+        self.piece_map.insert(vn, res);
+        res
+    }
+
+    /// Port of `TransformManager::getPiece`.
+    pub(crate) fn get_piece(
+        &mut self,
+        vn: VarnodeId,
+        bit_size: u32,
+        lsb_offset: u32,
+        preserve: bool,
+    ) -> Result<TVarId> {
+        match self.piece_map.get(&vn) {
+            Some(&res) => {
+                let v = &self.vars[res.0];
+                if v.byte_size * 8 != bit_size || v.val != u64::from(lsb_offset) {
+                    return err("Cannot create multiple pieces for one Varnode through getPiece");
+                }
+                Ok(res)
+            }
+            None => Ok(self.new_piece(vn, bit_size, lsb_offset, preserve)),
+        }
+    }
+
+    /// Port of `TransformManager::preexistingGuard`: whether a preexisting op reached on `slot`
+    /// is built now (not when its slot 0 is visited).
+    pub(crate) fn preexisting_guard(&self, slot: usize, rvn: TVarId) -> bool {
+        slot == 0 || !matches!(self.vars.get(rvn.0).map(|v| v.ty), Some(VarType::Piece | VarType::PieceTemp))
+    }
+
+    /// The op defining a placeholder (`TransformVar::getDef`).
+    pub(crate) fn var_def(&self, rvn: TVarId) -> Option<TOpId> {
+        self.vars.get(rvn.0).and_then(|v| v.def)
+    }
+
+    /// A placeholder op's input (`TransformOp::getIn`).
+    pub(crate) fn op_input(&self, rop: TOpId, slot: usize) -> Option<TVarId> {
+        self.ops.get(rop.0).and_then(|o| o.input.get(slot).copied().flatten())
     }
 
     /// The original varnode a placeholder models (`TransformVar::getOriginal`).

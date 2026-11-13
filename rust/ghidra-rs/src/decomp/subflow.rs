@@ -132,7 +132,7 @@ fn does_and_clear(fd: &Funcdata, op: OpId, mask: u64) -> Result<Option<usize>> {
 
 /// Port of `PcodeOp::getRepeatSlot`: the slot of the read at position `pos` of `vn`'s readers
 /// when `op` reads `vn` more than once.
-fn repeat_slot(fd: &Funcdata, op: OpId, vn: VarnodeId, first_slot: usize, pos: usize) -> Result<usize> {
+pub(crate) fn repeat_slot(fd: &Funcdata, op: OpId, vn: VarnodeId, first_slot: usize, pos: usize) -> Result<usize> {
     let count = 1 + fd.vn(vn).descend.iter().take(pos).filter(|&&o| o == op).count();
     let slots = fd.op(op).ins.iter().enumerate().skip(first_slot).filter(|&(_, &v)| v == vn);
     match slots.map(|(i, _)| i).nth(count - 1) {
@@ -1020,7 +1020,7 @@ impl<'a> SubvariableFlow<'a> {
 }
 
 /// `TypeOpFloatInt2Float::preferredZextSize`.
-fn preferred_zext_size(in_size: u32) -> u32 {
+pub(crate) fn preferred_zext_size(in_size: u32) -> u32 {
     match in_size {
         0..=3 => 4,
         4..=7 => 8,

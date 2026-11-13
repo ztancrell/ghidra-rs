@@ -579,7 +579,8 @@ rust/tools/decomp-diff.sh --script <file>      # one script on both engines, ful
   Superseded: until S2, `decompile` stopped at most at `heritage` and `continue` failed. Of the options
   `option readonly on|off` and `option currentaction decompile <group> on|off` have an
   effect (and print the reference's message); the others (`togglerule`: no rule is ported
-  yet) are read and ignored. Superseded: until S4, `decompile` stopped at most at
+  yet) are read and ignored (superseded at R4: `togglerule` and `nanignore` are read, options
+  that only change the printed C are ignored, any other is an error; see "Stage R4"). Superseded: until S4, `decompile` stopped at most at
   `paramdouble` and `option currentaction` was ignored. A name mapped twice
   (`map function`) finds its first function, as the C++ `findFirstByName` does.
   Superseded: S0 and S1a ignored `option` and `map externalref`; S1b reads them (read-only
@@ -1190,7 +1191,7 @@ runs (`jumptable::calc_nz_mask`; superseded in R3 part two: `calc_nz_mask_unfold
 the constant folding) and dead code reads its masks (`Funcdata::nzmask`).
 
 The check: `tools/corpus/r1-options.txt` is S4's options with `analysis` on and every rule of
-the groups that are on and not ported switched off (97 `togglerule`s at R1, 76 after R3 part one, 75 after part two), written by
+the groups that are on and not ported switched off (97 `togglerule`s at R1, 76 after R3 part one, 75 after part two, 58 after R4), written by
 `tools/r1-options.sh` from the table in `rules/mod.rs`: rerun it when rules land.
 `ghidra-rs decompile` honours `option togglerule`. Group `analysis` also holds three actions
 not ported yet, `multicse`, `shadowvar` and `condconst` (`ActionConditionalConst`). A console
@@ -1370,6 +1371,65 @@ BREAK=assignhigh OPTIONS=$PWD/tools/corpus/subvar-options.txt TIMEOUT=60 rust/to
 
 Remaining differences: 0x47a6b0 (`ActionConditionalExe`, as in R1; rule checks only),
 0x4919f0 (a block the reference empties; every check), 0x4c48d0 (reference timeout).
+
+### Stage R4: division, remainder, sign and float rules
+
+Stage R4 (branch `m3-r4`) adds 20 rules of `oppool1` (the table in `rules/mod.rs` now holds
+68 with R3 part two's): `rules/div.rs` (`positivediv`, `divtermadd`, `divtermadd2`, `divopt`, `signdiv2`,
+`divchain`, with `Varnode::isConstantExtended` and `Funcdata::newExtendedConstant`),
+`rules/modulo.rs` (`signform`, `signform2`, `signnearmult`, `modopt`, `signmod2nopt`,
+`signmod2nopt2`, `signmod2opt`), `rules/floatrules.rs` (`floatrange`, `floatsign`,
+`floatcast`, `ignorenan`, `unsigned2float`, `int2floatcollapse`) and `decomp/subfloat.rs`
+(`subfloat_convert`: `RuleSubfloatConvert` and `SubfloatFlow` of subflow.cc, with
+`FloatFormat::convertEncoding`; in its own file because `subflow.rs` is stage R3b's).
+`floatcast`, `ignorenan` and `subfloat_convert` are group `floatprecision`, the rest
+`analysis`. The 128-bit arithmetic of the division rules is `u128` (additions and shifts wrap
+as the C++; a division by zero fails as `udiv128` throws); C++ shifts by a count of 64 or
+more are taken mod 64, as x86 does. `RuleSignForm2` reports no change after making one, as the
+C++. Helpers added elsewhere: `BlockGraph::find_condition` (`FlowBlock::findCondition`),
+`TransformManager::new_piece`/`get_piece`/`preexisting_guard` (the subclass's
+`preserveAddress` is passed in), `jumptable::is_bool_output` made crate-visible. Shared after the merge with R3 part two:
+`rangeutil::mostsigbit_set`, `subflow::preferred_zext_size` and `subflow::repeat_slot`, and
+`infertypes::float_sign_manipulation` (one port of `TypeOp::floatSignManipulation` for type
+inference and `floatsign`); `TransformManager::has_def` became `var_def`. `option nanignore` (`OptionNanIgnore`) is read: `compare` (the default) and `all`
+enable `ignorenan`, `all` also makes every FLOAT_NAN a COPY of 0 (`nan_ignore_all`), `none`
+switches the rule off. Superseded: the console no longer reads and ignores every other option;
+those that only change the printed C (`nullprinting`, `inplaceops`, `conventionprinting`,
+`nocastprinting`, `maxlinewidth`, `indentincrement`, `commentindent`, `commentstyle`,
+`commentheader`, `commentinstruction`, `integerformat`, `braceformat`, `namespacestrategy`,
+`forloops`) still are, any other one not ported is an error. Not ported: `RuleFloatSignCleanup`
+(the `cleanup` pool, R2).
+
+
+The check is R1's with group `floatprecision` on: `tools/corpus/r4-options.txt`, written by
+`tools/r1-options.sh` next to `r1-options.txt` (59 `togglerule`s; 58 after the merge with R3 part two, which ports `piecepathology`).
+
+```sh
+export DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst
+BREAK=assignhigh OPTIONS=$PWD/rust/tools/corpus/r4-options.txt rust/tools/decomp-diff.sh m8
+BREAK=assignhigh OPTIONS=$PWD/rust/tools/corpus/r4-options.txt TIMEOUT=60 rust/tools/decomp-diff.sh m500
+```
+
+| corpus | identical (R4 check) |
+|---|---|
+| m8 | 8 / 8 |
+| m500 | 495 / 500; 495 / 499 of the functions the reference finishes (99.2 %, bar 98 %: reached) |
+| m500, the 90 whose reference output changes with the R4 rules off | 89 / 90 (7 with a division or remainder, 83 float) |
+
+Misses: 0x47a6b0, 0x4891e0, 0x4919f0, 0x6fa6e0 as in stage R3 (none caused by an R4 rule;
+0x4891e0 is among the 90), and 0x4c48d0 does not finish on the reference within 60 s.
+Other checks on the R4 binary: S3 paramdouble M500 500 / 500; S4 check M500 498 / 500; S6 unlocked,
+locked `void` and locked `int4` M500 498 / 500 each (misses 0x4919f0 and 0x4c48d0, as before);
+callees `int4(int4 a)` 497 / 500: 0x4919f0, 0x4c48d0 (ghidra-rs over 60 s with two checks running
+side by side) and 0x5b59c0, where the reference aborts (a `std::string` assertion in the C++, with a
+prelude regenerated by this branch's `analyze`), so ghidra-rs prints a function the reference does not.
+
+Merged with R3 part two (`master` into `m3-r4`, 2026-11-13); every bar rerun on the merged binary:
+R4 check M8 8 / 8, M500 497 / 499 (the misses 0x47a6b0, 0x4919f0; 0x4c48d0 the reference does
+not finish); subvar check and R3 check 497 / 499 each; paramdouble 500 / 500; S4 check and the
+four S6 checks (unlocked, `void`, `int4`, callees) 498 / 500 each (0x4919f0; 0x4c48d0).
+Superseded: the 495 / 499 above (0x4891e0 and 0x6fa6e0 are fixed by part two's non-zero masks)
+and the callee check's 497 (the reference ran 0x5b59c0 this time).
 
 ## Speed
 
