@@ -7,6 +7,20 @@ use super::opcode::Opcode;
 use super::varnode::VarnodeId;
 use super::Funcdata;
 
+/// `leastsigbit_set` (address.cc): the index of the lowest set bit, -1 for 0.
+pub(crate) fn leastsigbit_set(v: u64) -> i32 {
+    if v == 0 {
+        -1
+    } else {
+        v.trailing_zeros() as i32
+    }
+}
+
+/// `mostsigbit_set` (address.cc): the index of the highest set bit, -1 for 0.
+pub(crate) fn mostsigbit_set(v: u64) -> i32 {
+    63 - v.leading_zeros() as i32
+}
+
 /// `calc_mask`: the mask of a `size`-byte value.
 pub(crate) fn calc_mask(size: u32) -> u64 {
     if size >= 8 {
@@ -637,11 +651,6 @@ pub(crate) fn pcode_right(v: u64, sa: u64) -> u64 {
     }
 }
 
-/// `mostsigbit_set`: the index of the highest set bit, -1 for 0.
-pub(crate) fn mostsigbit_set(v: u64) -> i32 {
-    63 - v.leading_zeros() as i32
-}
-
 /// Port of `CircleRange::pullBack` from `vn` through the op defining it: the input varnode and
 /// its range of values for which `vn` lies in `rng`. `konst` gives a varnode's constant value
 /// and `nz` its non-zero mask (jump-table recovery passes what it folds in the partial function).
@@ -730,6 +739,18 @@ mod tests {
             (pcode_left(1, 63), pcode_left(1, 64), pcode_right(0x80, 7), pcode_right(0x80, 64)),
             (1 << 63, 0, 1, 0)
         );
+    }
+
+    #[test]
+    fn bit_helpers() {
+        assert_eq!((leastsigbit_set(0), mostsigbit_set(0)), (-1, -1));
+        assert_eq!((leastsigbit_set(1), mostsigbit_set(1)), (0, 0));
+        assert_eq!((leastsigbit_set(0xff00), mostsigbit_set(0xff00)), (8, 15));
+        assert_eq!((leastsigbit_set(u64::MAX), mostsigbit_set(u64::MAX)), (0, 63));
+        // sign_extend: from 1 byte to 4; sizes above 8 bytes clamp
+        assert_eq!(sign_extend(0x80, 1, 4), 0xffff_ff80);
+        assert_eq!(sign_extend(0x7f, 1, 4), 0x7f);
+        assert_eq!(sign_extend(0x8000_0000_0000_0000, 16, 16), 0x8000_0000_0000_0000);
     }
 
     #[test]

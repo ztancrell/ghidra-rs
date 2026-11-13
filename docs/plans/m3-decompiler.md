@@ -321,6 +321,9 @@ past 0x1000000 and 0x7c1f30, where the reference reads a garbage target. Details
   (R2): the partial runs the `jumptable` root action and two stand-ins are gone; the fold
   through read-only loads stays until R5 (see "R2" below). The 115
   obfuscated-code differences need stack heritage (S4 and later).
+- Superseded (R3 part two): the main loop runs `calc_nz_mask_unfolded`, without the constant
+  folding the partial function needs. Superseded (R2 merge): `calc_nz_mask` no longer folds;
+  the partial function calls `jumptable::fold_constants` first.
 - `ActionNonzeroMask` is ported inside `jumptable.rs` (`calc_nz_mask`), because the guards
   read the masks; the main loop's `ActionNonzeroMask` (group `analysis`, which S4
   leaves off and unported; the R-stages) should call it and
@@ -503,7 +506,7 @@ partial function needs the comparison rules too).
 50 rules of `oppool1` (26 bit and shift, 15 comparison, 9 boolean) and 2 of the `cleanup` pool
 (list in `rust/README.md`, "Stage R2"), in `rules/bits.rs`, `compare.rs`, `boolean.rs`,
 `cleanup.rs`. Check as R1, with `r1-options.txt` regenerated (group `cleanup` on, its nine other
-rules off; 35 `togglerule`s with R3 merged) and lane division on both sides: M8 8 / 8; M500
+rules off; 17 `togglerule`s with R3 and R4 merged) and lane division on both sides: M8 8 / 8; M500
 498 / 499 of the functions the reference finishes (99.8 %, bar 98 %: reached; 495 / 499 with
 R3 alone). Superseded: 452 / 453 of R1's set before the merge with R3. Where it differs from the
 table row:
@@ -517,6 +520,8 @@ table row:
   and `donothing`; `analyzeGuards` is the C++ loop. Left: the fold through read-only loads
   (`RuleLoadVarnode`, R5). S3 recheck at `paramdouble`: M8 8 / 8, M500 500 / 500, switch
   corpus 1,947 / 2,050 (1,934 before).
+- With R3 part two and R4 merged: the R1/R2/R3 check, the subvar check and the R4 check (all
+  with group `cleanup` on) are each M8 8 / 8, M500 498 / 499 (497 / 499 before the merge).
 - `ActionNonzeroMask` on the function itself no longer reads folded constants (an R1
   shortcut that sharpened masks beyond the C++'s).
 - Fixed on the way: removing unreachable blocks whose values are read in other removed blocks
@@ -559,6 +564,49 @@ check M8 8 / 8, M500 495 / 499; R1 set 451 / 453; paramdouble 500 / 500; S4 chec
 M500 498 / 500; S6 unlocked, locked `void`, locked `int4` and callees `int4(int4 a)` each
 M8 8 / 8, M500 498 / 500 (498 / 499 the reference finishes; the miss is 0x4919f0).
 Superseded: the "446 / 446 non-SSE" results of the S6 section above.
+
+### R3 part two: done on branch `m3-r3b` (2026-11-13)
+
+The `subvar` group: `SubvariableFlow` (`decomp/subflow.rs`), `SplitFlow` (`decomp/splitflow.rs`,
+on `transform.rs`), the rules `subvar_and`, `subvar_subpiece`, `splitflow`, `subvar_compzero`,
+`subvar_shift`, `subvar_zext`, `subvar_sext` (`rules/subvar.rs`), and `piecepathology` with the
+consumed-bytes hints dead code reads. Superseded: the "Not ported, left for a follow-up (R3b)"
+items above for the `subvar` rules and `RulePiecePathology`. Still not ported: `RulePtrFlow`
+(group `subvar`; switched off in the check), `RuleSubfloatConvert`/`SubfloatFlow` (group
+`floatprecision`, R4), `SplitDatatype` (cleanup pool), `prefersplit.cc` (no x86 use).
+
+New check, group `subvar` on (`rust/tools/corpus/subvar-options.txt`, from `r1-options.sh`):
+M8 8 / 8, M500 497 / 499 (99.6 %, bar 98 %: reached). Existing bars: R3 check 497 / 499 (was
+495; R1 set 452 / 453, lane-divide set 45 / 46), paramdouble 500 / 500, S4 and the four S6
+checks 498 / 500 each. Two older faults fixed on the way (details in `rust/README.md`, "Stage
+R3 part two"): the main loop's non-zero masks folded constants (0x6fa6e0, 0x4891e0), and
+unreachable-block removal refused readers in other dead blocks. Left: 0x47a6b0
+(`ActionConditionalExe`), 0x4919f0 (a block the reference empties).
+
+### R4: done on branch `m3-r4` (2026-11-13)
+
+Ported: the 20 division, remainder, sign and float rules of `oppool1` (list in
+`rust/README.md`, "Stage R4"): `rules/div.rs`, `rules/modulo.rs`, `rules/floatrules.rs`, and
+`RuleSubfloatConvert` with `SubfloatFlow` and `FloatFormat::convertEncoding` in
+`decomp/subfloat.rs` (its own file: `subflow.rs` is R3b's). The 128-bit arithmetic of
+`RuleDivOpt` and `RuleDivTermAdd*` is `u128`; a division by zero fails as `udiv128` throws.
+`RuleFloatSignCleanup` belongs to the `cleanup` pool (R2) and is not ported here.
+
+Check as R1 with group `floatprecision` on: `rust/tools/corpus/r4-options.txt` (written by
+`r1-options.sh` next to `r1-options.txt`, now 59 `togglerule`s, 58 after the merge with R3 part two). M8 8 / 8; M500 495 / 499 of
+the functions the reference finishes (99.2 %, bar 98 %: reached), the same four misses as R3
+(0x47a6b0, 0x4891e0, 0x4919f0, 0x6fa6e0) and 0x4c48d0 not finishing on the reference. The bar
+is meaningful: 90 M500 reference outputs change when the R4 rules are switched off (and
+`floatprecision` is off), 7 with a division or remainder, 83 float; 89 of them are identical
+(the miss is 0x4891e0, a miss of R3 already). S3 paramdouble 500 / 500; S4 and the four S6
+checks: see `rust/README.md`, "Stage R4".
+
+Merged with R3 part two (`master` into `m3-r4`, 2026-11-13); every bar rerun on the merged binary:
+R4 check M8 8 / 8, M500 497 / 499 (the misses 0x47a6b0, 0x4919f0; 0x4c48d0 the reference does
+not finish); subvar check and R3 check 497 / 499 each; paramdouble 500 / 500; S4 check and the
+four S6 checks (unlocked, `void`, `int4`, callees) 498 / 500 each (0x4919f0; 0x4c48d0).
+Superseded: the 495 / 499 above (0x4891e0 and 0x6fa6e0 are fixed by part two's non-zero masks)
+and the callee check's 497 (the reference ran 0x5b59c0 this time).
 
 ## Running stages in parallel
 

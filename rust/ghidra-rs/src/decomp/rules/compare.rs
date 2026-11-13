@@ -12,11 +12,6 @@ use super::*;
 use crate::decomp::opcode::is_bool_output;
 use crate::decomp::rangeutil::{self, CircleRange};
 
-/// `signbit_negative`.
-pub(super) fn signbit_negative(val: u64, size: u32) -> bool {
-    shr(val, (8 * size) as i32 - 1) & 1 != 0
-}
-
 /// `Varnode::operator==`: the same storage, and the same defining op when written.
 fn vn_eq(fd: &Funcdata, a: VarnodeId, b: VarnodeId) -> bool {
     let (x, y) = (fd.vn(a), fd.vn(b));
@@ -742,11 +737,5 @@ mod tests {
             let got = changed.then(|| (code(&fd, op), off(&fd, fd.op(op).ins[slot])));
             assert_eq!(got, want, "{opc:?} {c:#x} first={first}");
         }
-    }
-
-    #[test]
-    fn signbit_table() {
-        assert!(signbit_negative(0x80, 1) && !signbit_negative(0x7f, 1));
-        assert!(signbit_negative(0x8000_0000, 4) && !signbit_negative(0x8000_0000, 8));
     }
 }

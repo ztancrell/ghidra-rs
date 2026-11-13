@@ -1,0 +1,33 @@
+option currentaction decompile typerecovery off
+option currentaction decompile stackvars off
+option currentaction decompile floatprecision off
+option currentaction decompile doubleload off
+option currentaction decompile doubleprecis off
+option currentaction decompile segment off
+option currentaction decompile blockrecovery off
+option currentaction decompile localrecovery off
+option currentaction decompile switchnorm off
+option currentaction decompile returnsplit off
+option currentaction decompile splitcopy off
+option currentaction decompile splitpointer off
+option currentaction decompile constsequence off
+option currentaction decompile bitfields off
+option currentaction decompile dynamic off
+option togglerule pullsub_indirect off
+option togglerule aliasupdate off
+option togglerule threewaycomp off
+option togglerule transformcpool off
+option togglerule switchsingle off
+option togglerule ptrflow off
+option togglerule conditionalmove off
+option togglerule orpredicate off
+option togglerule funcptrencoding off
+option togglerule addunsigned off
+option togglerule dumptyhumplate off
+option togglerule subright off
+option togglerule floatsigncleanup off
+option togglerule expandload off
+option togglerule ptrsubcharconstant off
+option togglerule extensionpush off
+option togglerule piecestructure off
+option togglerule andstructure off

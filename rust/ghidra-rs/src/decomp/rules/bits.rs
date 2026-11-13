@@ -14,7 +14,7 @@ use crate::decomp::rangeutil::{mostsigbit_set, pcode_left, pcode_right};
 
 /// The shift a constant multiplier stands for (`leastsigbit_set`, a power of 2 checked).
 fn pow2_shift(val: u64) -> Option<i32> {
-    let sa = lsb(val);
+    let sa = leastsigbit_set(val);
     (shr(val, sa) == 1).then_some(sa)
 }
 
@@ -138,7 +138,7 @@ pub(super) fn shift_bitops(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32>
         IntRight => (off(fd, c) as i32, false),
         Subpiece => ((off(fd, c) as i32).wrapping_mul(8), false),
         IntMult => {
-            let sa = lsb(off(fd, c));
+            let sa = leastsigbit_set(off(fd, c));
             if sa == -1 {
                 return Ok(0);
             }
@@ -757,7 +757,7 @@ fn mult_power_of_2(fd: &Funcdata, op: OpId) -> i32 {
     if opc == IntLeft {
         return val as i32;
     }
-    let sa = lsb(val);
+    let sa = leastsigbit_set(val);
     if sa >= 0 && shr(val, sa) == 1 {
         sa
     } else {
@@ -859,7 +859,7 @@ pub(super) fn shift_and(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
     if opc == IntRight || opc == IntLeft {
         sa = off(fd, cvn) as i32;
     } else {
-        sa = lsb(off(fd, cvn));
+        sa = leastsigbit_set(off(fd, cvn));
         if sa <= 0 || shl(1, sa) != off(fd, cvn) {
             return Ok(0);
         }
@@ -1032,14 +1032,14 @@ pub(super) fn popcount_bool_xor(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result
         let nzm = fd.nzmask(invn);
         match nzm.count_ones() {
             1 => {
-                let (Some(b1), _) = boolean_result(fd, invn, lsb(nzm))? else { continue };
+                let (Some(b1), _) = boolean_result(fd, invn, leastsigbit_set(nzm))? else { continue };
                 fd.op_set_opcode(base, Copy);
                 fd.op_remove_input(base, 1);
                 fd.op_set_input(base, b1, 0)?;
                 return Ok(1);
             }
             2 => {
-                let (b1, c0) = boolean_result(fd, invn, lsb(nzm))?;
+                let (b1, c0) = boolean_result(fd, invn, leastsigbit_set(nzm))?;
                 if b1.is_none() && c0 != 1 {
                     continue;
                 }

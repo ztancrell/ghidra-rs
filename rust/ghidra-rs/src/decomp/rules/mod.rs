@@ -1,8 +1,10 @@
 //! Rule pools: the rules of `oppool1` and of the `cleanup` pool ported so far (stage R1: copies,
-//! constants, arithmetic; stage R2: bit operations, comparisons, booleans; stage R3: extension,
-//! concat and sub-pieces; ruleaction.cc) and the pool walk ([`pool`]). The rules are in families
-//! ([`copy`], [`arith`], [`bits`], [`compare`], [`boolean`], [`cleanup`], [`extend`], [`piece`],
-//! [`subpiece`]) with the expression helpers they share ([`cse`]) and float constant
+//! constants, arithmetic in [`copy`], [`arith`]; stage R2: bit operations, comparisons, booleans
+//! in [`bits`], [`compare`], [`boolean`], [`cleanup`]; stage R3: extension, concat and sub-pieces
+//! in [`extend`], [`piece`], [`subpiece`]; stage R4: division, remainder, sign and float rules in
+//! [`div`], [`modulo`], [`floatrules`] and `RuleSubfloatConvert` in `decomp/subfloat.rs`; the
+//! `subvar` group and `RulePiecePathology` of stage R3b in [`subvar`], [`piece`]; ruleaction.cc)
+//! and the pool walk ([`pool`]), with the expression helpers they share ([`cse`]) and float constant
 //! folding ([`float`]); the `Funcdata` methods they need (`cseEliminateList`,
 //! `distributeIntMultAdd`, `totalReplaceConstant`, ...) are in `funcdata.rs`.
 //!
@@ -18,11 +20,15 @@ mod cleanup;
 mod compare;
 mod copy;
 mod cse;
+mod div;
 mod extend;
 mod float;
+mod floatrules;
+mod modulo;
 mod piece;
 mod pool;
 mod subpiece;
+mod subvar;
 
 pub(crate) use pool::{nonzero_mask, pool_apply, select, Pool};
 
@@ -33,18 +39,25 @@ use cleanup::*;
 use compare::*;
 use copy::*;
 use cse::*;
+use div::*;
 use extend::*;
 use float::*;
+use floatrules::*;
+use modulo::*;
 use piece::*;
 use subpiece::*;
+use subvar::*;
 
 use std::collections::HashSet;
 
 use super::block::BlockId;
 use super::emulate::{eval_binary, eval_unary};
+use super::infertypes::float_sign_manipulation;
 use super::op::{OpFlags, OpId};
-use super::opcode::Opcode;
-use super::rangeutil::{calc_mask, sign_extend};
+use super::opcode::{is_bool_output, Opcode};
+use super::rangeutil::{calc_mask, leastsigbit_set, mostsigbit_set, sign_extend};
+use super::subfloat::subfloat_convert;
+use super::subflow::preferred_zext_size;
 use super::varnode::{Space, VarnodeId, VnFlags, CONST_SPACE};
 use super::{err, stdsort, Arch, Funcdata, LowlevelError, Result};
 
@@ -166,19 +179,50 @@ pub(crate) const OPPOOL1: &[Rule] = &[
     r("humptyor", "analysis", &[IntOr], humpty_or),
     r("negateidentity", "analysis", &[IntNegate], negate_identity),
     r("subnormal", "analysis", &[Subpiece], sub_normal),
+    r("positivediv", "analysis", &[IntSdiv, IntSrem], positive_div),
+    r("divtermadd", "analysis", &[Subpiece, IntRight, IntSright], div_term_add),
+    r("divtermadd2", "analysis", &[IntRight], div_term_add2),
+    r("divopt", "analysis", &[Subpiece, IntRight, IntSright], div_opt),
+    r("signform", "analysis", &[Subpiece], sign_form),
+    r("signform2", "analysis", &[IntSright], sign_form2),
+    r("signdiv2", "analysis", &[IntSright], sign_div2),
+    r("divchain", "analysis", &[IntDiv, IntSdiv], div_chain),
+    r("signnearmult", "analysis", &[IntAnd], sign_near_mult),
+    r("modopt", "analysis", &[IntDiv, IntSdiv], mod_opt),
+    r("signmod2nopt", "analysis", &[IntRight], sign_mod2n_opt),
+    r("signmod2nopt2", "analysis", &[IntMult], sign_mod2n_opt2),
+    r("signmod2opt", "analysis", &[IntAnd], sign_mod2_opt),
     r("condnegate", "analysis", &[Cbranch], cond_negate),
     r("boolnegate", "analysis", &[BoolNegate], bool_negate),
     r("lessequal", "analysis", &[BoolOr], less_equal),
     r("lessnotequal", "analysis", &[BoolAnd], less_not_equal),
     r("lessone", "analysis", &[IntLess, IntLessequal], less_one),
     r("rangemeld", "analysis", &[BoolOr, BoolAnd], range_meld),
+    r("floatrange", "analysis", &[BoolOr, BoolAnd], float_range),
     r("piece2zext", "analysis", &[Piece], piece_2_zext),
     r("piece2sext", "analysis", &[Piece], piece_2_sext),
     r("popcountboolxor", "analysis", &[Popcount], popcount_bool_xor),
     r("xorswap", "analysis", &[IntXor], xor_swap),
     r("lzcountshiftbool", "analysis", &[Lzcount], lzcount_shift_bool),
+    r("floatsign", "analysis", &[
+        FloatEqual, FloatNotequal, FloatLess, FloatLessequal, FloatNan, FloatAdd, FloatDiv, FloatMult,
+        FloatSub, FloatNeg, FloatAbs, FloatSqrt, FloatFloat2float, FloatCeil, FloatFloor, FloatRound,
+        FloatInt2float, FloatTrunc], float_sign),
     r("orcompare", "analysis", &[IntOr], or_compare),
+    r("subvar_and", "subvar", &[IntAnd], subvar_and),
+    r("subvar_subpiece", "subvar", &[Subpiece], subvar_subpiece),
+    r("splitflow", "subvar", &[Subpiece], split_flow),
+    r("subvar_compzero", "subvar", &[IntNotequal, IntEqual], subvar_comp_zero),
+    r("subvar_shift", "subvar", &[IntRight], subvar_shift),
+    r("subvar_zext", "subvar", &[IntZext], subvar_ext),
+    r("subvar_sext", "subvar", &[IntSext], subvar_ext),
     r("negatenegate", "analysis", &[IntNegate], negate_negate),
+    r("subfloat_convert", "floatprecision", &[FloatFloat2float], subfloat_convert),
+    r("floatcast", "floatprecision", &[FloatFloat2float, FloatTrunc], float_cast),
+    r("ignorenan", "floatprecision", &[FloatNan], ignore_nan),
+    r("unsigned2float", "analysis", &[FloatInt2float], unsigned_2_float),
+    r("int2floatcollapse", "analysis", &[FloatInt2float], int2float_collapse),
+    r("piecepathology", "protorecovery", &[Piece], piece_pathology),
 ];
 
 /// The ported rules of the `cleanup` pool, in `universalAction`'s order.
@@ -288,15 +332,6 @@ fn const_match(fd: &Funcdata, vn: VarnodeId, val: u64) -> bool {
     is_const(fd, vn) && off(fd, vn) == val
 }
 
-/// `leastsigbit_set`: -1 for 0.
-fn lsb(v: u64) -> i32 {
-    if v == 0 {
-        -1
-    } else {
-        v.trailing_zeros() as i32
-    }
-}
-
 /// `uintb << int4` as x86-64 computes it (the count modulo 64; the C++ has no range check).
 fn shl(v: u64, sa: i32) -> u64 {
     v.wrapping_shl(sa as u32)
@@ -325,9 +360,6 @@ mod tests {
 
     #[test]
     fn shift_helpers_table() {
-        for (v, l) in [(0u64, -1), (1, 0), (0x80, 7), (0x18, 3), (1 << 63, 63)] {
-            assert_eq!(lsb(v), l, "lsb {v:#x}");
-        }
         // shift counts are taken modulo 64, as x86-64 does for the C++
         for (v, sa, l, r) in [(1u64, 0, 1u64, 1u64), (1, 4, 16, 0), (0xf0, 64, 0xf0, 0xf0), (0xf0, -1, 0, 0)] {
             assert_eq!((shl(v, sa), shr(v, sa)), (l, r), "{v:#x} by {sa}");
