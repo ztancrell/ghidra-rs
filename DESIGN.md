@@ -61,6 +61,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
 - 2026-11-12: Next milestone outside the decompiler is 2c: port mercs2's Ghidra analysis
   pipeline, so Java Ghidra scripts are replaced by ghidra-rs as each reaches parity; Java
   stays the reference until then. User's decision (also in mercs2's `DESIGN.md`).
+- 2026-11-12: Milestone 2c ports what mercs2's fold and no-return scripts end up doing, on
+  ghidra-rs's own state, instead of first reproducing the Ghidra analyzers whose mistakes
+  they undo (tail-call guesses, a false no-return flag). The end bar is missing + extra ≤ 188
+  of the 37,619 functions of the 2026-11-12 reference run, each one classified. User's
+  decisions; the rest are in `docs/plans/m2c-pipeline.md`.
 
 ## Milestones
 
@@ -100,7 +105,7 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    AuditRecoveredFunctions, FoldSlotFragments, AddRelocatedEntries, ClearFalseNoReturn) and
    the remaining discovery gap, so `analyze` builds mercs2's full function list without Java
    Ghidra and without `--functions-from`. Plan: `docs/plans/m2c-pipeline.md` (branch
-   `m2c-pipeline`). Planned, nothing built; waits on a reference run from Java Ghidra.
+   `m2c-pipeline`). Reference run made 2026-11-12 (`rust/tools/m2c-reference.sh`); S0 (harness) in progress on branch `m2c-s0`.
 3. Decompilation: a Rust decompiler, checked against Ghidra's C++ one.
    Plan: `docs/plans/m3-decompiler.md` (stages, reference checks, decisions).
    S0 (harness) done on branch `m3-s0`: the reference `decomp_dbg` builds with the `print raw`
@@ -132,6 +137,4 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
 
 ## Open questions
 
-- Milestone 2c: questions A-F at the end of `docs/plans/m2c-pipeline.md` (outcome rules or
-  faithful analyzers first, the end bar, report-CSV compatibility, Ghidra version, the
-  fold's input files, when mercs2 switches over).
+- None right now.

@@ -241,8 +241,7 @@ Findings from the run:
   Ghidra went on to the next scripts, so the crashed run still produced exports (kept in
   `build/m2c-ref/crashed/`, not a reference). The second run used a patched copy of the
   script (a worklist loop, `build/m2c-ref/fold.patch`; identical when nothing is added) and
-  completed in two rounds. mercs2's tracked script is unchanged; whether to fix it there is
-  question G.
+  completed in two rounds. mercs2's tracked script is unchanged; fixed there since (decision 11).
 - **The reference moved since October.** The desktop's October log shows the unpatched script
   completing with 2,204 removed; now 2,183. Import counts moved too (original image 20,866
   against the documented 20,878; analysis image 23,289 against the README's 23,323), and the
@@ -387,26 +386,26 @@ subsequent Ghidra processing" until their cause is known.
    one `--pipeline` option; no mercs2 address is hard-coded. Section names (`.text`,
    `.rdata`, `.data`, `.securom`) stay as in the scripts.
 
-Open questions for the user:
+Answered by the user on 2026-11-12 (questions A-H of the first draft):
 
-- A. Decision 2: outcome rules first (recommended), or the faithful analyzers first?
-- B. The pass bars in the stage table are proposals. Is "missing + extra ≤ 188 of 37,619,
-  each classified" the right end bar, or does mercs2 need the set exact (as the two known
-  overlapping-decode cases would prevent today)?
-- C. Should the report CSVs stay byte-compatible for mercs2's tools (assumed yes), or does
-  only the function list matter?
-- D. Answered 2026-11-12: the desktop runs Ghidra 12.2; this repo's source tree is 12.3.
-  Stage agents check `git log` of each Java file they port for changes between the two.
-- E. Half answered 2026-11-12: both files are on the desktop (dated 2026-10-14) and were
-  copied to the Mac's `mercs2-rearmed/build/` with both exes (`orig/`, sha1 of
-  `Mercenaries2.exe` matches `config/sha1.txt`). `slot-rewrites.csv` has 1,593 rows,
-  `functions-original.csv` 37,345. Still open: whether `functions-original.csv` is the one
-  the current project was built with.
-- F. After S6, should mercs2's `analysis_pipeline.sh` call ghidra-rs (a mercs2 change, with
-  the Java scripts kept for one more cycle as a cross-check)?
-- G. Fix the `ConcurrentModificationException` in mercs2's own `FoldSlotFragments.java` (the
-  worklist patch the reference used)? Recommended: the reference should come from a script
-  that is in the mercs2 repo, and mercs2's `analysis_pipeline.sh` would hit the crash today.
-- H. `functions-original.csv` is from October and differs from today's `o2-recover` (37,345
-  against 37,331). Rebuild the reference fold on today's list, or keep October's as mercs2
-  does?
+6. **User's decision (A):** outcome rules first, as in decision 2; the faithful analyzers
+   only if S3's bar cannot be met.
+7. **User's decision (B):** the pass bars in the stage table stand; the end bar is missing +
+   extra ≤ 188 of 37,619, each one classified.
+8. **User's decision (C):** the report CSVs stay readable by mercs2's tools unchanged.
+9. **D, answered by the run:** the desktop and the Mac run Ghidra 12.2; this repo's source
+   tree is 12.3. Stage agents check `git log` of each Java file they port for changes
+   between the two.
+10. **User's decision (F):** after S6, mercs2's `analysis_pipeline.sh` calls ghidra-rs, with
+    the Java scripts kept one more cycle as a cross-check.
+11. **User's decision (G):** the worklist fix went into mercs2's own
+    `FoldSlotFragments.java` (mercs2 fe682dc). Checked: run from the saved pre-fold state,
+    the fixed script's `a3-fold.csv`, function list and gaps file are byte-identical to the
+    reference. `rust/tools/m2c-reference.sh` still patches a pre-fix checkout; on a fixed
+    one its `sed` matches nothing and `fold.patch` comes out empty.
+12. **User's decision (H, E):** the fold keeps reading October's
+    `build/functions-original.csv` (37,345 functions), as mercs2 does, not today's
+    `o2-recover` (37,331). S6's own list is compared with `o2-recover`, and S6 also reports
+    how the final list changes when the fold reads the own list instead of October's.
+
+Open questions: none.
