@@ -128,7 +128,7 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
             ("unreachable", "unreachable", c::unreachable),
             ("nodejoin", "nodejoin", c::node_join),
             ("conditionalexe", "conditionalexe", c::conditional_exe),
-            ("conditionalconst", "analysis", not_ported),
+            ("condconst", "analysis", not_ported),
         ],
     ));
     let mainloop = t.group("mainloop", mainloop, true);

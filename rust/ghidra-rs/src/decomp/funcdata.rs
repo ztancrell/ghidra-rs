@@ -931,6 +931,12 @@ impl Funcdata {
         self.seqs.remove(&(seq.addr, seq.time));
     }
 
+    /// `Varnode::getNZMask`: the mask `ActionNonzeroMask` computed last, else (before it runs,
+    /// or for a varnode made since) [`Varnode::nzmask`].
+    pub(crate) fn nzmask(&self, vn: VarnodeId) -> u64 {
+        self.nzm.get(vn.0 as usize).copied().unwrap_or_else(|| self.vn(vn).nzmask())
+    }
+
     /// Port of `Funcdata::warningHeader`.
     pub(crate) fn warning_header(&mut self, msg: impl Into<String>) {
         self.warnings.push(msg.into());

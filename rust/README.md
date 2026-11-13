@@ -1010,41 +1010,6 @@ Ported (`coreaction.rs`, plus `heritage.rs`, `fspec.rs`, `block.rs`, `funcdata.r
 - `decomp-diff.sh`: `TIMEOUT` (default 120 s per engine and function), and a reference that
   printed nothing no longer stops the summary.
 
-### Stage R1: rules for copies, constants, arithmetic
-
-Stage R1 (branch `m3-r1`) adds the rule pools (`ActionPool` in `actiontree.rs`: every op in
-sequence-number order, dead ops freed on the way, the rules for an op's opcode in table order,
-from the first again when a rule changes the opcode) and 19 rules of `oppool1` in
-`decomp/rules/mod.rs`: `earlyremoval`, `termorder`, `selectcse`, `collect_terms`,
-`pullsub_multi`, `push_multi`, `trivialarith`, `trivialbool`, `trivialshift`, `identityel`,
-`multicollapse`, `2comp2mult`, `sub2add`, `carryelim`, `addmultcollapse`,
-`collapseconstants`, `propagatecopy`, `negateidentity`, `negatenegate`, with the helpers they
-need (`TermOrder`, `functionalEqualityLevel`, `cseEliminateList`, `cseElimination`,
-`distributeIntMultAdd`, float constant folding through `FloatFormat`). Group `analysis` is on,
-so the main loop's `nonzeromask` runs (`jumptable::calc_nz_mask`).
-
-The check: `tools/corpus/r1-options.txt` is S4's options with `analysis` on and every rule of
-the groups that are on and not ported switched off (97 `togglerule`s; regenerate it with the
-list in `rules/mod.rs` when rules land). `ghidra-rs decompile` honours `option togglerule`.
-Group `analysis` also holds three actions not ported yet, `multicse`, `shadowvar` and
-`conditionalconst`; a console command cannot switch an action off, so the reference patch
-(`decomp-ref.patch`, `Action::perform`) and `ghidra-rs decompile` both skip the actions named
-in `DECOMP_SKIP_ACTIONS`:
-
-```sh
-export DECOMP_SKIP_ACTIONS=multicse,shadowvar,conditionalconst
-BREAK=assignhigh OPTIONS=$PWD/tools/corpus/r1-options.txt rust/tools/decomp-diff.sh m8
-BREAK=assignhigh OPTIONS=$PWD/tools/corpus/r1-options.txt TIMEOUT=60 rust/tools/decomp-diff.sh m500
-```
-
-Results (2026-11-13): M8 8 / 8 identical; M500 379 / 500 (the reference finishes 499). Below the 98 % bar. The misses: about 53 are the SSE functions S4 already lists (`ActionLaneDivide`, R3); the others start with sequence numbers that drift (the reference makes more or fewer ops in a rule pass), branch targets and block numbers after constant folding, x87/SSE flag logic (`ZF << 6` against `f<`, R2/R4 rules), `CONCAT31` constants, and one "removing unreachable blocks" not ported. They are not yet sorted by rule: next step is `decomp-bisect.sh` on the smallest of them.
-
-Not ported, with no effect on `print raw`: `setCopyImmed` (a MULTIEQUAL slot mark the merge
-stage reads), `isPrecisLo`/`isPrecisHi` (set by R5's double-precision rules), big-endian
-address arithmetic. A `pullsub_multi` on a join varnode fails loudly (`Address::renormalize`
-of join addresses is not ported). The jump-table stand-ins (`jumptable.rs`) stay: the partial
-function would need the `jumptable` root action's pool with R2's comparison rules as well.
-
 | corpus | identical at `break start assignhigh` (S4 options) | at `paramdouble` |
 |---|---|---|
 | m8 | 8 / 8 | 8 / 8 |
@@ -1073,6 +1038,67 @@ Remaining differences, by cause:
 - Locked prototypes (plan decision 6, mercs2's `register_abi.csv`): S4 needs none of them;
   their paths (`transferLockedInput`, `commitNewInputs`, locked parameter trials, `paramdouble`
   on stack trials) are still to come.
+
+### Stage R1: rules for copies, constants, arithmetic
+
+Stage R1 (branch `m3-r1`, in progress) adds the rule pools (`ActionPool` in `actiontree.rs`:
+every op in sequence-number order, dead ops freed on the way, the rules for an op's opcode in
+table order, from the first again when a rule changes the opcode) and 19 rules of `oppool1` in
+`decomp/rules/mod.rs`: `earlyremoval`, `termorder`, `selectcse`, `collect_terms`,
+`pullsub_multi`, `push_multi`, `trivialarith`, `trivialbool`, `trivialshift`, `identityel`,
+`multicollapse`, `2comp2mult`, `sub2add`, `carryelim`, `addmultcollapse`,
+`collapseconstants`, `propagatecopy`, `negateidentity`, `negatenegate`, with the helpers they
+need (`TermOrder`, `functionalEqualityLevel`, `cseEliminateList`, `cseElimination`,
+`distributeIntMultAdd`, float constant folding through `FloatFormat`). `propagatecopy` marks
+immediate-copy edges (`setCopyImmed`), which `donothing` reads (`hasNoImmediateCopy`): a block
+emptied by copy propagation stays. Group `analysis` is on, so the main loop's `nonzeromask`
+runs (`jumptable::calc_nz_mask`) and dead code reads its masks (`Funcdata::nzmask`).
+
+The check: `tools/corpus/r1-options.txt` is S4's options with `analysis` on and every rule of
+the groups that are on and not ported switched off (97 `togglerule`s), written by
+`tools/r1-options.sh` from the table in `rules/mod.rs`: rerun it when rules land.
+`ghidra-rs decompile` honours `option togglerule`. Group `analysis` also holds three actions
+not ported yet, `multicse`, `shadowvar` and `condconst` (`ActionConditionalConst`). A console
+command cannot switch an action off, so, as a check-only switch, the reference patch
+(`decomp-ref.patch`, `Action::perform`) and `ghidra-rs decompile` both skip the actions named
+in `DECOMP_SKIP_ACTIONS`; each action leaves the list when it is ported.
+
+```sh
+export DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst
+BREAK=assignhigh OPTIONS=$PWD/tools/corpus/r1-options.txt rust/tools/decomp-diff.sh m8
+BREAK=assignhigh OPTIONS=$PWD/tools/corpus/r1-options.txt TIMEOUT=60 rust/tools/decomp-diff.sh m500
+```
+
+The bar is taken over M500 less the functions that need `ActionLaneDivide` (R3), listed in
+`tools/corpus/m500-lanedivide.txt` (46): those whose reference output changes when
+`lanedivide` is added to `DECOMP_SKIP_ACTIONS` (rerun the M500 line with `,lanedivide` and
+`OUT=.../m500-nolane`, then compare the two `ref/` directories).
+
+| corpus | identical (R1 check) |
+|---|---|
+| m8 | 8 / 8 |
+| m500 | 439 / 500 |
+| m500 less `m500-lanedivide.txt`, functions the reference finishes | 439 / 453 (96.9 %, bar 98 %: not reached) |
+
+`print raw` at `paramdouble` stays 500 / 500 on M500 (the pool runs after it), and the S4 check
+(`s4-options.txt`) is unchanged. Remaining differences, by cause:
+
+- 46 functions need `ActionLaneDivide` (R3).
+- 11 functions with x87/SSE compares (`ucomiss`/`fcomp` then `lahf`/`test ah`): the reference's
+  dead code (`ActionDeadCode`, in `fullloop`) finds the carry flag never consumed and replaces
+  its reads by 0 (`neverConsumed`); ghidra-rs keeps it. Not found yet: the consume masks agree
+  by hand, so the difference is in the masks or the order the dead code sees the ops.
+- 0x47a6b0: a block the reference merges after the rules.
+- 0x440590: the reference makes new unique varnodes holding 0 where ghidra-rs keeps
+  `#0x80000000` (a rule not traced yet).
+- 0x6c2570: removing unreachable blocks is not ported (fails loudly).
+- 0x4c48d0: the reference does not finish within 60 s.
+
+Not ported, with no effect on `print raw`: `isPrecisLo`/`isPrecisHi` (set by R5's
+double-precision rules), big-endian address arithmetic. A `pullsub_multi` on a join varnode
+fails loudly (`Address::renormalize` of join addresses is not ported). The jump-table
+stand-ins (`jumptable.rs`) stay as they are: the partial function would need the `jumptable`
+root action's pool with R2's comparison rules too.
 
 ## Speed
 

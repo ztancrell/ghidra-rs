@@ -949,7 +949,7 @@ fn propagate_consumed(fd: &mut Funcdata, worklist: &mut Vec<VarnodeId>) -> Resul
             }
         },
         Opcode::IntLess | Opcode::IntLessequal | Opcode::IntEqual | Opcode::IntNotequal => {
-            let a = if outc == 0 { 0 } else { fd.vn(ins[0]).nzmask() | fd.vn(ins[1]).nzmask() };
+            let a = if outc == 0 { 0 } else { fd.nzmask(ins[0]) | fd.nzmask(ins[1]) };
             push(fd, a, 0);
             push(fd, a, 1);
         }
@@ -959,7 +959,7 @@ fn propagate_consumed(fd: &mut Funcdata, worklist: &mut Vec<VarnodeId>) -> Resul
         }
         Opcode::Call | Opcode::Callind => {}
         Opcode::FloatInt2float => {
-            let a = if outc != 0 { covering_mask(fd.vn(ins[0]).nzmask()) } else { 0 };
+            let a = if outc != 0 { covering_mask(fd.nzmask(ins[0])) } else { 0 };
             push(fd, a, 0);
         }
         Opcode::Insert | Opcode::Zpull | Opcode::Spull => {
@@ -1025,7 +1025,7 @@ pub(crate) fn dead_code(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
                 continue;
             }
             if let Some(&vn) = fd.op(op).ins.get(1) {
-                cv |= minimal_mask(fd.vn(vn).nzmask());
+                cv |= minimal_mask(fd.nzmask(vn));
             }
         }
         cv
@@ -1082,7 +1082,7 @@ pub(crate) fn dead_code(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         let active = fd.call(c).active_input.is_some();
         for &vn in &ins[1..] {
             let v = fd.vn(vn);
-            let val = if active || v.is_auto_live() { u64::MAX } else { minimal_mask(v.nzmask()) };
+            let val = if active || v.is_auto_live() { u64::MAX } else { minimal_mask(fd.nzmask(vn)) };
             push_consumed(fd, val, vn, &mut worklist);
         }
     }
@@ -1791,10 +1791,22 @@ fn unblocked_multi(fd: &Funcdata, bb: BlockId) -> bool {
     true
 }
 
-/// `BlockBasic::hasNoImmediateCopy`: only copy propagation (`RulePropagateCopy`, stage R1)
-/// marks the immediate-copy edges it looks for, so with the rules off there are none.
-fn has_no_immediate_copy(_: &Funcdata, _: BlockId) -> bool {
-    true
+/// Port of `BlockBasic::hasNoImmediateCopy(0)`: no COPY was propagated across the out edge into
+/// a MULTIEQUAL of the successor (`RulePropagateCopy` marks both, `PcodeOp::setCopyImmed`).
+fn has_no_immediate_copy(fd: &Funcdata, bb: BlockId) -> bool {
+    if !fd.blocks.has_immed_copy_edge(bb, 0) {
+        return true;
+    }
+    let blout = fd.blocks.block(bb).outs[0].point;
+    let b = fd.blocks.block(blout);
+    let Some(idx) = b.ins.iter().position(|e| e.point == bb) else { return true };
+    let (inbl, rev) = (b.ins[idx].point, b.ins[idx].reverse);
+    !b.ops.iter().any(|&o| {
+        let op = fd.op(o);
+        op.opc == Opcode::Multiequal
+            && op.flags.has(super::op::OpFlags::IMMED_COPY)
+            && fd.blocks.has_immed_copy_edge(inbl, rev)
+    })
 }
 
 /// Port of `Funcdata::pushMultiequals`: a MULTIEQUAL of `bb` read past its successor gets a

@@ -1316,8 +1316,7 @@ fn collapse_constants(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
     Ok(1)
 }
 
-/// Port of `RulePropagateCopy`. (`setCopyImmed` marks a MULTIEQUAL slot for the merge stage,
-/// S7; nothing reads it yet.)
+/// Port of `RulePropagateCopy`.
 fn propagate_copy(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
     let vn = out(fd, op)?;
     let invn = inp(fd, op, 0)?;
@@ -1348,6 +1347,15 @@ fn propagate_copy(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
                     && (ov.space, ov.offset) != (iv.space, iv.offset)
                 {
                     continue;
+                }
+            }
+            // setCopyImmed: the COPY's block is the MULTIEQUAL's input block for this slot
+            if let (Multiequal, Some(pb)) = (o.opc, o.parent) {
+                let e = &fd.blocks.block(pb).ins[slot];
+                let (inbl, rev) = (e.point, e.reverse);
+                if fd.op(op).parent == Some(inbl) {
+                    fd.blocks.set_immed_copy_edge(inbl, rev);
+                    fd.op_mut(other).flags.set(OpFlags::IMMED_COPY);
                 }
             }
         }

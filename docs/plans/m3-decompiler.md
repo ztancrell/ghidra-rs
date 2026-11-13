@@ -363,10 +363,20 @@ differs from the table row:
 The rule pool and 19 rules (list in `rust/README.md`, "Stage R1"). Check: `print raw` at
 `break start assignhigh` with `rust/tools/corpus/r1-options.txt` (S4's groups, `analysis` on,
 the 97 unported rules of the groups that are on switched off) and
-`DECOMP_SKIP_ACTIONS=multicse,shadowvar,conditionalconst` (the three `analysis` actions not
-ported; the reference patch reads the same variable). M8 8 / 8, M500 379 / 500: the 98 % bar is
-not reached. The jump-table stand-ins stay until R2 (the partial function needs the comparison
-rules too).
+`DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst` (the three `analysis` actions not
+ported; a check-only switch the reference patch reads too, and each action leaves the list
+when it is ported). The options come from `rust/tools/r1-options.sh`.
+
+Bar (user decision 2026-11-13): M500 ≥ 98 % identical among the functions that do not need
+`ActionLaneDivide` (R3), listed in `rust/tools/corpus/m500-lanedivide.txt` (46: the reference
+output changes when `lanedivide` is skipped too). Now: M8 8 / 8; M500 439 / 453 (96.9 %) of
+the others the reference finishes, so the bar is not reached; S3's paramdouble check stays
+500 / 500. Fixed in round two: the action is `condconst`, not `conditionalconst` (the skip
+missed it), `setCopyImmed`/`hasNoImmediateCopy` (blocks emptied by copy propagation stay), dead
+code reads the computed non-zero masks. Left: 11 x87/SSE compare functions where the
+reference's dead code drops the carry flag (cause not found), one block merge, one constant
+(0x440590), one "removing unreachable blocks". The jump-table stand-ins stay until R2 (the
+partial function needs the comparison rules too).
 
 ## Running stages in parallel
 
