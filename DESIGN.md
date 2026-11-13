@@ -133,6 +133,7 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `print raw` at `paramdouble` identical on M8 (8 / 8), M500 (500 / 500) and 1,934 of the
    2,050 functions with a jump table (the rest: obfuscated code needing stack heritage, and one
    garbage target the reference reads). Rule-pool stand-ins in `jumptable.rs` wait for R1/R2.
+   Superseded: R2 runs the real `jumptable` action on the partial function.
    S4 (main-loop actions without rules) done on branch `m3-s4`: dead code, parameter and
    return recovery, stack-pointer flow, deindirect, branch cleanup, the ram heritage pass;
    `print raw` at `break start assignhigh` with every later stage's groups off identical on
@@ -151,6 +152,12 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    R1 (rule pools; 19 copy, constant and arithmetic rules) done on branch `m3-r1`: M8 8 / 8;
    M500 less the 46 `ActionLaneDivide` functions 451 / 453 (99.6 %, bar 98 %). S6 and R1 are
    merged on `m3-s6`: every S6 and R1 number above holds on the merged binary.
+   R2 (50 bit, shift, comparison and boolean rules; 2 `cleanup` rules; the jump-table partial
+   function runs the real `jumptable` action) done on branch `m3-r2`, merged with R3: M8 8 / 8;
+   M500 498 / 499 the reference finishes (99.8 %, bar 98 %; 495 / 499 with R3 alone); S3
+   recheck M500 500 / 500, switch corpus 1,947 / 2,050 (1,934 before); S4 498 / 500 and
+   the S6 checks 498 / 500.
+   With R3 part two and R4 merged, the R1-R3, subvar and R4 checks are each 498 / 499.
    R3 (in part) on branch `m3-r3`: `ActionLaneDivide` with `transform.cc`, and 21 extension,
    concat and sub-piece rules; same check with `lanedivide` on both sides: M8 8 / 8, M500
    495 / 499 (99.2 %, bar 98 %). Open: the `subvar` rules (`Subvar*`, `SplitFlow`; the rest of

@@ -343,14 +343,14 @@ fn add_space_ranges(fd: &mut Funcdata, arch: &Arch, space: Space, mask: u64) -> 
             Intersect::New => (true, false),
             Intersect::Old if known || nodescend => continue,
             Intersect::Old => {
-                if !needwarning && deadremoved {
+                if !needwarning && deadremoved && !fd.jumptablerecovery_on {
                     needwarning = true;
                     bump_deadcode_delay(arch, si)?;
                 }
                 (false, true)
             }
             Intersect::Partial => {
-                if !needwarning && deadremoved && !known {
+                if !needwarning && deadremoved && !known && !fd.jumptablerecovery_on {
                     needwarning = true;
                     bump_deadcode_delay(arch, si)?;
                 }
