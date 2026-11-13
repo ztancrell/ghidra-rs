@@ -1032,7 +1032,11 @@ pub(crate) fn dead_code(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
                 cv |= minimal_mask(fd.nzmask(vn));
             }
         }
-        cv
+        // getReturnBytesConsumed
+        match fd.proto.return_bytes_consumed {
+            0 => cv,
+            n => cv & calc_mask(n),
+        }
     };
     let alive: Vec<OpId> = fd.blocks.ops().collect();
     for op in alive {
@@ -1084,9 +1088,14 @@ pub(crate) fn dead_code(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         let ins = fd.op(op).ins.clone();
         push_consumed(fd, u64::MAX, ins[0], &mut worklist);
         let active = fd.call(c).active_input.is_some() || fd.call(c).proto.locked.is_some();
-        for &vn in &ins[1..] {
+        for (slot, &vn) in ins.iter().enumerate().skip(1) {
             let v = fd.vn(vn);
-            let val = if active || v.is_auto_live() { u64::MAX } else { minimal_mask(fd.nzmask(vn)) };
+            let mut val = if active || v.is_auto_live() { u64::MAX } else { minimal_mask(fd.nzmask(vn)) };
+            // getInputBytesConsumed
+            let bytes = fd.call(c).input_consume.get(slot).copied().unwrap_or(0);
+            if !active && bytes != 0 {
+                val &= calc_mask(bytes);
+            }
             push_consumed(fd, val, vn, &mut worklist);
         }
     }
@@ -1779,7 +1788,8 @@ fn block_remove_unreachable(fd: &mut Funcdata, bb: BlockId, dead: &[BlockId]) ->
                 fd.warning_header("Creating undefined varnodes in (possibly) reachable block");
                 warned = true;
             }
-            if fd.vn(out).descend.iter().any(|&d| fd.op(d).parent != Some(bb)) {
+            // descendantsOutside: a reader in a block that is not dead
+            if fd.vn(out).descend.iter().any(|&d| fd.op(d).parent.is_some_and(|p| !dead.contains(&p))) {
                 return err("Deleting op with descendants");
             }
         }

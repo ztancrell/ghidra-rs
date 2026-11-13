@@ -162,6 +162,37 @@ impl BlockGraph {
         self.block(bl).entry_point
     }
 
+    /// Port of `FlowBlock::findCondition`: the block whose two-way branch decides between
+    /// in-edge `edge1` of `bl1` and in-edge `edge2` of `bl2` (through blocks of one out-edge),
+    /// with the out-edge of it on the `bl1` side. `None` where the C++ returns null (or would
+    /// read past an edge list).
+    pub(crate) fn find_condition(
+        &self,
+        mut bl1: BlockId,
+        mut edge1: usize,
+        mut bl2: BlockId,
+        mut edge2: usize,
+    ) -> Option<(BlockId, usize)> {
+        let in_of = |b: BlockId, i: usize| self.block(b).ins.get(i).map(|e| e.point);
+        let mut cond = in_of(bl1, edge1)?;
+        while self.block(cond).outs.len() != 2 {
+            if self.block(cond).outs.len() != 1 {
+                return None;
+            }
+            bl1 = cond;
+            edge1 = 0;
+            cond = in_of(bl1, 0)?;
+        }
+        while Some(cond) != in_of(bl2, edge2) {
+            bl2 = in_of(bl2, edge2)?;
+            if self.block(bl2).outs.len() != 1 {
+                return None;
+            }
+            edge2 = 0;
+        }
+        Some((cond, self.block(bl1).ins.get(edge1)?.reverse))
+    }
+
     /// Port of `FlowBlock::halfDeleteInEdge`: drop in-edge `slot`, renumbering the reverse
     /// indices of the edges after it.
     fn half_delete_in_edge(&mut self, bl: BlockId, slot: usize) {
