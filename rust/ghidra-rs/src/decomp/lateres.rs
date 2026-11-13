@@ -8,7 +8,7 @@ use super::funcdata::{CallId, Funcdata};
 use super::locked::{containment, Locked};
 use super::op::OpFlags;
 use super::opcode::Opcode;
-use super::varnode::{Space, VarnodeId};
+use super::varnode::{Space, VarnodeId, VnFlags};
 use super::{err, Arch, LowlevelError, Result};
 
 /// The single-space range of a storage (`None` for a join).
@@ -25,6 +25,9 @@ fn range(st: &Storage) -> Option<(Space, u64, u32)> {
 fn spacebase_relative(fd: &Funcdata, c: CallId) -> Option<VarnodeId> {
     let call = fd.call(c);
     let ph = *fd.op(call.op).ins.get(call.stack_placeholder_slot?)?;
+    if !fd.vn(ph).has(VnFlags::SPACEBASE_PLACEHOLDER) {
+        return None;
+    }
     let load = fd.vn(ph).def?;
     if fd.op(load).opc != Opcode::Load {
         return None;
@@ -148,7 +151,7 @@ fn commit_new_inputs(
         let vn = match newinput[i + 1] {
             None => {
                 let r = stackref.ok_or_else(|| LowlevelError("buildParam: no stack reference".into()))?;
-                fd.op_stack_load_ref(spec.stack_pointer, spec.stack_container, uniq, off, size, op, r)?
+                fd.op_stack_load(spec.stack_pointer, spec.stack_container, uniq, off, size, op, Some(r))?
             }
             Some(v) if fd.vn(v).size == size => v,
             Some(_) => {
@@ -157,7 +160,7 @@ fn commit_new_inputs(
         };
         newinput[i + 1] = Some(vn);
         if noplacehold && matches!(st, Storage::Stack { .. }) {
-            fd.call_mut(c).stack_placeholder_slot = Some(i + 1);
+            fd.vn_set(vn, VnFlags::SPACEBASE_PLACEHOLDER);
             noplacehold = false;
             placeholder = None;
         }
@@ -172,6 +175,11 @@ fn commit_new_inputs(
     Ok(())
 }
 
+/// Whether a locked output is a boolean.
+fn arch_meta_bool(fd: &Funcdata, locked: &Locked) -> bool {
+    fd.types.meta(locked.output.ty) == super::types::Meta::Bool
+}
+
 /// Port of `FuncCallSpecs::commitNewOutputs` (the exact-size case; resizing another output is
 /// not ported).
 fn commit_new_outputs(fd: &mut Funcdata, c: CallId, locked: &Locked, newoutput: Vec<VarnodeId>) -> Result<()> {
@@ -183,6 +191,10 @@ fn commit_new_outputs(fd: &mut Funcdata, c: CallId, locked: &Locked, newoutput: 
     let st = locked.output.storage.as_ref().ok_or_else(|| LowlevelError("commitNewOutputs without storage".into()))?;
     let (space, off, size) = range(st).ok_or_else(|| LowlevelError("commitNewOutputs: a join output".into()))?;
     let op = fd.call(c).op;
+    // opMarkCalculatedBool (type recovery is always on in the console)
+    if size == 1 && arch_meta_bool(fd, locked) {
+        fd.op_mut(op).flags.set(OpFlags::CALCULATED_BOOL);
+    }
     let exact = newoutput.iter().copied().find(|&v| fd.vn(v).size == size);
     if newoutput.iter().any(|&v| Some(v) != exact) {
         return err(

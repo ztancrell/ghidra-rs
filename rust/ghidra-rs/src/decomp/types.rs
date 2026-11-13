@@ -1,7 +1,9 @@
-//! Data-types (stage S6, first slice): a port of the parts of `type.cc` that type inference
-//! reaches with the rules off — base types, pointers, `code`, the space-base type of a stack
-//! or global space, and arrays of `xunknown1` for values wider than `max_basetype_size`.
-//! Structs, unions, enums, typedefs, partial types and `TypePointerRel` are not ported yet.
+//! Data-types (stage S6): a port of the parts of `type.cc` that type inference reaches with the
+//! rules off — base types, pointers, `code`, the space-base type of a stack or global space,
+//! arrays — plus structs, unions, enums and typedefs as `parse line` defines them (layout by
+//! `TypeStruct::assignFieldOffsets` and the `.cspec`'s alignment map). Partial types,
+//! `TypePointerRel` and descending into structs, unions and enums during inference are not
+//! ported yet (inference fails loudly there).
 //!
 //! Types live in an arena in [`TypeFactory`], addressed by [`TypeId`], and are hash-consed the
 //! way `TypeFactory::findAdd` dedups them, so two equal types are always the same id (the C++
@@ -203,8 +205,26 @@ impl TypeFactory {
     /// `Datatype::getAlignSize`: the size rounded up to the alignment (`getPrimitiveAlignSize`
     /// for primitives, `calcAlignSize` for aggregates); 0 for a space-base type.
     pub(crate) fn align_size(&self, id: TypeId) -> u32 {
-        let (size, align) = (self.size(id), self.alignment(id));
-        size.div_ceil(align) * align
+        let t = self.get(id);
+        match t.kind {
+            // the size is already a multiple of the alignment (calcAlignSize, n * element)
+            Kind::Array { .. } | Kind::Fields(_) | Kind::Spacebase { .. } => t.size,
+            _ if t.meta == Meta::Code => t.size,
+            _ => self.primitive_align_size(t.size),
+        }
+    }
+
+    /// `TypeFactory::getAlignment`: a primitive's alignment by (aligned) size, the last map
+    /// entry for larger sizes.
+    fn align_of_size(&self, size: u32) -> u32 {
+        let m = &self.align_map;
+        m.get(size as usize).or(m.last()).copied().unwrap_or(1)
+    }
+
+    /// `TypeFactory::getPrimitiveAlignSize`: the size rounded up to its alignment.
+    fn primitive_align_size(&self, size: u32) -> u32 {
+        let a = self.align_of_size(size);
+        size.div_ceil(a) * a
     }
 
     /// Port of `TypeFactory::getBase(int4,type_metatype)`.
@@ -304,13 +324,8 @@ impl TypeFactory {
         if ta.size != tb.size {
             return if tb.size > ta.size { 1 } else { -1 };
         }
-        let deeper = |x: TypeId, y: TypeId| {
-            if level - 1 < 0 {
-                // ponytail: the C++ orders by hashed type id here; ours is the creation order
-                return x.cmp(&y) as i32;
-            }
-            self.compare(x, y, level - 1)
-        };
+        // ponytail: past the level limit the C++ orders by hashed type id; ours is creation order
+        let deeper = |x: TypeId, y: TypeId| self.compare(x, y, level - 1);
         match (&ta.kind, &tb.kind) {
             (Kind::Pointer { to: pa, wordsize: wa }, Kind::Pointer { to: pb, wordsize: wb }) => {
                 if wa != wb {
@@ -370,16 +385,16 @@ impl TypeFactory {
         self.types.iter().rposition(|t| t.name.as_deref() == Some(name)).map(|i| TypeId(i as u32))
     }
 
-    /// `TypeFactory::getTypeArray`.
-    pub(crate) fn array_of(&mut self, elem: TypeId, count: u32) -> TypeId {
-        let size = self.size(elem) * count;
-        self.intern(Datatype {
+    /// `TypeFactory::getTypeArray`: `count` elements of the element's align size.
+    pub(crate) fn array_of(&mut self, elem: TypeId, count: u32) -> Result<TypeId, String> {
+        let size = self.align_size(elem).checked_mul(count).ok_or("array too large")?;
+        Ok(self.intern(Datatype {
             meta: Meta::Array,
             submeta: sub::ARRAY,
             size,
             name: None,
             kind: Kind::Array { elem, count },
-        })
+        }))
     }
 
     /// `Datatype::getAlignment`: a primitive's from the alignment map (`TypeFactory::getAlignment`,
@@ -390,28 +405,38 @@ impl TypeFactory {
         match &t.kind {
             Kind::Array { elem, .. } => self.alignment(*elem),
             Kind::Fields(fs) => fs.iter().map(|f| self.alignment(f.2)).max().unwrap_or(1),
-            _ => {
-                let m = &self.align_map;
-                m.get(t.size as usize).or(m.last()).copied().unwrap_or(1)
-            }
+            Kind::Spacebase { .. } => 1,
+            _ if t.meta == Meta::Code => 1,
+            // findAdd: alignment = getAlignment(getPrimitiveAlignSize(size))
+            _ => self.align_of_size(self.primitive_align_size(t.size)),
         }
     }
 
     /// `TypeFactory::setFields` for a struct (`union == false`, fields laid out in order) or a
     /// union (every field at offset 0), named `name`.
-    pub(crate) fn aggregate(&mut self, name: &str, union: bool, members: Vec<(String, TypeId)>) -> TypeId {
+    pub(crate) fn aggregate(
+        &mut self,
+        name: &str,
+        union: bool,
+        members: Vec<(String, TypeId)>,
+    ) -> Result<TypeId, String> {
+        let overflow = || format!("structure {name} is too large");
         let (mut off, mut align, mut fields) = (0u32, 1u32, Vec::new());
         for (n, t) in members {
-            let a = self.alignment(t);
+            if self.meta(t) == Meta::Void {
+                return Err(format!("Illegal field void in structure: {name}"));
+            }
+            // TypeStruct::assignFieldOffsets: align, then advance by the field's align size
+            let (a, cursize) = (self.alignment(t).max(1), self.align_size(t));
             align = align.max(a);
-            let at = if union { 0 } else { off.div_ceil(a) * a };
-            off = if union { off.max(self.size(t)) } else { at + self.size(t) };
+            let at = if union { 0 } else { off.div_ceil(a).checked_mul(a).ok_or_else(overflow)? };
+            off = if union { off.max(cursize) } else { at.checked_add(cursize).ok_or_else(overflow)? };
             fields.push((n, at, t));
         }
-        // the size is the end of the last field; `align_size` pads it (TypeStruct::calcAlignSize)
-        let size = off;
+        // calcAlignSize: the size is padded to the alignment
+        let size = off.div_ceil(align).checked_mul(align).ok_or_else(overflow)?;
         let (meta, submeta) = if union { (Meta::Union, sub::UNION) } else { (Meta::Struct, sub::STRUCT) };
-        self.intern(Datatype { meta, submeta, size, name: Some(name.to_string()), kind: Kind::Fields(fields) })
+        Ok(self.intern(Datatype { meta, submeta, size, name: Some(name.to_string()), kind: Kind::Fields(fields) }))
     }
 
     /// `TypeFactory::getTypeEnum`: a 4-byte unsigned enumeration.
@@ -456,5 +481,26 @@ mod tests {
         let cp = f.pointer(4, code, 1);
         assert_eq!(f.print_raw(cp), "code() *");
         assert_eq!(f.pointer(4, u4, 1), p);
+    }
+
+    /// TypeStruct::assignFieldOffsets and findAdd's primitive alignment (default map).
+    #[test]
+    fn layout() {
+        let mut f = TypeFactory::new();
+        let (i4, c) = (f.base(4, Meta::Int), f.base(1, Meta::Int));
+        let s = f.aggregate("s", false, vec![("a".into(), i4), ("c".into(), c)]).unwrap();
+        assert_eq!((f.size(s), f.align_size(s), f.alignment(s)), (8, 8, 4));
+        let s2 = f.aggregate("s2", false, vec![("c".into(), c), ("a".into(), i4)]).unwrap();
+        assert_eq!(f.size(s2), 8);
+        for (size, align_size, align) in [(3, 4, 4), (5, 8, 8), (6, 8, 8), (7, 8, 8), (10, 16, 8)] {
+            let t = f.base(size, Meta::Unknown);
+            assert_eq!((f.align_size(t), f.alignment(t)), (align_size, align), "size {size}");
+        }
+        let u3 = f.base(3, Meta::Unknown);
+        let arr = f.array_of(u3, 2).unwrap();
+        assert_eq!(f.size(arr), 8);
+        let void = f.base(1, Meta::Void);
+        assert!(f.aggregate("v", false, vec![("v".into(), void)]).is_err());
+        assert!(f.array_of(i4, u32::MAX).is_err());
     }
 }

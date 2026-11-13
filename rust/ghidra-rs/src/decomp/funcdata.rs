@@ -91,6 +91,8 @@ pub struct Funcdata {
     pub(crate) infer_passes: u32,
     /// `ActionConstantPtr::localcount`
     pub(crate) constptr_passes: u32,
+    /// `typerecovery_exceeded`: inference gave up after 7 passes
+    pub(crate) typerecovery_exceeded: bool,
 }
 
 impl Funcdata {
@@ -126,6 +128,7 @@ impl Funcdata {
             typerecovery_start: false,
             infer_passes: 0,
             constptr_passes: 0,
+            typerecovery_exceeded: false,
         }
     }
 
@@ -573,30 +576,9 @@ impl Funcdata {
 
     /// Port of `Funcdata::opStackLoad`: a LOAD of `size` bytes at stack offset `off`, computed
     /// from the stack pointer `sp` (space, offset, size) just before `op`; `ram` is the space the
-    /// stack lives in. Returns the loaded value.
-    /// `opStackLoad` with a stack reference to reuse (`stackref`, stage S6: `buildParam`).
+    /// stack lives in; `stackref` is a stack pointer to reuse (`buildParam`), none to read the
+    /// register afresh. Returns the loaded value.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn op_stack_load_ref(
-        &mut self,
-        sp: (u32, u64, u32),
-        ram: u32,
-        uniq: u32,
-        off: u64,
-        size: u32,
-        op: OpId,
-        stackref: VarnodeId,
-    ) -> Result<VarnodeId> {
-        let addout = self.create_stack_ref(sp, uniq, off, op, Some(stackref))?;
-        let addop = self.vn(addout).def.ok_or_else(|| LowlevelError("stack reference without its op".into()))?;
-        let addr = self.op(op).seq.addr;
-        let loadop = self.new_op(Opcode::Load, addr);
-        let spc = self.new_varnode_space(ram);
-        self.op_set_all_input(loadop, &[spc, addout])?;
-        let res = self.new_unique_out(size, uniq, loadop);
-        self.op_insert_after(loadop, addop)?;
-        Ok(res)
-    }
-
     pub(crate) fn op_stack_load(
         &mut self,
         sp: (u32, u64, u32),
@@ -605,8 +587,9 @@ impl Funcdata {
         off: u64,
         size: u32,
         op: OpId,
+        stackref: Option<VarnodeId>,
     ) -> Result<VarnodeId> {
-        let addout = self.create_stack_ref(sp, uniq, off, op, None)?;
+        let addout = self.create_stack_ref(sp, uniq, off, op, stackref)?;
         let addop = self.vn(addout).def.ok_or_else(|| LowlevelError("stack reference without its op".into()))?;
         let addr = self.op(op).seq.addr;
         let loadop = self.new_op(Opcode::Load, addr);
@@ -618,7 +601,7 @@ impl Funcdata {
         Ok(res)
     }
 
-    /// Port of `Funcdata::createStackRef` (no reused stack pointer, inserted before `op`):
+    /// Port of `Funcdata::createStackRef` (inserted before `op`; `stackref` reuses a stack pointer):
     /// `u = SP + off`. x86 declares no segment op, so there is no `SEGMENTOP` around it.
     fn create_stack_ref(
         &mut self,

@@ -77,6 +77,8 @@ enum Suffix {
 struct Parser<'a> {
     toks: Vec<Tok>,
     pos: usize,
+    /// nesting depth of specifiers and declarators (bounded: the input is untrusted)
+    depth: u32,
     types: &'a mut TypeFactory,
     ptr_size: u32,
 }
@@ -117,6 +119,13 @@ impl Parser<'_> {
     /// A type specifier: a type name, or a `struct`/`union`/`enum` reference or definition;
     /// `const` and `volatile` are dropped.
     fn specifier(&mut self) -> Result<TypeId> {
+        self.enter()?;
+        let r = self.specifier_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn specifier_inner(&mut self) -> Result<TypeId> {
         while self.peek_ident("const") || self.peek_ident("volatile") {
             self.pos += 1;
         }
@@ -140,7 +149,7 @@ impl Parser<'_> {
                         }
                         self.expect(';')?;
                     }
-                    self.types.aggregate(&name, word == "union", members)
+                    self.types.aggregate(&name, word == "union", members).map_err(|e| perr(&e))?
                 } else {
                     self.types.find_by_name(&name).ok_or_else(|| perr(&format!("undefined {word} {name}")))?
                 }
@@ -185,7 +194,7 @@ impl Parser<'_> {
         for s in suffixes.into_iter().rev() {
             ty = match s {
                 Suffix::Pointer => self.types.pointer(self.ptr_size, ty, 1),
-                Suffix::Array(n) => self.types.array_of(ty, n),
+                Suffix::Array(n) => self.types.array_of(ty, n).map_err(|e| perr(&e))?,
                 // ponytail: a function type keeps no prototype yet (TypeCode with a FuncProto)
                 Suffix::Function(..) => self.types.code(),
             };
@@ -195,6 +204,23 @@ impl Parser<'_> {
 
     /// Collects the declarator's suffixes, outermost first, and returns its name.
     fn declarator_into(&mut self, out: &mut Vec<Suffix>) -> Result<Option<String>> {
+        self.enter()?;
+        let r = self.declarator_into_inner(out);
+        self.depth -= 1;
+        r
+    }
+
+    /// Bounds the recursion of nested declarations.
+    fn enter(&mut self) -> Result<()> {
+        self.depth += 1;
+        if self.depth > 64 {
+            self.depth -= 1;
+            return Err(perr("declaration nested too deeply"));
+        }
+        Ok(())
+    }
+
+    fn declarator_into_inner(&mut self, out: &mut Vec<Suffix>) -> Result<Option<String>> {
         let mut ptrs = 0;
         loop {
             if self.eat('*') {
@@ -266,7 +292,7 @@ impl Parser<'_> {
 
 /// Port of `parse_C`: one declaration, ending in `;`. `ptr_size` is the size of a pointer.
 pub(crate) fn parse_line(types: &mut TypeFactory, text: &str, ptr_size: u32) -> Result<Decl> {
-    let mut p = Parser { toks: lex(text)?, pos: 0, types, ptr_size };
+    let mut p = Parser { toks: lex(text)?, pos: 0, depth: 0, types, ptr_size };
     let decl = if p.peek_ident("typedef") {
         p.pos += 1;
         let base = p.specifier()?;
@@ -291,7 +317,7 @@ pub(crate) fn parse_line(types: &mut TypeFactory, text: &str, ptr_size: u32) -> 
         for s in rest.rev() {
             out = match s {
                 Suffix::Pointer => p.types.pointer(ptr_size, out, 1),
-                Suffix::Array(n) => p.types.array_of(out, n),
+                Suffix::Array(n) => p.types.array_of(out, n).map_err(|e| perr(&e))?,
                 Suffix::Function(..) => p.types.code(),
             };
         }

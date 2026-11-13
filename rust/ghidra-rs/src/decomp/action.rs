@@ -324,9 +324,10 @@ pub(crate) fn create_placeholder(fd: &mut Funcdata, arch: &Arch, c: CallId) -> R
     let slot = fd.op(op).ins.len();
     let spec = &arch.spec;
     let uniq = arch.sleigh.uniq_space();
-    let loadval = fd.op_stack_load(spec.stack_pointer, spec.stack_container, uniq, 0, 1, op)?;
+    let loadval = fd.op_stack_load(spec.stack_pointer, spec.stack_container, uniq, 0, 1, op, None)?;
     fd.op_insert_input(op, loadval, slot)?;
     fd.call_mut(c).stack_placeholder_slot = Some(slot);
+    fd.vn_set(loadval, VnFlags::SPACEBASE_PLACEHOLDER);
     if let Some(a) = &mut fd.call_mut(c).active_input {
         a.set_placeholder_slot();
     }

@@ -250,7 +250,7 @@ impl Console {
                 };
                 write!(out, "{}", crate::decomp::print_raw(fd, arch).map_err(|e| e.to_string())?).map_err(io)?;
             }
-            // `IfcParseLine`: a C declaration (types; locked function prototypes are not ported yet)
+            // `IfcParseLine`: a C declaration (types, or a locked function prototype)
             ["parse", "line", ..] => {
                 let Some(arch) = &mut self.arch else { return Err("parse line: no architecture loaded".into()) };
                 let text = line

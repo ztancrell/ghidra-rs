@@ -1097,6 +1097,7 @@ Round two (same branch, 2026-11-13):
   decompiled function and its callees are locked. M8 5 / 8 with `void` and 5 / 8 with `int4` (the M500 runs had not finished at the commit).
   The misses are calls resolved by `ActionDeindirect` to a locked callee: `lateRestriction`
   (`transferLockedInput/Output`, `commitNewInputs/Outputs`) is not ported and fails loudly.
+  Superseded: round three ports `lateRestriction` (M8 8 / 8 for both).
 - Not reached: the D bar (`print raw` with types on the datatests using `parse line`). 58 of
   the 69 files are x86-64 (`x86:LE:64`), 8 ARM/AArch64/MIPS; the Rust decompiler is x86-32 only
   and cannot `load test file` yet. The one x86-32 file (`retstruct.xml`) also needs
@@ -1130,6 +1131,30 @@ Round three (same branch, 2026-11-13):
   the scopes of `database.cc` (parameter symbols, `type varnode`), `unionresolve`, partial
   types and `TypePointerRel`. `cast.cc`/`ActionSetCasts` are S9.
 
+
+Review fixes (same branch, 2026-11-13), after an independent review of the S6 diff:
+
+- A locked call's first stack parameter is marked as the spacebase placeholder
+  (`setSpacebasePlaceholder`, a varnode flag) instead of taking the call's placeholder slot,
+  which heritage removes with `abortSpacebaseRelative`: the parameter stayed lost before.
+  `getSpacebaseRelative` checks the flag. New check: `decomp-locked-options.sh int4 <file>
+  "int4 a"` with `OPTIONS_SKIP_SELF=1` locks only the callees, with one stack parameter each.
+- `ActionConstantPtr::isPointer` no longer needs an exact symbol hit for a constant already
+  typed as a pointer; its locked-call check reads the locked parameter's metatype.
+- Struct layout as `TypeStruct::assignFieldOffsets`: fields advance by their align size, the
+  size is padded (`calcAlignSize`), a `void` field is an error; primitives align as
+  `findAdd` (`getAlignment(getPrimitiveAlignSize(size))`); arrays are count times the element's
+  align size. Sizes and counts from `parse line` are checked for overflow, and its recursion is
+  bounded.
+- Type propagation into a struct, union or enum pointee, or to a partial enum, fails loudly
+  (`TypePointerRel`, `getTypePartialEnum` are not ported) instead of returning a wrong type.
+- `commitNewOutputs`/`funcLinkOutput` mark a boolean locked output (`opMarkCalculatedBool`);
+  the 7-pass limit sets `typeRecoveryExceeded`; `Funcdata::spacebase` makes its types before
+  the loop; an alignment of 0 in the `.cspec` is rejected.
+- The "every function locked" checks use `void name(void)` and `int4 name(void)` only (locked
+  stack parameters of the decompiled function need stack heritage, S6b).
+- Results (final binary): unlocked M8 8 / 8, M500 446 / 446 non-SSE; `void` M8 8 / 8, M500 446 / 446 non-SSE; `int4` M8 8 / 8,
+  M500 446 / 446 non-SSE; callees with a stack parameter M8 8 / 8, M500 446 / 446 non-SSE; S4 regression M8 8 / 8.
 
 ## Speed
 

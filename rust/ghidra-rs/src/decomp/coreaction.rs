@@ -1211,6 +1211,8 @@ fn is_eventual_constant(fd: &Funcdata, vn: VarnodeId, mut max_binary: i32, mut m
 /// pointer is marked; one already marked, written by an INT_ADD, has its uses split.
 pub(crate) fn spacebase(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     let (sp, off, size) = arch.spec.stack_pointer;
+    // Funcdata::spacebase makes the space-base pointer type before looking at the varnodes
+    let sb_ptr = super::infertypes::stack_pointer_type(fd, size);
     for vn in fd.loc_at(Space::Sleigh(sp), off, size) {
         let v = fd.vn(vn);
         if v.is_dead() || v.is_free() {
@@ -1225,7 +1227,7 @@ pub(crate) fn spacebase(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         } else {
             fd.vn_set(vn, VnFlags::SPACEBASE);
             if fd.vn(vn).is_input() {
-                super::infertypes::set_stack_pointer_type(fd, vn);
+                super::infertypes::update_type(fd, vn, sb_ptr, true, true);
             }
         }
     }

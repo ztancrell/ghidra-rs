@@ -261,10 +261,12 @@ pub(crate) fn func_link(fd: &mut Funcdata, arch: &Arch, c: CallId) -> Result<boo
                 fd.new_constant(size, 0)
             }
             Some(Storage::Stack { offset, size }) => {
-                let v = fd.op_stack_load(spec.stack_pointer, spec.stack_container, uniq, *offset, *size, op)?;
+                let v = fd.op_stack_load(spec.stack_pointer, spec.stack_container, uniq, *offset, *size, op, None)?;
                 if !setplaceholder {
+                    // funcLinkInput: the first stack parameter is marked, not made the
+                    // placeholder slot
                     setplaceholder = true;
-                    fd.call_mut(c).stack_placeholder_slot = Some(slot);
+                    fd.vn_set(v, VnFlags::SPACEBASE_PLACEHOLDER);
                     spacebase = false;
                 }
                 v
@@ -289,6 +291,9 @@ pub(crate) fn func_link(fd: &mut Funcdata, arch: &Arch, c: CallId) -> Result<boo
         }
         if type_class(&arch.types, locked.output.ty) == TypeClass::Float && arch.types.size(locked.output.ty) != 10 {
             return err("a locked float return value needing an extension: not implemented in ghidra-rs yet");
+        }
+        if arch.types.meta(locked.output.ty) == Meta::Bool {
+            fd.op_mut(op).flags.set(super::op::OpFlags::CALCULATED_BOOL);
         }
         let (space, off, size) = location(fd, st)?;
         fd.new_varnode_out(size, space, off, op);

@@ -18,6 +18,9 @@ fn decode_alignment_map(el: &Element) -> Result<Vec<u32>> {
             v.parse().map_err(|_| LowlevelError(format!("<size_alignment_map>: bad {n} {v}")))
         };
         let (sz, val) = (num("size")? as usize, num("alignment")?);
+        if val == 0 || sz > 64 {
+            return err(format!("<size_alignment_map>: bad entry size {sz} alignment {val}"));
+        }
         if map.len() <= sz {
             map.resize(sz + 1, None);
         }

@@ -95,6 +95,9 @@ impl VnFlags {
     pub(crate) const SYMCHECK_COMPLETE: VnFlags = VnFlags(1 << 20);
     /// `lockedinput`: an input of a locked prototype (stage S6)
     pub(crate) const LOCKED_INPUT: VnFlags = VnFlags(1 << 21);
+    /// `spacebase_placeholder`: the value a call loads from the stack to learn its stack offset
+    /// (the placeholder, or a locked call's first stack parameter; stage S6)
+    pub(crate) const SPACEBASE_PLACEHOLDER: VnFlags = VnFlags(1 << 22);
 
     pub(crate) fn has(self, f: VnFlags) -> bool {
         self.0 & f.0 != 0

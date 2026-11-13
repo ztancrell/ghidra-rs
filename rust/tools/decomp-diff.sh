@@ -13,6 +13,8 @@
 #   OPTIONS  file of extra commands run before `load function` (option togglerule ..., option currentaction ...)
 #   JOBS     parallel runs (default: nproc)
 #   CONTINUES  after the print, this many times `continue` and the print again (next hit of BREAK)
+#   OPTIONS_SKIP_SELF=1  drop the OPTIONS lines declaring the decompiled function (`<name>(`), so
+#            a `decomp-locked-options.sh` file locks only its callees
 #   VERBOSE=1  for each mismatch, also the break lines, first differing op's block and context (decomp-show.sh)
 #   ORDER=easy run the corpus simplest first (decomp-rank.sh, cached at rust/target/decomp-check/<corpus>.ranked)
 #   STOP=1     one function at a time, in corpus order, stopping at the first mismatch the reference ran
@@ -77,7 +79,14 @@ one() {
     {
         echo "load file $BIN"
         echo "source $PRELUDE"
-        [ -n "$OPTIONS" ] && cat "$OPTIONS"
+        if [ -n "$OPTIONS" ] && [ -n "$OPTIONS_SKIP_SELF" ]; then
+            # leave out the lines declaring the decompiled function (`parse line extern ... name(`),
+            # so only its callees get a locked prototype
+            self=$(awk -v a="$(printf "0x%08x" "$a")" '$1 == "map" && $2 == "function" && $3 == a { n = ($4 == "" || $4 == "nocode") ? "func_" a : $4 } END { print n }' "$PRELUDE")
+            grep -v -F " $self(" "$OPTIONS"
+        elif [ -n "$OPTIONS" ]; then
+            cat "$OPTIONS"
+        fi
         awk -v a="$(printf "0x%08x" "$a")" '$1 == "map" && $2 == "function" && $3 == a { n = ($4 == "" || $4 == "nocode") ? "func_" a : $4 } END { print (n == "" ? "load addr " a : "load function " n) }' "$PRELUDE"
         [ -n "$BREAK" ] && echo "break start $BREAK"
         echo decompile

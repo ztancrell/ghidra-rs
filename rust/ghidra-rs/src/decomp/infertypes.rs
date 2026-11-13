@@ -1,4 +1,4 @@
-//! Type inference (stage S6, first slice): `ActionStartTypes`, `ActionInferTypes` and
+//! Type inference (stage S6): `ActionStartTypes`, `ActionInferTypes` and
 //! `ActionConstantPtr` (coreaction.cc), the local types and propagation rules of `typeop.cc`
 //! they read, `Funcdata::spacebaseConstant`, and the global-scope lookups they need
 //! (`Scope::queryContainer` over the console's `map function` and `map externalref` symbols).
@@ -7,6 +7,7 @@
 use super::funcdata::Funcdata;
 use super::op::OpId;
 use super::opcode::Opcode;
+use super::rangeutil::{bit_transitions, calc_mask};
 use super::types::{Kind, Meta, TypeId, GLOBAL_SCOPE, LOCAL_SCOPE};
 use super::varnode::{Space, VarnodeId, VnFlags, CONST_SPACE};
 use super::{err, Arch, Result};
@@ -194,19 +195,28 @@ fn to_pointer(fd: &mut Funcdata, dt: TypeId, size: u32) -> TypeId {
 }
 
 /// Port of `TypeOp::propagateFromPointer`.
-fn from_pointer(fd: &Funcdata, dt: TypeId, size: u32) -> Option<TypeId> {
-    let to = fd.types.ptr_to(dt)?;
-    (fd.types.size(to) == size).then_some(to)
+fn from_pointer(fd: &Funcdata, dt: TypeId, size: u32) -> Result<Option<TypeId>> {
+    let Some(to) = fd.types.ptr_to(dt) else { return Ok(None) };
+    if fd.types.size(to) == size {
+        return Ok(Some(to));
+    }
+    if matches!(fd.types.get(to).kind, Kind::Enum(_)) {
+        return err("type propagation to a partial enum: not implemented in ghidra-rs yet");
+    }
+    Ok(None)
 }
 
 /// Port of `Datatype::getSubType`, with `TypeSpacebase::getSubType` answered from the scopes.
-fn sub_type(fd: &mut Funcdata, arch: &Arch, t: TypeId, off: i64) -> Option<(TypeId, i64)> {
+fn sub_type(fd: &mut Funcdata, arch: &Arch, t: TypeId, off: i64) -> Result<Option<(TypeId, i64)>> {
+    if matches!(fd.types.get(t).kind, Kind::Fields(_) | Kind::Enum(_)) {
+        return err("type propagation into a struct, union or enum: not implemented in ghidra-rs yet");
+    }
     if let Kind::Spacebase { scope, .. } = fd.types.get(t).kind {
         let addr = off as u64 & calc_mask(arch.spec.stack_pointer.2);
         if scope == GLOBAL_SCOPE {
             if let Some(e) = query_global(arch, addr) {
                 let ty = e.symbol_type(fd, arch);
-                return Some((ty, (addr - e.addr) as i64));
+                return Ok(Some((ty, (addr - e.addr) as i64)));
             }
         }
         // the local scope holds no symbols before `localrecovery`; its range
@@ -217,19 +227,11 @@ fn sub_type(fd: &mut Funcdata, arch: &Arch, t: TypeId, off: i64) -> Option<(Type
         let highest = calc_mask(arch.spec.stack_pointer.2);
         let local_first = highest - (highest >> 1).min(0x7fff_ffff);
         if scope != GLOBAL_SCOPE && addr < local_first && !(4..504).contains(&addr) {
-            return None;
+            return Ok(None);
         }
-        return Some((fd.types.base(1, Meta::Unknown), 0));
+        return Ok(Some((fd.types.base(1, Meta::Unknown), 0)));
     }
-    fd.types.sub_type(t, off)
-}
-
-fn calc_mask(size: u32) -> u64 {
-    if size >= 8 {
-        u64::MAX
-    } else {
-        (1u64 << (size * 8)) - 1
-    }
+    Ok(fd.types.sub_type(t, off))
 }
 
 fn sign_extend(v: u64, bit: u32) -> i64 {
@@ -261,10 +263,16 @@ fn down_chain(
             return Ok(Some((ptr, 0)));
         }
     }
-    if matches!(fd.types.meta(to), Meta::Array) {
-        return err("type propagation into an array (TypePointerRel): not implemented in ghidra-rs yet");
+    // downChain: an array or struct parent makes a TypePointerRel, an enum a pointer to uint1,
+    // a union needs resolution: none of them is ported yet
+    if matches!(fd.types.meta(to), Meta::Array | Meta::Struct | Meta::Union)
+        || matches!(fd.types.get(to).kind, Kind::Enum(_))
+    {
+        return err(
+            "type propagation into an array, struct, union or enum (downChain): not implemented in ghidra-rs yet",
+        );
     }
-    let Some((pt, newoff)) = sub_type(fd, arch, to, off) else { return Ok(None) };
+    let Some((pt, newoff)) = sub_type(fd, arch, to, off)? else { return Ok(None) };
     Ok(Some((fd.types.pointer_strip_array(size, pt, WS), newoff)))
 }
 
@@ -414,7 +422,7 @@ fn propagate_type(
             if to_ptr {
                 Some(to_pointer(fd, alt, size))
             } else {
-                from_pointer(fd, alt, size)
+                from_pointer(fd, alt, size)?
             }
         }
         Opcode::IntEqual | Opcode::IntNotequal | Opcode::IntLess | Opcode::IntLessequal => {
@@ -466,14 +474,14 @@ fn propagate_type(
             }
             // little-endian: input 0 is the most significant piece
             let off = if outslot == 0 { fd.vn(fd.op(op).ins[1]).size } else { 0 };
-            narrow(fd, arch, alt, i64::from(off), fd.vn(outvn).size)
+            narrow(fd, arch, alt, i64::from(off), fd.vn(outvn).size)?
         }
         Opcode::Subpiece => {
             if inslot != 0 || outslot != -1 {
                 return Ok(None);
             }
             let off = fd.vn(fd.op(op).ins[1]).offset as i64;
-            narrow(fd, arch, alt, off, fd.vn(outvn).size)
+            narrow(fd, arch, alt, off, fd.vn(outvn).size)?
         }
         Opcode::Ptradd => return err("type propagation through PTRADD: not implemented in ghidra-rs yet"),
         _ => None,
@@ -482,14 +490,14 @@ fn propagate_type(
 
 /// The loop of `TypeOpPiece/TypeOpSubpiece::propagateType`: descend into `alt` until a
 /// sub-type of `size` bytes sits at offset 0.
-fn narrow(fd: &mut Funcdata, arch: &Arch, alt: TypeId, mut off: i64, size: u32) -> Option<TypeId> {
+fn narrow(fd: &mut Funcdata, arch: &Arch, alt: TypeId, mut off: i64, size: u32) -> Result<Option<TypeId>> {
     let mut t = alt;
     while off != 0 || fd.types.size(t) != size {
-        let (n, o) = sub_type(fd, arch, t, off)?;
+        let Some((n, o)) = sub_type(fd, arch, t, off)? else { return Ok(None) };
         t = n;
         off = o;
     }
-    Some(t)
+    Ok(Some(t))
 }
 
 /// Port of `TypeOp::floatSignManipulation` (true for FLOAT_ABS or FLOAT_NEG done with bits).
@@ -588,24 +596,30 @@ fn propagate_one(fd: &mut Funcdata, arch: &Arch, st: &mut Infer, vn: VarnodeId) 
             continue;
         };
         let (inslot, slot) = (top.inslot, top.slot);
-        if propagate_edge(fd, arch, st, op, inslot, slot)? {
+        let next = if propagate_edge(fd, arch, st, op, inslot, slot)? {
             let o = fd.op(op);
-            let next = if slot == -1 { o.out } else { o.ins.get(slot as usize).copied() };
-            let top = stack.last_mut().expect("the state just read");
-            top.step(fd);
-            if let Some(n) = next {
-                stack.push(State::new(fd, n));
-                st.mark[n.0 as usize] = true;
+            if slot == -1 {
+                o.out
+            } else {
+                o.ins.get(slot as usize).copied()
             }
-        } else if let Some(top) = stack.last_mut() {
+        } else {
+            None
+        };
+        // step before pushing the next state
+        if let Some(top) = stack.last_mut() {
             top.step(fd);
+        }
+        if let Some(n) = next {
+            stack.push(State::new(fd, n));
+            st.mark[n.0 as usize] = true;
         }
     }
     Ok(())
 }
 
-/// Port of `ActionInferTypes::canonicalReturnOp` and `propagateAcrossReturns` (the
-/// console never locks the function's output).
+/// Port of `ActionInferTypes::canonicalReturnOp` and `propagateAcrossReturns` (nothing to do
+/// when the function's output is locked).
 fn propagate_across_returns(fd: &mut Funcdata, arch: &Arch, st: &mut Infer) -> Result<()> {
     if fd.proto.locked.is_some() {
         return Ok(());
@@ -668,6 +682,7 @@ pub(crate) fn infer_types(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     if fd.infer_passes >= 7 {
         if fd.infer_passes == 7 {
             fd.warning_header("Type propagation algorithm not settling");
+            fd.typerecovery_exceeded = true;
             fd.infer_passes += 1;
         }
         return Ok(0);
@@ -738,24 +753,6 @@ fn query_global(arch: &Arch, addr: u64) -> Option<Entry> {
         .map(|s| Entry { addr: s, externref: true })
 }
 
-/// Port of `bit_transitions`.
-fn bit_transitions(mut val: u64, size: u32) -> u32 {
-    let mut res = 0;
-    let mut last = val & 1;
-    for _ in 1..8 * size {
-        val >>= 1;
-        let cur = val & 1;
-        if cur != last {
-            res += 1;
-            last = cur;
-        }
-        if val == 0 {
-            break;
-        }
-    }
-    res
-}
-
 fn set_symcheck(fd: &mut Funcdata, vn: VarnodeId, complete: bool) {
     let f = &mut fd.vn_mut(vn).flags;
     f.clear(VnFlags::SYMCHECK_COMPLETE);
@@ -769,7 +766,8 @@ fn is_pointer(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, op: OpId, slot: usi
     set_symcheck(fd, vn, true);
     let ty = vn_type(fd, vn);
     let (off, size) = (fd.vn(vn).offset, fd.vn(vn).size);
-    let mut needexact = true;
+    // a constant already typed as a pointer need not hit a symbol exactly (isPointer)
+    let mut needexact = fd.types.meta(ty) != Meta::Ptr;
     if fd.types.meta(ty) != Meta::Ptr {
         if fd.vn(vn).has(VnFlags::TYPELOCK) {
             return None;
@@ -778,8 +776,7 @@ fn is_pointer(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, op: OpId, slot: usi
         match o.opc {
             Opcode::Call | Opcode::Callind if slot == 0 => return None,
             Opcode::Call | Opcode::Callind
-                if locked_input_type(fd, op, slot)
-                    .is_some_and(|t| !matches!(fd.types.meta(t), Meta::Ptr | Meta::Unknown)) =>
+                if locked_param_meta(fd, op, slot).is_some_and(|m| !matches!(m, Meta::Ptr | Meta::Unknown)) =>
             {
                 return None
             }
@@ -943,11 +940,9 @@ pub(crate) fn constant_ptr(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
 
 /// The stack pointer's type once `ActionSpacebase` marks it (`Funcdata::spacebase`): a
 /// pointer to the local scope's space-base type, locked.
-pub(crate) fn set_stack_pointer_type(fd: &mut Funcdata, vn: VarnodeId) {
-    let size = fd.vn(vn).size;
+pub(crate) fn stack_pointer_type(fd: &mut Funcdata, size: u32) -> TypeId {
     let sb = fd.types.spacebase(Space::Stack, LOCAL_SCOPE);
-    let ptr = fd.types.pointer(size, sb, WS);
-    update_type(fd, vn, ptr, true, true);
+    fd.types.pointer(size, sb, WS)
 }
 
 /// The type a global symbol forces on a new ram varnode exactly covering it
@@ -1007,6 +1002,14 @@ fn locked_input_type(fd: &Funcdata, op: OpId, slot: usize) -> Option<TypeId> {
         _ => return None,
     };
     (fd.types.meta(t) != Meta::Void).then_some(t)
+}
+
+/// `ActionConstantPtr::isPointer` on a call: the metatype of the locked parameter in the slot
+/// (`fc->isInputLocked() && fc->numParams() > slot-1`).
+fn locked_param_meta(fd: &Funcdata, op: OpId, slot: usize) -> Option<Meta> {
+    let l = fd.call(fd.call_of(op)?).proto.locked.as_ref()?;
+    let p = l.inputs.get(slot.checked_sub(1)?)?;
+    Some(fd.types.meta(p.ty))
 }
 
 /// `ActionConstantPtr::checkCopy` false: the COPY feeds only a RETURN of a locked output that
