@@ -233,6 +233,13 @@ impl BlockGraph {
         }
     }
 
+    /// Port of `BlockGraph::moveOutEdge`: out-edge `slot` of `blold` now leaves `blnew` (the
+    /// target keeps its in-slot).
+    pub(crate) fn move_out_edge(&mut self, blold: BlockId, slot: usize, blnew: BlockId) {
+        let Edge { point, reverse, .. } = self.block(blold).outs[slot];
+        self.replace_in_edge(point, reverse, blnew);
+    }
+
     /// Port of `FlowBlock::replaceInEdge`: in-edge `num` of `bl` now comes from `b`.
     fn replace_in_edge(&mut self, bl: BlockId, num: usize, b: BlockId) {
         let Edge { point: oldb, reverse, label } = self.block(bl).ins[num];

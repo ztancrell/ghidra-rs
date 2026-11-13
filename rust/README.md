@@ -1564,10 +1564,11 @@ sides (`DECOMP_SKIP_ACTIONS`). The commands and the reasons are in
 | m500 | 499 / 500 (499 / 499 the reference finishes) | 496 / 500 (496 / 499; the misses are R3's 0x47a6b0, 0x4891e0, 0x6fa6e0) |
 
 The miss is 0x4c48d0 (neither engine finishes within the timeout). After the R2 merge the
-rule-stage column is 463 / 499: `ActionNodeJoin` (`ConditionalJoin`, not ported) joins branches
-whose conditions `RuleCondNegate` made equal; 498 / 499 with `nodejoin` skipped (plan, "S8"). The existing bars hold on
-this branch (R3 check 495 / 499, paramdouble 500 / 500, S4 and S6 checks 498 / 500). Not ported yet:
-`prefercomplement` and `structuretransform` (they wait for R2's flip helpers), `finalstructure`,
+rule-stage column was 463 / 499: the reference joined branches whose conditions `RuleCondNegate`
+made equal (`ActionNodeJoin`), which ghidra-rs did not port. Superseded: `ActionNodeJoin` is now
+ported (`decomp/nodejoin.rs`, `ConditionalJoin` and `nodeJoinCreateBlock`), and the rule-stage
+column is 498 / 499 with `nodejoin` on (it changes 35 M500 outputs; all match). The S4 and S6 checks rise to 499 / 500 with it (0x4919f0). Not ported yet:
+`prefercomplement` and `structuretransform` (R2's flip helpers they need are now on master), `finalstructure`,
 `returnsplit` and structured `printRaw`.
 
 New flag bit: `OpFlags::FALLTHRU_TRUE` (`1 << 16`).

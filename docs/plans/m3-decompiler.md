@@ -653,19 +653,31 @@ paramdouble 500 / 500, the S4 check 498 / 500, the S6 check (unlocked) 498 / 500
 checks keep `blockrecovery` off, so `blockstructure` never runs in them.
 
 After merging R2 (2026-11-13; `cleanup` on, `condnegate` ported): rules off M8 8 / 8, M500 499 / 499;
-rule-stage options M8 8 / 8, M500 463 / 499. The 35 new misses come from `ActionNodeJoin`:
+rule-stage options M8 8 / 8, M500 463 / 499. Superseded by the `ConditionalJoin` port below. The 35
+new misses came from `ActionNodeJoin`:
 `RuleCondNegate` now turns the flips `blockstructure` sets into BOOL_NEGATE ops, so two branches
 get functionally equal conditions in different varnodes and the reference joins them
 (`ConditionalJoin`), which ghidra-rs does not port (its detection only sees one shared varnode,
 so it misses them silently). With `nodejoin` skipped on both sides the rule-stage check is
-498 / 499 (miss 0x47a6b0, `ActionConditionalExe`). Next: port `ConditionalJoin`
+498 / 499 (miss 0x47a6b0, `ActionConditionalExe`). Ported since (below):
 (`functionalEqualityLevel`, `nodeJoinCreateBlock`).
+
+`ActionNodeJoin` is now ported (`decomp/nodejoin.rs`: `ConditionalJoin` with `findDups`,
+`checkExitBlock`, `setupMultiequals`, `moveCbranch`, `cutDownMultiequals`, and
+`Funcdata::nodeJoinCreateBlock`; it reuses R2's `functionalEqualityLevel`), replacing S4's
+detection. With `nodejoin` running on both sides: rules off M8 8 / 8, M500 499 / 499; rule-stage
+options M8 8 / 8, M500 498 / 499 (miss 0x47a6b0, `ActionConditionalExe`). The action changes the
+reference output of 35 M500 functions under the rule-stage options; all 35 are identical.
+Other bars on the same binary: R3 check 498 / 499, subvar and R4 checks 498 / 499, paramdouble
+500 / 500; the S4 and S6 (unlocked) checks rise to 499 / 500 (499 / 499 the reference finishes):
+0x4919f0, the miss R3 left "not traced", is a join of two branches on one condition, which S4's
+detection let through.
 
 Not ported, left for part two:
 
 - `prefercomplement` and `structuretransform`: they need `opFlipInPlaceTest/Execute`,
   `opNormalizeFlip`, `replaceLessequal` and the boolean-flip table, which R2 ports
-  (`rules/boolean.rs`, `rules/compare.rs` on `m3-r2`). Blocked until R2 merges. The for-loop part
+  (`rules/boolean.rs`, `rules/compare.rs` on `m3-r2`). Superseded: "blocked until R2 merges"; R2 is on master now, so they are next. The for-loop part
   of `BlockWhileDo::finalTransform` (`findLoopVariable`, `findInitializer`,
   `PcodeOp::isMoveable`) also comes with it.
 - `finalstructure` (`orderBlocks`, `finalizePrinting`, `scopeBreak`, `markUnstructured`,

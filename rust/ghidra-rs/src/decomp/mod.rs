@@ -26,6 +26,7 @@ mod jumptable;
 mod lanedivide;
 mod lateres;
 mod locked;
+mod nodejoin;
 mod op;
 mod opcode;
 mod print;
