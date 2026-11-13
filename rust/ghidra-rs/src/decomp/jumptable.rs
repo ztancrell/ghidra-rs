@@ -345,7 +345,7 @@ fn calc_folded(fd: &Funcdata, arch: &Arch) -> Vec<Option<u64>> {
 }
 
 /// `mostsigbit_set`: the index of the highest set bit, -1 for 0.
-fn mostsigbit_set(v: u64) -> i32 {
+pub(crate) fn mostsigbit_set(v: u64) -> i32 {
     63 - v.leading_zeros() as i32
 }
 
@@ -354,7 +354,7 @@ fn def(fd: &Funcdata, vn: VarnodeId) -> Option<OpId> {
 }
 
 /// `PcodeOp::isBoolOutput`
-fn is_bool_output(opc: Opcode) -> bool {
+pub(crate) fn is_bool_output(opc: Opcode) -> bool {
     use Opcode::*;
     matches!(
         opc,

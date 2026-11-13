@@ -32,6 +32,7 @@ mod rangeutil;
 mod readers;
 mod rules;
 mod stdsort;
+mod subfloat;
 mod transform;
 mod types;
 mod varnode;

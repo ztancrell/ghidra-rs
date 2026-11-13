@@ -2,7 +2,8 @@
 # Writes rust/tools/corpus/r1-options.txt, the options of the rule-stage check: S4's options
 # (s4-options.txt) with group `analysis` on, and `option togglerule <rule> off` for every rule of
 # `oppool1` whose group is on and which ghidra-rs does not port yet (the table in
-# ghidra-rs/src/decomp/rules/mod.rs). Rerun it when rules land.
+# ghidra-rs/src/decomp/rules/mod.rs), and r4-options.txt, the same with group `floatprecision` on.
+# Rerun it when rules land.
 set -e
 rust=$(cd "$(dirname "$0")/.." && pwd)
 cpp=$rust/../Ghidra/Features/Decompiler/src/decompile/cpp
@@ -21,5 +22,7 @@ names=$(grep -ho 'Rule[A-Za-z0-9]*(const string &g[^)]*) : Rule( *g *, *[^,]*, *
             case "$ported" in *" $n "*) ;; *) echo "option togglerule $n off" ;; esac
         done
 } > "$rust/tools/corpus/r1-options.txt"
+# r4-options.txt: the same with group `floatprecision` on (stage R4 ports all its rules)
+grep -v "decompile floatprecision off" "$rust/tools/corpus/r1-options.txt" > "$rust/tools/corpus/r4-options.txt"
 echo "ported:$ported"
 echo "togglerules: $(grep -c togglerule "$rust/tools/corpus/r1-options.txt")"

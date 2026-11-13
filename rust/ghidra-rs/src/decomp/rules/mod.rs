@@ -1,6 +1,7 @@
 //! Rule pools: the rules of `oppool1` ported so far (stage R1: copies, constants,
 //! arithmetic; stage R3: extension, concat and sub-pieces in [`extend`], [`piece`],
-//! [`subpiece`]; ruleaction.cc) and the pool walk ([`pool`]). The rules are in families
+//! [`subpiece`]; stage R4: division, remainder, sign and float rules in [`div`], [`modulo`],
+//! [`floatrules`] and `RuleSubfloatConvert` in `decomp/subfloat.rs`; ruleaction.cc) and the pool walk ([`pool`]). The rules are in families
 //! ([`copy`], [`arith`]) with the expression helpers they share ([`cse`]) and float constant
 //! folding ([`float`]); the `Funcdata` methods they need (`cseEliminateList`,
 //! `distributeIntMultAdd`, `totalReplaceConstant`, ...) are in `funcdata.rs`.
@@ -13,8 +14,11 @@
 mod arith;
 mod copy;
 mod cse;
+mod div;
 mod extend;
 mod float;
+mod floatrules;
+mod modulo;
 mod piece;
 mod pool;
 mod subpiece;
@@ -24,8 +28,11 @@ pub(crate) use pool::{nonzero_mask, pool_apply, select, Pool};
 use arith::*;
 use copy::*;
 use cse::*;
+use div::*;
 use extend::*;
 use float::*;
+use floatrules::*;
+use modulo::*;
 use piece::*;
 use subpiece::*;
 
@@ -33,9 +40,11 @@ use std::collections::HashSet;
 
 use super::block::BlockId;
 use super::emulate::{eval_binary, eval_unary};
+use super::jumptable::{is_bool_output, mostsigbit_set};
 use super::op::{OpFlags, OpId};
 use super::opcode::Opcode;
 use super::rangeutil::{calc_mask, sign_extend};
+use super::subfloat::subfloat_convert;
 use super::varnode::{Space, VarnodeId, VnFlags, CONST_SPACE};
 use super::{err, stdsort, Arch, Funcdata, LowlevelError, Result};
 
@@ -117,9 +126,32 @@ pub(crate) const OPPOOL1: &[Rule] = &[
     r("humptyor", "analysis", &[IntOr], humpty_or),
     r("negateidentity", "analysis", &[IntNegate], negate_identity),
     r("subnormal", "analysis", &[Subpiece], sub_normal),
+    r("positivediv", "analysis", &[IntSdiv, IntSrem], positive_div),
+    r("divtermadd", "analysis", &[Subpiece, IntRight, IntSright], div_term_add),
+    r("divtermadd2", "analysis", &[IntRight], div_term_add2),
+    r("divopt", "analysis", &[Subpiece, IntRight, IntSright], div_opt),
+    r("signform", "analysis", &[Subpiece], sign_form),
+    r("signform2", "analysis", &[IntSright], sign_form2),
+    r("signdiv2", "analysis", &[IntSright], sign_div2),
+    r("divchain", "analysis", &[IntDiv, IntSdiv], div_chain),
+    r("signnearmult", "analysis", &[IntAnd], sign_near_mult),
+    r("modopt", "analysis", &[IntDiv, IntSdiv], mod_opt),
+    r("signmod2nopt", "analysis", &[IntRight], sign_mod2n_opt),
+    r("signmod2nopt2", "analysis", &[IntMult], sign_mod2n_opt2),
+    r("signmod2opt", "analysis", &[IntAnd], sign_mod2_opt),
+    r("floatrange", "analysis", &[BoolOr, BoolAnd], float_range),
     r("piece2zext", "analysis", &[Piece], piece_2_zext),
     r("piece2sext", "analysis", &[Piece], piece_2_sext),
+    r("floatsign", "analysis", &[
+        FloatEqual, FloatNotequal, FloatLess, FloatLessequal, FloatNan, FloatAdd, FloatDiv, FloatMult,
+        FloatSub, FloatNeg, FloatAbs, FloatSqrt, FloatFloat2float, FloatCeil, FloatFloor, FloatRound,
+        FloatInt2float, FloatTrunc], float_sign),
     r("negatenegate", "analysis", &[IntNegate], negate_negate),
+    r("subfloat_convert", "floatprecision", &[FloatFloat2float], subfloat_convert),
+    r("floatcast", "floatprecision", &[FloatFloat2float, FloatTrunc], float_cast),
+    r("ignorenan", "floatprecision", &[FloatNan], ignore_nan),
+    r("unsigned2float", "analysis", &[FloatInt2float], unsigned_2_float),
+    r("int2floatcollapse", "analysis", &[FloatInt2float], int2float_collapse),
 ];
 
 // ---- helpers on ops and varnodes ----

@@ -531,6 +531,24 @@ M500 498 / 500; S6 unlocked, locked `void`, locked `int4` and callees `int4(int4
 M8 8 / 8, M500 498 / 500 (498 / 499 the reference finishes; the miss is 0x4919f0).
 Superseded: the "446 / 446 non-SSE" results of the S6 section above.
 
+### R4: done on branch `m3-r4` (2026-11-13)
+
+Ported: the 20 division, remainder, sign and float rules of `oppool1` (list in
+`rust/README.md`, "Stage R4"): `rules/div.rs`, `rules/modulo.rs`, `rules/floatrules.rs`, and
+`RuleSubfloatConvert` with `SubfloatFlow` and `FloatFormat::convertEncoding` in
+`decomp/subfloat.rs` (its own file: `subflow.rs` is R3b's). The 128-bit arithmetic of
+`RuleDivOpt` and `RuleDivTermAdd*` is `u128`; a division by zero fails as `udiv128` throws.
+`RuleFloatSignCleanup` belongs to the `cleanup` pool (R2) and is not ported here.
+
+Check as R1 with group `floatprecision` on: `rust/tools/corpus/r4-options.txt` (written by
+`r1-options.sh` next to `r1-options.txt`, now 59 `togglerule`s). M8 8 / 8; M500 495 / 499 of
+the functions the reference finishes (99.2 %, bar 98 %: reached), the same four misses as R3
+(0x47a6b0, 0x4891e0, 0x4919f0, 0x6fa6e0) and 0x4c48d0 not finishing on the reference. The bar
+is meaningful: 90 M500 reference outputs change when the R4 rules are switched off (and
+`floatprecision` is off), 7 with a division or remainder, 83 float; 89 of them are identical
+(the miss is 0x4891e0, a miss of R3 already). S3 paramdouble 500 / 500; S4 and the four S6
+checks: see `rust/README.md`, "Stage R4".
+
 ## Running stages in parallel
 
 Strict chain first: S0 → S1a → S1b → S2. After S2 the work fans out. Under the cap of two

@@ -157,6 +157,9 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `subflow.cc`) and `RulePiecePathology` are not ported.
    Merged with S6: the S6 checks (unlocked, `void`, `int4`, callees) are M8 8 / 8, M500
    498 / 499 each with lane division on. Superseded: "446 / 446 non-SSE" above.
+   R4 on branch `m3-r4`: 20 division, remainder, sign and float rules, `floatprecision`
+   (`SubfloatFlow`) included; the R1 check with `floatprecision` on: M8 8 / 8, M500 495 / 499
+   (99.2 %, bar 98 %); 90 M500 functions exercise the rules, 89 of them identical.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.
