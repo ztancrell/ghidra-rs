@@ -1,6 +1,6 @@
 # Milestone 2c: the mercs2 analysis pipeline in ghidra-rs
 
-Written 2026-11-12 as a plan. Built so far: nothing (no code, no reference run yet).
+Written 2026-11-12 as a plan. Built so far: the reference run (`rust/tools/m2c-reference.sh`); no Rust code.
 
 ## Goal
 
@@ -212,71 +212,60 @@ reading the code; S0's evidence export replaces it with counts before any of it 
 5. Call targets found in decoded wrapper-section code.
 6. Pattern hits are descended at once with no validity check.
 
-## Reference data (needed from the desktop)
+## Reference data (run 2026-11-12)
 
-On this Mac since 2026-11-12: both exes and the fold's two input files (copied from the
-desktop). Still missing: Ghidra, the reference exports, a built `.sla`. One run on the
-desktop produces everything. It uses its own project directory (`build/ghidra-m2c`), so the
-desktop's working project `build/ghidra` and `build/functions.csv` are not touched.
+Made on the desktop with `rust/tools/m2c-reference.sh` (Ghidra 12.2, mercs2 395ba6b), in its
+own project `build/ghidra-m2c`, and copied to the Mac's `mercs2-rearmed/build/m2c-ref/`
+(27 MB, gitignored; never enters either repo). It is the pipeline with an ExportFunctions and
+ExportGaps snapshot after every script, for both images. The script in the repo is the two
+runs below merged into one file; in that merged form it has not been run.
 
-The run is the pipeline with an ExportFunctions and ExportGaps snapshot after every script
-(so each stage can be measured alone), for both images, plus one evidence export. Untested
-here (no Ghidra on the Mac): if a step fails, send the log.
+| Snapshot | After | Functions | Script's own summary |
+|---|---|---|---|
+| `a0-import` | import (12 min) | 23,289 | |
+| `a1-bindings` | ExportBindings `--recover` | 23,790 | 54 tables, 1,339 rows, 501 created, 0 unresolved |
+| `a2-recover` | RecoverFunctions, audit | 39,748 | 15,938 created, 36,270 candidates, 2 direct-call passes |
+| `a3-fold` | FoldSlotFragments (patched) | 37,583 | 2,183 removed, 1,438 owners refit, 106 kept, 1 refit failed |
+| `a4-relocated` | AddRelocatedEntries | 37,620 | 37 added |
+| `a5-final` | ClearFalseNoReturn | 37,619 | 1 cleared, 458 call sites, 182,403 bytes added, 25 kept, 79 cleared_in_flow; 39,557 gap rows |
+| `o0-import` | import of the original image | 20,866 | |
+| `o1-bindings` | ExportBindings `--recover` | 21,367 | 501 created |
+| `o2-recover` | RecoverFunctions, audit | 37,331 | 15,948 created |
 
-```sh
-cd ~/projects/mercs/mercs2-decomp        # the mercs2 checkout on the desktop
-G=${GHIDRA_HOME:-/opt/ghidra}; R=build/m2c-ref; mkdir -p $R
-grep -h version $G/Ghidra/application.properties > $R/ghidra-version.txt
-git rev-parse HEAD > $R/mercs2-commit.txt
-H="$G/support/analyzeHeadless build/ghidra-m2c m2c -scriptPath tools/ghidra"
-snap() { echo "-postScript ExportFunctions.java $R/$1-functions.csv -postScript ExportGaps.java $R/$1-gaps.csv"; }
+Findings from the run:
 
-# analysis image: import (about 12 minutes), then the chain with snapshots
-MAXMEM=6G $H -import orig/Mercenaries2.analysis.exe -overwrite $(snap a0-import) > $R/a-import.log 2>&1
-MAXMEM=6G $H -process Mercenaries2.analysis.exe -noanalysis \
-  -postScript ExportBindings.java $R/a1-bindings.csv --recover $(snap a1-bindings) \
-  -postScript RecoverFunctions.java $R/a2-recovery.csv \
-  -postScript AuditRecoveredFunctions.java $R/a2-recovery.csv $R/a2-audit.csv --remove-empty $(snap a2-recover) \
-  -postScript FoldSlotFragments.java build/functions-original.csv build/slot-rewrites.csv $R/a3-fold.csv $(snap a3-fold) \
-  -postScript AddRelocatedEntries.java config/securom_functions.csv $(snap a4-relocated) \
-  -postScript ClearFalseNoReturn.java $R/a5-noreturn.csv $(snap a5-final) > $R/a-chain.log 2>&1
+- **mercs2's FoldSlotFragments.java crashes on today's state.** First run: a
+  `ConcurrentModificationException` at `FoldSlotFragments.java:179` in round 1. The owners
+  loop re-walks each owner; at 0x00861190 the walk folded the owner itself (`removed`, then
+  `refit failed Object has been deleted`) and `fold` added owners to the set being iterated.
+  Ghidra went on to the next scripts, so the crashed run still produced exports (kept in
+  `build/m2c-ref/crashed/`, not a reference). The second run used a patched copy of the
+  script (a worklist loop, `build/m2c-ref/fold.patch`; identical when nothing is added) and
+  completed in two rounds. mercs2's tracked script is unchanged; whether to fix it there is
+  question G.
+- **The reference moved since October.** The desktop's October log shows the unpatched script
+  completing with 2,204 removed; now 2,183. Import counts moved too (original image 20,866
+  against the documented 20,878; analysis image 23,289 against the README's 23,323), and the
+  final list is 37,619 against the README's 37,635. Cause not established (Ghidra version is
+  the first suspect). `build/functions-original.csv` (37,345, from October) is therefore
+  older than this run's own `o2-recover` (37,331); the fold above read the October file.
+- Auto-analysis logs two `ERROR` lines per import (a failed function creation at 0x00492370,
+  an RTTI locator without a vtable at 0x00bf0014). They are Ghidra's own and part of the
+  reference.
+- The project state just before the fold is kept on the desktop (`build/ghidra-m2c-a2`), so
+  scripts 4-6 can be re-run without the import.
 
-# original image: import and the two recovery passes (what functions-original.csv is made of)
-MAXMEM=6G $H -import orig/Mercenaries2.exe -overwrite $(snap o0-import) > $R/o-import.log 2>&1
-MAXMEM=6G $H -process Mercenaries2.exe -noanalysis \
-  -postScript ExportBindings.java $R/o1-bindings.csv --recover $(snap o1-bindings) \
-  -postScript RecoverFunctions.java $R/o2-recovery.csv \
-  -postScript AuditRecoveredFunctions.java $R/o2-recovery.csv $R/o2-audit.csv --remove-empty $(snap o2-recover) > $R/o-chain.log 2>&1
+On the Mac since 2026-11-12: both exes (`mercs2-rearmed/orig/`, sha1 of `Mercenaries2.exe`
+matches `config/sha1.txt`), `build/functions-original.csv`, `build/slot-rewrites.csv` (1,593
+rows), the reference folder, and Ghidra 12.2 with Java 25 (`~/ghidra`, `~/jdk`; natives built
+locally), so reference runs can also be made here. Still missing: a built `.sla`
+(`rust/build-sla.sh` calls `nproc`, which macOS lacks; S0 fixes that).
 
-cp build/functions-original.csv build/slot-rewrites.csv $R/
-grep -c ERROR $R/*.log; wc -l $R/*-functions.csv
-```
-
-What to look for: `grep -c ERROR` prints 0 for every log; `a5-final-functions.csv` has about
-37,636 lines; every `*-functions.csv` is non-empty.
-
-Caveat for the fold step: `build/functions-original.csv` must be the file the desktop's
-current project was built with. If `build/slot-rewrites.csv` is missing on the desktop too,
-say so; the plan then derives it (the user's piece) before the reference run.
-
-Then copy to the Mac (replace `desktop` with the desktop's host name):
-
-```sh
-rsync -av desktop:projects/mercs/mercs2-decomp/build/m2c-ref ~/Desktop/mercs2-rearmed/build/
-rsync -av desktop:projects/mercs/mercs2-decomp/orig/Mercenaries2.exe \
-          desktop:projects/mercs/mercs2-decomp/orig/Mercenaries2.analysis.exe ~/Desktop/mercs2-rearmed/orig/
-```
-
-`orig/` and `build/` are gitignored in mercs2; the reference files never enter either repo.
-
-S0 adds the evidence export to this run (a second, short desktop run): a small read-only
-Java script, `rust/tools/ExportFunctionEvidence.java`, writing per function of `a0-import`
-and `a5-final`: thunk flag, no-return flag, counts of call / jump / data references to the
-entry, and the analysis bookmarks at the entry (which analyzer created it). That turns the
-ranked guesses above into counts.
-
-On the Mac, the tests also need the `.sla` files: `rust/build-sla.sh` (it calls `nproc`,
-which macOS lacks; S0 fixes that).
+S0 adds the evidence export: a small read-only Java script,
+`rust/tools/ExportFunctionEvidence.java`, writing per function of `a0-import` and `a5-final`:
+thunk flag, no-return flag, counts of call / jump / data references to the entry, and the
+analysis bookmarks at the entry (which analyzer created it). That turns the ranked guesses
+above into counts.
 
 ## Stages
 
@@ -294,12 +283,12 @@ thunks or flags.
 
 | Stage | Ports | Check (isolated) | Pass bar | Needs |
 |---|---|---|---|---|
-| S0 | Harness: `rust/tools/m2c-compare.sh` (common / missing / extra, size rate, gaps rows identical, report-CSV row diff), the evidence script, `build-sla.sh` on macOS, the `--pipeline` flag skeleton | Today's numbers reproduced on the Mac: 37,633 / 37,635 with `--functions-from a5-final`; 22,388 / 935 / 365 against `a0-import` | Numbers match the README's, or the difference is explained (fresh reference) | Reference data |
+| S0 | Harness: `rust/tools/m2c-compare.sh` (common / missing / extra, size rate, gaps rows identical, report-CSV row diff), the evidence script, `build-sla.sh` on macOS, the `--pipeline` flag skeleton | Today's numbers re-measured on the Mac against the new reference: `--functions-from a5-final` (was 37,633 / 37,635), plain discovery against `a0-import` (was 22,388 / 935 / 365) | New numbers recorded in `rust/README.md`; any drop from the old ones explained | Done: reference data |
 | S1 | ExportBindings: table scan, then `--recover`. Mutation API part 1: `function_containing`, stored `owner` map, `create_function`, `disassemble_at` | `a1-bindings.csv` byte-identical; created set vs `a1 − a0` | CSV identical; created set identical | S0 |
 | S2 | RecoverFunctions and the audit: pointer runs, direct-call passes, the nine results | `a2-recovery.csv` rows (address, result); function set vs `a2-recover` | Rows 99% identical; set 99.5% common, each remaining row with a named cause | S1 |
 | S3 | FoldSlotFragments: `refs_to` index, `remove_function`, the walk, kept / removed rules | `removed` and `kept` sets of `a3-fold.csv`; function set vs `a3-fold`; sizes of refit owners | Removed and kept sets 98%; set 99.5% common; refit-owner sizes 95% | S2, the user's piece |
 | S4 | AddRelocatedEntries (`clear`) and ClearFalseNoReturn (`reachesRet`, clearable flags, re-flow) | Set vs `a4-relocated`, then `cleared` and `kept` rows of `a5-noreturn.csv`, set and gaps vs `a5-final` | Relocated: set identical. No-return: `cleared` and `kept` sets identical; gaps rows 99% | S3 |
-| S5 | The discovery gap: chained run, no `--functions-from`, against `a5-final`. Work the causes in the order the evidence export gives | Chained set vs `a5-final`; `--gaps` rows; `--abi-callers` rate does not drop | Missing + extra ≤ 0.5% of 37,635 (≤ 188), each one classified; sizes 97% | S4, evidence export |
+| S5 | The discovery gap: chained run, no `--functions-from`, against `a5-final`. Work the causes in the order the evidence export gives | Chained set vs `a5-final`; `--gaps` rows; `--abi-callers` rate does not drop | Missing + extra ≤ 0.5% of 37,619 (≤ 188), each one classified; sizes 97% | S4, evidence export |
 | S6 | Remove the circular input: run S1-S2 on `orig/Mercenaries2.exe`, use the result as `functions-original` | Own list vs `o2-recover`; S5's numbers with the own list | S5's bar still holds | S5 |
 
 Each stage: one branch (`m2c-s0` ...), merged into `m2c-pipeline` when its bar is met, docs
@@ -401,7 +390,7 @@ subsequent Ghidra processing" until their cause is known.
 Open questions for the user:
 
 - A. Decision 2: outcome rules first (recommended), or the faithful analyzers first?
-- B. The pass bars in the stage table are proposals. Is "missing + extra ≤ 188 of 37,635,
+- B. The pass bars in the stage table are proposals. Is "missing + extra ≤ 188 of 37,619,
   each classified" the right end bar, or does mercs2 need the set exact (as the two known
   overlapping-decode cases would prevent today)?
 - C. Should the report CSVs stay byte-compatible for mercs2's tools (assumed yes), or does
@@ -415,3 +404,9 @@ Open questions for the user:
   the current project was built with.
 - F. After S6, should mercs2's `analysis_pipeline.sh` call ghidra-rs (a mercs2 change, with
   the Java scripts kept for one more cycle as a cross-check)?
+- G. Fix the `ConcurrentModificationException` in mercs2's own `FoldSlotFragments.java` (the
+  worklist patch the reference used)? Recommended: the reference should come from a script
+  that is in the mercs2 repo, and mercs2's `analysis_pipeline.sh` would hit the crash today.
+- H. `functions-original.csv` is from October and differs from today's `o2-recover` (37,345
+  against 37,331). Rebuild the reference fold on today's list, or keep October's as mercs2
+  does?
