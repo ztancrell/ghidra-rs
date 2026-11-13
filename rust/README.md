@@ -1563,7 +1563,9 @@ sides (`DECOMP_SKIP_ACTIONS`). The commands and the reasons are in
 | m8 | 8 / 8 | 8 / 8 |
 | m500 | 499 / 500 (499 / 499 the reference finishes) | 496 / 500 (496 / 499; the misses are R3's 0x47a6b0, 0x4891e0, 0x6fa6e0) |
 
-The miss is 0x4c48d0 (neither engine finishes within the timeout). The existing bars hold on
+The miss is 0x4c48d0 (neither engine finishes within the timeout). After the R2 merge the
+rule-stage column is 463 / 499: `ActionNodeJoin` (`ConditionalJoin`, not ported) joins branches
+whose conditions `RuleCondNegate` made equal; 498 / 499 with `nodejoin` skipped (plan, "S8"). The existing bars hold on
 this branch (R3 check 495 / 499, paramdouble 500 / 500, S4 and S6 checks 498 / 500). Not ported yet:
 `prefercomplement` and `structuretransform` (they wait for R2's flip helpers), `finalstructure`,
 `returnsplit` and structured `printRaw`.

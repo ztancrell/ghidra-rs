@@ -652,6 +652,15 @@ here: it differs only with `blockrecovery` off. Existing bars on this branch: th
 paramdouble 500 / 500, the S4 check 498 / 500, the S6 check (unlocked) 498 / 500: unchanged. Those
 checks keep `blockrecovery` off, so `blockstructure` never runs in them.
 
+After merging R2 (2026-11-13; `cleanup` on, `condnegate` ported): rules off M8 8 / 8, M500 499 / 499;
+rule-stage options M8 8 / 8, M500 463 / 499. The 35 new misses come from `ActionNodeJoin`:
+`RuleCondNegate` now turns the flips `blockstructure` sets into BOOL_NEGATE ops, so two branches
+get functionally equal conditions in different varnodes and the reference joins them
+(`ConditionalJoin`), which ghidra-rs does not port (its detection only sees one shared varnode,
+so it misses them silently). With `nodejoin` skipped on both sides the rule-stage check is
+498 / 499 (miss 0x47a6b0, `ActionConditionalExe`). Next: port `ConditionalJoin`
+(`functionalEqualityLevel`, `nodeJoinCreateBlock`).
+
 Not ported, left for part two:
 
 - `prefercomplement` and `structuretransform`: they need `opFlipInPlaceTest/Execute`,
