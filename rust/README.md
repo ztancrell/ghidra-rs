@@ -505,8 +505,10 @@ rust/tools/decomp-diff.sh --script <file>      # one script on both engines, ful
 - `decomp-ref.sh` copies the C++ sources into `rust/target/decomp-build` (the upstream tree is
   not touched), applies `tools/decomp-ref.patch` and builds both programs. The patch adds the
   data-type (`<type>`) and the high variable (`{hN}`) to each varnode of `print raw` when the
-  environment variable `DECOMP_RAW_EXTRA` is set; without it the output is upstream's. Run
-  `decomp_dbg` by absolute path with `SLEIGHHOME=<repository root>`.
+  environment variable `DECOMP_RAW_EXTRA` is set; without it the output is upstream's. With
+  `DECOMP_JT_RAW` set (stage S3), it also prints to stderr the partial function each jump-table
+  recovery simplifies (`print raw` form) and the reason a recovery fails. Run `decomp_dbg` by
+  absolute path with `SLEIGHHOME=<repository root>`.
 - `--decomp-prelude` writes console commands both engines `source` before a function:
   `option readonly on`, `readonly` over `.rdata` (so `.rdata` constants such as floats fold
   instead of printing as `fRam...`), for each IAT slot a `nocode` function named after the
@@ -596,6 +598,12 @@ rust/tools/decomp-bisect.sh 0x401000
 ACTIONS="funclink heritage paramdouble" rust/tools/decomp-bisect.sh 0x401000 5
 ```
 
+- Jump tables (stage S3): `GHIDRA_RS_JT_DEBUG=1 ghidra-rs decompile -i <script>` prints to
+  stderr each table ghidra-rs recovers (`jumptable in <function> at <jump>: N targets [...]`)
+  or why it fails; `=2` adds the partial function (`print raw`) and the model's paths, guards
+  and range. `DECOMP_JT_RAW=1` gives the reference's partial function (see `decomp-ref.sh`
+  above), so the two partials can be compared at the switch.
+
 The reference only accepts an absolute script path (`decomp_dbg -i /abs/path`); with a relative
 one it fails a libstdc++ assertion and prints nothing.
 
@@ -641,7 +649,8 @@ MSVC switch `JMP dword ptr [reg*4 + table]` bounded by a `CMP reg,imm` (imm8 sig
 `JA` before the jump, possibly through a byte index table, gives one target per switch value in
 order, as `JumpBasic` does, and fails past `max_jumptable_size` (1024) entries; any other
 indirect jump becomes a call and a halt (`truncateIndirectJump`). It covers the 5 switches in
-M8 and M500. As in the C++, an instruction at an unmapped address ends the decompile with an
+M8 and M500. Superseded: stage S3 replaces the stand-in with the port of jump-table recovery
+("Stage S3" below). As in the C++, an instruction at an unmapped address ends the decompile with an
 error (`DataUnavailError`), and only a constructor without p-code counts as unimplemented
 (`Sleigh::pcode` returns `PcodeError::Unimplemented` for it, `Invalid` for anything else).
 Superseded: "call fixups ... (the console applies no `callfixup` by name)" above: the console
@@ -797,7 +806,8 @@ creation on (24.4 s, 11.2 s, 1 GB). 29,131 reach the break, 8 are
 the garbage code past 0x2300000, differ in flow: 0x232f745 and 0x2384399 fail on a different
 unmapped address, 0x23831b0 exceeds the instruction limit where the reference hits an unmapped
 address, and 0x2396e7d fails where the reference recovers a switch at 0x2396eec, which the
-S1a jump-table stand-in does not (S3). Superseded: S1b's "70 `Unable to load bytes`" message
+S1a jump-table stand-in does not (S3; superseded: S3 recovers it, identical at `heritage`).
+Superseded: S1b's "70 `Unable to load bytes`" message
 is `Unable to load 512 bytes` now, as `LoadImageBfd::loadFill` words it (it reads 512-byte
 chunks), and S1b counted the 8 `nocode` functions among its failures.
 
@@ -817,6 +827,92 @@ What S2 does not port, and why:
 - Prototype state across decompiles (S1b's required item): `fillinExtrapop` belongs to
   `ActionStackPtrFlow`, after `paramdouble` (S4). The 21 datatests that decompile several
   functions cannot be compared yet: the Rust console does not load a test's `<binaryimage>`.
+
+### Stage S3: jump tables
+
+Stage S3 (branch `m3-s3`) replaces S1a's jump-table stand-in with the port of the C++
+recovery. When flow meets indirect jumps, `FlowInfo::recoverJumpTables` builds one partial
+function (a clone of the function so far, `truncatedFlow`), runs the `jumptable` root action
+on it and recovers each table from it (`Funcdata::stageJumpTable`); a jump without a table
+becomes a call and a halt, as before. Modules:
+
+- `jumptable.rs` (from jumptable.cc, 2,933 lines): `JumpBasic` and `JumpBasic2`
+  (`findDeterminingVarnodes`, `PathMeld`, `analyzeGuards`, `GuardRecord` with `quasiCopy` and
+  `valueMatch`, `calcRange`, `findSmallestNormal`, `findNormalized`, `buildAddresses`,
+  `sanityCheck`), `JumpValuesRange(Default)`, `JumpTable::recoverAddresses` (`isReachable`,
+  `isThunk`), `earlyJumpTableFail`, and `ActionNonzeroMask`'s non-zero masks
+  (`Funcdata::calcNZMask`, `PcodeOp::getNZMaskLocal` from funcdata_varnode.cc and op.cc), which
+  the guards and strides read.
+- `rangeutil.rs` (from rangeutil.cc, 2,605 lines): `CircleRange` (ranges, intersection, union,
+  non-zero masks, `pullBack` through unary and binary ops). The value-set solver is not used by
+  jump tables and not ported.
+- `emulate.rs` (from emulateutil.cc 397, emulate.cc 462, opbehavior.cc): `EmulateFunction` over
+  the data flow (`EmulatePcodeOp`, `Emulate::executeCurrentOp`) and the integer and boolean op
+  behaviors. memstate.cc (738 lines) is not needed: `EmulateFunction` keeps a value per
+  varnode and ignores STOREs. Float ops fail an emulation (no switch in mercs2 uses one).
+- Hooks: `action::jumptable_partial` (the `jumptable` root's actions as far as they are
+  ported: `start` to `heritage`), `Funcdata` derives `Clone` and keeps the partial's masks
+  and folded constants (`nzm`, `folded`), `startProcessing` skips flow for a partial,
+  `BlockGraph::is_loop_in`.
+
+In all about 2,200 lines of Rust for about 4,000 lines of C++ ported (jumptable.cc but its
+override, assisted and label parts; CircleRange; the emulator parts).
+
+The partial function the C++ analyses has been through the whole rule pool and later heritage
+passes (stack, ram); here it has had only what is ported (registers and temporaries in SSA
+form, read-only constants). Three stand-ins in `jumptable.rs` read the raw p-code as the rules
+leave it, until the rule stages replace them: constants are folded (copies, constant
+operations, `xor r,r`, loads from read-only memory: `RulePropagateCopy`,
+`RuleCollapseConstants`, `RuleLoadVarnode`); a guard's x86 flag logic (`!(CF || ZF)`,
+`OF != SF`, `x - c == 0`) is read as the one comparison the rules turn it into; a commutative
+op's constant counts in slot 1 (`RuleTermOrder`). Two C++ details reach the output and are kept:
+the non-zero masks (a field `(x << 19) s>> 27` gets an empty range on one varnode, so the C++
+gives up on that switch, and so does the port), and a switch variable on the stack matched
+through its two LOADs.
+
+Check (`print raw` at `paramdouble`; the switch corpus is every function in which ghidra-rs
+meets a jump table, 2,051 of mercs2's 29,240, listed with `GHIDRA_RS_JT_DEBUG`):
+
+```sh
+BREAK=paramdouble rust/tools/decomp-diff.sh m8
+BREAK=paramdouble rust/tools/decomp-diff.sh m500
+cargo test --release -p ghidra-rs --test decomp print_raw_at_paramdouble_with_a_switch
+```
+
+| corpus | identical at `break start paramdouble` |
+|---|---|
+| m8 | 8 / 8 (also at `heritage` and `funclink`) |
+| m500 | 500 / 500 (its 4 switch functions included) |
+| every switch function (2,051, 0xa4e8c2 left out) | 1,934 / 2,050 |
+
+Of the 116 switch functions that differ, 115 are in the obfuscated code past 0x1000000
+(SecuROM layers): jumps through stack slots (`JMP [ESP-0x10]`) and indices the C++ folds
+through stack heritage and its rules, which this stage does not have (sampled with
+`DECOMP_JT_RAW`). In the game code below 0x1000000 one differs: 0x7c1f30, where the C++ folds
+the guard to "always the default" and the index to a constant, and then fails on the garbage
+target it reads (`Unable to load 512 bytes at r0x5310ec83`); ghidra-rs recovers the 4 real
+targets. 0xa4e8c2 is left out: its partial function has 780,000 ops (flow runs to the
+instruction limit); ghidra-rs takes 49 s on it, the reference had not finished after 35 min.
+Not ported, and why: `fail_callother` (an address made by a CALLOTHER; ghidra-rs stops with
+an error: 2 functions in obfuscated code, 0x1c3c0d9 and 0x1c3c0fa), `fail_return`
+(`testForReturnAddress`: the return address is on the stack, not heritaged yet), the retry of
+a table whose switch looks unreachable (it needs a guard folded to a constant; it is taken as
+complete), `checkUnrolledGuard`, multistage tables, overrides, `JumpAssisted`.
+
+Table targets against `ghidra-rs analyze` (its own MSVC switch pattern, milestone 2): of the
+619 jumps both find a table for, 610 have the same set of targets. The other 9 are 3 in
+0xa4e8c2 (ghidra-rs reads one more entry), 2 in obfuscated code, and 4 (0x759bf4, 0x76ae9f,
+0x7ed762, 0x807b95) where `analyze` has more targets and the decompiler's functions are
+identical to decomp_dbg's. Of the 19 tables `analyze` finds and the decompiler does not
+recover, 17 are in functions identical to decomp_dbg's (it does not recover them either) and 2
+in obfuscated code; the decompiler finds 114 tables `analyze` misses.
+
+Speed (Mall: 29,240 functions to `break start heritage`, one thread, release build): 69.7 s,
+peak 652 MB, against 9.4 s and 585 MB before S3 (measured the same day on the same machine).
+Of the 60 s added, 49 s is the partial function of 0xa4e8c2; the 2,115 other partial
+functions take about 11 s. 29,096 functions reach the break (29,131 before): the others now
+follow a recovered table into garbage code, as the reference does for most of them (see the
+switch corpus above).
 
 ### Stage S4: main-loop actions without rules
 

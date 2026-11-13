@@ -1,6 +1,6 @@
 # Milestone 3 plan: the decompiler
 
-Written 2026-11-12 as a plan. Built so far: S0, S1a, S1b, S2 and S4 (see their sections below).
+Written 2026-11-12 as a plan. Built so far: S0, S1a, S1b, S2, S3 and S4 (see their sections below).
 
 ## Goal
 
@@ -304,6 +304,34 @@ tools". Where it differs from the table row:
   (8 duplicate names pick an import first), and an unmapped address reads `Unable to load 512
   bytes` as the C++ loader words it. Of the 101 Mall failures, 97 match decomp_dbg; 4 in
   garbage code differ in flow (one verified: a switch the S1a stand-in does not recover, S3).
+
+### S3: done on branch m3-s3 (2026-11-12)
+
+M8 8 / 8 and M500 500 / 500 identical at `break start paramdouble`; every function in which
+ghidra-rs meets a jump table (2,051 of mercs2's functions) 1,934 / 2,050 (0xa4e8c2 left out:
+the reference had not finished it after 35 min); the 116 others are 115 in obfuscated code
+past 0x1000000 and 0x7c1f30, where the reference reads a garbage target. Details in
+`rust/README.md`, "Stage S3". Where it differs from the table row:
+
+- The partial function the C++ recovers a table from has been through the rule pool and the
+  later heritage passes. Neither exists yet, so `jumptable.rs` has three stand-ins that read
+  the raw p-code as the rules leave it (constant folding, x86 guard flag logic as one
+  comparison, constants in slot 1). R1/R2 replace them: when those rules land, the partial
+  should run them (`action::jumptable_partial`) and the stand-ins should go. The 115
+  obfuscated-code differences need stack heritage (S4 and later).
+- `ActionNonzeroMask` is ported inside `jumptable.rs` (`calc_nz_mask`), because the guards
+  read the masks; the main loop's `ActionNonzeroMask` (group `analysis`, which S4
+  leaves off and unported; the R-stages) should call it and
+  `Funcdata::nzm` then holds the masks of the function itself.
+- memstate.cc and most of emulate.cc are not needed (the jump-table emulator keeps a value per
+  varnode); the value-set solver of rangeutil.cc is not used by jump tables. Not ported:
+  `fail_callother` (stops with an error; 2 functions in obfuscated code), `fail_return`,
+  retrying an unreachable-looking table, unrolled guards, multistage tables, overrides,
+  `JumpAssisted`, label recovery and guard folding (`recoverLabels`, after `paramdouble`).
+- Debugging: `GHIDRA_RS_JT_DEBUG=1|2` on ghidra-rs, and the reference patch's `DECOMP_JT_RAW`
+  prints the C++ partial function.
+- Speed: Mall to `heritage` 9.4 s → 69.7 s; 49 s of it is one function (0xa4e8c2, a partial
+  function of 780,000 ops), the other 2,115 partial functions about 11 s.
 
 ### S4: done on branch `m3-s4` (2026-11-12)
 

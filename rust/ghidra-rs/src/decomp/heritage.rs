@@ -61,7 +61,7 @@ struct MemRange {
 
 /// Port of `LocationMap`: the disjoint ranges heritaged so far and the pass each was first
 /// heritaged in, sorted by address.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct LocationMap {
     /// (space index, offset, size, pass), sorted by space index and offset
     map: Vec<(u32, u64, u32, i32)>,
@@ -133,7 +133,7 @@ impl LocationMap {
 }
 
 /// Port of `PriorityQueue`: blocks by dominator-tree depth, deepest first, last in first out.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct PriorityQueue {
     queue: Vec<Vec<usize>>,
     curdepth: i32,
@@ -171,7 +171,7 @@ struct Collected {
 }
 
 /// Port of `Heritage`: the SSA builder's state, kept across passes.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Heritage {
     pass: i32,
     globaldisjoint: LocationMap,

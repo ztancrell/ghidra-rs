@@ -119,3 +119,26 @@ fn print_raw_at_paramdouble_with_a_loop() {
     };
     assert_eq!(raw_at(img, 0x40ad80, "paramdouble"), include_str!("data/raw-paramdouble-40ad80.txt"));
 }
+
+/// Stage S3: `print raw` at `break start paramdouble` for mercs2's 0x5f8f30, a two-level
+/// switch (`ADD EDX,-0x21; CMP EDX,0x9d; JA`, a byte table at 0x5f8fac, the jump table at
+/// 0x5f8f90), rebuilt from its bytes, against decomp_dbg's output for the corpus script. The
+/// jump table comes from the partial function's guard (`!(CF || ZF)` on the normalized
+/// variable) and the emulation of the byte and word table loads for each of the 158 values.
+#[test]
+fn print_raw_at_paramdouble_with_a_switch() {
+    let hex = include_str!("data/switch-5f8f30.hex").trim();
+    let data = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
+    let img = Image {
+        sections: vec![Section {
+            name: ".text".into(),
+            exec: true,
+            readonly: true,
+            zero_tail: 0,
+            addr: 0x5f8f30,
+            data,
+        }],
+        ..Image::default()
+    };
+    assert_eq!(raw_at(img, 0x5f8f30, "paramdouble"), include_str!("data/raw-paramdouble-5f8f30.txt"));
+}

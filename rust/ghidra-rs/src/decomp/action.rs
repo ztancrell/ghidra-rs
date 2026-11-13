@@ -137,6 +137,19 @@ fn not_ported(_: &mut Funcdata, _: &Arch) -> Result<i32> {
     err("action not implemented in ghidra-rs yet (milestone 3: stage S4 ends before assignhigh, with the rule groups off)")
 }
 
+/// The `jumptable` root action (`buildDefaultGroups`: groups `base`, `noproto`, `analysis`, ...)
+/// as far as it is ported, run once on the partial function of jump-table recovery
+/// (`Funcdata::stageJumpTable`): the `base` actions up to the first heritage pass. Left out:
+/// `funclinkoutonly` (`noproto`; output trials only), and the main loop after `heritage`
+/// (dead code, the rule pools, later heritage passes: stages S4 and the rule stages).
+/// `jumptable.rs` reads the guard logic those rules would rewrite.
+pub(crate) fn jumptable_partial(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
+    for f in [start, constbase, default_params, extrapop_setup, unreachable, varnode_props, heritage_pass] {
+        f(fd, arch)?;
+    }
+    Ok(())
+}
+
 /// `ActionStart`: `Funcdata::startProcessing`.
 fn start(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     fd.start_processing(arch)?;
