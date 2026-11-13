@@ -667,12 +667,13 @@ impl Analysis {
             self.propagate(img, sl);
         }
         let mut checked = HashSet::new(); // targets asked once, as Ghidra's checkedTargets
+        let mut asked = HashSet::new(); // pointer targets asked once
         while constants && !log.is_empty() {
             let mut queue: Vec<u32> = Vec::new();
             for t in log.iter().flat_map(|a| self.insns[a].code_imms.iter().copied()).collect::<Vec<_>>() {
                 if owner[(t - self.code_lo) as usize] == 0
                     && checked.insert(t)
-                    && self.valid_subroutine(img, sl, &mut p, &owner, t)
+                    && self.valid_subroutine(img, sl, &mut p, &owner, t, false)
                 {
                     queue.push(t);
                 }
@@ -680,9 +681,14 @@ impl Analysis {
             log.clear();
             self.descend(img, sl, &mut p, &mut owner, &mut queue, &mut log);
             if log.is_empty() {
-                // Create Address Tables over what is still undefined; tables of code are
-                // disassembled, and what that reaches is checked for code constants again.
-                let mut queue = self.address_tables(img, &owner);
+                // Pointers in referenced data first (the operand analyzer runs before
+                // Create Address Tables), then address tables over what is still undefined;
+                // code either reaches is checked for code constants again.
+                let mut queue = self.pointer_targets(img, sl, &mut p, &owner, &mut asked);
+                if queue.is_empty() {
+                    queue = self.address_tables(img, &owner);
+                    queue.extend(self.pointer_targets(img, sl, &mut p, &owner, &mut asked));
+                }
                 queue.retain(|&t| owner[(t - self.code_lo) as usize] == 0);
                 self.descend(img, sl, &mut p, &mut owner, &mut queue, &mut log);
             }
@@ -695,7 +701,9 @@ impl Analysis {
     /// `entry` (not into calls, nor jumps to functions) decodes without a bad instruction, runs
     /// into no existing code, jumps only to instruction starts, never branches conditionally
     /// to its own fallthrough, and returns, jumps through a register or reaches a function;
-    /// a single instruction must reach a function. Not modelled: references into the body.
+    /// a single instruction must reach a function. With `existing` (isValidSubroutine(entry,
+    /// true), asked for pointers in data), the flow may run through existing instructions and a
+    /// single instruction is enough. Not modelled: references into the body.
     fn valid_subroutine(
         &self,
         img: &Image,
@@ -703,6 +711,7 @@ impl Analysis {
         p: &mut crate::sleigh::Parse,
         owner: &[u8],
         entry: u32,
+        existing: bool,
     ) -> bool {
         if img.read_u32(entry) == Some(0) && img.read_u32(entry + 4) == Some(0) {
             return false;
@@ -718,7 +727,8 @@ impl Analysis {
                 }
                 let Some(i) = self.decode(img, sl, p, a, &mut fold) else { return false };
                 let o = (a - self.code_lo) as usize;
-                if owner.get(o..o + i.len as usize).is_none_or(|b| b.iter().any(|&b| b != 0)) {
+                let taken = |b: u8| b == 3 || b != 0 && !existing; // 3: defined data (a switch table)
+                if owner.get(o..o + i.len as usize).is_none_or(|b| b.iter().any(|&b| taken(b))) {
                     return false;
                 }
                 body.insert(a, i.len);
@@ -749,7 +759,48 @@ impl Analysis {
         if targets.iter().any(|&t| matches!(start_of(t), Some((s, true)) if s != t)) {
             return false; // a jump into the middle of an instruction of the body
         }
-        (terminated || called) && (called || body.len() > 1)
+        (terminated || called) && (called || existing || body.len() > 1)
+    }
+
+    /// OperandReferenceAnalyzer (`added`, `checkForPointer`): a data word an instruction
+    /// references, holding an address no other reference points into, becomes a pointer; the
+    /// pointer's reference into undecoded code is disassembled where isValidSubroutine(target,
+    /// true) accepts it. This is how Ghidra reaches functions only a vtable names (deleting
+    /// destructors). The pointers of address tables (`table_slots`) go the same way
+    /// (DataOperandReferenceAnalyzer), so a table that mixes code and data pointers still
+    /// reaches its code. Returns those targets; `asked` holds the ones already asked.
+    /// ponytail: no string check at the slot (checkForAscii/Unicode) and no pointer chains.
+    fn pointer_targets(
+        &self,
+        img: &Image,
+        sl: &Sleigh,
+        p: &mut crate::sleigh::Parse,
+        owner: &[u8],
+        asked: &mut HashSet<u32>,
+    ) -> Vec<u32> {
+        let dests: BTreeSet<u32> = self
+            .insns
+            .values()
+            .flat_map(|i| i.refs.iter().chain(&i.code_imms).chain(&i.target))
+            .chain(self.tables.values().flatten())
+            .chain(self.table_slots.values())
+            .copied()
+            .collect();
+        // checkForPointer: a value of 4096 up, and no reference into the rest of the slot
+        let pointers = dests.iter().filter(|&&t| !self.is_code(img, t)).filter_map(|&t| {
+            img.read_u32(t).filter(|&v| v >= 4096 && dests.range(t + 1..t.saturating_add(4)).next().is_none())
+        });
+        let mut out = Vec::new();
+        for v in pointers.chain(self.table_slots.values().copied()) {
+            if self.is_code(img, v)
+                && owner[(v - self.code_lo) as usize] == 0
+                && asked.insert(v)
+                && self.valid_subroutine(img, sl, p, owner, v, true)
+            {
+                out.push(v);
+            }
+        }
+        out
     }
 
     /// Ghidra's Create Address Tables analyzer (AddressTableAnalyzer, AddressTable.getEntry and

@@ -353,7 +353,14 @@ ghidra-rs instead of a Ghidra project:
   OperandReferenceAnalyzer asks before "Found code from operand reference"): its flow decodes
   without a bad instruction, runs into no existing code, jumps only to instruction starts,
   never branches conditionally to its own fallthrough, and returns, jumps through a register
-  or reaches a function; a single instruction must reach a function. This code belongs to no
+  or reaches a function; a single instruction must reach a function. Pointers in data are
+  followed too (`Analysis::pointer_targets`, OperandReferenceAnalyzer's `checkForPointer`): a
+  data word an instruction or address table references, of 4096 or more and with no other
+  reference into the rest of the word, and every slot of an address table (also tables that
+  mix code and data pointers), is disassembled where `isValidSubroutine(target, true)`
+  accepts it (its flow may run through existing code, and one instruction is enough). This
+  is how Ghidra reaches code only a vtable names, e.g. the deleting destructor 0x752040. Not
+  modelled there: the string check at the word and pointer chains. This code belongs to no
   function and does not change `--functions` or `--gaps`.
 - Code constants also come from a local constant fold (a stand-in for Ghidra's constant
   propagation, `SymbolicPropogator`): 4-byte register values from immediates, initialised
@@ -487,6 +494,17 @@ a checked row of the group) and `cause` (a kebab-case group). mercs2's abi_test 
 (`build/abi_callees.csv`) held one row at that commit, so every truth comes from the
 disassembly and the contracts.
 
+Following pointers in data (`pointer_targets`, see the analysis section) gives 17 of the
+ledger's `(none)` rows their caller, each now with Java's status: the undecoded tails of
+0x5b2950 (0x4b2a50 at 0x5b2afb; 0x59f770 at 0x5b2a56, 0x5b2a98, 0x5b2ad6, 0x5b2aed), 0x84af20
+at 0x60f1e0, 0x61bb70 and 0x752050 (the vtable-only deleting destructor 0x752040), and the
+nine `trivial` sites of 0x88cdc0. On the shadow run against mercs2 8d38ed4 it moved Java only
+from 174 to 157 and same from 55,421 to 55,438 (differ 58, ghidra-rs only 309 unchanged); no
+row of ours changed or went away (17 added), and `--functions`/`--gaps` and plain discovery are
+byte for byte the same. The `data-pointer-missed` rows (data sites in vtables no instruction
+references, e.g. 0xbcd238) are still missing: they need the slot itself as a reference, which
+only `--data-pointers` makes.
+
 Every `violation` site of the reference is written with that status: the eight missing
 before the coverage changes (0x4793ff, 0x47940e, 0x479440, 0x479445, 0x479450, 0x47945b,
 0x479466 through the folded pointer at 0x553224, and 0x6fd52b through the address table at
@@ -497,7 +515,8 @@ before the coverage changes (0x4793ff, 0x47940e, 0x479440, 0x479445, 0x479450, 0
 It takes about 23 s wall on a 12-thread machine (about 19 s analysis, of which about 2 s are
 the whole-function propagation on 12 threads, about 9 s on one; the rest is on one thread:
 about 3 s the local fold, 2.3 s checking code constants for valid subroutines, 0.5 s
-building address tables; 20 s wall and 15 s analysis before the propagation, measured back
+building address tables; following data pointers adds about 1 s: 18.3 s analysis against
+17.1 s before it, one run each; 20 s wall and 15 s analysis before the propagation, measured back
 to back on a busy machine; 16 s before the symbolic fold, 14 s before the coverage changes;
 3.5 s checking on 12; checking alone is about 25 s on one thread). The contracts are split over
 threads (contract `t`, `t+n`, ... to thread `t`), and written in file order;

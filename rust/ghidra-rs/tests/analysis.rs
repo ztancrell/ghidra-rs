@@ -205,3 +205,61 @@ fn propagation_survives_call_purge_and_join_x86_32() {
     assert_eq!(an.insns[&0x401019].computed, Some(0x401040));
     assert!(an.insns[&0x401019].refs.contains(&0x402004));
 }
+
+// A constructor stores its vtable (`MOV [ECX],vtable`); the vtable's first word names a
+// deleting destructor nothing calls. Ghidra's operand reference analyzer makes the referenced
+// word a pointer (checkForPointer) and disassembles the code it points to.
+#[test]
+fn pointer_in_referenced_data_x86_32() {
+    let sl = Sleigh::load(&Sleigh::sla_path("x86")).unwrap();
+    let mut text = vec![
+        0xc7, 0x01, 0x00, 0x20, 0x40, 0x00, // 401000 MOV dword ptr [ECX],0x402000
+        0xc3, // 401006 RET
+    ];
+    text.resize(0x20, 0xcc);
+    text.extend([0x8b, 0xc1, 0xc3]); // 401020 MOV EAX,ECX; RET
+    text.resize(0x30, 0xcc);
+    let mut data = 0x401020u32.to_le_bytes().to_vec();
+    data.resize(0x10, 0);
+    let img = Image {
+        sections: vec![
+            Section { name: ".text".into(), exec: true, readonly: true, zero_tail: 0, addr: 0x401000, data: text },
+            Section { name: ".rdata".into(), exec: false, readonly: true, zero_tail: 0, addr: 0x402000, data },
+        ],
+        ..Image::default()
+    };
+    let mut an = Analysis::run(&img, &sl, &[0x401000], true).unwrap();
+    assert!(!an.insns.contains_key(&0x401020));
+    an.disassemble(&img, &sl, &[], true);
+    assert!(an.insns.contains_key(&0x401020) && an.insns.contains_key(&0x401022));
+}
+
+// An address table that mixes data and code pointers (a binding table of name, function
+// pairs) is made, but not disassembled as a table of code; the data reference analyzer still
+// disassembles each pointer's code.
+#[test]
+fn code_pointers_of_mixed_address_table_x86_32() {
+    let sl = Sleigh::load(&Sleigh::sla_path("x86")).unwrap();
+    let mut text = vec![0xc3]; // 401000 RET
+    text.resize(0x30, 0xcc);
+    text.extend([0x33, 0xc0, 0xc3]); // 401030 XOR EAX,EAX; RET
+    text.resize(0x40, 0xcc);
+    text.extend([0x33, 0xc0, 0xc3]); // 401040 XOR EAX,EAX; RET
+    text.resize(0x50, 0xcc);
+    let mut data = Vec::new();
+    for w in [0x402020u32, 0x401030, 0x402024, 0x401040] {
+        data.extend(w.to_le_bytes());
+    }
+    data.resize(0x30, 0);
+    let img = Image {
+        sections: vec![
+            Section { name: ".text".into(), exec: true, readonly: true, zero_tail: 0, addr: 0x401000, data: text },
+            Section { name: ".rdata".into(), exec: false, readonly: true, zero_tail: 0, addr: 0x402000, data },
+        ],
+        ..Image::default()
+    };
+    let mut an = Analysis::run(&img, &sl, &[0x401000], true).unwrap();
+    an.disassemble(&img, &sl, &[], true);
+    assert_eq!(an.table_slots.get(&0x402004), Some(&0x401030));
+    assert!(an.insns.contains_key(&0x401030) && an.insns.contains_key(&0x401040));
+}
