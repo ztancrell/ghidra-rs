@@ -424,6 +424,16 @@ references; 2912 output findings; 277 input findings`. (Superseded: against the 
 of 2026-11-11 13:05, 52,922 rows, it was 52,198 identical; 52,000 before the symbolic fold,
 51,705 before the coverage changes, 51,099 before the drop-in changes.)
 
+Never-returned bytes (`never_returned`, also CheckAbiCallers' `neverReturned`): an EAX byte
+that reaches a RET unwritten on some path is taken as not returned, and dropped from the
+output check. A read of EAX stops that walk, so an EAX input is never dropped. A byte the
+function's own body never writes is no longer dropped either (Java still drops it): on every
+path it is the caller's value or a callee's, passed through, and a caller may read it back
+(test `output_check_pass_through_and_input_eax`). On mercs2 (2026-11-13, 38,161 references)
+this adds 561 output rows, all from no finding to a stricter one: 556 `unconcluded` and 5
+`violation`, the latter all GameFree 0x84af20, whose mutated-call caller 0x5a0dca resumes at
+0x5a0dd9 and pushes its own pre-call EAX at 0x5a0de8. Output findings 3,034 → 3,595.
+
 The mercs2 ABI gate reads only `address`, `contract`, `site` and `status` (and the `output`/
 `input` marker rows). Projected to those fields and sorted, 215 reference lines are missing
 from ours and 338 are extra (285 and 351 before the whole-function propagation; against the
