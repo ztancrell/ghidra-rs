@@ -214,7 +214,8 @@ reading the code; S0's evidence export replaces it with counts before any of it 
 
 ## Reference data (needed from the desktop)
 
-Nothing is on this Mac: no exe, no Ghidra, no exports, no built `.sla`. One run on the
+On this Mac since 2026-11-12: both exes and the fold's two input files (copied from the
+desktop). Still missing: Ghidra, the reference exports, a built `.sla`. One run on the
 desktop produces everything. It uses its own project directory (`build/ghidra-m2c`), so the
 desktop's working project `build/ghidra` and `build/functions.csv` are not touched.
 
@@ -405,9 +406,12 @@ Open questions for the user:
   overlapping-decode cases would prevent today)?
 - C. Should the report CSVs stay byte-compatible for mercs2's tools (assumed yes), or does
   only the function list matter?
-- D. Which Ghidra version does the desktop use? The reference run records it; if it differs
-  from this repo's source tree, the sources to read change.
-- E. Is `build/slot-rewrites.csv` still on the desktop, and is `build/functions-original.csv`
-  the one the current project was built with?
+- D. Answered 2026-11-12: the desktop runs Ghidra 12.2; this repo's source tree is 12.3.
+  Stage agents check `git log` of each Java file they port for changes between the two.
+- E. Half answered 2026-11-12: both files are on the desktop (dated 2026-10-14) and were
+  copied to the Mac's `mercs2-rearmed/build/` with both exes (`orig/`, sha1 of
+  `Mercenaries2.exe` matches `config/sha1.txt`). `slot-rewrites.csv` has 1,593 rows,
+  `functions-original.csv` 37,345. Still open: whether `functions-original.csv` is the one
+  the current project was built with.
 - F. After S6, should mercs2's `analysis_pipeline.sh` call ghidra-rs (a mercs2 change, with
   the Java scripts kept for one more cycle as a cross-check)?
