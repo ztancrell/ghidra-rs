@@ -1021,7 +1021,8 @@ Remaining differences, by cause:
   `XMM0_Dd`, `ActionLaneDivide`, `subflow.cc`/`transform.cc`). It is in group `base`, so no
   option turns it off; the plan puts it in R3. Excluding these, 446 / 447 (every function the reference finishes).
 - 0x4c48d0: the reference does not finish within 60 s (`TIMEOUT`), so it is not compared.
-- Not ported and failing loudly when reached (no M500 function needs them): removing
+- Not ported and failing loudly when reached (no M500 function needs them; superseded for
+  removing unreachable blocks and the `varnodeprops` zero replacement, both ported in R1): removing
   unreachable blocks, `ActionNodeJoin` and `ActionConditionalExe` (a candidate on the same
   condition varnode fails; functionally equal conditions in different varnodes are not looked
   for), `ActionUnjustifiedParams` widening (`adjustInputVarnodes`), heritage after dead-code
@@ -1041,7 +1042,7 @@ Remaining differences, by cause:
 
 ### Stage R1: rules for copies, constants, arithmetic
 
-Stage R1 (branch `m3-r1`, in progress) adds the rule pools (`ActionPool` in `actiontree.rs`:
+Stage R1 (branch `m3-r1`) adds the rule pools (`ActionPool` in `actiontree.rs`:
 every op in sequence-number order, dead ops freed on the way, the rules for an op's opcode in
 table order, from the first again when a rule changes the opcode) and 19 rules of `oppool1` in
 `decomp/rules/mod.rs`: `earlyremoval`, `termorder`, `selectcse`, `collect_terms`,
@@ -1077,22 +1078,32 @@ The bar is taken over M500 less the functions that need `ActionLaneDivide` (R3),
 | corpus | identical (R1 check) |
 |---|---|
 | m8 | 8 / 8 |
-| m500 | 439 / 500 |
-| m500 less `m500-lanedivide.txt`, functions the reference finishes | 439 / 453 (96.9 %, bar 98 %: not reached) |
+| m500 | 451 / 500 |
+| m500 less `m500-lanedivide.txt`, functions the reference finishes | 451 / 453 (99.6 %, bar 98 %: reached) |
 
 `print raw` at `paramdouble` stays 500 / 500 on M500 (the pool runs after it), and the S4 check
-(`s4-options.txt`) is unchanged. Remaining differences, by cause:
+(`s4-options.txt`) is unchanged. (446 / 500). Remaining differences, by cause:
 
 - 46 functions need `ActionLaneDivide` (R3).
-- 11 functions with x87/SSE compares (`ucomiss`/`fcomp` then `lahf`/`test ah`): the reference's
-  dead code (`ActionDeadCode`, in `fullloop`) finds the carry flag never consumed and replaces
-  its reads by 0 (`neverConsumed`); ghidra-rs keeps it. Not found yet: the consume masks agree
-  by hand, so the difference is in the masks or the order the dead code sees the ops.
-- 0x47a6b0: a block the reference merges after the rules.
-- 0x440590: the reference makes new unique varnodes holding 0 where ghidra-rs keeps
-  `#0x80000000` (a rule not traced yet).
-- 0x6c2570: removing unreachable blocks is not ported (fails loudly).
+- 0x47a6b0: the reference merges two blocks testing the same condition (`ActionConditionalExe`,
+  `condexe.cc`: ghidra-rs only detects a candidate on the same condition varnode and does not
+  find this one; R2 or later).
+- 0x6fa6e0: `varnodeprops` replaces a never-consumed `BL` by 0 later on the reference (through a
+  COPY into a MULTIEQUAL); on ghidra-rs the rules have made it `COPY #0` by then, which the
+  replacement skips. Not traced further.
 - 0x4c48d0: the reference does not finish within 60 s.
+
+Round three (2026-11-13) found and fixed, with a temporary print of each varnode's consume and
+non-zero masks in the reference's dead code (not committed):
+
+- `ActionVarnodeProps` replaces every read of a varnode whose non-zero mask and consume mask
+  share no bit by 0 (`totalReplaceConstant`, a COPY for a marker). With `nonzeromask` on, the
+  carry flag of `ucomiss`/`fcomp` + `lahf` (non-zero mask 1, consumed 0x44 through `AH & 0x44`)
+  is one; ghidra-rs failed loudly on it before only when the consume mask was 0. That fixed
+  the 11 x87/SSE compare functions and 0x440590. A varnode over 8 bytes defined by a ZEXT of 0
+  (`handleExtendedZero`) still fails loudly.
+- Removing unreachable blocks (`removeUnreachableBlocks`, `blockRemoveInternal` for
+  unreachable blocks, `descend2Undef`): 0x6c2570.
 
 Not ported, with no effect on `print raw`: `isPrecisLo`/`isPrecisHi` (set by R5's
 double-precision rules), big-endian address arithmetic. A `pullsub_multi` on a join varnode

@@ -358,7 +358,7 @@ differs from the table row:
   Superseded: "S2/S4 must port `fillinExtrapop`" above.
 - Locked prototypes (decision 6) are not needed by S4; the locked paths of `fspec.cc` remain.
 
-### R1: in progress on branch `m3-r1` (2026-11-13)
+### R1: done on branch `m3-r1` (2026-11-13)
 
 The rule pool and 19 rules (list in `rust/README.md`, "Stage R1"). Check: `print raw` at
 `break start assignhigh` with `rust/tools/corpus/r1-options.txt` (S4's groups, `analysis` on,
@@ -369,13 +369,15 @@ when it is ported). The options come from `rust/tools/r1-options.sh`.
 
 Bar (user decision 2026-11-13): M500 ≥ 98 % identical among the functions that do not need
 `ActionLaneDivide` (R3), listed in `rust/tools/corpus/m500-lanedivide.txt` (46: the reference
-output changes when `lanedivide` is skipped too). Now: M8 8 / 8; M500 439 / 453 (96.9 %) of
-the others the reference finishes, so the bar is not reached; S3's paramdouble check stays
+output changes when `lanedivide` is skipped too). M8 8 / 8; M500 451 / 453 (99.6 %) of the
+others the reference finishes (451 / 500 in all): the bar is reached; S3's paramdouble check stays
 500 / 500. Fixed in round two: the action is `condconst`, not `conditionalconst` (the skip
 missed it), `setCopyImmed`/`hasNoImmediateCopy` (blocks emptied by copy propagation stay), dead
-code reads the computed non-zero masks. Left: 11 x87/SSE compare functions where the
-reference's dead code drops the carry flag (cause not found), one block merge, one constant
-(0x440590), one "removing unreachable blocks". The jump-table stand-ins stay until R2 (the
+code reads the computed non-zero masks. Round three: `varnodeprops` replaces reads of a varnode
+whose non-zero and consume masks share no bit by 0 (the x87/SSE carry flags, 11 functions, and
+0x440590), and removing unreachable blocks is ported (0x6c2570). Left: 0x47a6b0
+(`ActionConditionalExe` merging two blocks on equal conditions) and 0x6fa6e0 (a zero
+replacement the reference makes later than ghidra-rs). The jump-table stand-ins stay until R2 (the
 partial function needs the comparison rules too).
 
 ## Running stages in parallel

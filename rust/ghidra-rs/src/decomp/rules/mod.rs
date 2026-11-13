@@ -412,7 +412,7 @@ fn find_common_block(fd: &Funcdata, b1: BlockId, b2: BlockId) -> Option<BlockId>
 }
 
 /// Port of `Funcdata::opInsertEnd`: at the end of `bl`, before a final branch or return.
-fn op_insert_end(fd: &mut Funcdata, op: OpId, bl: BlockId) {
+pub(crate) fn op_insert_end(fd: &mut Funcdata, op: OpId, bl: BlockId) {
     let ops = &fd.blocks.block(bl).ops;
     let mut at = ops.len();
     if let Some(&last) = ops.last() {
@@ -1484,4 +1484,43 @@ fn eval_float(fd: &Funcdata, op: OpId) -> Option<u64> {
         FloatTrunc => Some((fa()? as i64 as u64) & calc_mask(sout)),
         _ => None,
     }
+}
+
+/// Port of `Funcdata::totalReplaceConstant`: every read of `vn` reads the constant `val`; a
+/// marker reads one COPY of it made after `vn`'s definition (or at the function's start).
+pub(crate) fn total_replace_constant(fd: &mut Funcdata, vn: VarnodeId, val: u64) -> Result<()> {
+    let size = fd.vn(vn).size;
+    let uniq = fd.uniq.ok_or_else(|| LowlevelError("no unique space".into()))?;
+    let mut copy_out: Option<VarnodeId> = None;
+    let readers = fd.vn(vn).descend.to_vec();
+    for op in readers {
+        let slot = fd.slot_of(op, vn).ok_or_else(|| LowlevelError("totalReplaceConstant: reader".into()))?;
+        let newrep = if fd.op(op).is_marker() {
+            if let Some(c) = copy_out {
+                c
+            } else {
+                let (addr, after) = match fd.vn(vn).def {
+                    Some(d) => (fd.op(d).seq.addr, Some(d)),
+                    None => {
+                        let bb = *fd.blocks.list.first().ok_or_else(|| LowlevelError("no blocks".into()))?;
+                        (fd.blocks.block(bb).start, None)
+                    }
+                };
+                let copyop = fd.new_op(Copy, addr);
+                let out = fd.new_unique_out(size, uniq, copyop);
+                let k = fd.new_constant(size, val);
+                fd.op_set_input(copyop, k, 0)?;
+                match after {
+                    Some(d) => fd.op_insert_after(copyop, d)?,
+                    None => fd.op_insert_begin(copyop, fd.blocks.list[0]),
+                }
+                copy_out = Some(out);
+                out
+            }
+        } else {
+            fd.new_constant(size, val)
+        };
+        fd.op_set_input(op, newrep, slot)?;
+    }
+    Ok(())
 }

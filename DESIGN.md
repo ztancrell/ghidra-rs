@@ -137,8 +137,8 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    return recovery, stack-pointer flow, deindirect, branch cleanup, the ram heritage pass;
    `print raw` at `break start assignhigh` with every later stage's groups off identical on
    M8 (8 / 8) and M500 (446 / 500); the rest need `ActionLaneDivide` (R3).
-   R1 (rule pools; 19 copy, constant and arithmetic rules) in progress on branch `m3-r1`: M8
-   8 / 8; M500 less the 46 `ActionLaneDivide` functions 439 / 453 (96.9 %, bar 98 %, not reached).
+   R1 (rule pools; 19 copy, constant and arithmetic rules) done on branch `m3-r1`: M8 8 / 8;
+   M500 less the 46 `ActionLaneDivide` functions 451 / 453 (99.6 %, bar 98 %).
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.

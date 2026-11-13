@@ -424,15 +424,27 @@ fn varnode_props_late(fd: &mut Funcdata) -> Result<i32> {
             }
             continue;
         }
-        if v.consume == 0 && !v.is_constant() && !v.descend.is_empty() {
-            let zero_copy = v.def.is_some_and(|d| {
+        // no bit that may be non-zero is consumed: every read becomes 0
+        if fd.nzmask(vn) & v.consume == 0 && !v.is_constant() {
+            if let Some(d) = v.def {
                 let o = fd.op(d);
-                o.opc == Opcode::Copy && fd.vn(o.ins[0]).is_constant() && fd.vn(o.ins[0]).offset == 0
-            });
-            if !zero_copy {
-                return err(
-                    "varnodeprops: replacing an unconsumed varnode by zero is not implemented in ghidra-rs yet",
-                );
+                if v.size > 8 {
+                    // handleExtendedZero acts on a ZEXT of 0 only
+                    let zext0 =
+                        o.opc == Opcode::IntZext && fd.vn(o.ins[0]).is_constant() && fd.vn(o.ins[0]).offset == 0;
+                    if zext0 {
+                        return err("varnodeprops: handleExtendedZero is not implemented in ghidra-rs yet");
+                    }
+                    continue;
+                }
+                // a COPY of 0 is left to constant propagation
+                if o.opc == Opcode::Copy && fd.vn(o.ins[0]).is_constant() && fd.vn(o.ins[0]).offset == 0 {
+                    continue;
+                }
+            }
+            if !fd.vn(vn).descend.is_empty() {
+                super::rules::total_replace_constant(fd, vn, 0)?;
+                changes += 1;
             }
         }
     }
