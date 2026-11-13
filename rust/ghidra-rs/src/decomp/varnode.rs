@@ -93,6 +93,8 @@ impl VnFlags {
     pub(crate) const SYMCHECK_INCOMPLETE: VnFlags = VnFlags(1 << 19);
     /// `symcheck_complete` (`ActionConstantPtr`)
     pub(crate) const SYMCHECK_COMPLETE: VnFlags = VnFlags(1 << 20);
+    /// `lockedinput`: an input of a locked prototype (stage S6)
+    pub(crate) const LOCKED_INPUT: VnFlags = VnFlags(1 << 21);
 
     pub(crate) fn has(self, f: VnFlags) -> bool {
         self.0 & f.0 != 0

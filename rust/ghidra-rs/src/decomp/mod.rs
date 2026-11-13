@@ -22,6 +22,7 @@ mod heritage;
 mod infertypes;
 mod inject;
 mod jumptable;
+mod locked;
 mod op;
 mod opcode;
 mod print;
@@ -132,6 +133,10 @@ impl Arch {
             .map(|(name, val)| names.register(name).map(|(s, o, z)| (s, o, z, u64::from(*val))))
             .collect::<Result<_>>()?;
         let spec = CompilerSpec::parse(cspec, &sleigh, &names)?;
+        let mut type_factory = types::TypeFactory::new();
+        if let Some(m) = &spec.align_map {
+            type_factory.align_map = m.clone();
+        }
         let incidental = sleigh.incidental.iter().map(|n| names.register(n)).collect::<Result<_>>()?;
         let readonly = image
             .sections
@@ -150,11 +155,17 @@ impl Arch {
             readonly,
             externrefs: HashMap::new(),
             readonly_propagate: false,
-            types: types::TypeFactory::new(),
+            types: type_factory,
         })
     }
 
     /// `map function`: a function at `entry` with the default (empty) prototype.
+    /// The locked prototype of the function at `entry` (`parse line extern`), which a decompile
+    /// starts from; an unlocked one starts fresh, as every corpus script decompiles once.
+    pub(crate) fn function_proto(&self, entry: u64) -> Option<FuncProto> {
+        self.functions.get(&entry).filter(|f| f.proto.locked.is_some()).map(|f| f.proto.clone())
+    }
+
     pub(crate) fn add_function(&mut self, entry: u64, name: String) {
         self.functions.insert(entry, Function { name, proto: FuncProto::default() });
     }
@@ -238,14 +249,20 @@ impl Arch {
 }
 
 /// Port of `IfcParseLine` (`parse_C`): a C declaration. Types (`struct`, `union`, `enum`,
-/// `typedef`) join the architecture's types; an `extern` function declaration would lock the
-/// function's prototype, which is not ported yet, so it is an error rather than ignored.
-pub fn parse_line(arch: &mut Arch, text: &str) -> Result<()> {
+/// `typedef`) join the architecture's types; an `extern` function declaration locks the prototype
+/// of the function `find` names (`FuncProto::setPieces`).
+pub fn parse_line(arch: &mut Arch, text: &str, find: &dyn Fn(&str) -> Option<u64>) -> Result<()> {
     let ptr_size = arch.spec.stack_pointer.2;
     match cparse::parse_line(&mut arch.types, text, ptr_size)? {
         cparse::Decl::Type(_) => Ok(()),
-        cparse::Decl::Function { name, .. } => err(format!(
-            "parse line extern {name}: locked prototypes are not implemented in ghidra-rs yet (stage S6 remainder)"
-        )),
+        cparse::Decl::Function { name, model, output, inputs, dotdotdot } => {
+            let addr = find(&name).ok_or_else(|| LowlevelError(format!("Unknown function name: {name}")))?;
+            let proto = locked::lock_prototype(arch, model.as_deref(), (String::new(), output), inputs, dotdotdot)?;
+            match arch.functions.get_mut(&addr) {
+                Some(f) => f.proto = proto,
+                None => return err(format!("Unknown function name: {name}")),
+            }
+            Ok(())
+        }
     }
 }

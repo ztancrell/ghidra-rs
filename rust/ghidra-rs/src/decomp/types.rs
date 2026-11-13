@@ -110,6 +110,9 @@ pub(crate) struct TypeFactory {
     cache: HashMap<(u32, Meta), TypeId>,
     /// `type_nochar`: the 1-byte signed integer that is not `char`
     nochar: Option<TypeId>,
+    /// `alignMap`: the alignment of a primitive by size (`setDefaultAlignmentMap` until the
+    /// `.cspec`.s `<data_organization>` replaces it)
+    pub(crate) align_map: Vec<u32>,
 }
 
 impl Default for TypeFactory {
@@ -122,7 +125,13 @@ impl TypeFactory {
     /// The core types of `SleighArchitecture::buildCoreTypes` (sleigh_arch.cc), cached as
     /// `cacheCoreTypes` does: `char` is preferred over `int1`, wide characters are not cached.
     pub(crate) fn new() -> TypeFactory {
-        let mut f = TypeFactory { types: Vec::new(), dedup: HashMap::new(), cache: HashMap::new(), nochar: None };
+        let mut f = TypeFactory {
+            types: Vec::new(),
+            dedup: HashMap::new(),
+            cache: HashMap::new(),
+            nochar: None,
+            align_map: vec![1, 1, 2, 2, 4, 4, 4, 4, 8],
+        };
         let core: &[(&'static str, u32, Meta, u8)] = &[
             ("void", 1, Meta::Void, sub::VOID),
             ("bool", 1, Meta::Bool, sub::BOOL),
@@ -191,9 +200,11 @@ impl TypeFactory {
             _ => None,
         }
     }
-    /// `Datatype::getAlignSize` (no data organization is read: the size)
+    /// `Datatype::getAlignSize`: the size rounded up to the alignment (`getPrimitiveAlignSize`
+    /// for primitives, `calcAlignSize` for aggregates); 0 for a space-base type.
     pub(crate) fn align_size(&self, id: TypeId) -> u32 {
-        self.size(id)
+        let (size, align) = (self.size(id), self.alignment(id));
+        size.div_ceil(align) * align
     }
 
     /// Port of `TypeFactory::getBase(int4,type_metatype)`.
@@ -371,15 +382,18 @@ impl TypeFactory {
         })
     }
 
-    /// The alignment of a type for struct layout. ponytail: natural alignment (a primitive's
-    /// size, up to 8; an aggregate's largest member); read the `.cspec`'s `<data_organization>`
-    /// when a layout differs.
+    /// `Datatype::getAlignment`: a primitive's from the alignment map (`TypeFactory::getAlignment`,
+    /// the last entry for larger sizes), an array's its element's, an aggregate's its largest
+    /// field's.
     pub(crate) fn alignment(&self, id: TypeId) -> u32 {
         let t = self.get(id);
         match &t.kind {
             Kind::Array { elem, .. } => self.alignment(*elem),
             Kind::Fields(fs) => fs.iter().map(|f| self.alignment(f.2)).max().unwrap_or(1),
-            _ => t.size.clamp(1, 8),
+            _ => {
+                let m = &self.align_map;
+                m.get(t.size as usize).or(m.last()).copied().unwrap_or(1)
+            }
         }
     }
 
@@ -394,7 +408,8 @@ impl TypeFactory {
             off = if union { off.max(self.size(t)) } else { at + self.size(t) };
             fields.push((n, at, t));
         }
-        let size = off.div_ceil(align) * align;
+        // the size is the end of the last field; `align_size` pads it (TypeStruct::calcAlignSize)
+        let size = off;
         let (meta, submeta) = if union { (Meta::Union, sub::UNION) } else { (Meta::Struct, sub::STRUCT) };
         self.intern(Datatype { meta, submeta, size, name: Some(name.to_string()), kind: Kind::Fields(fields) })
     }

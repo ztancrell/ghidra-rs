@@ -86,6 +86,9 @@ fn is_indirect_zero(fd: &Funcdata, vn: VarnodeId) -> bool {
 /// Port of `FuncProto::possibleInputParam` for the function's unlocked prototype: an input
 /// entry holds the range justified, and the range is at least its minimum size.
 fn possible_input_param(fd: &Funcdata, arch: &Arch, space: Space, off: u64, size: u32) -> bool {
+    if let Some(p) = fd.proto.locked.as_ref().and_then(|l| l.possible_input(space, off, size)) {
+        return p;
+    }
     let Some(m) = fd.proto.model else { return false };
     let list = &arch.spec.models.get(m).input;
     (0..list.entries.len())
@@ -1016,7 +1019,7 @@ pub(crate) fn dead_code(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         }
     }
     // gatherConsumedReturn: the return value is still being recovered, or locked
-    let return_consume = if fd.active_output.is_some() {
+    let return_consume = if fd.active_output.is_some() || fd.proto.locked.is_some() {
         u64::MAX
     } else {
         let mut cv = 0;
@@ -1079,7 +1082,7 @@ pub(crate) fn dead_code(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         let op = fd.call(c).op;
         let ins = fd.op(op).ins.clone();
         push_consumed(fd, u64::MAX, ins[0], &mut worklist);
-        let active = fd.call(c).active_input.is_some();
+        let active = fd.call(c).active_input.is_some() || fd.call(c).proto.locked.is_some();
         for &vn in &ins[1..] {
             let v = fd.vn(vn);
             let val = if active || v.is_auto_live() { u64::MAX } else { minimal_mask(v.nzmask()) };
@@ -1565,6 +1568,9 @@ pub(crate) fn deindirect(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         };
         let Some(entry) = target.filter(|e| arch.functions.contains_key(e)) else { continue };
         let callee = arch.functions[&entry].proto.clone();
+        if callee.locked.is_some() {
+            return err("deindirect to a locked prototype (lateRestriction, transferLockedInput/Output): not implemented in ghidra-rs yet");
+        }
         let call = fd.call_mut(c);
         call.entry = Some(entry);
         call.known = true;

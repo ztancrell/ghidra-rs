@@ -574,8 +574,7 @@ rust/tools/decomp-diff.sh --script <file>      # one script on both engines, ful
   runs up to the `break start` action (stage S4: at most `assignhigh`, see "Stage S4") and
   `continue` resumes it; a function mapped `nocode` prints `No code for <name>` instead. `print
   C|tree block` fail with "not implemented in ghidra-rs yet (milestone 3, later stages)";
-  `parse line` defines types (stage S6) but fails on `extern` declarations (locked prototypes
-  are not ported); any other command fails with "not implemented in ghidra-rs".
+  `parse line` defines types and locks `extern` prototypes (stage S6); any other command fails with "not implemented in ghidra-rs".
   Superseded: until S6, `parse line` failed like `print C`.
   Superseded: until S2, `decompile` stopped at most at `heritage` and `continue` failed. Of the options
   `option readonly on|off` and `option currentaction decompile <group> on|off` have an
@@ -1071,8 +1070,7 @@ M8 8 / 8, M500 446 / 500: identical on every function the reference finishes (49
   namespaces. 211 of the 232 `parse line` commands of the upstream datatests parse (unit test):
   all but
   `bitfields*.xml` (bit-fields, stage R5) and `pointersub.xml` (a relative pointer type made by
-  `pointer setting`). The console's `parse line` defines types; `extern` declarations fail,
-  since locking a prototype is not ported.
+  `pointer setting`). The console's `parse line` defines types and locks prototypes (round two below).
 
 Not ported yet (the S6 remainder): locked prototypes (`parse line extern`, `fspec.cc`'s locked
 paths; so no datatest that uses `parse line` passes yet, and they also need C printing, S9),
@@ -1080,6 +1078,36 @@ paths; so no datatest that uses `parse line` passes yet, and they also need C pr
 and `TypePointerRel`, `database.cc` beyond the global lookups (scopes are stand-ins), the
 `.cspec`'s `<data_organization>` (struct layout uses natural alignment), function types with
 prototypes. Each fails loudly where the inference would need it.
+
+Round two (same branch, 2026-11-13):
+
+- Locked prototypes (`locked.rs`): `parse line extern` locks the named function's prototype
+  (`FuncProto::setPieces`: storage from the model by `assignAddressFallback`/`getAddrBySlot`,
+  join outputs included; a hidden return pointer is not ported). Locked paths ported:
+  `ActionPrototypeTypes` (locked return values on every RETURN, register parameters as locked
+  inputs), `funcLinkInput`/`funcLinkOutput` (stack parameters as stack loads, register ones,
+  the output varnode), `characterizeAs*`/`possibleInputParam`, `ActionDeadCode`'s consumption,
+  the locked types of `TypeOpCall`/`TypeOpCallind`/`TypeOpReturn`, and `ActionConstantPtr`'s
+  locked checks. A decompile starts from its function's locked prototype.
+- Struct layout and `getAlignSize` from the `.cspec`'s `<data_organization>`
+  (`<size_alignment_map>`; `setDefaultAlignmentMap` without one). Superseded: the natural
+  alignment shortcut of the first slice.
+- Check: `rust/tools/decomp-locked-options.sh <type> <file>` writes the S6 options plus a
+  locked `<type> name(void)` prototype for every mercs2 function with a C name (28,495), so the
+  decompiled function and its callees are locked. M8 5 / 8 with `void` and 5 / 8 with `int4` (the M500 runs had not finished at the commit).
+  The misses are calls resolved by `ActionDeindirect` to a locked callee: `lateRestriction`
+  (`transferLockedInput/Output`, `commitNewInputs/Outputs`) is not ported and fails loudly.
+- Not reached: the D bar (`print raw` with types on the datatests using `parse line`). 58 of
+  the 69 files are x86-64 (`x86:LE:64`), 8 ARM/AArch64/MIPS; the Rust decompiler is x86-32 only
+  and cannot `load test file` yet. The one x86-32 file (`retstruct.xml`) also needs
+  `type varnode` (dynamic symbols). So D: 0 checked.
+- Still left for S6: `lateRestriction`, locked stack parameters of the decompiled function
+  (they need the stack heritage pass), varargs calls to locked prototypes, hidden return
+  pointers, the scopes of `database.cc` (parameter symbols, `type varnode`, the global scope
+  beyond `map`), `unionresolve`, partial types and `TypePointerRel`, x86-64 and `load test
+  file` for the D corpus. `cast.cc`/`ActionSetCasts` belong to S9: they run after `assignhigh`,
+  so no S6 check can see them.
+
 
 ## Speed
 

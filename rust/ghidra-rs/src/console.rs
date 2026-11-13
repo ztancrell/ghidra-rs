@@ -229,6 +229,10 @@ impl Console {
                 self.fd = Some(Funcdata::new(u64::from(*a)));
                 if let (Some(fd), Some(arch)) = (&mut self.fd, &self.arch) {
                     fd.types = arch.types.clone();
+                    // the function symbol's prototype (`Funcdata::funcp`), locked by `parse line`
+                    if let Some(p) = arch.function_proto(u64::from(*a)) {
+                        fd.proto = p;
+                    }
                 }
                 self.actions = set.is_ok().then_some(actions);
                 self.run_actions(set, out)?;
@@ -255,7 +259,9 @@ impl Console {
                     .map(str::trim_start)
                     .and_then(|s| s.strip_prefix("line"))
                     .unwrap_or("");
-                crate::decomp::parse_line(arch, text).map_err(|e| e.to_string())?;
+                let functions = &self.functions;
+                crate::decomp::parse_line(arch, text, &|n| functions.get(n).map(|&a| u64::from(a)))
+                    .map_err(|e| e.to_string())?;
             }
             // read by the corpora but needing later stages
             ["print", "C"] | ["print", "tree", "block"] => {

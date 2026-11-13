@@ -276,8 +276,6 @@ fn prototype_types(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     if !fd.proto.model_locked && !fd.proto.has_matching_model(evalfp) {
         fd.proto.set_model(models, evalfp);
     }
-    let delay = arch.spec.models.get(evalfp).output.max_delay();
-    fd.active_output = Some(ParamActive::new(delay));
     for op in fd.ops_with(Opcode::Return) {
         let Some(&in0) = fd.op(op).ins.first() else { continue };
         if !fd.vn(in0).is_constant() {
@@ -285,6 +283,11 @@ fn prototype_types(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             let c = fd.new_constant(size, 0);
             fd.op_set_input(op, c, 0)?;
         }
+    }
+    // the locked output and inputs (stage S6), else initActiveOutput
+    if !super::locked::prototype_types(fd, arch)? {
+        let delay = arch.spec.models.get(evalfp).output.max_delay();
+        fd.active_output = Some(ParamActive::new(delay));
     }
     Ok(0)
 }
@@ -300,6 +303,9 @@ fn funclink(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         let model = fd.call(c).proto.model;
         let delays = model.map(|m| arch.spec.models.get(m)).map(|m| (m.input.max_delay(), m.output.max_delay()));
         let (din, dout) = delays.unwrap_or((0, 0));
+        if super::locked::func_link(fd, arch, c)? {
+            continue;
+        }
         let call = fd.call_mut(c);
         call.active_input = Some(ParamActive::new(din));
         call.active_output = Some(ParamActive::new(dout));
@@ -313,7 +319,7 @@ fn funclink(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
 
 /// Port of `FuncCallSpecs::createPlaceholder`: a 1-byte LOAD at stack offset 0, appended to
 /// the call's inputs; heritage later reads the stack offset at the call from it.
-fn create_placeholder(fd: &mut Funcdata, arch: &Arch, c: CallId) -> Result<()> {
+pub(crate) fn create_placeholder(fd: &mut Funcdata, arch: &Arch, c: CallId) -> Result<()> {
     let op = fd.call(c).op;
     let slot = fd.op(op).ins.len();
     let spec = &arch.spec;

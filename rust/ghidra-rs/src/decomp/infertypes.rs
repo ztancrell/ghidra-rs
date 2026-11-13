@@ -102,9 +102,12 @@ fn unknown_ptr(fd: &mut Funcdata, size: u32) -> TypeId {
     fd.types.pointer(size, u1, WS)
 }
 
-/// Port of `TypeOp::getOutputLocal` and its overrides (`PcodeOp::outputTypeLocal`). Calls and
-/// the function's own output are never locked in the console, so they take the default.
+/// Port of `TypeOp::getOutputLocal` and its overrides (`PcodeOp::outputTypeLocal`); a call
+/// with a locked output gives its type.
 fn output_local(fd: &mut Funcdata, op: OpId) -> Result<TypeId> {
+    if let Some(t) = locked_output_type(fd, op) {
+        return Ok(t);
+    }
     let o = fd.op(op);
     let Some(out) = o.out else { return err("outputTypeLocal: op without output") };
     let size = fd.vn(out).size;
@@ -117,6 +120,9 @@ fn output_local(fd: &mut Funcdata, op: OpId) -> Result<TypeId> {
 
 /// Port of `TypeOp::getInputLocal` and its overrides (`PcodeOp::inputTypeLocal`).
 fn input_local(fd: &mut Funcdata, op: OpId, slot: usize) -> TypeId {
+    if let Some(t) = locked_input_type(fd, op, slot) {
+        return t;
+    }
     let o = fd.op(op);
     let opc = o.opc;
     let size = fd.vn(o.ins[slot]).size;
@@ -601,6 +607,9 @@ fn propagate_one(fd: &mut Funcdata, arch: &Arch, st: &mut Infer, vn: VarnodeId) 
 /// Port of `ActionInferTypes::canonicalReturnOp` and `propagateAcrossReturns` (the
 /// console never locks the function's output).
 fn propagate_across_returns(fd: &mut Funcdata, arch: &Arch, st: &mut Infer) -> Result<()> {
+    if fd.proto.locked.is_some() {
+        return Ok(());
+    }
     let rets: Vec<OpId> = fd
         .ops_created_with(Opcode::Return)
         .into_iter()
@@ -768,6 +777,13 @@ fn is_pointer(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, op: OpId, slot: usi
         let o = fd.op(op);
         match o.opc {
             Opcode::Call | Opcode::Callind if slot == 0 => return None,
+            Opcode::Call | Opcode::Callind
+                if locked_input_type(fd, op, slot)
+                    .is_some_and(|t| !matches!(fd.types.meta(t), Meta::Ptr | Meta::Unknown)) =>
+            {
+                return None
+            }
+            Opcode::Copy if copy_blocked(fd, op) => return None,
             Opcode::Call
             | Opcode::Callind
             | Opcode::Copy
@@ -957,4 +973,50 @@ fn symbol_types(fd: &mut Funcdata, arch: &Arch) {
         };
         update_type(fd, vn, ty, true, true);
     }
+}
+
+/// `TypeOpCall`/`TypeOpCallind::getOutputLocal` with a locked output (stage S6).
+fn locked_output_type(fd: &Funcdata, op: OpId) -> Option<TypeId> {
+    if !matches!(fd.op(op).opc, Opcode::Call | Opcode::Callind) {
+        return None;
+    }
+    let l = fd.call(fd.call_of(op)?).proto.locked.as_ref()?;
+    (fd.types.meta(l.output.ty) != Meta::Void).then_some(l.output.ty)
+}
+
+/// The locked-prototype cases of `TypeOpCall`/`TypeOpCallind`/`TypeOpReturn::getInputLocal`:
+/// a call's locked parameter type, the function's locked output type on a RETURN.
+fn locked_input_type(fd: &Funcdata, op: OpId, slot: usize) -> Option<TypeId> {
+    let o = fd.op(op);
+    let size = fd.vn(*o.ins.get(slot)?).size;
+    let t = match o.opc {
+        Opcode::Call | Opcode::Callind if slot > 0 => {
+            let t = fd.call(fd.call_of(op)?).proto.locked.as_ref()?.inputs.get(slot - 1)?.ty;
+            if o.opc == Opcode::Call && fd.types.size(t) > size {
+                return None;
+            }
+            t
+        }
+        Opcode::Return if slot == 1 => {
+            let t = fd.proto.locked.as_ref()?.output.ty;
+            if fd.types.size(t) != size {
+                return None;
+            }
+            t
+        }
+        _ => return None,
+    };
+    (fd.types.meta(t) != Meta::Void).then_some(t)
+}
+
+/// `ActionConstantPtr::checkCopy` false: the COPY feeds only a RETURN of a locked output that
+/// cannot be a pointer.
+fn copy_blocked(fd: &Funcdata, op: OpId) -> bool {
+    let Some(out) = fd.op(op).out else { return false };
+    let readers = fd.vn(out).descend.to_vec();
+    let [ret] = readers[..] else { return false };
+    if fd.op(ret).opc != Opcode::Return {
+        return false;
+    }
+    fd.proto.locked.as_ref().is_some_and(|l| !matches!(fd.types.meta(l.output.ty), Meta::Ptr | Meta::Unknown))
 }
