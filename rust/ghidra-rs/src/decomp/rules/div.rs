@@ -8,7 +8,8 @@ use super::*;
 
 /// `signbit_negative`.
 pub(super) fn signbit_negative(val: u64, size: u32) -> bool {
-    (val >> (size * 8).wrapping_sub(1).min(63)) & 1 != 0
+    // address.cc: `0x80 << 8*(size-1)`, the shift count taken mod 64 as x86 does
+    val & 0x80u64.wrapping_shl(size.wrapping_sub(1).wrapping_mul(8)) != 0
 }
 
 /// Port of `Varnode::isConstantExtended`: a constant, or a 9 to 16-byte ZEXT, SEXT or PIECE of
@@ -44,8 +45,9 @@ pub(super) fn constant_extended(fd: &Funcdata, vn: VarnodeId) -> Option<u128> {
             }
             let (mut l, mut h) = (lo.offset, hi.offset);
             if lo.size != 8 {
-                l |= h.wrapping_shl(8 * lo.size);
-                h = h.wrapping_shr(8 * (8u32.wrapping_sub(lo.size)));
+                l |= h.wrapping_shl(lo.size.wrapping_mul(8));
+                // the C++ shifts are undefined past 63; x86 takes them mod 64
+                h = h.wrapping_shr(8u32.wrapping_sub(lo.size).wrapping_mul(8));
             }
             Some(u128::from(h) << 64 | u128::from(l))
         }
@@ -361,6 +363,9 @@ fn move_sign_bit_extraction(fd: &mut Funcdata, first: VarnodeId, replace: Varnod
     let mut i = 0;
     while let Some(&vn) = test.get(i) {
         i += 1;
+        // a snapshot visits the ops the C++ live walk does: it advances before changing an op,
+        // and the change only drops that op from this list (it reads `replace`, a different
+        // varnode, instead)
         let readers = fd.vn(vn).descend.to_vec();
         for op in readers {
             match fd.op(op).opc {
@@ -579,8 +584,38 @@ mod tests {
 
     #[test]
     fn signbit() {
-        assert!(signbit_negative(0x80, 1));
-        assert!(!signbit_negative(0x7fff_ffff, 4));
-        assert!(signbit_negative(u64::MAX, 8));
+        // sizes 1-8: the top bit; 9-16: `0x80 << 8*(size-1)` with the count mod 64 (bit 7 .. 63)
+        for size in 1..=16u32 {
+            let bit = (8 * (size - 1) + 7) % 64;
+            assert!(signbit_negative(1 << bit, size), "size {size}");
+            assert!(!signbit_negative(!(1u64 << bit), size), "size {size}");
+        }
+    }
+
+    /// A 16-byte varnode written by `opc` of the given constants.
+    fn wide(fd: &mut Funcdata, opc: Opcode, consts: &[(u32, u64)]) -> VarnodeId {
+        let op = fd.new_op(opc, 0x1000);
+        let out = fd.new_varnode_out(16, Space::Sleigh(3), 0x100, op);
+        for (slot, &(size, val)) in consts.iter().enumerate() {
+            let c = fd.new_constant(size, val);
+            fd.op_set_input(op, c, slot).unwrap();
+        }
+        out
+    }
+
+    #[test]
+    fn constant_extended_wide() {
+        let mut fd = Funcdata::new(0x1000);
+        let c = fd.new_constant(4, 0x1234);
+        assert_eq!(constant_extended(&fd, c), Some(0x1234));
+        let z = wide(&mut fd, IntZext, &[(8, u64::MAX)]);
+        assert_eq!(constant_extended(&fd, z), Some(u128::from(u64::MAX)));
+        let s = wide(&mut fd, IntSext, &[(4, 0x8000_0000)]);
+        assert_eq!(constant_extended(&fd, s), Some(u128::MAX - 0x7fff_ffff));
+        let p = wide(&mut fd, Piece, &[(8, 0x1122), (8, 0x3344)]);
+        assert_eq!(constant_extended(&fd, p), Some(0x1122u128 << 64 | 0x3344));
+        // a 4-byte low piece: the high constant moves up by 32 bits
+        let p4 = wide(&mut fd, Piece, &[(8, 0xaabb_ccdd_0000_0001), (4, 0x5)]);
+        assert_eq!(constant_extended(&fd, p4), Some(0xaabb_ccddu128 << 64 | 0x1_0000_0005));
     }
 }

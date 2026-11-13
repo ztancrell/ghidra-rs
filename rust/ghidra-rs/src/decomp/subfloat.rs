@@ -129,11 +129,13 @@ impl FloatFormat {
             return self.zero_encoding(sgn);
         }
         if exp < 1 {
+            // float.cc does not handle a rounding carry into the normal range here (its TODO):
+            // exp can reach 1 and the shift count -1, which x86 takes mod 64
             if Self::round_to_nearest_even(&mut signif, 64 - self.frac_size - exp) && signif >> 63 == 0 {
                 signif = 1u64 << 63;
                 exp += 1;
             }
-            return self.set_fractional_code(self.zero_encoding(sgn), signif >> (-exp));
+            return self.set_fractional_code(self.zero_encoding(sgn), signif.wrapping_shr((-exp) as u32));
         }
         if Self::round_to_nearest_even(&mut signif, 64 - self.frac_size - 1) && signif >> 63 == 0 {
             signif = 1u64 << 63;
@@ -520,6 +522,7 @@ mod tests {
             (&f8, &f4, 0x0000_0001, 0x36a0_0000_0000_0000), // smallest single denormal
             (&f4, &f8, 0x3800_0000_0000_0000, 0x0040_0000), // 2^-127: a single denormal
             (&f4, &f8, 0x0000_0000_0000_0001, 0x0000_0000), // too small: zero
+            (&f4, &f8, 0x380f_ffff_ffff_ffff, 0x0000_0000), // denormal rounding carry: float.cc gives +0
         ];
         for &(to, from, enc, want) in cases {
             assert_eq!(to.convert_encoding(enc, from), want, "{enc:#x}");

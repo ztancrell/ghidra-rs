@@ -579,7 +579,8 @@ rust/tools/decomp-diff.sh --script <file>      # one script on both engines, ful
   Superseded: until S2, `decompile` stopped at most at `heritage` and `continue` failed. Of the options
   `option readonly on|off` and `option currentaction decompile <group> on|off` have an
   effect (and print the reference's message); the others (`togglerule`: no rule is ported
-  yet) are read and ignored. Superseded: until S4, `decompile` stopped at most at
+  yet) are read and ignored (superseded at R4: `togglerule` and `nanignore` are read, options
+  that only change the printed C are ignored, any other is an error; see "Stage R4"). Superseded: until S4, `decompile` stopped at most at
   `paramdouble` and `option currentaction` was ignored. A name mapped twice
   (`map function`) finds its first function, as the C++ `findFirstByName` does.
   Superseded: S0 and S1a ignored `option` and `map externalref`; S1b reads them (read-only
@@ -1330,8 +1331,14 @@ more are taken mod 64, as x86 does. `RuleSignForm2` reports no change after maki
 C++. Helpers added elsewhere: `BlockGraph::find_condition` (`FlowBlock::findCondition`),
 `TransformManager::new_piece`/`get_piece`/`preexisting_guard` (the subclass's
 `preserveAddress` is passed in), `jumptable::is_bool_output` and `mostsigbit_set` made
-crate-visible. Not ported: `RuleFloatSignCleanup` (the `cleanup` pool, R2); the
-`nanignore` option (no console option sets it, so `ignorenan` never takes that path).
+crate-visible. `option nanignore` (`OptionNanIgnore`) is read: `compare` (the default) and `all`
+enable `ignorenan`, `all` also makes every FLOAT_NAN a COPY of 0 (`nan_ignore_all`), `none`
+switches the rule off. Superseded: the console no longer reads and ignores every other option;
+those that only change the printed C (`nullprinting`, `inplaceops`, `conventionprinting`,
+`nocastprinting`, `maxlinewidth`, `indentincrement`, `commentindent`, `commentstyle`,
+`commentheader`, `commentinstruction`, `integerformat`, `braceformat`, `namespacestrategy`,
+`forloops`) still are, any other one not ported is an error. Not ported: `RuleFloatSignCleanup`
+(the `cleanup` pool, R2).
 
 The check is R1's with group `floatprecision` on: `tools/corpus/r4-options.txt`, written by
 `tools/r1-options.sh` next to `r1-options.txt` (59 `togglerule`s).

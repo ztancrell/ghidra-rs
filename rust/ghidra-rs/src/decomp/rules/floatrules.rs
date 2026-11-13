@@ -246,8 +246,18 @@ fn test_for_comparison(
 }
 
 /// Port of `RuleIgnoreNan`: a NaN test combined with a comparison of the same value is dropped
-/// (`nan_ignore_all` is never set: no option sets it).
-pub(super) fn ignore_nan(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
+/// (`option nanignore compare`, the default); with `nanignore all` every NaN test is false.
+///
+/// The reader lists are snapshots: the C++ advances its live iterator before changing a reader,
+/// and a change only removes that reader from the list (or adds readers to other varnodes),
+/// so the walk visits the same ops.
+pub(super) fn ignore_nan(fd: &mut Funcdata, op: OpId, arch: &Arch) -> Result<i32> {
+    if arch.nan_ignore_all {
+        fd.op_set_opcode(op, Copy);
+        let c = fd.new_constant(1, 0);
+        fd.op_set_input(op, c, 0)?;
+        return Ok(1);
+    }
     let float_var = inp(fd, op, 0)?;
     if fd.vn(float_var).is_free() {
         return Ok(0);
