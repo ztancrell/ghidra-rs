@@ -1399,7 +1399,10 @@ impl<'a> Checker<'a> {
     }
 
     // What the original cannot be returning: a path reaching RET with a byte of EAX still
-    // unwritten, or with no net x87 push.
+    // unwritten, or with no net x87 push. A read of EAX stops the walk, so an EAX input is
+    // never counted. A byte the function's own body never writes is not counted either: on
+    // every path it is the caller's own value or a callee's, returned unchanged, which a
+    // caller may read back.
     fn never_returned(&mut self, entry: u32) -> Live {
         if let Some(m) = self.never_returned_memo.get(&entry) {
             return m.clone();
@@ -1409,8 +1412,13 @@ impl<'a> Checker<'a> {
         let mut out = Live::new();
         let eax = self.callee(entry, &self.eax_bytes(), 1);
         if eax.status == "ok" {
-            let all = self.eax_bytes();
-            out.extend(eax.at_return.into_iter().filter(|k| all.contains(k)));
+            let mut written = Live::new();
+            for a in self.body_of(entry) {
+                if let Some(i) = self.ins(a) {
+                    written.extend(i.results.iter().flat_map(|&r| self.regs.keys(r).iter().cloned()));
+                }
+            }
+            out.extend(eax.at_return.into_iter().filter(|k| written.contains(k) && base(k) == "EAX"));
         }
         let x87 = self.callee(entry, &Live::from(["X87#0".into()]), 1);
         if x87.status == "ok" && x87.at_return.contains("X87#0") {
