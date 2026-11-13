@@ -1,6 +1,6 @@
 //! The action framework: port of `Action`, `ActionGroup` and `ActionRestartGroup` (action.cc)
 //! with `break start` breakpoints, so that a run stops before an action and `continue` resumes
-//! it where it stopped. Rule pools (`ActionPool`) come with the rules.
+//! it where it stopped, and `ActionPool` (the rules are in [`super::rules`]).
 
 use super::{err, Arch, Funcdata, Result};
 
@@ -31,6 +31,8 @@ enum Kind {
         kids: Vec<ActionId>,
         restart: bool,
     },
+    /// `ActionPool`: the rules it applies to every op
+    Pool(Vec<&'static super::rules::Rule>),
 }
 
 /// One action with the C++ `Action` fields that drive `perform`.
@@ -106,6 +108,11 @@ impl ActionTree {
         self.add(name, Kind::Group { kids, restart: true }, false, true)
     }
 
+    /// An `ActionPool` (`rule_repeatapply`).
+    pub(crate) fn pool(&mut self, name: &'static str, rules: Vec<&'static super::rules::Rule>) -> ActionId {
+        self.add(name, Kind::Pool(rules), true, false)
+    }
+
     fn root(&self) -> ActionId {
         ActionId(self.nodes.len() - 1)
     }
@@ -173,6 +180,11 @@ impl ActionTree {
         let restart = match &self.nodes[id.0].kind {
             Kind::Leaf(f) => {
                 let changes = f(fd, arch)?;
+                self.nodes[id.0].count += changes;
+                return Ok(0);
+            }
+            Kind::Pool(rules) => {
+                let changes = super::rules::pool_apply(fd, arch, rules)?;
                 self.nodes[id.0].count += changes;
                 return Ok(0);
             }

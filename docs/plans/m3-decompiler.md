@@ -358,6 +358,16 @@ differs from the table row:
   Superseded: "S2/S4 must port `fillinExtrapop`" above.
 - Locked prototypes (decision 6) are not needed by S4; the locked paths of `fspec.cc` remain.
 
+### R1: in progress on branch `m3-r1` (2026-11-13)
+
+The rule pool and 19 rules (list in `rust/README.md`, "Stage R1"). Check: `print raw` at
+`break start assignhigh` with `rust/tools/corpus/r1-options.txt` (S4's groups, `analysis` on,
+the 97 unported rules of the groups that are on switched off) and
+`DECOMP_SKIP_ACTIONS=multicse,shadowvar,conditionalconst` (the three `analysis` actions not
+ported; the reference patch reads the same variable). M8 8 / 8, M500 379 / 500: the 98 % bar is
+not reached. The jump-table stand-ins stay until R2 (the partial function needs the comparison
+rules too).
+
 ## Running stages in parallel
 
 Strict chain first: S0 → S1a → S1b → S2. After S2 the work fans out. Under the cap of two

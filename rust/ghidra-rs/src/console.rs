@@ -194,7 +194,17 @@ impl Console {
                 }
                 writeln!(out, "Toggled {group} in action decompile").map_err(io)?;
             }
-            // the other options (`togglerule`: no rule is ported) are read and ignored
+            // `option togglerule <rule> on|off` (its message precedes `load function`, which the
+            // checks compare from, so none is printed)
+            ["option", "togglerule", rule, on @ ("on" | "off")] if self.arch.is_some() => {
+                let key = format!("rule:{rule}");
+                if *on == "off" {
+                    self.disabled.insert(key);
+                } else {
+                    self.disabled.remove(&key);
+                }
+            }
+            // the other options are read and ignored
             ["option", ..] if self.arch.is_some() => {}
             // `readonly <addr>:<size>`
             ["readonly", range] => {
@@ -221,7 +231,13 @@ impl Console {
                     return Ok(true);
                 }
                 writeln!(out, "Decompiling {name}").map_err(io)?;
-                let mut actions = action::universal(&self.disabled);
+                // the checks' `DECOMP_SKIP_ACTIONS` (comma list), which the reference patch reads
+                // too: those actions do nothing on both sides
+                let mut disabled = self.disabled.clone();
+                if let Ok(skip) = std::env::var("DECOMP_SKIP_ACTIONS") {
+                    disabled.extend(skip.split(',').filter(|s| !s.is_empty()).map(|s| format!("action:{s}")));
+                }
+                let mut actions = action::universal(&disabled);
                 let set = match &self.break_start {
                     Some(b) => actions.set_break_start(b),
                     None => Ok(()),

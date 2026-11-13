@@ -908,6 +908,29 @@ impl Funcdata {
         Ok(at as u64)
     }
 
+    /// The first op (alive or dead, not freed) whose sequence number sorts after `seq`, or the
+    /// first of all (`PcodeOpTree` iteration from `beginOpMain`).
+    pub(crate) fn op_after(&self, seq: Option<SeqNum>) -> Option<OpId> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let lo = seq.map_or(Unbounded, |s| Excluded((s.addr, s.time)));
+        self.seqs.range((lo, Unbounded)).next().map(|(_, &id)| id)
+    }
+
+    /// Port of `Funcdata::opDeadAndGone`: a dead op is freed at once.
+    pub(crate) fn op_dead_and_gone(&mut self, op: OpId) {
+        if let Some(p) = self.dead.iter().position(|&o| o == op) {
+            self.dead.remove(p);
+        }
+        self.op_clear_inputs(op);
+        if let Some(out) = self.op_mut(op).out.take() {
+            self.loc_del(out);
+            self.vn_mut(out).def = None;
+            self.delete_varnode(out);
+        }
+        let seq = self.op(op).seq;
+        self.seqs.remove(&(seq.addr, seq.time));
+    }
+
     /// Port of `Funcdata::warningHeader`.
     pub(crate) fn warning_header(&mut self, msg: impl Into<String>) {
         self.warnings.push(msg.into());

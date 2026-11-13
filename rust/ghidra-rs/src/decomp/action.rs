@@ -15,8 +15,8 @@ use super::{err, heritage, Arch, Funcdata, Result};
 /// `universalAction` as the `decompile` root has it, with the groups in `disabled` switched
 /// off (`option currentaction decompile <group> off`): the root `universal` (restart group,
 /// once per function), its first actions, the repeating groups `fullloop`, `mainloop` and
-/// `stackstall`, and the root's actions after `fullloop` up to `assignhigh`. Rule pools hold no
-/// ported rule, so they do nothing: the checks switch every rule off. An action that is not
+/// `stackstall`, and the root's actions after `fullloop` up to `assignhigh`. `oppool1` holds the
+/// ported rules (`rules::OPPOOL1`) less those `togglerule` switched off. An action that is not
 /// ported fails when it runs with its group on.
 pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
     use super::coreaction as c;
@@ -58,8 +58,16 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
     ];
     let on = |g: &str| DECOMPILE.contains(&g) && !disabled.contains(g);
     let leaves = |t: &mut ActionTree, list: &[(&'static str, &str, super::actiontree::ApplyFn)]| -> Vec<_> {
-        list.iter().filter(|(_, g, _)| on(g)).map(|&(name, _, f)| t.leaf(name, f)).collect()
+        list.iter()
+            .filter(|(name, g, _)| on(g) && !disabled.contains(&format!("action:{name}")))
+            .map(|&(name, _, f)| t.leaf(name, f))
+            .collect()
     };
+    // the rules of the groups that are on, less those `togglerule` switched off ("rule:<name>")
+    let pool1 = super::rules::select(super::rules::OPPOOL1, |rl| {
+        on(rl.group) && !disabled.contains(&format!("rule:{}", rl.name))
+    });
+    let pool1 = t.pool("oppool1", pool1);
     let mut root = leaves(
         &mut t,
         &[
@@ -73,10 +81,9 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
             ("funclinkoutonly", "noproto", not_ported),
         ],
     );
-    let stackstall = leaves(
+    let mut stackstall = leaves(
         &mut t,
         &[
-            ("oppool1", "base", c::nothing),
             ("lanedivide", "base", c::nothing),
             ("multicse", "analysis", not_ported),
             ("shadowvar", "analysis", not_ported),
@@ -84,6 +91,7 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
             ("stackptrflow", "stackptrflow", c::stack_ptr_flow),
         ],
     );
+    stackstall.insert(0, pool1);
     let stackstall = t.group("stackstall", stackstall, true);
     let mut mainloop = leaves(
         &mut t,
@@ -103,7 +111,7 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
             ("deadcode", "deadcode", c::dead_code),
             ("dynamicmapping", "dynamic", c::nothing),
             ("spacebase", "base", c::spacebase),
-            ("nonzeromask", "analysis", not_ported),
+            ("nonzeromask", "analysis", super::rules::nonzero_mask),
             ("infertypes", "typerecovery", not_ported),
             ("restructurevarnode", "localrecovery", not_ported),
         ],
