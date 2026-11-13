@@ -18,6 +18,7 @@ mod float;
 mod piece;
 mod pool;
 mod subpiece;
+mod subvar;
 
 pub(crate) use pool::{nonzero_mask, pool_apply, select, Pool};
 
@@ -28,6 +29,7 @@ use extend::*;
 use float::*;
 use piece::*;
 use subpiece::*;
+use subvar::*;
 
 use std::collections::HashSet;
 
@@ -119,7 +121,15 @@ pub(crate) const OPPOOL1: &[Rule] = &[
     r("subnormal", "analysis", &[Subpiece], sub_normal),
     r("piece2zext", "analysis", &[Piece], piece_2_zext),
     r("piece2sext", "analysis", &[Piece], piece_2_sext),
+    r("subvar_and", "subvar", &[IntAnd], subvar_and),
+    r("subvar_subpiece", "subvar", &[Subpiece], subvar_subpiece),
+    r("splitflow", "subvar", &[Subpiece], split_flow),
+    r("subvar_compzero", "subvar", &[IntNotequal, IntEqual], subvar_comp_zero),
+    r("subvar_shift", "subvar", &[IntRight], subvar_shift),
+    r("subvar_zext", "subvar", &[IntZext], subvar_ext),
+    r("subvar_sext", "subvar", &[IntSext], subvar_ext),
     r("negatenegate", "analysis", &[IntNegate], negate_negate),
+    r("piecepathology", "protorecovery", &[Piece], piece_pathology),
 ];
 
 // ---- helpers on ops and varnodes ----
