@@ -23,11 +23,38 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
     let mut t = ActionTree::default();
     // the groups of the `decompile` root (ActionDatabase::buildDefaultGroups)
     const DECOMPILE: &[&str] = &[
-        "base", "protorecovery", "protorecovery_a", "deindirect", "localrecovery", "deadcode", "typerecovery",
-        "stackptrflow", "blockrecovery", "stackvars", "deadcontrolflow", "switchnorm", "cleanup", "splitcopy",
-        "splitpointer", "merge", "dynamic", "casts", "analysis", "fixateglobals", "fixateproto", "constsequence",
-        "bitfields", "segment", "returnsplit", "nodejoin", "doubleload", "doubleprecis", "unreachable", "subvar",
-        "floatprecision", "conditionalexe",
+        "base",
+        "protorecovery",
+        "protorecovery_a",
+        "deindirect",
+        "localrecovery",
+        "deadcode",
+        "typerecovery",
+        "stackptrflow",
+        "blockrecovery",
+        "stackvars",
+        "deadcontrolflow",
+        "switchnorm",
+        "cleanup",
+        "splitcopy",
+        "splitpointer",
+        "merge",
+        "dynamic",
+        "casts",
+        "analysis",
+        "fixateglobals",
+        "fixateproto",
+        "constsequence",
+        "bitfields",
+        "segment",
+        "returnsplit",
+        "nodejoin",
+        "doubleload",
+        "doubleprecis",
+        "unreachable",
+        "subvar",
+        "floatprecision",
+        "conditionalexe",
     ];
     let on = |g: &str| DECOMPILE.contains(&g) && !disabled.contains(g);
     let leaves = |t: &mut ActionTree, list: &[(&'static str, &str, super::actiontree::ApplyFn)]| -> Vec<_> {
@@ -395,7 +422,9 @@ fn varnode_props_late(fd: &mut Funcdata) -> Result<i32> {
                 o.opc == Opcode::Copy && fd.vn(o.ins[0]).is_constant() && fd.vn(o.ins[0]).offset == 0
             });
             if !zero_copy {
-                return err("varnodeprops: replacing an unconsumed varnode by zero is not implemented in ghidra-rs yet");
+                return err(
+                    "varnodeprops: replacing an unconsumed varnode by zero is not implemented in ghidra-rs yet",
+                );
             }
         }
     }

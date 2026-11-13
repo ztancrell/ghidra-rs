@@ -116,7 +116,15 @@ pub(crate) struct Varnode {
 
 impl Varnode {
     pub(crate) fn new(space: Space, offset: u64, size: u32) -> Varnode {
-        Varnode { space, offset, size, def: None, descend: Readers::default(), flags: VnFlags::default(), consume: u64::MAX }
+        Varnode {
+            space,
+            offset,
+            size,
+            def: None,
+            descend: Readers::default(),
+            flags: VnFlags::default(),
+            consume: u64::MAX,
+        }
     }
 
     pub(crate) fn is_constant(&self) -> bool {

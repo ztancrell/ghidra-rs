@@ -64,7 +64,8 @@ pub(crate) fn direct_write(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         }
     }
     while let Some(vn) = worklist.pop() {
-        for op in fd.vn(vn).descend.to_vec() {
+        let readers = fd.vn(vn).descend.to_vec(); // snapshot: the loop edits fd
+        for op in readers {
             let Some(out) = fd.op(op).out else { continue };
             if !fd.vn(out).has(VnFlags::DIRECTWRITE) {
                 fd.vn_set(out, VnFlags::DIRECTWRITE);
@@ -227,6 +228,7 @@ fn is_unique(fd: &Funcdata, vn: VarnodeId) -> bool {
 }
 
 /// Port of `Funcdata::ancestorOpUse`.
+#[allow(clippy::too_many_arguments)] // same parameters as the C++ recursion
 fn ancestor_op_use(
     fd: &Funcdata,
     maxlevel: i32,
@@ -1150,7 +1152,8 @@ fn never_consumed(fd: &mut Funcdata, vn: VarnodeId) -> Result<bool> {
     if size > 8 {
         return Ok(false);
     }
-    for op in fd.vn(vn).descend.to_vec() {
+    let readers = fd.vn(vn).descend.to_vec(); // snapshot: the loop edits fd
+    for op in readers {
         let slot = fd.slot_of(op, vn).unwrap();
         let c = fd.new_constant(size, 0);
         fd.op_set_input(op, c, slot)?;
@@ -1829,24 +1832,17 @@ fn push_multiequals(fd: &mut Funcdata, bb: BlockId) -> Result<()> {
             continue;
         }
         let (space, offset, size) = (fd.vn(origvn).space, fd.vn(origvn).offset, fd.vn(origvn).size);
-        let replacevn = if neednewunique {
-            fd.new_unique(size, fd.uniq.unwrap_or(0))
-        } else {
-            fd.new_varnode(size, space, offset)
-        };
-        let branches: Vec<VarnodeId> = fd
-            .blocks
-            .block(outblock)
-            .ins
-            .iter()
-            .map(|e| if e.point == bb { origvn } else { replacevn })
-            .collect();
+        let replacevn =
+            if neednewunique { fd.new_unique(size, fd.uniq.unwrap_or(0)) } else { fd.new_varnode(size, space, offset) };
+        let branches: Vec<VarnodeId> =
+            fd.blocks.block(outblock).ins.iter().map(|e| if e.point == bb { origvn } else { replacevn }).collect();
         let start = fd.blocks.block(outblock).start;
         let replaceop = fd.new_op(Opcode::Multiequal, start);
         fd.op_set_output(replaceop, replacevn)?;
         fd.op_set_all_input(replaceop, &branches)?;
         fd.op_insert_begin(replaceop, outblock);
-        for op in fd.vn(origvn).descend.to_vec() {
+        let readers = fd.vn(origvn).descend.to_vec(); // snapshot: the loop edits fd
+        for op in readers {
             for i in 0..fd.op(op).ins.len() {
                 if fd.op(op).ins[i] != origvn {
                     continue;
@@ -1875,7 +1871,8 @@ fn remove_do_nothing_block(fd: &mut Funcdata, arch: &Arch, bb: BlockId) -> Resul
             }
             let deadvn = fd.op(op).ins[blocknum];
             fd.op_remove_input(op, blocknum);
-            let deadop = fd.vn(deadvn).def.filter(|&d| fd.op(d).opc == Opcode::Multiequal && fd.op(d).parent == Some(bb));
+            let deadop =
+                fd.vn(deadvn).def.filter(|&d| fd.op(d).opc == Opcode::Multiequal && fd.op(d).parent == Some(bb));
             for j in 0..nin {
                 let v = match deadop {
                     Some(d) => fd.op(d).ins[j],
@@ -2058,7 +2055,9 @@ pub(crate) fn node_join(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
                 (fd.op(op).opc == Opcode::Cbranch).then(|| fd.op(op).ins[1])
             };
             if cond(bb).is_some() && cond(bb) == cond(bb2) {
-                return err("ActionNodeJoin: joining two branches on one condition is not implemented in ghidra-rs yet");
+                return err(
+                    "ActionNodeJoin: joining two branches on one condition is not implemented in ghidra-rs yet",
+                );
             }
         }
     }

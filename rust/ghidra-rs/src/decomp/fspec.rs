@@ -719,9 +719,8 @@ impl ParamList {
     pub(crate) fn group(&self, i: usize) -> usize {
         if let Storage::Join(pieces) = &self.entries[i].storage {
             for &(s, o, z) in pieces {
-                if let Some(j) = self.entries[..i]
-                    .iter()
-                    .position(|e| e.storage == Storage::Space { space: s, offset: o, size: z })
+                if let Some(j) =
+                    self.entries[..i].iter().position(|e| e.storage == Storage::Space { space: s, offset: o, size: z })
                 {
                     return self.group(j);
                 }

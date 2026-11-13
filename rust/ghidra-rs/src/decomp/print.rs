@@ -156,7 +156,9 @@ impl<'a> Printer<'a> {
             Space::Join => {
                 let names: Vec<String> = self.fd().joins[v.offset as usize]
                     .iter()
-                    .map(|&(s, o, z)| self.arch.register_name(s, o, z).map_or_else(|| format!("r0x{o:x}"), |r| r.0.to_string()))
+                    .map(|&(s, o, z)| {
+                        self.arch.register_name(s, o, z).map_or_else(|| format!("r0x{o:x}"), |r| r.0.to_string())
+                    })
                     .collect();
                 self.out.str(&format!("j{{{}}}", names.join(",")));
                 0
