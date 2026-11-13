@@ -358,6 +358,30 @@ differs from the table row:
   Superseded: "S2/S4 must port `fillinExtrapop`" above.
 - Locked prototypes (decision 6) are not needed by S4; the locked paths of `fspec.cc` remain.
 
+### S6: partial on branch `m3-s6` (2026-11-13)
+
+`print raw` with types at `break start assignhigh` (`DECOMP_RAW_EXTRA=1`,
+`rust/tools/corpus/s6-options.txt`: the S4 options with `typerecovery` on and its five R5 rules
+toggled off): M8 8 / 8, M500 446 / 500: identical on every function the reference finishes (499) except the 53 that use whole SSE registers and wait for `ActionLaneDivide` (R3), as in S4. Details in `rust/README.md`, "Stage S6". Where it differs
+from the table row:
+
+- Ported: the type store (`types.rs`, the kinds inference reaches with the rules off, plus
+  structs, unions, enums and typedefs for `parse line`), `ActionStartTypes`,
+  `ActionInferTypes`, `ActionConstantPtr` and the type parts of `typeop.cc` for every op the
+  rules-off IR has (`infertypes.rs`), and the `parse line` declaration parser (`cparse.rs`).
+  `database.cc` is a stand-in: the global scope answers from the console's `map function` and
+  `map externalref`, the local scope holds no symbols (`localrecovery` is off) and has the
+  default local range plus x86win's stack parameter range.
+- Bar not reached for `parse line`: every D `parse line` but bit-fields (R5) and one
+  `pointer setting` type parses, but an `extern` declaration locks a prototype, which is not
+  ported, so the console fails on it; the datatests also print C (S9), so none can pass yet.
+- Left for the S6 remainder: locked prototypes (`fspec.cc` locked paths, also decision 6's
+  register ABI), `cast.cc` and `ActionSetCasts` (after `assignhigh`, checked with S9),
+  `unionresolve`, partial types and `TypePointerRel`, `<data_organization>` (struct layout),
+  function types with prototypes, the scopes of `database.cc`.
+- Types are one factory per function (copied from the architecture's at `decompile`), so the
+  C++ order by hashed type id, reached only for pointer chains ten deep, is creation order here.
+
 ## Running stages in parallel
 
 Strict chain first: S0 → S1a → S1b → S2. After S2 the work fans out. Under the cap of two

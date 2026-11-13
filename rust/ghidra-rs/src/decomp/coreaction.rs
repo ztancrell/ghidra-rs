@@ -1221,6 +1221,9 @@ pub(crate) fn spacebase(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             }
         } else {
             fd.vn_set(vn, VnFlags::SPACEBASE);
+            if fd.vn(vn).is_input() {
+                super::infertypes::set_stack_pointer_type(fd, vn);
+            }
         }
     }
     Ok(0)

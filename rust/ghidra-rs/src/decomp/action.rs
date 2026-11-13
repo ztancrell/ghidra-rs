@@ -104,7 +104,7 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
             ("dynamicmapping", "dynamic", c::nothing),
             ("spacebase", "base", c::spacebase),
             ("nonzeromask", "analysis", not_ported),
-            ("infertypes", "typerecovery", not_ported),
+            ("infertypes", "typerecovery", super::infertypes::infer_types),
             ("restructurevarnode", "localrecovery", not_ported),
         ],
     );
@@ -114,7 +114,7 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
         &[
             ("redundbranch", "deadcontrolflow", c::redund_branch),
             ("blockstructure", "blockrecovery", not_ported),
-            ("constantptr", "typerecovery", not_ported),
+            ("constantptr", "typerecovery", super::infertypes::constant_ptr),
             ("oppool2", "base", c::nothing),
             ("determinedbranch", "unreachable", c::determined_branch),
             ("unreachable", "unreachable", c::unreachable),
@@ -134,7 +134,7 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
         ("switchnorm", "switchnorm", not_ported),
         ("returnsplit", "returnsplit", not_ported),
         ("unjustifiedparams", "protorecovery", c::unjustified_params),
-        ("starttypes", "typerecovery", not_ported),
+        ("starttypes", "typerecovery", super::infertypes::start_types),
         ("activereturn", "protorecovery", c::active_return),
     ] {
         if on(g) {

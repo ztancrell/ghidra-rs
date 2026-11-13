@@ -87,6 +87,12 @@ impl VnFlags {
     pub(crate) const CODEREF: VnFlags = VnFlags(1 << 17);
     /// `incidental_copy`, from the `.pspec`
     pub(crate) const INCIDENTAL_COPY: VnFlags = VnFlags(1 << 16);
+    /// `typelock`: the data-type is fixed (stage S6)
+    pub(crate) const TYPELOCK: VnFlags = VnFlags(1 << 18);
+    /// `symcheck_incomplete` (`ActionConstantPtr`)
+    pub(crate) const SYMCHECK_INCOMPLETE: VnFlags = VnFlags(1 << 19);
+    /// `symcheck_complete` (`ActionConstantPtr`)
+    pub(crate) const SYMCHECK_COMPLETE: VnFlags = VnFlags(1 << 20);
 
     pub(crate) fn has(self, f: VnFlags) -> bool {
         self.0 & f.0 != 0
@@ -112,6 +118,8 @@ pub(crate) struct Varnode {
     pub(crate) flags: VnFlags,
     /// the bits read by some op (`Varnode::consumed`, `ActionDeadCode`)
     pub(crate) consume: u64,
+    /// the data-type (`Varnode::type`); `None` until set: `getBase(size, TYPE_UNKNOWN)`
+    pub(crate) ty: Option<super::types::TypeId>,
 }
 
 impl Varnode {
@@ -124,6 +132,7 @@ impl Varnode {
             descend: Readers::default(),
             flags: VnFlags::default(),
             consume: u64::MAX,
+            ty: None,
         }
     }
 

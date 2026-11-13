@@ -227,6 +227,9 @@ impl Console {
                     None => Ok(()),
                 };
                 self.fd = Some(Funcdata::new(u64::from(*a)));
+                if let (Some(fd), Some(arch)) = (&mut self.fd, &self.arch) {
+                    fd.types = arch.types.clone();
+                }
                 self.actions = set.is_ok().then_some(actions);
                 self.run_actions(set, out)?;
             }
@@ -243,8 +246,19 @@ impl Console {
                 };
                 write!(out, "{}", crate::decomp::print_raw(fd, arch).map_err(|e| e.to_string())?).map_err(io)?;
             }
-            // read by the corpora but needing later stages (`parse line`: the types of S6)
-            ["print", "C"] | ["print", "tree", "block"] | ["parse", "line", ..] => {
+            // `IfcParseLine`: a C declaration (types; locked function prototypes are not ported yet)
+            ["parse", "line", ..] => {
+                let Some(arch) = &mut self.arch else { return Err("parse line: no architecture loaded".into()) };
+                let text = line
+                    .trim_start()
+                    .strip_prefix("parse")
+                    .map(str::trim_start)
+                    .and_then(|s| s.strip_prefix("line"))
+                    .unwrap_or("");
+                crate::decomp::parse_line(arch, text).map_err(|e| e.to_string())?;
+            }
+            // read by the corpora but needing later stages
+            ["print", "C"] | ["print", "tree", "block"] => {
                 return Err(format!("{line}: not implemented in ghidra-rs yet (milestone 3, later stages)"));
             }
             _ => return Err(format!("not implemented in ghidra-rs: {line}")),

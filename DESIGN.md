@@ -137,6 +137,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    return recovery, stack-pointer flow, deindirect, branch cleanup, the ram heritage pass;
    `print raw` at `break start assignhigh` with every later stage's groups off identical on
    M8 (8 / 8) and M500 (446 / 500); the rest need `ActionLaneDivide` (R3).
+   S6 (types) partial on branch `m3-s6`: the data-type store (`types.rs`), type inference
+   (`ActionStartTypes`, `ActionInferTypes`, `ActionConstantPtr` with the global-scope lookups,
+   `infertypes.rs`) and the `parse line` C declaration parser (`cparse.rs`); `print raw` with
+   types at `assignhigh` identical on M8 (8 / 8) and M500 (446 / 500, every function the reference finishes but the 53 using whole SSE registers, which wait for `ActionLaneDivide`, R3); locked prototypes from
+   `parse line extern`, casts and unions remain.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.

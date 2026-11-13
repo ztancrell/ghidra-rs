@@ -179,7 +179,11 @@ impl<'a> Printer<'a> {
             self.out.str("(");
             self.out.seq(self.fd().op(def).seq);
             self.out.str(")");
-        } else if !v.is_input() && !v.is_constant() {
+        }
+        if raw_extra() {
+            self.out.str(&format!("<{}>", self.fd().types.print_vn_type(v.ty, v.size)));
+        }
+        if v.def.is_none() && !v.is_input() && !v.is_constant() {
             self.out.str("(free)");
         }
     }
@@ -390,4 +394,11 @@ impl<'a> Printer<'a> {
         }
         Ok(())
     }
+}
+
+/// `DECOMP_RAW_EXTRA` (rust/tools/decomp-ref.patch): print raw also shows each varnode's
+/// data-type, as the patched reference does (stage S6).
+fn raw_extra() -> bool {
+    static EXTRA: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *EXTRA.get_or_init(|| std::env::var_os("DECOMP_RAW_EXTRA").is_some())
 }

@@ -83,6 +83,14 @@ pub struct Funcdata {
     /// jump-table recovery's partial function: each varnode's value where it folds to a
     /// constant (`jumptable::calc_folded`)
     pub(crate) folded: Vec<Option<u64>>,
+    /// the data-types (`Architecture::types`; one factory per function here)
+    pub(crate) types: super::types::TypeFactory,
+    /// `typerecovery_start` (`ActionStartTypes`)
+    pub(crate) typerecovery_start: bool,
+    /// `ActionInferTypes::localcount`
+    pub(crate) infer_passes: u32,
+    /// `ActionConstantPtr::localcount`
+    pub(crate) constptr_passes: u32,
 }
 
 impl Funcdata {
@@ -114,6 +122,10 @@ impl Funcdata {
             stackptrflow_done: false,
             nzm: Vec::new(),
             folded: Vec::new(),
+            types: super::types::TypeFactory::new(),
+            typerecovery_start: false,
+            infer_passes: 0,
+            constptr_passes: 0,
         }
     }
 

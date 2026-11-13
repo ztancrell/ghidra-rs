@@ -12,12 +12,14 @@ pub mod action;
 pub mod actiontree;
 mod block;
 mod coreaction;
+mod cparse;
 mod cspec;
 mod emulate;
 mod flow;
 mod fspec;
 mod funcdata;
 mod heritage;
+mod infertypes;
 mod inject;
 mod jumptable;
 mod op;
@@ -26,6 +28,7 @@ mod print;
 mod rangeutil;
 mod readers;
 mod stdsort;
+mod types;
 mod varnode;
 
 use crate::analysis::Image;
@@ -106,6 +109,9 @@ pub struct Arch {
     externrefs: HashMap<u64, u64>,
     /// `option readonly`: read-only memory propagates as constants (`readonlypropagate`)
     pub(crate) readonly_propagate: bool,
+    /// the program-wide data-types (`Architecture::types`): the core types and those `parse
+    /// line` defines; each decompile starts from a copy
+    pub(crate) types: types::TypeFactory,
 }
 
 impl Arch {
@@ -144,6 +150,7 @@ impl Arch {
             readonly,
             externrefs: HashMap::new(),
             readonly_propagate: false,
+            types: types::TypeFactory::new(),
         })
     }
 
@@ -227,5 +234,18 @@ impl Arch {
         let a = u32::try_from(addr).ok()?;
         let sec = self.image.block_of(a)?;
         sec.data.get((a - sec.addr) as usize..)
+    }
+}
+
+/// Port of `IfcParseLine` (`parse_C`): a C declaration. Types (`struct`, `union`, `enum`,
+/// `typedef`) join the architecture's types; an `extern` function declaration would lock the
+/// function's prototype, which is not ported yet, so it is an error rather than ignored.
+pub fn parse_line(arch: &mut Arch, text: &str) -> Result<()> {
+    let ptr_size = arch.spec.stack_pointer.2;
+    match cparse::parse_line(&mut arch.types, text, ptr_size)? {
+        cparse::Decl::Type(_) => Ok(()),
+        cparse::Decl::Function { name, .. } => err(format!(
+            "parse line extern {name}: locked prototypes are not implemented in ghidra-rs yet (stage S6 remainder)"
+        )),
     }
 }

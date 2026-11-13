@@ -573,8 +573,10 @@ rust/tools/decomp-diff.sh --script <file>      # one script on both engines, ful
   `print raw`, `continue` and `quit`, and echoes them as `decomp_dbg -i` does. `decompile`
   runs up to the `break start` action (stage S4: at most `assignhigh`, see "Stage S4") and
   `continue` resumes it; a function mapped `nocode` prints `No code for <name>` instead. `print
-  C|tree block` and `parse line` fail with "not implemented in ghidra-rs yet (milestone 3,
-  later stages)"; any other command fails with "not implemented in ghidra-rs".
+  C|tree block` fail with "not implemented in ghidra-rs yet (milestone 3, later stages)";
+  `parse line` defines types (stage S6) but fails on `extern` declarations (locked prototypes
+  are not ported); any other command fails with "not implemented in ghidra-rs".
+  Superseded: until S6, `parse line` failed like `print C`.
   Superseded: until S2, `decompile` stopped at most at `heritage` and `continue` failed. Of the options
   `option readonly on|off` and `option currentaction decompile <group> on|off` have an
   effect (and print the reference's message); the others (`togglerule`: no rule is ported
@@ -1037,6 +1039,47 @@ Remaining differences, by cause:
 - Locked prototypes (plan decision 6, mercs2's `register_abi.csv`): S4 needs none of them;
   their paths (`transferLockedInput`, `commitNewInputs`, locked parameter trials, `paramdouble`
   on stack trials) are still to come.
+
+### Stage S6: types (partial)
+
+Stage S6 (branch `m3-s6`, partial) adds data-types to the IR. The check is `print raw` with
+types at `assignhigh`: `DECOMP_RAW_EXTRA=1` makes both engines print each varnode's type after
+it (`<int4>`, `<xunknown4 *>`, ...; the reference through `tools/decomp-ref.patch`), and
+`tools/corpus/s6-options.txt` is the S4 option set with the `typerecovery` group back on and
+its five rules (`ptraddundo`, `ptrsubundo`, `pushptr`, `structoffset0`, `ptrarith`, stage R5)
+toggled off:
+
+    DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=rust/tools/corpus/s6-options.txt rust/tools/decomp-diff.sh m500
+
+M8 8 / 8, M500 446 / 500: identical on every function the reference finishes (499) except the 53 that use whole SSE registers and wait for `ActionLaneDivide` (R3), as in S4. Ported:
+
+- `decomp/types.rs`: the type store (`TypeFactory`, hash-consed in an arena, so equal types are
+  one id as the C++ compares pointers): the core types of `SleighArchitecture::buildCoreTypes`
+  with `cacheCoreTypes`' choices (`char` over `int1`), `getBase` (unnamed `unkbyteN`, arrays of
+  `xunknown1` past `max_basetype_size`), pointers, `code`, space-base types, `typeOrder`
+  (`compare` with its sub-metatype order) and `printRaw`; for `parse line` also structs,
+  unions, enums and typedefs.
+- `decomp/infertypes.rs`: `ActionStartTypes`, `ActionInferTypes` (local types, edge
+  propagation, returns, write-back, the 7-pass limit) and `ActionConstantPtr` with
+  `Funcdata::spacebaseConstant`; the local types and `propagateType` of every op the rules-off
+  IR has (`typeop.cc`); `TypePointer::downChain`, `TypeSpacebase::getSubType` answered from the
+  global scope (functions and external references of the console's `map` commands) and the
+  local scope's range; the stack pointer's locked space-base type (`Funcdata::spacebase`); the
+  locked types global symbols give the ram varnodes covering them.
+- `decomp/cparse.rs`: the `parse line` C declaration parser (replaces `grammar.y`): `struct`,
+  `union`, `enum`, `typedef`, `extern` functions, pointers, arrays, function declarators,
+  namespaces. 211 of the 232 `parse line` commands of the upstream datatests parse (unit test):
+  all but
+  `bitfields*.xml` (bit-fields, stage R5) and `pointersub.xml` (a relative pointer type made by
+  `pointer setting`). The console's `parse line` defines types; `extern` declarations fail,
+  since locking a prototype is not ported.
+
+Not ported yet (the S6 remainder): locked prototypes (`parse line extern`, `fspec.cc`'s locked
+paths; so no datatest that uses `parse line` passes yet, and they also need C printing, S9),
+`cast.cc` (`ActionSetCasts`, after `assignhigh`), `unionresolve`, partial structs/unions/enums
+and `TypePointerRel`, `database.cc` beyond the global lookups (scopes are stand-ins), the
+`.cspec`'s `<data_organization>` (struct layout uses natural alignment), function types with
+prototypes. Each fails loudly where the inference would need it.
 
 ## Speed
 
