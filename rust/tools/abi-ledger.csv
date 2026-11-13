@@ -31,24 +31,24 @@ address,site,java,ghidra_rs,truth,evidence,cause
 0x006e65a0,output:00bd1310,unconcluded,(none),unverified,group:data-pointer-missed; checked 00bcd238,data-pointer-missed
 0x0070b680,00bd200c,trivial,(none),ok,contract trivial; the --data-pointers run finds this ref as trivial,data-pointer-missed
 0x0070b710,00bd2014,trivial,(none),ok,contract trivial; the --data-pointers run finds this ref as trivial,data-pointer-missed
-0x00753f40,input:00753f64,unconcluded,(none),unverified,group:input-indirect-call; checked none,input-indirect-call
-0x004074e0,input:004074e0,unconcluded,(none),unverified,group:input-relocated-slot; checked none,input-relocated-slot
-0x0040a020,input:0040a020,unconcluded,(none),unverified,group:input-relocated-slot; checked none,input-relocated-slot
-0x0057c870,input:0057c870,unconcluded,(none),unverified,group:input-relocated-slot; checked none,input-relocated-slot
-0x0057de50,input:0057de50,unconcluded,(none),unverified,group:input-relocated-slot; checked none,input-relocated-slot
-0x005e68d0,input:005e68d0,unconcluded,(none),unverified,group:input-relocated-slot; checked none,input-relocated-slot
-0x005e6a20,input:005e6a20,unconcluded,(none),unverified,group:input-relocated-slot; checked none,input-relocated-slot
-0x00751ac0,input:00751bb6,unconcluded,(none),unverified,group:input-rs-concludes-some-regs; checked none,input-rs-concludes-some-regs
-0x00751ac0,input:00751d23,unconcluded,(none),unverified,group:input-rs-concludes-some-regs; checked none,input-rs-concludes-some-regs
-0x0075b260,input:00759c95,unconcluded,(none),unverified,group:input-rs-concludes-some-regs; checked none,input-rs-concludes-some-regs
-0x005439b0,input:00543b55,unconcluded,(none),unverified,group:input-switch-resolved; checked input:00667aa1,input-switch-resolved
-0x005c37f0,input:005c43ed,unconcluded,(none),unverified,group:input-switch-resolved; checked input:00667aa1,input-switch-resolved
-0x005d0750,input:005d07dc,unconcluded,(none),unverified,group:input-switch-resolved; checked input:00667aa1,input-switch-resolved
-0x005e6c20,input:005e6ce8,unconcluded,(none),unverified,group:input-switch-resolved; checked input:00667aa1,input-switch-resolved
+0x00753f40,input:00753f64,unconcluded,(none),ok,CALL ESI is GetPrivateProfileIntA-style IAT 0xb050b4 (ESI built at 0x551617 from 0x24d8a10+0x24fd471); EBX = IAT 0xb050a8; stdcall stack args only; body to RET 0x7548db has no XMM/x87; ECX read only as input 0x753f4d,input-indirect-call
+0x004074e0,input:004074e0,unconcluded,(none),ok,slot [0x24dc4f8] = 0x299e000: PUSH EDI then XOR EAX/EDI and ESI/ECX from 0x24dd8e4 before any read; no register input,input-relocated-slot
+0x0040a020,input:0040a020,unconcluded,(none),ok,slot [0x24dbfa8] = 0x297a000: reads ECX EDX and [ESP+8] only (contract inputs); BL/ESI/EAX written first,input-relocated-slot
+0x0057c870,input:0057c870,unconcluded,(none),ok,slot [0x24dc764] = 0x29b3000: reads EAX (input) only; EBP/ESI/EDI written after PUSH; PUSHFD/POPFD save-restore,input-relocated-slot
+0x0057de50,input:0057de50,unconcluded,(none),ok,slot [0x24dc400] = 0x2999000: reads [ESP+4] and EDI (inputs) only; ESI EBX EBP written before use,input-relocated-slot
+0x005e68d0,input:005e68d0,unconcluded,(none),ok,slot [0x24dbd68] = 0x32b0000: MOV EAX;[EAX+0x42c] (input) then compares; no other register read,input-relocated-slot
+0x005e6a20,input:005e6a20,unconcluded,(none),ok,slot [0x24dc7a4] = 0x29b6000: MOV EAX;[EAX+0x42c] (input) then compares; no other register read,input-relocated-slot
+0x00751ac0,input:00751bb6,unconcluded,(none),ok,display-list loop: EBX 0x751ac8 ESI 0x751ad8 (reloaded via 0x40a116 each turn); each of 27 cases (table 0x751f48) writes EDI/EBP/EDX/EAX/ECX before reading them or passing them to contracted callees; XMM0 only loaded; no XMM1-7,input-rs-concludes-some-regs
+0x00751ac0,input:00751d23,unconcluded,(none),ok,as input:00751bb6: case 0x751cbb writes EBP 0x751cbb before PUSH EBP 0x751d23; CALL EDX is a vtable call with stack args,input-rs-concludes-some-regs
+0x0075b260,input:00759c95,unconcluded,(none),ok,EBP/EBX/ESI written and EAX ECX EDI EDX are inputs or written before the first call (0x75b290); zlib callees 0x7599d0-0x75cf00 have no XMM/x87 read (only PXOR XMM0 at 0x75bd42); ghidra-rs itself unconcluded at 0x75a7ee/0x75a826,input-rs-concludes-some-regs
+0x005439b0,input:00543b55,unconcluded,(none),ok,EBP 0x5439b1 EDI 0x5439bf ESI 0x5439f7 EBX 0x543a40 all written on every path to JMP [EAX*4+0x544110]; no other register Java lists,input-switch-resolved
+0x005c37f0,input:005c43ed,unconcluded,(none),ok,EBP 0x5c37f1 ESI/EDI 0x5c380e EBX 0x5c3872 written on the only path to JMP [ECX*4+0x5c5778] (LEA EBX;[EBX] 0x5c385a is a no-op pad),input-switch-resolved
+0x005d0750,input:005d07dc,unconcluded,(none),ok,EBX 0x5d0752 ESI 0x5d0778 EDI 0x5d07b6 written before the switch; no case 0x5d07e3-0x5d0b78 touches EBP or XMM; callees get EAX/ECX,input-switch-resolved
+0x005e6c20,input:005e6ce8,unconcluded,(none),ok,EBP/EBX/ESI/EDI written (0x5e6c21 0x5e6c2a 0x5e6c3c 0x5e6ca4/0x5e6cc3) before the switch; cases 0x5e6cef-0x5e6d08 only OR a stack word; no XMM in the body,input-switch-resolved
 0x00667a60,input:00667aa1,unconcluded,(none),ok,switch cases 0x667aa8-0x667ae2 only store constants; EBX/ESI/EDI/EBP pushed then written before any read; XMM0 loaded by MOVSS,input-switch-resolved
-0x00667b60,input:00667b8b,unconcluded,(none),unverified,group:input-switch-resolved; checked input:00667aa1,input-switch-resolved
-0x0066ac90,input:0066ac9e,unconcluded,(none),unverified,group:input-switch-resolved; checked input:00667aa1,input-switch-resolved
-0x006c4230,input:006c4240,unconcluded,(none),unverified,group:input-switch-resolved; checked input:00667aa1,input-switch-resolved
+0x00667b60,input:00667b8b,unconcluded,(none),ok,EBX/EDI written before the switch; targets 0x667b92/0x667be8 only: ESI LEA 0x667b96 for 0x665a60(esi;edi); XMM0 loaded by MOVSS 0x667b9f before use,input-switch-resolved
+0x0066ac90,input:0066ac9e,unconcluded,(none),ok,JMP EAX is a virtual tail call [[0xdf8d10]+0x64] = 0x6493a0 (vtables 0xbc4288 and 0xbc5ff0 agree) with ECX set; 0x6493a0 reads stack+ECX and writes ESI/EDI/EAX before HashIndex_Find(eax;esi),input-switch-resolved
+0x006c4230,input:006c4240,unconcluded,(none),ok,ESI 0x6c4236 EDI 0x6c4238 written; slot JMP 0x41a75e is LEA EBX;[EBX] no-op then JMP 0x6c4240; table 0x6c42c0 cases store EDI or recurse with ECX=ESI,input-switch-resolved
 0x0043f010,input:008f944d,unconcluded,(none),unknown,ghidra-rs input:008f959b unconcluded on the same registers,input-walk-stops-elsewhere
 0x0047d7e0,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
 0x004842b0,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
@@ -69,7 +69,7 @@ address,site,java,ghidra_rs,truth,evidence,cause
 0x00751380,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
 0x007516d0,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
 0x00751740,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
-0x00751ac0,input:00751d45,unconcluded,(none),unknown,ghidra-rs input:00751dd0 unconcluded on the same registers,input-walk-stops-elsewhere
+0x00751ac0,input:00751d45,unconcluded,(none),ok,as input:00751bb6: case 0x751d2c writes EDI 0x751d2f before EDX=EDI and LEA EBX;[EBX+EDI*4] 0x751d45; ghidra-rs input:00751dd0 still unconcluded (step limit),input-walk-stops-elsewhere
 0x007521d0,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
 0x007522d0,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
 0x00752370,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
@@ -86,9 +86,9 @@ address,site,java,ghidra_rs,truth,evidence,cause
 0x008565d0,input:00a4ea3f,unconcluded,(none),unknown,ghidra-rs input:00a59e18 unconcluded on the same registers,input-walk-stops-elsewhere
 0x008569d0,input:00856a7d,unconcluded,(none),unknown,ghidra-rs input:00856d0d input:00856d3d unconcluded on the same registers,input-walk-stops-elsewhere
 0x008569d0,input:00856b34,unconcluded,(none),unknown,ghidra-rs input:00856d0d input:00856d3d unconcluded on the same registers,input-walk-stops-elsewhere
-0x00521120,input:02964000,unconcluded,(none),unverified,group:input-wrapper-code; checked none,input-wrapper-code
-0x00601c30,input:029b7025,unconcluded,(none),unverified,group:input-wrapper-code; checked none,input-wrapper-code
-0x00601c30,input:EXTERNAL:0000006f,unconcluded,(none),unverified,group:input-wrapper-code; checked none,input-wrapper-code
+0x00521120,input:02964000,unconcluded,(none),ok,slot [0x24dbd0c] = 0x2964000 (plain x86 not wrapper): EAX/EDI XOR-ed and ESI/ECX loaded before any read; no register input,input-wrapper-code
+0x00601c30,input:029b7025,unconcluded,(none),ok,0x29b7000 reads ESI (input) only; disguised calls (PUSH ret; JMP/RET) to import [0xb05128] 0x602cd0(stack) 0x6020f0(esi;stack) 0x602090(eax;edx) get written regs; EDI 0x29b70c5 EBX 0x29b70e6 EDX 0x29b70fd before reads,input-wrapper-code
+0x00601c30,input:EXTERNAL:0000006f,unconcluded,(none),ok,EXTERNAL:0x6f is the import [0xb05128] called as PUSH 0x29b7025; JMP with one stack arg (EAX=ESI+0x10bc); stdcall API reads no register; rest of 0x29b7000 as input:029b7025,input-wrapper-code
 0x004a4ba0,,unknown,(none),unverified,group:java-no-refs-rs-has-refs; checked ,java-no-refs-rs-has-refs
 0x004dfa70,,trivial,(none),unverified,group:java-no-refs-rs-has-refs; checked ,java-no-refs-rs-has-refs
 0x00538e70,,unknown,(none),unverified,group:java-no-refs-rs-has-refs; checked ,java-no-refs-rs-has-refs
@@ -167,10 +167,10 @@ address,site,java,ghidra_rs,truth,evidence,cause
 0x0083dec0,00be23d4,unknown,trivial,ok,as 008397fa (data ref): contract trivial over the real body,outlined-tail-body
 0x006f19b0,output:006e693b,unconcluded,(none),unverified,group:output-java-no-instruction; checked none,output-java-no-instruction
 0x008df760,output:00402a08,unconcluded,(none),unverified,group:output-java-no-instruction; checked none,output-java-no-instruction
-0x0051e690,output:0051f005,unconcluded,(none),unverified,group:output-live-at-return-rule; checked output:006f70c7,output-live-at-return-rule
-0x0051e690,output:006f7cd7,unconcluded,(none),unverified,group:output-live-at-return-rule; checked output:006f70c7,output-live-at-return-rule
-0x00665a60,output:006f739e,unconcluded,(none),unverified,group:output-live-at-return-rule; checked output:006f70c7,output-live-at-return-rule
-0x00674620,output:006f70c7,unconcluded,(none),unknown,containing 0x6f6f80 is a switch on EAX; rs drops EAX#1-3 by never_returned but an unwritten path returns the caller's EAX (the index); callers of 0x6f6f80 not checked,output-live-at-return-rule
+0x0051e690,output:0051f005,unconcluded,(none),ok,0x51f005 -> RET 0x51f012 of 0x51eee0 -> 0x6f7295 in 0x6f6f80 -> its RET; sole caller 0x6bac25 overwrites EAX at 0x6bac2a,output-live-at-return-rule
+0x0051e690,output:006f7cd7,unconcluded,(none),ok,0x6f7cd7 -> RET of 0x6f6f80; sole caller 0x6bac25 overwrites EAX at 0x6bac2a,output-live-at-return-rule
+0x00665a60,output:006f739e,unconcluded,(none),ok,0x6f73a3 TEST AL then JZ 0x6f7cdf -> RET of 0x6f6f80 (sole caller 0x6bac25 overwrites EAX at 0x6bac2a); fallthrough writes EAX at 0x6f73af,output-live-at-return-rule
+0x00674620,output:006f70c7,unconcluded,(none),ok,EAX#1-3 live only to 0x6f6f80's RET 0x6f70d2; its sole E8/E9 caller 0x6bac25 overwrites EAX at 0x6bac2a (MOV EAX;[ESI]); ghidra-rs right by an unsound rule (never_returned drops EAX bytes although EAX is 0x6f6f80's input),output-live-at-return-rule
 0x0041b7b0,output:00ba8cb0,unconcluded,(none),unverified,group:output-not-returned-by-original; checked output:00bbcaa0,output-not-returned-by-original
 0x0042f850,output:00ba90d8,unconcluded,(none),ok,X87#0 not lost: path 0x42f858 CALL EDX/TEST EAX/JZ 0x42f86a RET returns with no x87 push so the original never returns st0,output-not-returned-by-original
 0x0042f850,output:00ba9280,unconcluded,(none),ok,X87#0 not lost: path 0x42f858 CALL EDX/TEST EAX/JZ 0x42f86a RET returns with no x87 push so the original never returns st0,output-not-returned-by-original
@@ -196,7 +196,7 @@ address,site,java,ghidra_rs,truth,evidence,cause
 0x00627540,output:00bbcaa0,unconcluded,(none),ok,nothing lost: path JZ 0x6275ac -> POP EDI/RET 8 leaves EAX unwritten and pushes no x87 value,output-not-returned-by-original
 0x00627540,output:00bbcea0,unconcluded,(none),ok,nothing lost: path JZ 0x6275ac -> POP EDI/RET 8 leaves EAX unwritten and pushes no x87 value,output-not-returned-by-original
 0x00627540,output:00bbcf20,unconcluded,(none),ok,nothing lost: path JZ 0x6275ac -> POP EDI/RET 8 leaves EAX unwritten and pushes no x87 value,output-not-returned-by-original
-0x0041d7a0,output:0041e69a,violation,unconcluded,unverified,Java reader 0x621837 MOV BL;AL is real code after disguised call 0x621822 (PUSH 0x621830; JMP slot 0x413230); path from 0x41e69a not traced; ghidra-rs stops at wrapper 0x25621c0,output-walk-stops-wrapper
+0x0041d7a0,output:0041e69a,violation,unconcluded,ok,after 0x41e69a EAX is rewritten (0x41e698 loop; 0x460a20; 0x41e6cb) except via CALL 0x41d740 -> 0x2945000 -> 0x41d690 -> JMP 0x621800 which reads no EAX; 0x621837 MOV BL;AL reads the return of the disguised call 0x621822 (PUSH 0x621830; JMP slot 0x413230) not 0x41d7a0's EAX,output-walk-stops-wrapper
 0x00579860,00576c54,unknown,violation,unverified,group:rs-walks-further-violation; checked none,rs-walks-further-violation
 0x005806a0,005745d2,unknown,violation,unverified,group:rs-walks-further-violation; checked none,rs-walks-further-violation
 0x00589640,0062937c,unknown,violation,unverified,group:rs-walks-further-violation; checked none,rs-walks-further-violation
