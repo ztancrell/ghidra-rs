@@ -6,20 +6,20 @@ use super::*;
 /// `Funcdata::deadRemovalAllowedSeen` for the space of `vn` (only spaces that do dead code
 /// elimination are checked: `AddrSpace::doesDeadcode`).
 pub(super) fn dead_removal_allowed_seen(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId) -> bool {
-    match fd.vn(vn).space {
-        Space::Sleigh(s) if s != 0 && arch.sleigh.spaces[s as usize].delay.is_some() => {
-            let ok = fd.heritage.dead_removal_allowed(arch, s);
-            if ok {
-                fd.heritage.seen_dead_code(s);
-            }
-            ok
-        }
-        // the stack's dead-code delay is its heritage delay, 1. `seenDeadCode` is not recorded:
-        // ghidra-rs keeps that flag per SLEIGH space, and nothing reads it for the stack (the
-        // stack's heritage after dead-code removal is not checked yet)
-        Space::Stack => fd.heritage.pass() > 1,
-        _ => true,
+    let space = fd.vn(vn).space;
+    let does_deadcode = match space {
+        Space::Sleigh(s) => s != 0 && arch.sleigh.spaces[s as usize].delay.is_some(),
+        Space::Stack => true,
+        _ => false,
+    };
+    if !does_deadcode {
+        return true;
     }
+    let ok = fd.heritage.dead_removal_allowed(arch, space);
+    if ok {
+        fd.heritage.seen_dead_code(space);
+    }
+    ok
 }
 
 /// Port of `RuleEarlyRemoval`.

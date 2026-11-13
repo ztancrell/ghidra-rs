@@ -1008,14 +1008,17 @@ pub(crate) fn dead_code(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             v.flags.clear(VnFlags::ADDRFORCE);
         }
     }
-    let deadcode_spaces: Vec<u32> = (0..arch.sleigh.spaces.len() as u32)
-        .filter(|&i| i != 0 && arch.sleigh.spaces[i as usize].delay.is_some())
+    // the spaces that do dead code (`AddrSpace::doesDeadcode`), the stack last
+    let deadcode_spaces: Vec<Space> = (1..arch.sleigh.spaces.len() as u32)
+        .filter(|&i| arch.sleigh.spaces[i as usize].delay.is_some())
+        .map(Space::Sleigh)
+        .chain([Space::Stack])
         .collect();
     for &sp in &deadcode_spaces {
         if fd.heritage.dead_removal_allowed(arch, sp) {
             continue;
         }
-        for vn in fd.loc_space(Space::Sleigh(sp)) {
+        for vn in fd.loc_space(sp) {
             push_consumed(fd, u64::MAX, vn, &mut worklist);
         }
     }
@@ -1130,7 +1133,7 @@ pub(crate) fn dead_code(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             continue;
         }
         let mut changes = 0;
-        for vn in fd.loc_space(Space::Sleigh(sp)) {
+        for vn in fd.loc_space(sp) {
             let v = fd.vn(vn);
             if v.is_dead() || !v.is_written() {
                 continue;

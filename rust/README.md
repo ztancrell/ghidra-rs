@@ -1544,6 +1544,18 @@ four S6 checks (unlocked, `void`, `int4`, callees) 498 / 500 each (0x4919f0; 0x4
 Superseded: the 495 / 499 above (0x4891e0 and 0x6fa6e0 are fixed by part two's non-zero masks)
 and the callee check's 497 (the reference ran 0x5b59c0 this time).
 
+### Stack heritage (slice one, branch `m3-stack`)
+
+The stack space is heritaged from pass 1 on (`heritage.rs`, `heritage_guard.rs`, `varmap.rs`).
+Locked stack parameters of the decompiled function are now supported (S6 failed on them).
+Check, with every function and callee locked:
+`tools/decomp-locked-options.sh void target/stack-lock.txt "int4 a, int4 b"`, then
+`DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=target/stack-lock.txt tools/decomp-diff.sh m8`
+(M8 8 / 8). LOADs and STOREs through the stack pointer stay unconverted until R5's
+`RuleLoadVarnode`/`RuleStoreVarnode`. Not ported, fails loudly: the load-guard value-set
+analysis, revisited markers, the dead-code restart, `ActionRestructureVarnode`. Details and
+the M500 numbers in `docs/plans/m3-decompiler.md`, "Stack heritage".
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The

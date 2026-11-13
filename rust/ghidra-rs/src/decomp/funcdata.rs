@@ -66,6 +66,8 @@ pub struct Funcdata {
     pub(crate) active_output: Option<ParamActive>,
     /// the SSA builder's state across passes (`Funcdata::heritage`)
     pub(crate) heritage: Heritage,
+    /// the stack ranges of the local scope (`ScopeLocal`, varmap.rs)
+    pub(crate) localmap: super::varmap::LocalMap,
     /// the next free offset of the unique space (`VarnodeBank::uniqid`)
     next_unique: u64,
     /// header warnings (`Funcdata::warningHeader`), for `print C`
@@ -131,6 +133,7 @@ impl Funcdata {
             proto: FuncProto::default(),
             active_output: None,
             heritage: Heritage::default(),
+            localmap: super::varmap::LocalMap::new(4),
             next_unique: UNIQUE_ANALYSIS,
             warnings: Vec::new(),
             ram: None,
@@ -282,12 +285,36 @@ impl Funcdata {
             v.flags.set(VnFlags::PERSIST);
             v.flags.set(VnFlags::ADDRTIED);
         }
+        if v.space == Space::Stack {
+            self.scoped_stack(&mut v);
+        }
         if let Space::Sleigh(s) = v.space {
             if self.incidental.iter().any(|&(is, io, iz)| is == s && io <= v.offset && v.offset < io + u64::from(iz)) {
                 v.flags.set(VnFlags::INCIDENTAL_COPY);
             }
         }
         v
+    }
+
+    /// `Scope::queryProperties` for a stack varnode: the local scope makes it `addrtied` in its
+    /// ranges, and a locked parameter of the function (its one kind of symbol) types it
+    /// (`setSymbolProperties` with `SymbolEntry::updateType`; a piece of one fails in heritage,
+    /// `check_locked_param_pieces`).
+    fn scoped_stack(&self, v: &mut Varnode) {
+        if self.localmap.in_scope(v.offset, v.size) {
+            v.flags.set(VnFlags::ADDRTIED);
+        }
+        let Some(l) = &self.proto.locked else { return };
+        let hit = l.inputs.iter().find(|p| {
+            matches!(p.storage, Some(super::fspec::Storage::Stack { offset, size }) if offset == v.offset && size == v.size)
+        });
+        if let Some(p) = hit {
+            v.flags.set(VnFlags::ADDRTIED);
+            v.ty = Some(p.ty);
+            if self.types.meta(p.ty) != super::types::Meta::Unknown {
+                v.flags.set(VnFlags::TYPELOCK);
+            }
+        }
     }
 
     pub(crate) fn new_constant(&mut self, size: u32, value: u64) -> VarnodeId {
@@ -805,6 +832,8 @@ impl Funcdata {
         self.uniq = Some(arch.sleigh.uniq_space());
         self.incidental = arch.incidental.clone();
         self.laned = arch.laned.clone();
+        let stack_size = arch.sleigh.spaces.get(arch.spec.stack_container as usize).map_or(8, |s| s.size);
+        self.localmap = super::varmap::LocalMap::new(stack_size);
         if self.blocks.list.is_empty() {
             flow::follow_flow(self, arch)?;
         }
@@ -898,7 +927,7 @@ impl Funcdata {
             if !self.vn(vn).descend.is_empty() {
                 continue;
             }
-            if self.vn(vn).is_input() {
+            if self.vn(vn).is_input() && !self.vn(vn).has(VnFlags::LOCKED_INPUT) {
                 let v = self.vn(vn);
                 let key = (v.space.index(), v.offset, v.size, vn);
                 self.loc_del(vn);

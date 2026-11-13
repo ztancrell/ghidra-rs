@@ -659,10 +659,14 @@ fn propagate_across_returns(fd: &mut Funcdata, arch: &Arch, st: &mut Infer) -> R
 }
 
 /// Port of `ActionInferTypes::propagateSpacebaseRef`/`propagateRef`: types of stack varnodes
-/// reached through the stack pointer. No stack-space varnode exists before the `stackvars`
-/// rules (stage R5), so there is nothing to reach yet.
+/// reached through the stack pointer. Before the `stackvars` rules (stage R5) the only stack
+/// varnodes are those of locked parameters, typelocked, which `propagateRef` skips.
 fn propagate_spacebase_ref(fd: &Funcdata) -> Result<()> {
-    if fd.loc_space(Space::Stack).is_empty() {
+    let skipped = |vn| {
+        let v = fd.vn(vn);
+        v.has(VnFlags::TYPELOCK) || v.is_annotation() || (v.def.is_none() && v.descend.is_empty())
+    };
+    if fd.loc_space(Space::Stack).into_iter().all(skipped) {
         return Ok(());
     }
     err("type propagation into stack varnodes (propagateRef): not implemented in ghidra-rs yet")

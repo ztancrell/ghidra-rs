@@ -292,6 +292,8 @@ tools". Where it differs from the table row:
 - Not ported, for that reason: `varmap` (stack ranges), the stack and ram paths of heritage
   (load/store guards, placeholders, revisited markers, indexed stack pointers, scope
   properties), and `cover` (nothing before merging, S7, uses it).
+  Superseded (stack heritage, below): the stack pass, its stack-pointer tracing and the
+  stack part of the local scope are ported; revisited markers and the load-guard analysis are not.
 - The action framework (`actiontree.rs`) is ported in full except rule pools: statuses,
   repeat, restart (nothing asks for one yet), breakpoints, `continue`.
 - The varnode bank keeps readers for every edit and the location order from the first
@@ -438,8 +440,8 @@ Round three (same branch, 2026-11-13):
   `lateRestriction` failures.
 - Results: unlocked (`s6-options.txt`) M8 8 / 8, M500 446 / 446 non-SSE; locked `void`
   M8 8 / 8, M500 446 / 446 non-SSE; locked `int4` M8 8 / 8, M500 446 / 446 non-SSE; S4 regression M8 8 / 8.
-- Left for a later S6b: locked stack parameters of the decompiled function (stack heritage),
-  varargs and hidden-return locked prototypes, resizing an output in `commitNewOutputs` and
+- Left for a later S6b: locked stack parameters of the decompiled function (stack heritage;
+  Superseded: done with stack heritage, below), varargs and hidden-return locked prototypes, resizing an output in `commitNewOutputs` and
   truncating a trial in `buildParam`, the restart when a call cannot take a locked prototype,
   the scopes of `database.cc` (parameter symbols, `type varnode`), `unionresolve`, partial
   types and `TypePointerRel`. `cast.cc`/`ActionSetCasts` are S9.
@@ -607,6 +609,38 @@ not finish); subvar check and R3 check 497 / 499 each; paramdouble 500 / 500; S4
 four S6 checks (unlocked, `void`, `int4`, callees) 498 / 500 each (0x4919f0; 0x4c48d0).
 Superseded: the 495 / 499 above (0x4891e0 and 0x6fa6e0 are fixed by part two's non-zero masks)
 and the callee check's 497 (the reference ran 0x5b59c0 this time).
+
+### Stack heritage: slice one on branch `m3-stack` (2026-11-13)
+
+Check: `print raw` with types at `break start assignhigh`, every function and callee locked
+with two stack parameters, so stack varnodes exist without the R5 rules:
+
+    rust/tools/decomp-locked-options.sh void rust/target/stack-lock.txt "int4 a, int4 b"
+    DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=rust/target/stack-lock.txt rust/tools/decomp-diff.sh m500
+
+The options are `s6-options.txt` (no new group switch): `stackvars` holds only
+`RuleLoadVarnode`/`RuleStoreVarnode` (R5) and stays off, `localrecovery` stays off because
+`ActionRestructureVarnode` builds local symbols. M8 8 / 8 (the reference shows SSA stack
+varnodes in 4 of 8: call INDIRECTs and MULTIEQUALs of `s0x4`/`s0x8`). M500 and the regression
+bars: the run was still going when the slice was committed (results in
+`rust/target/stk/bars.out`, script `rust/target/stk/bars.sh`).
+
+- Ported: the stack space in the heritage pass loop (delay 1, dead-code delay 1, dead code
+  and `deadRemovalAllowedSeen` per space incl. the stack), `discoverIndexedStackPointers`,
+  `protectFreeStores`, `reprocessFreeStores`, load/store guard records (`heritage_guard.rs`),
+  stack ranges in `guard` (address-tied in the local scope, call guards with the callee's
+  stack offset, STORE guards through `spacebase_ptr`), stack effects (`lookupEffect`),
+  `ScopeLocal`'s stack ranges and `markNotMapped`, `ActionRestrictLocal` (`varmap.rs`),
+  locked stack parameters of the function itself (inputs, typelocked symbol properties), and
+  `clearDeadVarnodes` keeping locked inputs.
+- Invisible to the check until R5: every LOAD/STORE through the stack pointer (locals,
+  pushed call arguments, saved registers), so no call gets stack trials and every call's stack
+  offset stays unknown (`resolveSpacebaseRelative` is R5's).
+- Not ported, fails loudly: the value-set analysis of load guards (`ValueSetSolver`;
+  `guardLoads` on an address-tied stack range with an indexed stack LOAD), revisited markers
+  (`removeRevisitedMarkers`), the restart after heritage following dead-code removal
+  (`bumpDeadcodeDelay`), pieces of a locked stack parameter, `ActionRestructureVarnode`
+  (MapState, RangeHint, AliasChecker, symbols), `ActionMappedLocalSync`.
 
 ## Running stages in parallel
 

@@ -40,6 +40,9 @@ impl OpFlags {
     pub(crate) const CALCULATED_BOOL: OpFlags = OpFlags(1024);
     /// `immed_copy` (an additional flag in C++): a COPY was propagated into a MULTIEQUAL slot
     pub(crate) const IMMED_COPY: OpFlags = OpFlags(2048);
+    /// `spacebase_ptr`: a LOAD or STORE through the stack pointer (`opMarkSpacebasePtr`, stack
+    /// heritage)
+    pub(crate) const SPACEBASE_PTR: OpFlags = OpFlags(1 << 20);
 
     pub(crate) fn has(self, f: OpFlags) -> bool {
         self.0 & f.0 != 0
