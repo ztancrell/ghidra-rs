@@ -26,9 +26,10 @@ fn calc_mask(size: u32) -> u64 {
     }
 }
 
-/// An action with nothing to do on x86 without locked prototypes, segment ops, lane registers
-/// or overrides (`paramdouble`: only stack trials split, and none exist before the `stackvars`
-/// rules; `segmentize`, `internalstorage`, `lanedivide`).
+/// An action with nothing to do on x86 without locked prototypes, segment ops or overrides
+/// (`paramdouble`: only stack trials split, and none exist before the `stackvars` rules;
+/// `segmentize`, `internalstorage`). Superseded: `lanedivide` was one until R3
+/// (`lanedivide.rs`).
 pub(crate) fn nothing(_: &mut Funcdata, _: &Arch) -> Result<i32> {
     Ok(0)
 }
@@ -1093,7 +1094,7 @@ pub(crate) fn dead_code(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         propagate_consumed(fd, &mut worklist)?;
     }
     // lastChanceLoad: only LOADs from an eventual constant address
-    if fd.heritage.pass() <= 1 {
+    if fd.heritage.pass() <= 1 && !fd.jumptablerecovery_on {
         let mut any = false;
         for op in fd.ops_created_with(Opcode::Load) {
             if fd.op(op).is_dead() {
@@ -1777,7 +1778,8 @@ fn block_remove_unreachable(fd: &mut Funcdata, bb: BlockId, dead: &[BlockId]) ->
                 fd.warning_header("Creating undefined varnodes in (possibly) reachable block");
                 warned = true;
             }
-            if fd.vn(out).descend.iter().any(|&d| fd.op(d).parent != Some(bb)) {
+            // `descendantsOutside`: a reader in a block that is not dead (not one outside `bb`)
+            if fd.vn(out).descend.iter().any(|&d| fd.op(d).parent.is_some_and(|p| !dead.contains(&p))) {
                 return err("Deleting op with descendants");
             }
         }
@@ -1846,7 +1848,8 @@ pub(crate) fn do_nothing(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         if !unblocked_multi(fd, bb) {
             continue;
         }
-        if !has_no_immediate_copy(fd, bb) {
+        // jump-table recovery removes the block whatever was copied into it (`isJumptableRecoveryOn`)
+        if !fd.jumptablerecovery_on && !has_no_immediate_copy(fd, bb) {
             continue; // setDelayedDonothing: for ActionLateDoNothing (group blockrecovery)
         }
         remove_do_nothing_block(fd, arch, bb)?;

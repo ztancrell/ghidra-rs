@@ -9,7 +9,7 @@ pub use super::actiontree::{ActionTree, Outcome};
 use super::fspec::{ExtraPop, ParamActive};
 use super::funcdata::CallId;
 use super::opcode::Opcode;
-use super::varnode::{Space, VnFlags};
+use super::varnode::{Space, VarnodeId, VnFlags};
 use super::{err, heritage, Arch, Funcdata, Result};
 
 /// `universalAction` as the `decompile` root has it, with the groups in `disabled` switched
@@ -18,7 +18,7 @@ use super::{err, heritage, Arch, Funcdata, Result};
 /// `stackstall`, and the root's actions after `fullloop` up to `assignhigh`. `oppool1` holds the
 /// ported rules (`rules::OPPOOL1`) less those `togglerule` switched off (`rule:<name>` in
 /// `disabled`); the actions named `action:<name>` there (`DECOMP_SKIP_ACTIONS`) are left out. An
-/// action that is not ported fails when it runs with its group on, except `lanedivide` (see there).
+/// action that is not ported fails when it runs with its group on.
 pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
     tree(false, disabled)
 }
@@ -81,7 +81,14 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
     let on = |g: &str| groups.contains(&g) && !disabled.contains(g);
     let leaves = |t: &mut ActionTree, list: &[(&'static str, &str, super::actiontree::ApplyFn)]| -> Vec<_> {
         list.iter()
-            .filter(|(name, g, _)| on(g) && !disabled.contains(&format!("action:{name}")))
+            .filter(|&&(name, g, f)| {
+                // the jumptable root runs without its unported actions (`PARTIAL_SKIP`); once one
+                // is ported it runs there too
+                let unported = std::ptr::fn_addr_eq(f, not_ported as super::actiontree::ApplyFn);
+                on(g)
+                    && !disabled.contains(&format!("action:{name}"))
+                    && !(jumptable && unported && PARTIAL_SKIP.contains(&name))
+            })
             .map(|&(name, _, f)| t.leaf(name, f))
             .collect()
     };
@@ -106,10 +113,9 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
     let mut stackstall = leaves(
         &mut t,
         &[
-            // ActionLaneDivide (R3) is in group `base` and cannot be switched off, so it is the one
-            // action not ported that does nothing instead of failing: the functions that need it
-            // differ from the reference (`rust/tools/corpus/m500-lanedivide.txt`) rather than fail
-            ("lanedivide", "base", c::nothing),
+            // ActionLaneDivide (R3, `lanedivide.rs`). Superseded: until R3 it was the one action
+            // not ported that did nothing instead of failing (group `base` cannot be switched off)
+            ("lanedivide", "base", super::lanedivide::lane_divide),
             ("multicse", "analysis", not_ported),
             ("shadowvar", "analysis", not_ported),
             ("deindirect", "deindirect", c::deindirect),
@@ -207,8 +213,12 @@ fn not_ported(_: &mut Funcdata, _: &Arch) -> Result<i32> {
     err("action not implemented in ghidra-rs yet (milestone 3: stage S4 ends before assignhigh, with the rule groups off)")
 }
 
-/// The actions of the `jumptable` root's groups that are not ported: the partial function is
-/// simplified without them.
+/// The actions of the `jumptable` root's groups the partial function is simplified without while
+/// they are not ported (an entry is skipped only as long as its leaf is `not_ported`; any other
+/// unported action reached in the partial fails the table and is reported, `flow.rs`). Three
+/// of them can change which tables are recovered: `restructurevarnode` (in the partial it also
+/// runs `protectSwitchPaths`, coreaction.cc), `condconst` (constants along a guarded path) and
+/// `normalizebranches` (flips the CBRANCHs the guards are read from).
 const PARTIAL_SKIP: &[&str] = &[
     "funclinkoutonly",
     "restrictlocal",
@@ -227,8 +237,7 @@ const PARTIAL_SKIP: &[&str] = &[
 /// rules of later stages (R3 to R5, with `RuleLoadVarnode`) are missing from it; `jumptable.rs`
 /// folds the read-only loads they would resolve.
 pub(crate) fn jumptable_partial(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
-    let skip = PARTIAL_SKIP.iter().map(|a| format!("action:{a}")).collect();
-    match tree(true, &skip).perform(fd, arch)? {
+    match tree(true, &std::collections::HashSet::new()).perform(fd, arch)? {
         super::actiontree::Outcome::Complete => Ok(()),
         super::actiontree::Outcome::Break(at) => err(format!("the jumptable action stopped at {at}")),
     }
@@ -437,7 +446,7 @@ fn varnode_props(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
                     continue;
                 }
                 fd.op_remove_input(op, 1);
-                fd.op_mut(op).opc = Opcode::Copy;
+                fd.op_set_opcode(op, Opcode::Copy);
             }
             Opcode::Multiequal => continue,
             _ => {}
@@ -447,6 +456,37 @@ fn varnode_props(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         changes += 1;
     }
     Ok(changes)
+}
+
+/// Port of `ActionVarnodeProps::handleExtendedZero`: the ops reading `vn`, a `zext(#0)` wider
+/// than 8 bytes, become COPYs (of the other input, or of the zero).
+fn handle_extended_zero(fd: &mut Funcdata, vn: VarnodeId) -> i32 {
+    use Opcode::*;
+    let mut changes = 0;
+    let mut i = 0;
+    while let Some(&subop) = fd.vn(vn).descend.get(i) {
+        i += 1;
+        let slot = fd.slot_of(subop, vn);
+        let remove = match fd.op(subop).opc {
+            IntAdd | IntOr | IntXor => slot,
+            Int2comp => {
+                fd.op_set_opcode(subop, Copy);
+                changes += 1;
+                continue;
+            }
+            IntLeft | IntRight | IntSright | IntDiv | IntSdiv | IntRem | IntSrem => {
+                (fd.op(subop).ins.first() == Some(&vn)).then_some(1)
+            }
+            IntMult | IntAnd => slot.map(|s| 1 - s),
+            _ => None,
+        };
+        let Some(r) = remove else { continue };
+        fd.op_remove_input(subop, r);
+        fd.op_set_opcode(subop, Copy);
+        i = 0; // the descendants changed: from the first again
+        changes += 1;
+    }
+    changes
 }
 
 /// The parts of `ActionVarnodeProps::apply` that act after dead code ran: an auto-live hold
@@ -490,7 +530,7 @@ fn varnode_props_late(fd: &mut Funcdata) -> Result<i32> {
                     let zext0 =
                         o.opc == Opcode::IntZext && fd.vn(o.ins[0]).is_constant() && fd.vn(o.ins[0]).offset == 0;
                     if zext0 {
-                        return err("varnodeprops: handleExtendedZero is not implemented in ghidra-rs yet");
+                        changes += handle_extended_zero(fd, vn);
                     }
                     continue;
                 }

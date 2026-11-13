@@ -309,6 +309,32 @@ impl Opcode {
     }
 }
 
+/// `PcodeOp::isBoolOutput`
+pub(crate) fn is_bool_output(opc: Opcode) -> bool {
+    use Opcode::*;
+    matches!(
+        opc,
+        IntEqual
+            | IntNotequal
+            | IntSless
+            | IntSlessequal
+            | IntLess
+            | IntLessequal
+            | IntCarry
+            | IntScarry
+            | IntSborrow
+            | BoolNegate
+            | BoolXor
+            | BoolAnd
+            | BoolOr
+            | FloatEqual
+            | FloatNotequal
+            | FloatLess
+            | FloatLessequal
+            | FloatNan
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

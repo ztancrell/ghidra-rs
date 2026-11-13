@@ -40,8 +40,6 @@ impl OpFlags {
     pub(crate) const CALCULATED_BOOL: OpFlags = OpFlags(1024);
     /// `immed_copy` (an additional flag in C++): a COPY was propagated into a MULTIEQUAL slot
     pub(crate) const IMMED_COPY: OpFlags = OpFlags(2048);
-    /// `fallthru_true` of a CBRANCH (`opFlipCondition`, stage R2)
-    pub(crate) const FALLTHRU_TRUE: OpFlags = OpFlags(4096);
 
     pub(crate) fn has(self, f: OpFlags) -> bool {
         self.0 & f.0 != 0
@@ -75,6 +73,9 @@ pub(crate) struct PcodeOp {
     pub(crate) flags: OpFlags,
     /// the special halt this RETURN stands for (`getHaltType`), if any
     pub(crate) halt: Option<Halt>,
+    /// the position in the per-opcode list (`PcodeOp::codeiter`): an op goes to the end of
+    /// its list when made and on every `opSetOpcode`
+    pub(crate) list_key: u32,
 }
 
 impl PcodeOp {

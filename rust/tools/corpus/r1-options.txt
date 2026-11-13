@@ -15,28 +15,9 @@ option currentaction decompile constsequence off
 option currentaction decompile bitfields off
 option currentaction decompile dynamic off
 option togglerule pullsub_indirect off
-option togglerule doublesub off
-option togglerule concatshift off
 option togglerule aliasupdate off
 option togglerule threewaycomp off
 option togglerule transformcpool off
-option togglerule zexteliminate off
-option togglerule zextsless off
-option togglerule subextcomm off
-option togglerule subcommute off
-option togglerule concatcommute off
-option togglerule concatzext off
-option togglerule zextcommute off
-option togglerule zextshiftzext off
-option togglerule concatzero off
-option togglerule concatleftshift off
-option togglerule subzext off
-option togglerule subcancel off
-option togglerule shiftsub off
-option togglerule humptydumpty off
-option togglerule dumptyhump off
-option togglerule humptyor off
-option togglerule subnormal off
 option togglerule positivediv off
 option togglerule divtermadd off
 option togglerule divtermadd2 off
@@ -52,8 +33,6 @@ option togglerule signmod2nopt2 off
 option togglerule signmod2opt off
 option togglerule switchsingle off
 option togglerule floatrange off
-option togglerule piece2zext off
-option togglerule piece2sext off
 option togglerule floatsign off
 option togglerule conditionalmove off
 option togglerule orpredicate off

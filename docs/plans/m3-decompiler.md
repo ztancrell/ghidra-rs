@@ -346,7 +346,8 @@ differs from the table row:
   `analysis`, `cleanup`, `typerecovery` (those three leave the `subvar`, `stackvars`,
   `blockrecovery`, ... groups on, whose rules and structuring change the output).
 - `ActionLaneDivide` (R3 in the table) is in group `base` and cannot be switched off: the
-  M500 functions using whole SSE registers differ until R3 ports it. Pass bar: 446 / 447 (every function the reference finishes)
+  M500 functions using whole SSE registers differ until R3 ports it. Superseded: R3 ported it (498 / 499 now).
+  Pass bar: 446 / 447 (every function the reference finishes)
   identical without them; with them the bar is not reached.
 - `multicse` and `conditionalconst` are in group `analysis` (off), so they wait for the rule
   stages; `paramid.cc` belongs to the `paramid` root action, which the console's `decompile`
@@ -364,7 +365,7 @@ differs from the table row:
 
 `print raw` with types at `break start assignhigh` (`DECOMP_RAW_EXTRA=1`,
 `rust/tools/corpus/s6-options.txt`: the S4 options with `typerecovery` on and its five R5 rules
-toggled off): M8 8 / 8, M500 446 / 500: identical on every function the reference finishes (499) except the 53 that use whole SSE registers and wait for `ActionLaneDivide` (R3), as in S4. Details in `rust/README.md`, "Stage S6". Where it differs
+toggled off): M8 8 / 8, M500 446 / 500: identical on every function the reference finishes (499) except the 53 that use whole SSE registers and wait for `ActionLaneDivide` (R3), as in S4. Superseded: with R3 merged, 498 / 499 (0x4919f0 differs), see "R3". Details in `rust/README.md`, "Stage S6". Where it differs
 from the table row:
 
 - Ported: the type store (`types.rs`, the kinds inference reaches with the rules off, plus
@@ -499,24 +500,65 @@ partial function needs the comparison rules too).
 
 ### R2: done on branch `m3-r2` (2026-11-13)
 
-51 rules of `oppool1` (bit operations, shifts, comparisons, booleans) and 2 of the `cleanup` pool
+50 rules of `oppool1` (26 bit and shift, 15 comparison, 9 boolean) and 2 of the `cleanup` pool
 (list in `rust/README.md`, "Stage R2"), in `rules/bits.rs`, `compare.rs`, `boolean.rs`,
-`cleanup.rs`. Check as R1, with `r1-options.txt` regenerated (56 `togglerule`s; group
-`cleanup` on, its nine other rules off): M8 8 / 8; M500 452 / 453 of R1's set (99.8 %, bar
-98 %: reached; 452 / 500 in all). Where it differs from the table row:
+`cleanup.rs`. Check as R1, with `r1-options.txt` regenerated (group `cleanup` on, its nine other
+rules off; 35 `togglerule`s with R3 merged) and lane division on both sides: M8 8 / 8; M500
+498 / 499 of the functions the reference finishes (99.8 %, bar 98 %: reached; 495 / 499 with
+R3 alone). Superseded: 452 / 453 of R1's set before the merge with R3. Where it differs from the
+table row:
 
 - Not ported: `threewaycomp`, `conditionalmove`, `orpredicate`, and the `cleanup` rules that read
   data-types (`addunsigned`, `subright`, `piecestructure`, `andstructure`) or belong to R3 to R5.
 - The partial function of jump-table recovery runs the `jumptable` root action (the tree of
-  `universal` with its groups, eight unported actions skipped) instead of S3's stand-ins;
-  `analyzeGuards` is the C++ loop. Left: the fold through read-only loads (`RuleLoadVarnode`,
-  R5). S3 recheck at `paramdouble`: M8 8 / 8, M500 500 / 500, switch corpus 1,946 / 2,050
-  (1,934 before).
+  `universal` with its groups; eight actions left out while they are not ported, of which
+  `restructurevarnode`, `condconst` and `normalizebranches` can change table recovery) instead of
+  S3's stand-ins, with `jumptablerecovery_on` gating heritage's dead-code delay, `lastChanceLoad`
+  and `donothing`; `analyzeGuards` is the C++ loop. Left: the fold through read-only loads
+  (`RuleLoadVarnode`, R5). S3 recheck at `paramdouble`: M8 8 / 8, M500 500 / 500, switch
+  corpus 1,947 / 2,050 (1,934 before).
 - `ActionNonzeroMask` on the function itself no longer reads folded constants (an R1
   shortcut that sharpened masks beyond the C++'s).
-- S4 M8 8 / 8, M500 446 / 500; S6 unlocked M8 8 / 8, M500 446 / 500; locked `void`
-  446 / 500, `int4` 446 / 500, callees with a stack parameter 446 / 500.
+- Fixed on the way: removing unreachable blocks whose values are read in other removed blocks
+  (`descendantsOutside`, 0x74fae0).
+- S4 M8 8 / 8, M500 498 / 500; S6 unlocked M8 8 / 8, M500 498 / 500; locked `void`
+  498 / 500, `int4` 498 / 500, callees with a stack parameter 498 / 500.
 - Left: 0x47a6b0 (`ActionConditionalExe`, as in R1).
+
+### R3: in part on branch `m3-r3` (2026-11-13)
+
+Ported: `ActionLaneDivide` (`decomp/lanedivide.rs`: the action and `LaneDivide` of `subflow.cc`),
+`transform.cc` (`decomp/transform.rs`), the `.pspec` `vector_lane_sizes` records, and 21 rules of
+`oppool1` (list in `rust/README.md`, "Stage R3"), plus `ActionVarnodeProps::handleExtendedZero`.
+Superseded: the `lanedivide` exception of S4 and R1 (an action that did nothing) and the bar taken
+over M500 less `m500-lanedivide.txt`; `lanedivide` now runs on both sides.
+
+Check as R1 (`r1-options.txt` regenerated: 76 `togglerule`s; `DECOMP_SKIP_ACTIONS` unchanged):
+M8 8 / 8; M500 495 / 499 of the functions the reference finishes (99.2 %, bar 98 %: reached).
+Of the 46 lane-divide functions 44 are identical; of the other 453, 451 as in R1. S3's
+paramdouble check stays 500 / 500; the S4 check is now 498 / 499 (was 446). Misses: 0x47a6b0
+and 0x6fa6e0 as in R1; 0x4891e0 (a zero replacement ghidra-rs makes one main-loop pass before
+the reference, the cause of 0x6fa6e0 seen from the other side); 0x4919f0 (the reference empties
+a block whose branch ghidra-rs keeps, also under the S4 options, so not a rule).
+
+Not ported, left for a follow-up (R3b):
+
+- The `subvar` group: `RuleSubvarAnd`, `RuleSubvarSubpiece`, `RuleSubvarCompZero`,
+  `RuleSubvarShift`, `RuleSubvarZext`, `RuleSubvarSext`, `RuleSplitFlow` and their engines in
+  `subflow.cc` (`SubvariableFlow`, `SplitFlow`; `SubfloatFlow` is R4's). The group is off in the
+  check on both sides, so the bar does not see them; porting them needs a check with `subvar` on.
+- `RulePiecePathology` (group `protorecovery`, switched off by `togglerule`): it needs
+  `setInputBytesConsumed`/`setReturnBytesConsumed` in `fspec.rs` and their readers in dead code.
+- `prefersplit.cc`: no x86 `.cspec` has `<prefersplit>`, so nothing runs it; not ported.
+- Superseded: "`LaneDivide::setReplacement`'s type-lock test is left out". It is ported
+  (review round, after the merge with S6), with the other review fixes listed in
+  `rust/README.md`, "Stage R3".
+
+Merged with S6 (`master` into `m3-r3`, 2026-11-13); every bar rerun on the merged binary: R3
+check M8 8 / 8, M500 495 / 499; R1 set 451 / 453; paramdouble 500 / 500; S4 check M8 8 / 8,
+M500 498 / 500; S6 unlocked, locked `void`, locked `int4` and callees `int4(int4 a)` each
+M8 8 / 8, M500 498 / 500 (498 / 499 the reference finishes; the miss is 0x4919f0).
+Superseded: the "446 / 446 non-SSE" results of the S6 section above.
 
 ## Running stages in parallel
 

@@ -4,12 +4,13 @@
 //! `RuleLessNotEqual`, `RuleLessOne`, `RuleRangeMeld` (ruleaction.cc), with
 //! `Funcdata::replaceLessequal` (funcdata_op.cc) and `AddExpression` (expression.cc).
 //!
-//! Constants hold no symbol yet, so `copySymbol`/`copySymbolIfValid` (markup carried to a new
-//! constant) have nothing to carry.
+//! `copySymbol` carries a constant's data-type and type lock to its replacement (`copy_symbol`);
+//! symbols and equates are not modelled yet, so `copySymbolIfValid` (which copies only for an
+//! equate) has nothing to carry.
 
 use super::*;
-use crate::decomp::jumptable::{is_bool_output, pull_back};
-use crate::decomp::rangeutil::CircleRange;
+use crate::decomp::opcode::is_bool_output;
+use crate::decomp::rangeutil::{self, CircleRange};
 
 /// `signbit_negative`.
 pub(super) fn signbit_negative(val: u64, size: u32) -> bool {
@@ -59,6 +60,7 @@ pub(crate) fn replace_lessequal(fd: &mut Funcdata, op: OpId) -> Result<bool> {
     fd.op_set_opcode(op, opc);
     let res = if down { val.wrapping_sub(1) } else { val.wrapping_add(1) } & mask;
     let newvn = fd.new_constant(size, res);
+    copy_symbol(fd, newvn, vn);
     fd.op_set_input(op, newvn, i)?;
     Ok(true)
 }
@@ -141,7 +143,7 @@ fn overflow_compare(fd: &Funcdata, svn: VarnodeId, expr: &AddExpr) -> Result<Opt
             continue;
         }
         let cvn = if inp(fd, compop, 0)? == svn { inp(fd, compop, 1)? } else { inp(fd, compop, 0)? };
-        let Some(signop) = def_opc(fd, cvn, IntSless) else { continue };
+        let Some(signop) = def_with(fd, cvn, IntSless) else { continue };
         let zside = if const_match(fd, inp(fd, signop, 0)?, 0) {
             0
         } else if const_match(fd, inp(fd, signop, 1)?, 0) {
@@ -372,6 +374,12 @@ pub(super) fn sless_2_zero(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32>
         }
         return Ok(1);
     }
+    sign_through(fd, op, feed, xvn, xslot, negative)
+}
+
+/// `RuleSLess2Zero`, the forms that move the sign test of `xvn` (slot `xslot` of `op`; `X s< 0`
+/// when `negative`, else `-1 s< X`) to an input of the op `feed` defining it.
+fn sign_through(fd: &mut Funcdata, op: OpId, feed: OpId, xvn: VarnodeId, xslot: usize, negative: bool) -> Result<i32> {
     let Some(&avn) = ins(fd, feed).first() else { return Ok(0) };
     let asz = sz(fd, avn);
     // `X s< 0` holds when `avn s< 0` (`same`), else when `-1 s< avn`
@@ -422,7 +430,7 @@ pub(super) fn sless_2_zero(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32>
         }
         IntLeft if !negative => {
             let coeff = inp(fd, feed, 1)?;
-            if !const_match(fd, coeff, u64::from(sz(fd, lvn) * 8 - 1)) {
+            if !const_match(fd, coeff, u64::from(sz(fd, xvn) * 8 - 1)) {
                 return Ok(0);
             }
             if !def(fd, avn).is_some_and(|d| is_bool_output(code(fd, d))) {
@@ -450,10 +458,10 @@ pub(super) fn equal_2_zero(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32>
     if !fd.vn(addvn).descend.iter().all(|&d| is_bool_output(code(fd, d))) {
         return Ok(0);
     }
-    let Some(addop) = def_opc(fd, addvn, IntAdd) else { return Ok(0) };
+    let Some(addop) = def_with(fd, addvn, IntAdd) else { return Ok(0) };
     let (vn, vn2) = (inp(fd, addop, 0)?, inp(fd, addop, 1)?);
     let mult_neg_one = |v: VarnodeId| -> Result<Option<VarnodeId>> {
-        let Some(m) = def_opc(fd, v, IntMult) else { return Ok(None) };
+        let Some(m) = def_with(fd, v, IntMult) else { return Ok(None) };
         let c = inp(fd, m, 1)?;
         Ok(if const_match(fd, c, calc_mask(sz(fd, c))) { Some(inp(fd, m, 0)?) } else { None })
     };
@@ -526,7 +534,7 @@ pub(super) fn xor_collapse(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32>
         return Ok(0);
     }
     let x = inp(fd, op, 0)?;
-    let Some(xorop) = def_opc(fd, x, IntXor) else { return Ok(0) };
+    let Some(xorop) = def_with(fd, x, IntXor) else { return Ok(0) };
     if lone_descend(fd, x).is_none() {
         return Ok(0);
     }
@@ -637,31 +645,36 @@ pub(super) fn less_one(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
     Ok(1)
 }
 
+/// `CircleRange::pullBack` (without the non-zero masks) on literal constants.
+fn pull_back(fd: &Funcdata, vn: VarnodeId, rng: CircleRange) -> Option<(VarnodeId, CircleRange)> {
+    rangeutil::pull_back(fd, vn, rng, false, |v| is_const(fd, v).then(|| off(fd, v)), |v| fd.nzmask(v))
+}
+
 /// `RuleRangeMeld`: the varnode a boolean (the output of `sub`) tests, and the range of its
 /// values for which the boolean holds.
-fn bool_range(fd: &Funcdata, arch: &Arch, vn: VarnodeId, sub: OpId) -> Option<(VarnodeId, CircleRange)> {
-    let (a, range) = pull_back(fd, arch, vn, CircleRange::boolean(true), false)?;
+fn bool_range(fd: &Funcdata, vn: VarnodeId, sub: OpId) -> Option<(VarnodeId, CircleRange)> {
+    let (a, range) = pull_back(fd, vn, CircleRange::boolean(true))?;
     if code(fd, sub) == BoolNegate {
-        return pull_back(fd, arch, a, range, false);
+        return pull_back(fd, a, range);
     }
     Some((a, range))
 }
 
 /// Port of `RuleRangeMeld`: two range tests of one variable, ANDed or ORed, become one test.
-pub(super) fn range_meld(fd: &mut Funcdata, op: OpId, arch: &Arch) -> Result<i32> {
+pub(super) fn range_meld(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
     let (vn1, vn2) = (inp(fd, op, 0)?, inp(fd, op, 1)?);
     let (Some(sub1), Some(sub2)) = (def(fd, vn1), def(fd, vn2)) else { return Ok(0) };
     if !is_bool_output(code(fd, sub1)) || !is_bool_output(code(fd, sub2)) {
         return Ok(0);
     }
-    let Some((mut a1, mut range1)) = bool_range(fd, arch, vn1, sub1) else { return Ok(0) };
-    let Some((mut a2, mut range2)) = bool_range(fd, arch, vn2, sub2) else { return Ok(0) };
+    let Some((mut a1, mut range1)) = bool_range(fd, vn1, sub1) else { return Ok(0) };
+    let Some((mut a2, mut range2)) = bool_range(fd, vn2, sub2) else { return Ok(0) };
     if !func_equal(fd, a1, a2) {
-        match pull_back(fd, arch, a1, range1, false) {
+        match pull_back(fd, a1, range1) {
             Some((a, r)) if a == a2 => (a1, range1) = (a, r),
             _ => {
                 if def(fd, a2).is_some() {
-                    let Some(back) = pull_back(fd, arch, a2, range2, false) else { return Ok(0) };
+                    let Some(back) = pull_back(fd, a2, range2) else { return Ok(0) };
                     (a2, range2) = back;
                 }
                 if a1 != a2 {
@@ -690,5 +703,50 @@ pub(super) fn range_meld(fd: &mut Funcdata, op: OpId, arch: &Arch) -> Result<i32
         1 => to_bool_const(fd, op, true),
         3 => to_bool_const(fd, op, false),
         _ => Ok(1),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `x <opc> c` (or `c <opc> x` with `const_first`) in a fresh function.
+    fn compare_op(fd: &mut Funcdata, opc: Opcode, c: u64, const_first: bool) -> OpId {
+        let op = fd.new_op(opc, 0x1000);
+        let x = fd.new_varnode(4, Space::Sleigh(1), 0x10);
+        let k = fd.new_constant(4, c);
+        let (a, b) = if const_first { (k, x) } else { (x, k) };
+        fd.op_set_input(op, a, 0).unwrap();
+        fd.op_set_input(op, b, 1).unwrap();
+        op
+    }
+
+    #[test]
+    fn replace_lessequal_table() {
+        // opcode, constant, constant first, result: (new opcode, new constant) or unchanged
+        let cases = [
+            (IntLessequal, 5, false, Some((IntLess, 6))),
+            (IntLessequal, 5, true, Some((IntLess, 4))),
+            (IntLessequal, 0xffff_ffff, false, None),
+            (IntLessequal, 0, true, None),
+            (IntSlessequal, 0x7fff_ffff, false, None),
+            (IntSlessequal, 0x8000_0000, true, None),
+            (IntSlessequal, 0xffff_ffff, false, Some((IntSless, 0))),
+            (IntSlessequal, 0, true, Some((IntSless, 0xffff_ffff))),
+        ];
+        for (opc, c, first, want) in cases {
+            let mut fd = Funcdata::new(0x1000);
+            let op = compare_op(&mut fd, opc, c, first);
+            let changed = replace_lessequal(&mut fd, op).unwrap();
+            let slot = usize::from(!first);
+            let got = changed.then(|| (code(&fd, op), off(&fd, fd.op(op).ins[slot])));
+            assert_eq!(got, want, "{opc:?} {c:#x} first={first}");
+        }
+    }
+
+    #[test]
+    fn signbit_table() {
+        assert!(signbit_negative(0x80, 1) && !signbit_negative(0x7f, 1));
+        assert!(signbit_negative(0x8000_0000, 4) && !signbit_negative(0x8000_0000, 8));
     }
 }

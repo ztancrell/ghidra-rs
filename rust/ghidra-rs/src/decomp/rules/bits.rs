@@ -4,106 +4,19 @@
 //! `RuleAndCompare`, `RuleDoubleShift`, `RuleDoubleArithShift`, `RuleLeftRight`,
 //! `RuleShiftCompare`, `RuleSignShift`, `RuleShift2Mult`, `RuleShiftPiece`, `RuleShiftAnd`,
 //! `RuleBitUndistribute`, `RuleXorSwap`, `RulePopcountBoolXor`, `RuleLzcountShiftBool`,
-//! `RuleOrCompare` (ruleaction.cc), and the small helpers the R2 rule files share.
+//! `RuleOrCompare` (ruleaction.cc) (the helpers the rule files share are in `rules/mod.rs`).
 //!
 //! The C++ shifts a `uintb` by an `int4` without a range check; on x86-64 the count is taken
 //! modulo 64, which [`shl`] and [`shr`] reproduce.
 
 use super::*;
-use crate::decomp::jumptable::{pcode_left, pcode_right};
-
-// ---- helpers shared by the R2 rule files ----
-
-/// `Funcdata::newUniqueOut`.
-pub(super) fn new_uniq(fd: &mut Funcdata, size: u32, op: OpId) -> Result<VarnodeId> {
-    let uniq = fd.uniq.ok_or_else(|| LowlevelError("no unique space".into()))?;
-    Ok(fd.new_unique_out(size, uniq, op))
-}
-
-/// A new op at `addr` with a unique output of `size` bytes and the inputs `ins` (`newOp`,
-/// `newUniqueOut`, `opSetInput`), inserted before `follow` (`opInsertBefore`): its output.
-pub(super) fn insert_new(
-    fd: &mut Funcdata,
-    opc: Opcode,
-    addr: u64,
-    size: u32,
-    ins: &[VarnodeId],
-    follow: OpId,
-) -> Result<VarnodeId> {
-    let n = fd.new_op(opc, addr);
-    let o = new_uniq(fd, size, n)?;
-    for (i, &v) in ins.iter().enumerate() {
-        fd.op_set_input(n, v, i)?;
-    }
-    fd.op_insert_before(n, follow)?;
-    Ok(o)
-}
-
-pub(super) fn off(fd: &Funcdata, vn: VarnodeId) -> u64 {
-    fd.vn(vn).offset
-}
-
-pub(super) fn sz(fd: &Funcdata, vn: VarnodeId) -> u32 {
-    fd.vn(vn).size
-}
-
-pub(super) fn code(fd: &Funcdata, op: OpId) -> Opcode {
-    fd.op(op).opc
-}
-
-pub(super) fn op_addr(fd: &Funcdata, op: OpId) -> u64 {
-    fd.op(op).seq.addr
-}
-
-pub(super) fn is_free(fd: &Funcdata, vn: VarnodeId) -> bool {
-    fd.vn(vn).is_free()
-}
-
-pub(super) fn known(fd: &Funcdata, vn: VarnodeId) -> bool {
-    fd.vn(vn).is_heritage_known()
-}
-
-/// `Varnode::constantMatch`.
-pub(super) fn const_match(fd: &Funcdata, vn: VarnodeId, val: u64) -> bool {
-    is_const(fd, vn) && off(fd, vn) == val
-}
-
-/// The op writing `vn` when it has the opcode `opc`.
-pub(super) fn def_opc(fd: &Funcdata, vn: VarnodeId, opc: Opcode) -> Option<OpId> {
-    def(fd, vn).filter(|&d| code(fd, d) == opc)
-}
-
-/// `leastsigbit_set`: -1 for 0.
-pub(super) fn lsb(v: u64) -> i32 {
-    if v == 0 {
-        -1
-    } else {
-        v.trailing_zeros() as i32
-    }
-}
-
-/// `mostsigbit_set`: -1 for 0.
-pub(super) fn msb(v: u64) -> i32 {
-    63 - v.leading_zeros() as i32
-}
-
-/// `uintb << int4` as x86-64 computes it.
-pub(super) fn shl(v: u64, sa: i32) -> u64 {
-    v.wrapping_shl(sa as u32)
-}
-
-/// `uintb >> int4` as x86-64 computes it.
-pub(super) fn shr(v: u64, sa: i32) -> u64 {
-    v.wrapping_shr(sa as u32)
-}
+use crate::decomp::rangeutil::{mostsigbit_set, pcode_left, pcode_right};
 
 /// The shift a constant multiplier stands for (`leastsigbit_set`, a power of 2 checked).
 fn pow2_shift(val: u64) -> Option<i32> {
     let sa = lsb(val);
     (shr(val, sa) == 1).then_some(sa)
 }
-
-// ---- the rules ----
 
 /// Port of `RuleOrMask`: `V | 0xff..f  =>  0xff..f`.
 pub(super) fn or_mask(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
@@ -190,7 +103,7 @@ pub(super) fn and_or_lump(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> 
     if !is_const(fd, c) {
         return Ok(0);
     }
-    let Some(op2) = def_opc(fd, inp(fd, op, 0)?, opc) else { return Ok(0) };
+    let Some(op2) = def_with(fd, inp(fd, op, 0)?, opc) else { return Ok(0) };
     let c2 = inp(fd, op2, 1)?;
     let base = inp(fd, op2, 0)?;
     if !is_const(fd, c2) || is_free(fd, base) {
@@ -264,7 +177,7 @@ pub(super) fn right_shift_and(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i
     if !is_const(fd, c) {
         return Ok(0);
     }
-    let Some(andop) = def_opc(fd, inp(fd, op, 0)?, IntAnd) else { return Ok(0) };
+    let Some(andop) = def_with(fd, inp(fd, op, 0)?, IntAnd) else { return Ok(0) };
     let maskvn = inp(fd, andop, 1)?;
     if !is_const(fd, maskvn) {
         return Ok(0);
@@ -284,7 +197,7 @@ pub(super) fn high_order_and(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i3
     if !is_const(fd, cvn1) {
         return Ok(0);
     }
-    let Some(addop) = def_opc(fd, inp(fd, op, 0)?, IntAdd) else { return Ok(0) };
+    let Some(addop) = def_with(fd, inp(fd, op, 0)?, IntAdd) else { return Ok(0) };
     let mut val = off(fd, cvn1);
     let size = sz(fd, cvn1);
     if (val.wrapping_sub(1) | val) != calc_mask(size) {
@@ -316,7 +229,7 @@ pub(super) fn high_order_and(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i3
             continue;
         }
         let nonzero = inp(fd, addop, 1 - i)?;
-        let Some(addop2) = def_opc(fd, nonzero, IntAdd) else { continue };
+        let Some(addop2) = def_with(fd, nonzero, IntAdd) else { continue };
         if lone_descend(fd, nonzero) != Some(addop) {
             continue;
         }
@@ -351,7 +264,7 @@ pub(super) fn and_distribute(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i3
         if !known(fd, other) {
             continue;
         }
-        let Some(orop) = def_opc(fd, inp(fd, op, i)?, IntOr) else { continue };
+        let Some(orop) = def_with(fd, inp(fd, op, i)?, IntOr) else { continue };
         let (o0, o1) = (inp(fd, orop, 0)?, inp(fd, orop, 1)?);
         if !known(fd, o0) || !known(fd, o1) {
             continue;
@@ -399,6 +312,24 @@ fn commute_wins(fd: &Funcdata, orvn: VarnodeId, othermask: u64, other_const: boo
     }
 }
 
+/// `RuleAndCommute`: the mask of the other AND input as it will be after the commute with a
+/// shift `opc` by `sa`, `None` when the commute gains nothing.
+fn commuted_mask(opc: Opcode, fullmask: u64, mut othermask: u64, sa: i32) -> Option<u64> {
+    if opc == IntRight {
+        if shr(fullmask, sa) == othermask {
+            return None;
+        }
+        othermask = shl(othermask, sa);
+    } else {
+        // the C++ reads `((fullmask<<sa)&&fullmask)==othermask`, a logical AND
+        if u64::from(shl(fullmask, sa) != 0 && fullmask != 0) == othermask {
+            return None;
+        }
+        othermask = shr(othermask, sa);
+    }
+    (othermask != 0 && othermask != fullmask).then_some(othermask)
+}
+
 /// Port of `RuleAndCommute`: `(V << W) & d  =>  (V & (d >> W)) << W`, and for a right shift.
 pub(super) fn and_commute(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
     let size = sz(fd, out(fd, op)?);
@@ -423,22 +354,7 @@ pub(super) fn and_commute(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> 
         if !known(fd, other) {
             continue;
         }
-        let mut othermask = fd.nzmask(other);
-        if opc == IntRight {
-            if shr(fullmask, sa) == othermask {
-                continue;
-            }
-            othermask = shl(othermask, sa);
-        } else {
-            // the C++ reads `((fullmask<<sa)&&fullmask)==othermask`, a logical AND
-            if u64::from(shl(fullmask, sa) != 0 && fullmask != 0) == othermask {
-                continue;
-            }
-            othermask = shr(othermask, sa);
-        }
-        if othermask == 0 || othermask == fullmask {
-            continue;
-        }
+        let Some(othermask) = commuted_mask(opc, fullmask, fd.nzmask(other), sa) else { continue };
         let orvn = inp(fd, shiftop, 0)?;
         let other_const = is_const(fd, other);
         if (opc == IntLeft && other_const && lone_descend(fd, shiftvn) == Some(op))
@@ -464,7 +380,7 @@ pub(super) fn and_piece(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
     let size = sz(fd, out(fd, op)?);
     let mut found = None;
     for i in 0..2 {
-        let Some(pieceop) = def_opc(fd, inp(fd, op, i)?, Piece) else { continue };
+        let Some(pieceop) = def_with(fd, inp(fd, op, i)?, Piece) else { continue };
         let othermask = fd.nzmask(inp(fd, op, 1 - i)?);
         if othermask == calc_mask(size) || othermask == 0 {
             continue;
@@ -497,7 +413,7 @@ pub(super) fn and_piece(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
         fd.op_set_input(newop, high, 0)?;
         fd.op_set_input(newop, z, 1)?;
     }
-    let newvn = new_uniq(fd, size, newop)?;
+    let newvn = uniq_out(fd, size, newop)?;
     fd.op_insert_before(newop, op)?;
     fd.op_set_input(op, newvn, i)?;
     Ok(1)
@@ -525,28 +441,30 @@ pub(super) fn and_zext(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
 }
 
 /// Port of `RuleAndCompare`: `zext(V) & c == 0  =>  V & (c & mask) == 0`, and for SUBPIECE.
-/// The symbol of the old mask (`copySymbol`) is not carried: constants hold none yet.
 pub(super) fn and_compare(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
     if !const_match(fd, inp(fd, op, 1)?, 0) {
         return Ok(0);
     }
     let andvn = inp(fd, op, 0)?;
-    let Some(andop) = def_opc(fd, andvn, IntAnd) else { return Ok(0) };
+    let Some(andop) = def_with(fd, andvn, IntAnd) else { return Ok(0) };
     let maskvn = inp(fd, andop, 1)?;
     if !is_const(fd, maskvn) {
         return Ok(0);
     }
     let Some(subop) = def(fd, inp(fd, andop, 0)?) else { return Ok(0) };
-    let base = inp(fd, subop, 0)?;
     let baseconst = off(fd, maskvn);
-    let andconst = match code(fd, subop) {
+    let (base, andconst) = match code(fd, subop) {
         Subpiece => {
+            let base = inp(fd, subop, 0)?;
             if sz(fd, base) > 8 {
                 return Ok(0);
             }
-            shl(baseconst, off(fd, inp(fd, subop, 1)?).wrapping_mul(8) as i32)
+            (base, shl(baseconst, off(fd, inp(fd, subop, 1)?).wrapping_mul(8) as i32))
         }
-        IntZext => baseconst & calc_mask(sz(fd, base)),
+        IntZext => {
+            let base = inp(fd, subop, 0)?;
+            (base, baseconst & calc_mask(sz(fd, base)))
+        }
         _ => return Ok(0),
     };
     if baseconst == calc_mask(sz(fd, andvn)) || is_free(fd, base) {
@@ -554,6 +472,9 @@ pub(super) fn and_compare(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> 
     }
     let bsz = sz(fd, base);
     let c = fd.new_constant(bsz, andconst);
+    if baseconst == andconst {
+        copy_symbol(fd, c, maskvn); // no change but the size: keep the old constant's type
+    }
     let newout = insert_new(fd, IntAnd, op_addr(fd, andop), bsz, &[base, c], andop)?;
     fd.op_set_input(op, newout, 0)?;
     let z = fd.new_constant(bsz, 0);
@@ -605,20 +526,26 @@ pub(super) fn double_shift(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32>
         return Ok(0);
     }
     let mut mask = calc_mask(size);
-    let mut diffsa;
+    let diffsa;
     if opc1 == IntLeft {
         if lone_descend(fd, secvn).is_none() {
             return Ok(0);
         }
         mask &= shl(mask, sa2);
-        diffsa = sa1 - sa2;
+        diffsa = sa1.wrapping_sub(sa2);
         if diffsa != 0 {
             return Ok(0);
         }
     } else {
         mask &= shr(mask, sa2);
-        diffsa = sa2 - sa1;
+        diffsa = sa2.wrapping_sub(sa1);
     }
+    opposite_shifts(fd, op, base, size, mask, diffsa)
+}
+
+/// `RuleDoubleShift`, shifts in opposite directions: a mask, and a shift by what is left
+/// (`diffsa` bits to the left).
+fn opposite_shifts(fd: &mut Funcdata, op: OpId, base: VarnodeId, size: u32, mask: u64, mut diffsa: i32) -> Result<i32> {
     if diffsa == 0 {
         let c = fd.new_constant(size, mask);
         fd.op_set_opcode(op, IntAnd);
@@ -630,7 +557,7 @@ pub(super) fn double_shift(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32>
         let mut finalopc = IntLeft;
         if diffsa < 0 {
             finalopc = IntRight;
-            diffsa = -diffsa;
+            diffsa = diffsa.wrapping_neg();
         }
         fd.op_set_opcode(op, finalopc);
         fd.op_set_input(op, newout, 0)?;
@@ -646,7 +573,7 @@ pub(super) fn double_arith_shift(fd: &mut Funcdata, op: OpId, _: &Arch) -> Resul
     if !is_const(fd, cd) {
         return Ok(0);
     }
-    let Some(shift2) = def_opc(fd, inp(fd, op, 0)?, IntSright) else { return Ok(0) };
+    let Some(shift2) = def_with(fd, inp(fd, op, 0)?, IntSright) else { return Ok(0) };
     let cc = inp(fd, shift2, 1)?;
     let invn = inp(fd, shift2, 0)?;
     if !is_const(fd, cc) || is_free(fd, invn) {
@@ -671,13 +598,13 @@ pub(super) fn left_right(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
         return Ok(0);
     }
     let shiftin = inp(fd, op, 0)?;
-    let Some(leftshift) = def_opc(fd, shiftin, IntLeft) else { return Ok(0) };
+    let Some(leftshift) = def_with(fd, shiftin, IntLeft) else { return Ok(0) };
     let lc = inp(fd, leftshift, 1)?;
     let sa = off(fd, c);
     if !is_const(fd, lc) || off(fd, lc) != sa || sa & 7 != 0 {
         return Ok(0);
     }
-    let tsz = i64::from(sz(fd, shiftin)) - (sa >> 3) as i64;
+    let tsz = (sz(fd, shiftin) as i32).wrapping_sub((sa >> 3) as i32);
     if !matches!(tsz, 1 | 2 | 4 | 8) || lone_descend(fd, shiftin) != Some(op) {
         return Ok(0);
     }
@@ -746,7 +673,7 @@ pub(super) fn shift_compare(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32
             if lone_descend(fd, shiftvn) != Some(op) {
                 return Ok(0);
             }
-            sa = (8 * sz(fd, shiftvn)) as i32 - sa;
+            sa = ((8 * sz(fd, shiftvn)) as i32).wrapping_sub(sa);
             let newmask = fd.new_constant(csz, shl(1, sa).wrapping_sub(1));
             let newtmp = insert_new(fd, IntAnd, op_addr(fd, op), csz, &[mainvn, newmask], shiftop)?;
             fd.op_set_input(op, newtmp, 0)?;
@@ -787,7 +714,7 @@ pub(super) fn sign_shift(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
         return Ok(0);
     }
     let shiftop = fd.new_op(IntSright, op_addr(fd, op));
-    let uniq = new_uniq(fd, size, shiftop)?;
+    let uniq = uniq_out(fd, size, shiftop)?;
     fd.op_set_input(op, uniq, 0)?;
     let m = fd.new_constant(size, calc_mask(size));
     fd.op_set_input(op, m, 1)?;
@@ -840,13 +767,13 @@ fn mult_power_of_2(fd: &Funcdata, op: OpId) -> i32 {
 
 /// `RuleShiftPiece`, the form `V = zext(W); V | (sext(sub(V,0) s>> 31) << 32)  =>  sext(sub)`.
 fn shift_piece_sext(fd: &mut Funcdata, op: OpId, vn1: VarnodeId, zextloop: OpId, sa: i32) -> Result<i32> {
-    let Some(rshift) = def_opc(fd, vn1, IntSright) else { return Ok(0) };
+    let Some(rshift) = def_with(fd, vn1, IntSright) else { return Ok(0) };
     let rc = inp(fd, rshift, 1)?;
     if !is_const(fd, rc) {
         return Ok(0);
     }
     let vn2 = inp(fd, rshift, 0)?;
-    let Some(subop) = def_opc(fd, vn2, Subpiece) else { return Ok(0) };
+    let Some(subop) = def_with(fd, vn2, Subpiece) else { return Ok(0) };
     let big = out(fd, zextloop)?;
     let bits = (sz(fd, vn2) * 8) as i32;
     if off(fd, inp(fd, subop, 1)?) != 0
@@ -920,7 +847,7 @@ pub(super) fn shift_and(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
     if !is_const(fd, cvn) {
         return Ok(0);
     }
-    let Some(andop) = def_opc(fd, inp(fd, op, 0)?, IntAnd) else { return Ok(0) };
+    let Some(andop) = def_with(fd, inp(fd, op, 0)?, IntAnd) else { return Ok(0) };
     let maskvn = inp(fd, andop, 1)?;
     let invn = inp(fd, andop, 0)?;
     if !is_const(fd, maskvn) || is_free(fd, invn) {
@@ -961,6 +888,9 @@ pub(super) fn bit_undistribute(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<
     if code(fd, d2) != opc {
         return Ok(0);
     }
+    if !matches!(opc, IntZext | IntSext | IntLeft | IntRight | IntSright) {
+        return Ok(0);
+    }
     let (in1, in2) = (inp(fd, d1, 0)?, inp(fd, d2, 0)?);
     match opc {
         IntZext | IntSext => {
@@ -969,7 +899,7 @@ pub(super) fn bit_undistribute(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<
             }
             fd.op_remove_input(op, 1);
         }
-        IntLeft | IntRight | IntSright => {
+        _ => {
             let (s1, s2) = (inp(fd, d1, 1)?, inp(fd, d2, 1)?);
             let extra = if is_const(fd, s1) && is_const(fd, s2) {
                 if off(fd, s1) != off(fd, s2) {
@@ -990,10 +920,9 @@ pub(super) fn bit_undistribute(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<
             };
             fd.op_set_input(op, extra, 1)?;
         }
-        _ => return Ok(0),
     }
     let newext = fd.new_op(code(fd, op), op_addr(fd, op));
-    let small = new_uniq(fd, sz(fd, in1), newext)?;
+    let small = uniq_out(fd, sz(fd, in1), newext)?;
     fd.op_set_input(newext, in1, 0)?;
     fd.op_set_input(newext, in2, 1)?;
     fd.op_set_opcode(op, opc);
@@ -1005,7 +934,7 @@ pub(super) fn bit_undistribute(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<
 /// Port of `RuleXorSwap`: `(V ^ W) ^ V  =>  W`.
 pub(super) fn xor_swap(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
     for i in 0..2 {
-        let Some(op2) = def_opc(fd, inp(fd, op, i)?, IntXor) else { continue };
+        let Some(op2) = def_with(fd, inp(fd, op, i)?, IntXor) else { continue };
         let other = inp(fd, op, 1 - i)?;
         let (vn0, vn1) = (inp(fd, op2, 0)?, inp(fd, op2, 1)?);
         let keep = if other == vn0 && !is_free(fd, vn1) {
@@ -1023,6 +952,51 @@ pub(super) fn xor_swap(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
     Ok(0)
 }
 
+/// `RulePopcountBoolXor::getBooleanResult`, one step: the input of `op` holding bit `bit_pos`
+/// (mask `mask`) of its output, with the bit's position and mask there; `None` when the bit
+/// cannot be followed.
+fn bit_source(fd: &Funcdata, op: OpId, bit_pos: i32, mask: u64) -> Result<Option<(VarnodeId, i32, u64)>> {
+    let const_sa = |slot: usize| -> Result<Option<i32>> {
+        let v = inp(fd, op, slot)?;
+        Ok(is_const(fd, v).then(|| off(fd, v) as i32))
+    };
+    Ok(match code(fd, op) {
+        IntAnd => is_const(fd, inp(fd, op, 1)?).then_some((inp(fd, op, 0)?, bit_pos, mask)),
+        IntXor | IntOr => {
+            let (vn0, vn1) = (inp(fd, op, 0)?, inp(fd, op, 1)?);
+            match (fd.nzmask(vn0) & mask != 0, fd.nzmask(vn1) & mask != 0) {
+                (true, false) => Some((vn0, bit_pos, mask)),
+                (false, true) => Some((vn1, bit_pos, mask)),
+                _ => None, // no unique path
+            }
+        }
+        IntZext | IntSext => {
+            let vn = inp(fd, op, 0)?;
+            (bit_pos < (sz(fd, vn) * 8) as i32).then_some((vn, bit_pos, mask))
+        }
+        Subpiece => {
+            let sa = (off(fd, inp(fd, op, 1)?) as i32).wrapping_mul(8);
+            Some((inp(fd, op, 0)?, bit_pos.wrapping_add(sa), shl(mask, sa)))
+        }
+        Piece => {
+            let (vn0, vn1) = (inp(fd, op, 0)?, inp(fd, op, 1)?);
+            let sa = (sz(fd, vn1) * 8) as i32;
+            Some(if bit_pos >= sa { (vn0, bit_pos.wrapping_sub(sa), shr(mask, sa)) } else { (vn1, bit_pos, mask) })
+        }
+        IntLeft => match const_sa(1)? {
+            Some(sa) if sa <= bit_pos => Some((inp(fd, op, 0)?, bit_pos.wrapping_sub(sa), shr(mask, sa))),
+            _ => None,
+        },
+        IntRight | IntSright => {
+            let Some(sa) = const_sa(1)? else { return Ok(None) };
+            let vn = inp(fd, op, 0)?;
+            let pos = bit_pos.wrapping_add(sa);
+            (pos < (sz(fd, vn) * 8) as i32).then_some((vn, pos, shl(mask, sa)))
+        }
+        _ => None,
+    })
+}
+
 /// `RulePopcountBoolXor::getBooleanResult`: the boolean varnode that is bit `bit_pos` of `vn`,
 /// or the constant value of the bit (-1 when it is neither).
 fn boolean_result(fd: &Funcdata, mut vn: VarnodeId, mut bit_pos: i32) -> Result<(Option<VarnodeId>, i32)> {
@@ -1035,68 +1009,8 @@ fn boolean_result(fd: &Funcdata, mut vn: VarnodeId, mut bit_pos: i32) -> Result<
         if bit_pos == 0 && sz(fd, vn) == 1 && fd.nzmask(vn) == mask {
             return Ok((Some(vn), -1));
         }
-        let const_sa = |slot: usize| -> Result<Option<i32>> {
-            let v = inp(fd, op, slot)?;
-            Ok(is_const(fd, v).then(|| off(fd, v) as i32))
-        };
-        match code(fd, op) {
-            IntAnd => {
-                if !is_const(fd, inp(fd, op, 1)?) {
-                    return Ok((None, -1));
-                }
-                vn = inp(fd, op, 0)?;
-            }
-            IntXor | IntOr => {
-                let (vn0, vn1) = (inp(fd, op, 0)?, inp(fd, op, 1)?);
-                vn = match (fd.nzmask(vn0) & mask != 0, fd.nzmask(vn1) & mask != 0) {
-                    (true, false) => vn0,
-                    (false, true) => vn1,
-                    _ => return Ok((None, -1)),
-                };
-            }
-            IntZext | IntSext => {
-                vn = inp(fd, op, 0)?;
-                if bit_pos >= (sz(fd, vn) * 8) as i32 {
-                    return Ok((None, -1));
-                }
-            }
-            Subpiece => {
-                let sa = (off(fd, inp(fd, op, 1)?) as i32).wrapping_mul(8);
-                bit_pos = bit_pos.wrapping_add(sa);
-                mask = shl(mask, sa);
-                vn = inp(fd, op, 0)?;
-            }
-            Piece => {
-                let (vn0, vn1) = (inp(fd, op, 0)?, inp(fd, op, 1)?);
-                let sa = (sz(fd, vn1) * 8) as i32;
-                if bit_pos >= sa {
-                    vn = vn0;
-                    bit_pos -= sa;
-                    mask = shr(mask, sa);
-                } else {
-                    vn = vn1;
-                }
-            }
-            IntLeft => {
-                let Some(sa) = const_sa(1)? else { return Ok((None, -1)) };
-                if sa > bit_pos {
-                    return Ok((None, -1));
-                }
-                bit_pos -= sa;
-                mask = shr(mask, sa);
-                vn = inp(fd, op, 0)?;
-            }
-            IntRight | IntSright => {
-                let Some(sa) = const_sa(1)? else { return Ok((None, -1)) };
-                vn = inp(fd, op, 0)?;
-                bit_pos = bit_pos.wrapping_add(sa);
-                if bit_pos >= (sz(fd, vn) * 8) as i32 {
-                    return Ok((None, -1));
-                }
-                mask = shl(mask, sa);
-            }
-            _ => return Ok((None, -1)),
-        }
+        let Some(next) = bit_source(fd, op, bit_pos, mask)? else { return Ok((None, -1)) };
+        (vn, bit_pos, mask) = next;
     }
 }
 
@@ -1129,7 +1043,7 @@ pub(super) fn popcount_bool_xor(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result
                 if b1.is_none() && c0 != 1 {
                     continue;
                 }
-                let (b2, c1) = boolean_result(fd, invn, msb(nzm))?;
+                let (b2, c1) = boolean_result(fd, invn, mostsigbit_set(nzm))?;
                 if (b2.is_none() && c1 != 1) || (b1.is_none() && b2.is_none()) {
                     continue;
                 }
@@ -1197,8 +1111,8 @@ pub(super) fn or_compare(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
         let eq_w = fd.new_op(opc, addr);
         fd.op_set_input(eq_w, w, 0)?;
         fd.op_set_input(eq_w, zero_w, 1)?;
-        let out_v = new_uniq(fd, 1, eq_v)?;
-        let out_w = new_uniq(fd, 1, eq_w)?;
+        let out_v = uniq_out(fd, 1, eq_v)?;
+        let out_w = uniq_out(fd, 1, eq_w)?;
         fd.op_insert_before(eq_v, equal)?;
         fd.op_insert_before(eq_w, equal)?;
         fd.op_set_opcode(equal, if opc == IntEqual { BoolAnd } else { BoolOr });

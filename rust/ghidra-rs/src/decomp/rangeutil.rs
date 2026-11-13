@@ -4,6 +4,8 @@
 //! not use it.
 
 use super::opcode::Opcode;
+use super::varnode::VarnodeId;
+use super::Funcdata;
 
 /// `calc_mask`: the mask of a `size`-byte value.
 pub(crate) fn calc_mask(size: u32) -> u64 {
@@ -14,8 +16,9 @@ pub(crate) fn calc_mask(size: u32) -> u64 {
     }
 }
 
-/// `sign_extend(val, sizein, sizeout)`
-fn sign_extend(val: u64, sizein: u32, sizeout: u32) -> u64 {
+/// `sign_extend(val, sizein, sizeout)` (address.cc): both sizes are clamped to 8 bytes.
+pub(crate) fn sign_extend(val: u64, sizein: u32, sizeout: u32) -> u64 {
+    let (sizein, sizeout) = (sizein.clamp(1, 8), sizeout.min(8));
     let sh = 64 - 8 * sizein;
     let v = (((val << sh) as i64) >> sh) as u64;
     v & calc_mask(sizeout)
@@ -618,9 +621,116 @@ impl CircleRange {
     }
 }
 
+pub(crate) fn pcode_left(v: u64, sa: u64) -> u64 {
+    if sa >= 64 {
+        0
+    } else {
+        v << sa
+    }
+}
+
+pub(crate) fn pcode_right(v: u64, sa: u64) -> u64 {
+    if sa >= 64 {
+        0
+    } else {
+        v >> sa
+    }
+}
+
+/// `mostsigbit_set`: the index of the highest set bit, -1 for 0.
+pub(crate) fn mostsigbit_set(v: u64) -> i32 {
+    63 - v.leading_zeros() as i32
+}
+
+/// Port of `CircleRange::pullBack` from `vn` through the op defining it: the input varnode and
+/// its range of values for which `vn` lies in `rng`. `konst` gives a varnode's constant value
+/// and `nz` its non-zero mask (jump-table recovery passes what it folds in the partial function).
+pub(crate) fn pull_back(
+    fd: &Funcdata,
+    vn: VarnodeId,
+    mut rng: CircleRange,
+    usenzmask: bool,
+    konst: impl Fn(VarnodeId) -> Option<u64>,
+    nz: impl Fn(VarnodeId) -> u64,
+) -> Option<(VarnodeId, CircleRange)> {
+    let op = fd.op(fd.vn(vn).def?);
+    let outsize = fd.vn(vn).size;
+    let res;
+    if op.ins.len() == 1 {
+        res = op.ins[0];
+        if konst(res).is_some() || !rng.pull_back_unary(op.opc, fd.vn(res).size, outsize) {
+            return None;
+        }
+    } else if op.ins.len() == 2 {
+        let (mut slot, mut r, mut c) = (0, op.ins[0], op.ins[1]);
+        if konst(r).is_some() {
+            slot = 1;
+            c = r;
+            r = op.ins[1];
+            if konst(r).is_some() {
+                return None;
+            }
+        }
+        res = r;
+        let val = konst(c)?;
+        if !rng.pull_back_binary(op.opc, val, slot, fd.vn(res).size) {
+            if !(usenzmask && op.opc == Opcode::Subpiece && val == 0) {
+                return None;
+            }
+            // everything truncated is known to be zero: keep the range on the bigger mask
+            if (outsize as i32) < (mostsigbit_set(nz(res)) + 8) / 8 {
+                return None;
+            }
+            rng.mask = calc_mask(fd.vn(res).size);
+        }
+    } else {
+        return None;
+    }
+    if usenzmask {
+        let mut nzr = CircleRange::default();
+        if nzr.set_nz_mask(nz(res), fd.vn(res).size) {
+            rng.intersect(&nzr);
+        }
+    }
+    Some((res, rng))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn translate_2_op_table() {
+        use Opcode::*;
+        let r = |l: u64, rt: u64| CircleRange::new(l, rt, 1, 1);
+        // range [left, right) on one byte: result, opcode, constant, slot of the constant
+        for (rng, want) in [
+            (r(5, 6), (0, IntEqual, 5, 0)),
+            (r(6, 5), (0, IntNotequal, 5, 0)),
+            (r(0, 10), (0, IntLess, 10, 1)),
+            (r(10, 0), (0, IntLess, 9, 0)),
+            (r(0x80, 3), (0, IntSless, 3, 1)),
+            (r(3, 0x80), (0, IntSless, 2, 0)),
+            (r(3, 9), (2, Copy, 0, 0)),
+            (CircleRange::default(), (3, Copy, 0, 0)),
+            (CircleRange::full(1), (1, Copy, 0, 0)),
+        ] {
+            assert_eq!(rng.translate_2_op(), want, "{rng:?}");
+        }
+        assert_eq!(CircleRange::new(0, 8, 1, 2).translate_2_op().0, 2, "a stride has no single comparison");
+    }
+
+    #[test]
+    fn bit_helpers_table() {
+        assert_eq!(
+            (mostsigbit_set(0), mostsigbit_set(1), mostsigbit_set(0x90), mostsigbit_set(u64::MAX)),
+            (-1, 0, 7, 63)
+        );
+        assert_eq!(
+            (pcode_left(1, 63), pcode_left(1, 64), pcode_right(0x80, 7), pcode_right(0x80, 64)),
+            (1 << 63, 0, 1, 0)
+        );
+    }
 
     #[test]
     fn guard_ranges() {

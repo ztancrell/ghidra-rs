@@ -26,8 +26,8 @@
 use super::block::BlockId;
 use super::emulate::{eval_binary, eval_unary, EmuError, EmulateFunction};
 use super::op::{OpFlags, OpId};
-use super::opcode::Opcode;
-use super::rangeutil::{calc_mask, CircleRange};
+use super::opcode::{is_bool_output, Opcode};
+use super::rangeutil::{self, calc_mask, mostsigbit_set, pcode_left, pcode_right, CircleRange};
 use super::varnode::{Space, VarnodeId};
 use super::{Arch, Funcdata};
 use std::collections::HashSet;
@@ -56,22 +56,6 @@ fn nz_mask(fd: &Funcdata, vn: VarnodeId) -> u64 {
         v.offset
     } else {
         calc_mask(v.size)
-    }
-}
-
-pub(crate) fn pcode_left(v: u64, sa: u64) -> u64 {
-    if sa >= 64 {
-        0
-    } else {
-        v << sa
-    }
-}
-
-pub(crate) fn pcode_right(v: u64, sa: u64) -> u64 {
-    if sa >= 64 {
-        0
-    } else {
-        v >> sa
     }
 }
 
@@ -149,7 +133,14 @@ fn nz_mask_local(fd: &Funcdata, arch: &Arch, op: OpId, cliploop: bool) -> u64 {
         Lzcount => covering_mask(u64::from(fd.vn(o.ins[0]).size * 8)) & full,
         Subpiece => {
             let sz1 = fd.vn(o.ins[1]).offset; // always a constant
-            let m = if sz1 < 8 { nz(0) >> (8 * sz1) } else { 0 };
+            let m = match (fd.vn(o.ins[0]).size <= 8, sz1 < 8) {
+                (true, true) => nz(0) >> (8 * sz1),
+                (true, false) => 0,
+                // extended precision: the bits above the 64 shift in as possibly non-zero
+                (false, true) if sz1 > 0 => (nz(0) >> (8 * sz1)) | (u64::MAX << (8 * (8 - sz1))),
+                (false, true) => nz(0),
+                (false, false) => u64::MAX,
+            };
             m & full
         }
         Piece => {
@@ -340,93 +331,19 @@ fn calc_folded(fd: &Funcdata, arch: &Arch) -> Vec<Option<u64>> {
     val
 }
 
-/// `mostsigbit_set`: the index of the highest set bit, -1 for 0.
-fn mostsigbit_set(v: u64) -> i32 {
-    63 - v.leading_zeros() as i32
-}
-
 fn def(fd: &Funcdata, vn: VarnodeId) -> Option<OpId> {
     fd.vn(vn).def
 }
 
-/// `PcodeOp::isBoolOutput`
-pub(crate) fn is_bool_output(opc: Opcode) -> bool {
-    use Opcode::*;
-    matches!(
-        opc,
-        IntEqual
-            | IntNotequal
-            | IntSless
-            | IntSlessequal
-            | IntLess
-            | IntLessequal
-            | IntCarry
-            | IntScarry
-            | IntSborrow
-            | BoolNegate
-            | BoolXor
-            | BoolAnd
-            | BoolOr
-            | FloatEqual
-            | FloatNotequal
-            | FloatLess
-            | FloatLessequal
-            | FloatNan
-    )
-}
-
-/// `CircleRange::pullBack` from `vn` through the op defining it: the input varnode and its
-/// range of values for which `vn` lies in `rng`.
-pub(crate) fn pull_back(
+/// [`rangeutil::pull_back`] with the partial function's folded constants ([`konst`]).
+fn pull_back(
     fd: &Funcdata,
     arch: &Arch,
     vn: VarnodeId,
-    mut rng: CircleRange,
+    rng: CircleRange,
     usenzmask: bool,
 ) -> Option<(VarnodeId, CircleRange)> {
-    let op = fd.op(def(fd, vn)?);
-    let outsize = fd.vn(vn).size;
-    let res;
-    if op.ins.len() == 1 {
-        res = op.ins[0];
-        if konst(fd, arch, res).is_some() || !rng.pull_back_unary(op.opc, fd.vn(res).size, outsize) {
-            return None;
-        }
-    } else if op.ins.len() == 2 {
-        let (mut slot, mut r, mut c) = (0, op.ins[0], op.ins[1]);
-        if konst(fd, arch, r).is_some() {
-            slot = 1;
-            c = r;
-            r = op.ins[1];
-            if konst(fd, arch, r).is_some() {
-                return None;
-            }
-        } else if konst(fd, arch, c).is_none() {
-            return None;
-        }
-        res = r;
-        let val = konst(fd, arch, c).unwrap();
-        if !rng.pull_back_binary(op.opc, val, slot, fd.vn(res).size) {
-            if usenzmask && op.opc == Opcode::Subpiece && val == 0 {
-                let msb = (mostsigbit_set(nz_mask(fd, res)) + 8) / 8;
-                if (outsize as i32) < msb {
-                    return None;
-                }
-                rng.mask = calc_mask(fd.vn(res).size);
-            } else {
-                return None;
-            }
-        }
-    } else {
-        return None;
-    }
-    if usenzmask {
-        let mut nz = CircleRange::default();
-        if nz.set_nz_mask(nz_mask(fd, res), fd.vn(res).size) {
-            rng.intersect(&nz);
-        }
-    }
-    Some((res, rng))
+    rangeutil::pull_back(fd, vn, rng, usenzmask, |v| konst(fd, arch, v), |v| nz_mask(fd, v))
 }
 
 /// Port of `GuardRecord`: a range a CBRANCH before the switch puts on a varnode.

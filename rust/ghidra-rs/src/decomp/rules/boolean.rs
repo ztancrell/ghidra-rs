@@ -1,11 +1,11 @@
 //! The rules on booleans (stage R2): `RuleBxor2NotEqual`, `RuleNotDistribute`,
 //! `RuleBooleanUndistribute`, `RuleBooleanDedup`, `RuleBooleanNegate`, `RuleBoolZext`,
 //! `RuleLogic2Bool`, `RuleCondNegate`, `RuleBoolNegate` (ruleaction.cc), with `BooleanMatch`
-//! (expression.cc), `Funcdata::opBoolNegate`, `opNormalizeFlip`, `opFlipCondition`
+//! (expression.cc), `Funcdata::opBoolNegate`, `opNormalizeFlip`, `opFlipCondition` (which flips `boolean_flip` only)
 //! (funcdata_op.cc) and the boolean flips of the opcodes (`TypeOp::getBooleanFlip`).
 
 use super::*;
-use crate::decomp::jumptable::is_bool_output;
+use crate::decomp::opcode::is_bool_output;
 use crate::decomp::types::Meta;
 
 /// `TypeOp::getBooleanFlip` and `isBooleanFlipReorder`: the opcode of the complement and
@@ -360,13 +360,13 @@ fn bool_zext_logic(
 ) -> Result<i32> {
     let (a0, a1) = (inp(fd, actionop, 0)?, inp(fd, actionop, 1)?);
     let other = if def(fd, a0) == Some(multop1) { a1 } else { a0 };
-    let Some(multop2) = def_opc(fd, other, IntMult) else { return Ok(0) };
+    let Some(multop2) = def_with(fd, other, IntMult) else { return Ok(0) };
     let c2 = inp(fd, multop2, 1)?;
     let coeff = off(fd, c2);
     if !is_const(fd, c2) || coeff != calc_mask(size) {
         return Ok(0);
     }
-    let Some(zextop2) = def_opc(fd, inp(fd, multop2, 0)?, IntZext) else { return Ok(0) };
+    let Some(zextop2) = def_with(fd, inp(fd, multop2, 0)?, IntZext) else { return Ok(0) };
     let bool2 = inp(fd, zextop2, 0)?;
     if !is_boolean_value(fd, bool2) {
         return Ok(0);
@@ -468,7 +468,6 @@ pub(super) fn cond_negate(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> 
     let outvn = op_bool_negate(fd, vn, op)?;
     fd.op_set_input(op, outvn, 1)?;
     flip_flag(fd, op, OpFlags::BOOLEAN_FLIP);
-    flip_flag(fd, op, OpFlags::FALLTHRU_TRUE);
     Ok(1)
 }
 
@@ -490,4 +489,50 @@ pub(super) fn bool_negate(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> 
         fd.op_set_opcode(d, Copy);
     }
     Ok(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `x <opc> c` or `c <opc> x` on the shared varnode `x`.
+    fn cmp(fd: &mut Funcdata, x: VarnodeId, opc: Opcode, c: u64, const_first: bool) -> OpId {
+        let op = fd.new_op(opc, 0x1000);
+        let k = fd.new_constant(4, c);
+        let (a, b) = if const_first { (k, x) } else { (x, k) };
+        fd.op_set_input(op, a, 0).unwrap();
+        fd.op_set_input(op, b, 1).unwrap();
+        op
+    }
+
+    #[test]
+    fn same_op_complement_table() {
+        // `x < c1` against `c2 < x` is complementary when c2 + 1 == c1, but for the wrap corners
+        let cases = [
+            (IntLess, 5, 4, true),
+            (IntLess, 5, 5, false),
+            (IntLess, 0, 0xffff_ffff_ffff_ffff, false), // unsigned corner: val2 == 0
+            (IntSless, 5, 4, true),
+            (IntSless, 0x8000_0000, 0x7fff_ffff, false), // signed corner: crosses the minimum
+            (IntEqual, 5, 4, false),
+        ];
+        for (opc, c1, c2, want) in cases {
+            let mut fd = Funcdata::new(0x1000);
+            let d = fd.new_op(Copy, 0x1000);
+            let x = fd.new_varnode_out(4, Space::Sleigh(1), 0x10, d);
+            let op1 = cmp(&mut fd, x, opc, c1, false);
+            let op2 = cmp(&mut fd, x, opc, c2, true);
+            assert_eq!(same_op_complement(&fd, op1, op2).unwrap(), want, "{opc:?} {c1:#x} {c2:#x}");
+        }
+    }
+
+    #[test]
+    fn boolean_flip_table() {
+        for opc in [IntEqual, IntNotequal, IntSless, IntSlessequal, IntLess, IntLessequal, FloatEqual, FloatLess] {
+            let (flip, reorder) = boolean_flip(opc).unwrap();
+            assert_eq!(boolean_flip(flip), Some((opc, reorder)), "{opc:?}");
+        }
+        assert_eq!(boolean_flip(BoolNegate), Some((Copy, false)));
+        assert_eq!(boolean_flip(IntAdd), None);
+    }
 }

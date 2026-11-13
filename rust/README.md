@@ -1025,6 +1025,7 @@ Remaining differences, by cause:
 - 53 functions: the reference splits SSE registers into lanes (`XMM0` into `XMM0_Da` ..
   `XMM0_Dd`, `ActionLaneDivide`, `subflow.cc`/`transform.cc`). It is in group `base`, so no
   option turns it off; the plan puts it in R3. Excluding these, 446 / 447 (every function the reference finishes).
+  Superseded: stage R3 ported `ActionLaneDivide`; the S4 check is now 498 / 499 (0x4919f0 differs).
 - 0x4c48d0: the reference does not finish within 60 s (`TIMEOUT`), so it is not compared.
 - Not ported and failing loudly when reached (no M500 function needs them; superseded for
   removing unreachable blocks and the `varnodeprops` zero replacement, both ported in R1): removing
@@ -1046,6 +1047,8 @@ Remaining differences, by cause:
   on stack trials) are still to come.
 
 ### Stage S6: types (partial)
+
+Superseded (R3 merged with S6, 2026-11-13): the "446 / 446 non-SSE" and "446 / 500" results in this section predate `ActionLaneDivide`. With it ported and running on both sides, the S6 checks unlocked, locked `void`, locked `int4` and callees `int4(int4 a)` are each M8 8 / 8, M500 498 / 500 (498 / 499 of the functions the reference finishes): the SSE functions are identical but 0x4919f0 (a block the reference empties, also under the S4 options); 0x4c48d0 is the timeout.
 
 Stage S6 (branch `m3-s6`, partial) adds data-types to the IR. The check is `print raw` with
 types at `assignhigh`: `DECOMP_RAW_EXTRA=1` makes both engines print each varnode's type after
@@ -1190,7 +1193,8 @@ emptied by copy propagation stays. Group `analysis` is on, so the main loop's `n
 runs (`jumptable::calc_nz_mask`) and dead code reads its masks (`Funcdata::nzmask`).
 
 The check: `tools/corpus/r1-options.txt` is S4's options with `analysis` on and every rule of
-the groups that are on and not ported switched off (97 `togglerule`s; superseded: 56 after R2, which also turns group `cleanup` on), written by
+the groups that are on and not ported switched off (97 `togglerule`s at R1; see "Stage R2" for the
+current count), written by
 `tools/r1-options.sh` from the table in `rules/mod.rs`: rerun it when rules land.
 `ghidra-rs decompile` honours `option togglerule`. Group `analysis` also holds three actions
 not ported yet, `multicse`, `shadowvar` and `condconst` (`ActionConditionalConst`). A console
@@ -1221,6 +1225,7 @@ The bar is taken over M500 less the functions that need `ActionLaneDivide` (R3),
 (`s4-options.txt`) is unchanged (446 / 500). Remaining differences, by cause:
 
 - 46 functions need `ActionLaneDivide` (R3).
+  Superseded: ported in stage R3, below.
 - 0x47a6b0: the reference merges two blocks testing the same condition (`ActionConditionalExe`,
   `condexe.cc`: ghidra-rs only detects a candidate on the same condition varnode and does not
   find this one; R2 or later).
@@ -1257,7 +1262,7 @@ Superseded: R2 runs that action on the partial function (see "Stage R2").
 
 ### Stage R2: rules for bit operations, comparisons, booleans
 
-Stage R2 (branch `m3-r2`) adds 51 rules of `oppool1` and 2 of the `cleanup` pool, in
+Stage R2 (branch `m3-r2`) adds 50 rules of `oppool1` and 2 of the `cleanup` pool, in
 `decomp/rules/`, each in the C++ pool order with its `getOpList`:
 
 - `bits.rs`: `ormask`, `andmask`, `orconsume`, `orcollapse`, `andorlump`, `shiftbitops`,
@@ -1281,33 +1286,50 @@ Stage R2 (branch `m3-r2`) adds 51 rules of `oppool1` and 2 of the `cleanup` pool
   index, which nothing ported reads.
 
 Not ported from the table row: `threewaycomp` (`RuleThreeWayCompare`, 64-bit compare
-idioms), `conditionalmove` and `orpredicate` (group `conditionalexe`), and the float, division,
-extension and sub-piece rules of R3 and R4; they stay switched off on the reference.
-`r1-options.txt` (from `tools/r1-options.sh`, which now reads both pools) holds
-56 `togglerule`s.
+idioms), `conditionalmove` and `orpredicate` (group `conditionalexe`), and the float and
+division rules of R4; they stay switched off on the reference. `r1-options.txt` (from
+`tools/r1-options.sh`, which now reads both pools) holds 35 `togglerule`s with R3's rules
+merged.
 
 `isBooleanValue` reads `typerecovery_on` (set by `ActionStartTypes::reset` when the root action
-has group `typerecovery`; `Funcdata::typerecovery_on`). A CBRANCH's `fallthru_true` flag
-(`opFlipCondition`) is a new `OpFlags` bit, `FALLTHRU_TRUE`. Constants hold no symbol yet, so
-`copySymbol`/`copySymbolIfValid` carry nothing. `leftright` on a join-space varnode fails
-loudly (`Address::renormalize`).
+has group `typerecovery`; `Funcdata::typerecovery_on`). `opFlipCondition` flips `boolean_flip`
+only. `copySymbol` carries a constant's data-type and type lock to its replacement
+(`rules::copy_symbol`, in `replaceLessequal` and `andcompare`); symbols and equates are not
+modelled, so `copySymbolIfValid` has nothing to carry. `leftright` on a join-space varnode
+fails loudly (`Address::renormalize`). The helpers the rule files share (`insert_new`,
+`copy_symbol`, `lsb`, `shl`, `shr`, ...) are in `rules/mod.rs`; `pull_back`, `pcode_left`,
+`pcode_right` and `mostsigbit_set` are in `rangeutil.rs` and `is_bool_output` in `opcode.rs`.
+Table tests cover `translate_2_op`, `replace_lessequal`, `same_op_complement`, the boolean
+flips and the bit helpers.
 
 The partial function of jump-table recovery now runs the real `jumptable` root action
 (`action::jumptable_partial`): the tree of `universal` with the `jumptable` groups (`base`,
 `noproto`, `localrecovery`, `deadcode`, `stackptrflow`, `stackvars`, `analysis`, `segment`,
 `subvar`, `normalizebranches`, `conditionalexe`), every ported rule on (`togglerule` and
-`option currentaction` reach only the `decompile` root, on the reference too), less the eight
-actions of those groups that are not ported (`funclinkoutonly`, `restrictlocal`,
-`restructurevarnode`, `multicse`, `shadowvar`, `condconst`, `mappedlocalsync`,
-`normalizebranches`). `analyzeGuards` is the C++ loop (the CBRANCH condition, `boolean_flip`,
-two pull-backs). Two of S3's three stand-ins are gone (x86 flag logic read as one comparison;
-a commutative op's constant in slot 0). One is left: constants folded through a load from
-read-only memory (`jumptable::fold_constants`), because `RuleLoadVarnode` is stage R5. The
-folded constants no longer reach the non-zero masks of the function itself
-(`ActionNonzeroMask` used them in R1, which sharpened masks beyond the C++'s and cost two
-functions here).
+`option currentaction` reach only the `decompile` root, on the reference too). Eight actions of
+those groups are not ported and are left out of the partial's tree while they are
+(`action::PARTIAL_SKIP`: `funclinkoutonly`, `restrictlocal`, `restructurevarnode`, `multicse`,
+`shadowvar`, `condconst`, `mappedlocalsync`, `normalizebranches`); an entry is skipped only as
+long as its leaf is `not_ported`, so a later port runs in the partial too. Three of them can
+change which tables are recovered: `restructurevarnode` (in the partial it also runs
+`protectSwitchPaths`), `condconst` and `normalizebranches`. The partial carries
+`Funcdata::jumptablerecovery_on` (`isJumptableRecoveryOn`): heritage does not bump the
+dead-code delay in it, dead code skips `lastChanceLoad`, and `donothing` removes an empty block
+whatever was copied into it. An error of the partial's action fails the table, as in the C++;
+when the error comes from a path ghidra-rs does not port (`LowlevelError::is_unported`) it is
+also written to stderr, which `decomp-diff.sh` compares, so it cannot pass for a failure the
+reference has (none occurs in the switch corpus). `analyzeGuards` is the C++ loop (the CBRANCH
+condition, `boolean_flip`, two pull-backs). Two of S3's three stand-ins are gone (x86 flag
+logic read as one comparison; a commutative op's constant in slot 0). One is left: constants
+folded through a load from read-only memory (`jumptable::fold_constants`), because
+`RuleLoadVarnode` is stage R5. The folded constants no longer reach the non-zero masks of the
+function itself (`ActionNonzeroMask` used them in R1, which sharpened masks beyond the C++'s).
 
-The check is R1's, with the regenerated options:
+Found with the merged rules and fixed: removing unreachable blocks failed with "Deleting op
+with descendants" when a removed block's value was read in another removed block
+(`descendantsOutside` asks for a reader in a block that is not dead; 0x74fae0).
+
+The check is R1's, with the regenerated options and lane division on both sides (R3):
 
 ```sh
 rust/tools/r1-options.sh
@@ -1316,31 +1338,91 @@ BREAK=assignhigh OPTIONS=$PWD/tools/corpus/r1-options.txt rust/tools/decomp-diff
 BREAK=assignhigh OPTIONS=$PWD/tools/corpus/r1-options.txt TIMEOUT=60 rust/tools/decomp-diff.sh m500
 ```
 
-| corpus | identical (R2 check) |
+| corpus | identical (R2 check, merged with R3) |
 |---|---|
 | m8 | 8 / 8 |
-| m500 | 452 / 500 |
-| m500 less `m500-lanedivide.txt`, functions the reference finishes | 452 / 453 (99.8 %, bar 98 %: reached) |
+| m500 | 498 / 500; 498 / 499 of the functions the reference finishes (99.8 %, bar 98 %: reached; 495 / 499 with R3 alone) |
+
+Superseded: before the merge with R3 the check was 452 / 453 of R1's set (the 46 lane-division
+functions left out).
 
 Other checks on the same binary: `paramdouble` (S3) M8 8 / 8, M500 500 / 500, and the
 switch corpus (every function in which ghidra-rs meets a jump table, 0xa4e8c2 left out)
-1,946 / 2,050 (1,934 with the stand-ins); S4 (`s4-options.txt`) M8 8 / 8, M500 446 / 500;
-S6 with types (`s6-options.txt`) M8 8 / 8, M500 446 / 500; locked `void` M8 8 / 8, M500
-446 / 500; locked `int4` M8 8 / 8, M500 446 / 500; callees with a stack parameter M8
-8 / 8, M500 446 / 500 (446 / 500 is every non-SSE function the reference finishes).
+1,947 / 2,050 (1,934 with the stand-ins); S4 (`s4-options.txt`) M8 8 / 8, M500 498 / 500;
+S6 with types (`s6-options.txt`) M8 8 / 8, M500 498 / 500; locked `void` M8 8 / 8, M500
+498 / 500; locked `int4` M8 8 / 8, M500 498 / 500; callees with a stack parameter M8
+8 / 8, M500 498 / 500.
 
 Remaining differences of the R2 check, by cause:
 
-- 46 functions need `ActionLaneDivide` (R3).
 - 0x47a6b0: `ActionConditionalExe` merging two blocks on equal conditions (as in R1).
 - 0x4c48d0: the reference does not finish within 60 s.
-- 0x6fa6e0, R1's other miss, is identical now.
+- The S4 and S6 checks differ on 0x4919f0 (as with R3 alone); the R2 check does not.
 
-Switch corpus: the reference finishes 2,004 of the 2,050 (120 s limit, errors). Of the 104 that
-differ, 102 are in the obfuscated code past 0x1000000 and two in the game code: 0x7c1f30 (as in
-S3: the reference reads a garbage target) and 0x831db0, new with the real partial action (the
-reference prints 23 more lines, a flow difference not traced: the partial still lacks the rules
-and actions of later stages). Net, 12 more functions are identical than with the stand-ins.
+Switch corpus: the reference finishes 2,004 of the 2,050 (120 s limit, errors). Of the 103
+that differ, 102 are in the obfuscated code past 0x1000000 and one in the game code: 0x7c1f30
+(as in S3: the reference reads a garbage target). No partial function fails on an unported path.
+0x831db0, which differed after the first R2 round (two tables not recovered), is identical
+with the `jumptablerecovery_on` gates and R3's rules in the partial.
+
+### Stage R3 (in part): lane division; extension, concat and sub-piece rules
+
+Stage R3 (branch `m3-r3`) ports `ActionLaneDivide` (`decomp/lanedivide.rs`: the action of
+coreaction.cc and `LaneDivide` of subflow.cc) with `transform.cc` (`decomp/transform.rs`:
+`TransformManager`, `LaneDescription`, `LanedRegister`): a laned register (the `.pspec`
+`vector_lane_sizes` of XMM/YMM/ZMM, read by `sleigh.rs`) whose data-flow only moves whole lanes
+becomes one varnode per lane (`XMM0_Da` .. `XMM0_Dd`). `Funcdata` records laned storage as
+varnodes are made (`checkForLanedRegister`) and keeps the per-opcode list order of
+`PcodeOpBank` (`PcodeOp::list_key`: an op goes to the end of its list on `opSetOpcode`). The
+non-zero mask of a SUBPIECE of a varnode wider than 8 bytes follows the C++ extended-precision
+branch, and `varnodeprops` has `handleExtendedZero`.
+
+21 more rules of `oppool1`, in `decomp/rules/`: `extend.rs` (`zexteliminate`, `zextsless`,
+`zextcommute`, `zextshiftzext`), `piece.rs` (`concatshift`, `concatcommute`, `concatzext`,
+`concatzero`, `concatleftshift`, `humptydumpty`, `dumptyhump`, `humptyor`, `piece2zext`,
+`piece2sext`), `subpiece.rs` (`doublesub`, `subextcomm`, `subcommute`, `subzext`, `subcancel`,
+`shiftsub`, `subnormal`). The table in `rules/mod.rs` now holds 40 rules.
+
+The check is R1's, with `lanedivide` running on both sides (`r1-options.txt` regenerated by
+`tools/r1-options.sh`: 76 `togglerule`s; `DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst`).
+Superseded: the bar over M500 less `m500-lanedivide.txt`; the list stays as the record of which
+functions exercise lane division.
+
+| corpus | identical (R3 check) |
+|---|---|
+| m8 | 8 / 8 |
+| m500 | 495 / 500; 495 / 499 of the functions the reference finishes (99.2 %, bar 98 %: reached) |
+| m500, the 46 of `m500-lanedivide.txt` | 44 / 46 |
+| m500, the others the reference finishes | 451 / 453 (as R1) |
+
+`print raw` at `paramdouble` stays 500 / 500 on M500; the S4 check is 498 / 500 (M8 8 / 8).
+Remaining differences, by cause:
+
+- 0x47a6b0, 0x6fa6e0: as in stage R1.
+- 0x4891e0: `varnodeprops` replaces the reads of a MULTIEQUAL of two zeros by 0 one main-loop
+  pass before the reference does (an extra `COPY #0` for a MULTIEQUAL reader, so later sequence
+  numbers shift): the non-zero mask is 0 earlier on ghidra-rs. Same family as 0x6fa6e0; not
+  traced further.
+- 0x4919f0: the reference empties a block (the branch at 0x492433 goes) that ghidra-rs keeps;
+  it differs under the S4 options too, so no rule is involved. Not traced further.
+- 0x4c48d0: the reference does not finish within 60 s.
+
+Not ported in this stage (see the plan, "R3"): the `subvar` group (`RuleSubvar*`,
+`RuleSplitFlow`, `SubvariableFlow` and `SplitFlow` of subflow.cc; the group is off in the check),
+`RulePiecePathology` (switched off by `togglerule`; needs the consumed-bytes records of
+`fspec.cc`) and `prefersplit.cc` (no x86 `.cspec` uses `<prefersplit>`).
+
+Review round (after the merge with S6): `LaneDivide::setReplacement` refuses a type-locked
+varnode unless its type is an array, as the C++ (superseded: "no locked types before S6");
+`Arch::new` rejects a big-endian processor, which every ported rule and lane division assume
+away; `LanedRegister::parse` reads sizes as `parseSizes` does (hex, octal, a trailing comma;
+an empty attribute is skipped); `sign_extend` clamps its sizes to 8 bytes; every opcode change
+goes through `op_set_opcode`; the transform placeholders fail on an out-of-range lane, slot or
+a varnode made before its defining op. `zext_eliminate` leaves out `copySymbolIfValid`: it
+copies only an `EquateSymbol`, which only the console's `map convert` makes, and ghidra-rs has
+no such command. All bars rerun on the merged binary: R3 check M8 8 / 8, M500 495 / 499 (the
+R1 set 451 / 453, the lane-divide set 44 / 46); paramdouble 500 / 500; S4 check M8 8 / 8,
+M500 498 / 500; the four S6 checks M8 8 / 8, M500 498 / 500 each.
 
 ## Speed
 

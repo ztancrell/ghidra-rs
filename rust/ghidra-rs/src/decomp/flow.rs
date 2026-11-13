@@ -527,6 +527,7 @@ impl Flow<'_> {
     ) -> Result<std::result::Result<Vec<u64>, Fail>> {
         if partial.is_none() {
             let mut p = self.fd.clone();
+            p.jumptablerecovery_on = true;
             let mut pflow = Flow {
                 fd: &mut p,
                 arch: self.arch,
@@ -540,6 +541,18 @@ impl Flow<'_> {
             };
             pflow.generate_blocks()?;
             if let Err(e) = action::jumptable_partial(&mut p, self.arch) {
+                // An error of the jumptable action fails the table, as in the C++ (`stageJumpTable`
+                // catches `LowlevelError`). One from a path ghidra-rs does not port is not a
+                // failure the reference has: it is reported on stderr, always, so a check
+                // cannot take it for one (`decomp-diff.sh` compares stderr too).
+                if e.is_unported() {
+                    eprintln!(
+                        "jumptable partial of 0x{:x}: unported path, table at 0x{:x} not recovered: {}",
+                        self.fd.entry,
+                        self.fd.op(op).seq.addr,
+                        e.0
+                    );
+                }
                 return Ok(Err(Fail::Normal(e.0)));
             }
             jumptable::fold_constants(&mut p, self.arch);
@@ -565,7 +578,7 @@ impl Flow<'_> {
     /// Port of `FlowInfo::truncateIndirectJump` for a failed recovery (`fail_normal`,
     /// `fail_thunk`): the jump becomes a call followed by a halt.
     fn truncate_indirect_jump(&mut self, op: OpId) -> Result<()> {
-        self.fd.op_mut(op).opc = Opcode::Callind;
+        self.fd.op_set_opcode(op, Opcode::Callind);
         self.setup_callind_specs(op);
         let halt = self.artificial_halt(self.fd.op(op).seq.addr, None)?;
         self.fd.op_dead_insert_after(halt, op);
@@ -585,7 +598,7 @@ impl Flow<'_> {
             if start != addr || start + stat.size <= addr {
                 continue; // "Call to offcut address within same function" is only a warning
             }
-            self.fd.op_mut(op).opc = Opcode::Branch;
+            self.fd.op_set_opcode(op, Opcode::Branch);
             let targ = self.target(addr)?;
             self.mark(targ, OpFlags::START_BASIC);
             let pos = self.fd.dead.iter().position(|&o| o == op);

@@ -1,7 +1,8 @@
 //! Rule pools: the rules of `oppool1` and of the `cleanup` pool ported so far (stage R1: copies,
-//! constants, arithmetic; stage R2: bit operations, comparisons, booleans; ruleaction.cc) and
-//! the pool walk ([`pool`]). The rules are in families ([`copy`], [`arith`], [`bits`],
-//! [`compare`], [`boolean`], [`cleanup`]) with the expression helpers they share ([`cse`]) and float constant
+//! constants, arithmetic; stage R2: bit operations, comparisons, booleans; stage R3: extension,
+//! concat and sub-pieces; ruleaction.cc) and the pool walk ([`pool`]). The rules are in families
+//! ([`copy`], [`arith`], [`bits`], [`compare`], [`boolean`], [`cleanup`], [`extend`], [`piece`],
+//! [`subpiece`]) with the expression helpers they share ([`cse`]) and float constant
 //! folding ([`float`]); the `Funcdata` methods they need (`cseEliminateList`,
 //! `distributeIntMultAdd`, `totalReplaceConstant`, ...) are in `funcdata.rs`.
 //!
@@ -17,8 +18,11 @@ mod cleanup;
 mod compare;
 mod copy;
 mod cse;
+mod extend;
 mod float;
+mod piece;
 mod pool;
+mod subpiece;
 
 pub(crate) use pool::{nonzero_mask, pool_apply, select, Pool};
 
@@ -29,7 +33,10 @@ use cleanup::*;
 use compare::*;
 use copy::*;
 use cse::*;
+use extend::*;
 use float::*;
+use piece::*;
+use subpiece::*;
 
 use std::collections::HashSet;
 
@@ -37,7 +44,7 @@ use super::block::BlockId;
 use super::emulate::{eval_binary, eval_unary};
 use super::op::{OpFlags, OpId};
 use super::opcode::Opcode;
-use super::rangeutil::calc_mask;
+use super::rangeutil::{calc_mask, sign_extend};
 use super::varnode::{Space, VarnodeId, VnFlags, CONST_SPACE};
 use super::{err, stdsort, Arch, Funcdata, LowlevelError, Result};
 
@@ -104,8 +111,10 @@ pub(crate) const OPPOOL1: &[Rule] = &[
     r("andpiece", "analysis", &[IntAnd], and_piece),
     r("andzext", "analysis", &[IntAnd], and_zext),
     r("andcompare", "analysis", &[IntEqual, IntNotequal], and_compare),
+    r("doublesub", "analysis", &[Subpiece], double_sub),
     r("doubleshift", "analysis", &[IntLeft, IntRight, IntMult], double_shift),
     r("doublearithshift", "analysis", &[IntSright], double_arith_shift),
+    r("concatshift", "analysis", &[IntRight, IntSright], concat_shift),
     r("leftright", "analysis", &[IntRight, IntSright], left_right),
     r("shiftcompare", "analysis", &[IntEqual, IntNotequal], shift_compare),
     r("shift2mult", "analysis", &[IntLeft], shift_2_mult),
@@ -131,21 +140,40 @@ pub(crate) const OPPOOL1: &[Rule] = &[
         FloatFloat2float, FloatTrunc, FloatCeil, FloatFloor, FloatRound, Piece, Subpiece, Popcount,
         Lzcount], collapse_constants),
     r("propagatecopy", "analysis", &[Copy], propagate_copy),
+    r("zexteliminate", "analysis", &[IntEqual, IntNotequal, IntLess, IntLessequal], zext_eliminate),
     r("slesstoless", "analysis", &[IntSless, IntSlessequal], sless_to_less),
+    r("zextsless", "analysis", &[IntSless, IntSlessequal], zext_sless),
     r("bitundistribute", "analysis", &[IntAnd, IntOr, IntXor], bit_undistribute),
     r("booleanundistribute", "analysis", &[IntEqual, IntNotequal], boolean_undistribute),
     r("booleandedup", "analysis", &[BoolAnd, BoolOr], boolean_dedup),
     r("boolzext", "analysis", &[IntZext], bool_zext),
     r("booleannegate", "analysis", &[IntNotequal, IntEqual], boolean_negate),
     r("logic2bool", "analysis", &[IntAnd, IntOr, IntXor], logic_2_bool),
+    r("subextcomm", "analysis", &[Subpiece], sub_ext_comm),
+    r("subcommute", "analysis", &[Subpiece], sub_commute),
+    r("concatcommute", "analysis", &[Piece], concat_commute),
+    r("concatzext", "analysis", &[Piece], concat_zext),
+    r("zextcommute", "analysis", &[IntRight], zext_commute),
+    r("zextshiftzext", "analysis", &[IntZext], zext_shift_zext),
     r("shiftand", "analysis", &[IntRight, IntLeft, IntMult], shift_and),
+    r("concatzero", "analysis", &[Piece], concat_zero),
+    r("concatleftshift", "analysis", &[Piece], concat_left_shift),
+    r("subzext", "analysis", &[IntZext], sub_zext),
+    r("subcancel", "analysis", &[Subpiece], sub_cancel),
+    r("shiftsub", "analysis", &[Subpiece], shift_sub),
+    r("humptydumpty", "analysis", &[Piece], humpty_dumpty),
+    r("dumptyhump", "analysis", &[Subpiece], dumpty_hump),
+    r("humptyor", "analysis", &[IntOr], humpty_or),
     r("negateidentity", "analysis", &[IntNegate], negate_identity),
+    r("subnormal", "analysis", &[Subpiece], sub_normal),
     r("condnegate", "analysis", &[Cbranch], cond_negate),
     r("boolnegate", "analysis", &[BoolNegate], bool_negate),
     r("lessequal", "analysis", &[BoolOr], less_equal),
     r("lessnotequal", "analysis", &[BoolAnd], less_not_equal),
     r("lessone", "analysis", &[IntLess, IntLessequal], less_one),
     r("rangemeld", "analysis", &[BoolOr, BoolAnd], range_meld),
+    r("piece2zext", "analysis", &[Piece], piece_2_zext),
+    r("piece2sext", "analysis", &[Piece], piece_2_sext),
     r("popcountboolxor", "analysis", &[Popcount], popcount_bool_xor),
     r("xorswap", "analysis", &[IntXor], xor_swap),
     r("lzcountshiftbool", "analysis", &[Lzcount], lzcount_shift_bool),
@@ -194,4 +222,115 @@ fn lone_descend(fd: &Funcdata, vn: VarnodeId) -> Option<OpId> {
 fn addr(fd: &Funcdata, vn: VarnodeId) -> (u32, u64) {
     let v = fd.vn(vn);
     (v.space.index(), v.offset)
+}
+
+/// The op defining `vn` when its opcode is `opc`.
+fn def_with(fd: &Funcdata, vn: VarnodeId, opc: Opcode) -> Option<OpId> {
+    def(fd, vn).filter(|&d| fd.op(d).opc == opc)
+}
+
+/// A constant's value as the C++ `int4` it is read into.
+fn int4(fd: &Funcdata, vn: VarnodeId) -> i64 {
+    i64::from(fd.vn(vn).offset as i32)
+}
+
+/// `Funcdata::newUniqueOut`: a new unique-space varnode of `size` bytes written by `op`.
+fn uniq_out(fd: &mut Funcdata, size: u32, op: OpId) -> Result<VarnodeId> {
+    let uniq = fd.uniq.ok_or_else(|| LowlevelError("no unique space".into()))?;
+    Ok(fd.new_unique_out(size, uniq, op))
+}
+
+/// A new op at `addr` with a unique output of `size` bytes and the inputs `ins` (`newOp`,
+/// `newUniqueOut`, `opSetInput`), inserted before `follow` (`opInsertBefore`): its output.
+fn insert_new(
+    fd: &mut Funcdata,
+    opc: Opcode,
+    addr: u64,
+    size: u32,
+    ins: &[VarnodeId],
+    follow: OpId,
+) -> Result<VarnodeId> {
+    let n = fd.new_op(opc, addr);
+    let o = uniq_out(fd, size, n)?;
+    for (i, &v) in ins.iter().enumerate() {
+        fd.op_set_input(n, v, i)?;
+    }
+    fd.op_insert_before(n, follow)?;
+    Ok(o)
+}
+
+fn off(fd: &Funcdata, vn: VarnodeId) -> u64 {
+    fd.vn(vn).offset
+}
+
+fn sz(fd: &Funcdata, vn: VarnodeId) -> u32 {
+    fd.vn(vn).size
+}
+
+fn code(fd: &Funcdata, op: OpId) -> Opcode {
+    fd.op(op).opc
+}
+
+fn op_addr(fd: &Funcdata, op: OpId) -> u64 {
+    fd.op(op).seq.addr
+}
+
+fn is_free(fd: &Funcdata, vn: VarnodeId) -> bool {
+    fd.vn(vn).is_free()
+}
+
+fn known(fd: &Funcdata, vn: VarnodeId) -> bool {
+    fd.vn(vn).is_heritage_known()
+}
+
+/// `Varnode::constantMatch`.
+fn const_match(fd: &Funcdata, vn: VarnodeId, val: u64) -> bool {
+    is_const(fd, vn) && off(fd, vn) == val
+}
+
+/// `leastsigbit_set`: -1 for 0.
+fn lsb(v: u64) -> i32 {
+    if v == 0 {
+        -1
+    } else {
+        v.trailing_zeros() as i32
+    }
+}
+
+/// `uintb << int4` as x86-64 computes it (the count modulo 64; the C++ has no range check).
+fn shl(v: u64, sa: i32) -> u64 {
+    v.wrapping_shl(sa as u32)
+}
+
+/// `uintb >> int4` as x86-64 computes it.
+fn shr(v: u64, sa: i32) -> u64 {
+    v.wrapping_shr(sa as u32)
+}
+
+/// Port of `Varnode::copySymbol` for a new constant, as far as constants carry it here: the
+/// data-type and the type lock (symbols and the name lock are not modelled yet).
+fn copy_symbol(fd: &mut Funcdata, to: VarnodeId, from: VarnodeId) {
+    let (ty, lock) = (fd.vn(from).ty, fd.vn(from).has(VnFlags::TYPELOCK));
+    fd.vn_mut(to).ty = ty;
+    if lock {
+        fd.vn_set(to, VnFlags::TYPELOCK);
+    } else {
+        fd.vn_clear(to, VnFlags::TYPELOCK);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shift_helpers_table() {
+        for (v, l) in [(0u64, -1), (1, 0), (0x80, 7), (0x18, 3), (1 << 63, 63)] {
+            assert_eq!(lsb(v), l, "lsb {v:#x}");
+        }
+        // shift counts are taken modulo 64, as x86-64 does for the C++
+        for (v, sa, l, r) in [(1u64, 0, 1u64, 1u64), (1, 4, 16, 0), (0xf0, 64, 0xf0, 0xf0), (0xf0, -1, 0, 0)] {
+            assert_eq!((shl(v, sa), shr(v, sa)), (l, r), "{v:#x} by {sa}");
+        }
+    }
 }

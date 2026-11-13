@@ -1,6 +1,7 @@
 # M500 functions that need ActionLaneDivide (stage R3): the reference's `print raw` at
 # `break start assignhigh` (options r1-options.txt, DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst)
-# changes when `lanedivide` is skipped as well. The R1 bar is taken over M500 less these.
+# changes when `lanedivide` is skipped as well. The R1 bar was taken over M500 less these;
+# since R3 ports the action the bar is over all of M500 (44 of these 46 identical).
 # Regenerate: rust/README.md, "Stage R1".
 0x409ed0
 0x40cb60
