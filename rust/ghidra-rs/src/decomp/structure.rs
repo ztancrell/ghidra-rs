@@ -26,7 +26,6 @@ pub(crate) const ROOT: SId = SId(0);
 pub(crate) const F_SWITCH_OUT: u32 = 0x10;
 pub(crate) const F_MARK: u32 = 0x80;
 const F_MARK2: u32 = 0x100;
-const F_ENTRY_POINT: u32 = 0x200;
 const F_INTERIOR_GOTOOUT: u32 = 0x400;
 const F_INTERIOR_GOTOIN: u32 = 0x800;
 pub(crate) const F_WHILEDO_OVERFLOW: u32 = 0x8000;
@@ -266,7 +265,8 @@ impl Structure {
         self.bm(to).ins.push(SEdge { point: b, label, reverse: num });
     }
 
-    /// `FlowBlock::swapEdges` (the `f_flip_path` toggle is left out: nothing reads it).
+    /// `FlowBlock::swapEdges`. The `f_flip_path` toggle is left out: of the hierarchy nothing
+    /// reads it (only `JumpBasic::foldInGuards` reads it, on basic blocks; see `BlockGraph::swap_edges`).
     fn swap_edges(&mut self, b: SId) {
         self.bm(b).outs.swap(0, 1);
         for i in 0..2 {
@@ -564,16 +564,39 @@ impl Structure {
 
     /// `BlockGraph::newBlockSwitch`. `grabCaseBasic` (the case order and labels) is left out:
     /// only printing (`BlockSwitch::finalizePrinting`, stage S9) reads it.
-    pub(crate) fn new_switch(&mut self, cs: &[SId], has_exit: bool) {
+    pub(crate) fn new_switch(&mut self, cs: &[SId], has_exit: bool) -> Result<()> {
+        let leaf = cs.first().and_then(|&root| self.exit_leaf(root));
+        if !leaf.is_some_and(|l| matches!(self.b(l).kind, Kind::Copy(_))) {
+            return err("Could not get switch leaf");
+        }
         let ret = self.new_internal(Kind::Switch, cs);
         if has_exit {
             self.force_output_num(ret, 1);
         }
         self.bm(ret).flags &= !F_SWITCH_OUT;
+        Ok(())
+    }
+
+    /// `getExitLeaf`: a copy is its own; goto, multi-goto and if-goto blocks take component 0's,
+    /// a list its last component's; the other kinds have none.
+    fn exit_leaf(&self, mut b: SId) -> Option<SId> {
+        loop {
+            let bl = self.b(b);
+            b = match bl.kind {
+                Kind::Copy(_) => return Some(b),
+                Kind::Goto(_) | Kind::MultiGoto { .. } | Kind::IfGoto(_) => *bl.list.first()?,
+                Kind::List => *bl.list.last()?,
+                _ => return None,
+            };
+        }
     }
 
     /// `BlockGraph::buildCopy` of the basic blocks into an empty root, with the defaults of
-    /// `Funcdata::installSwitchDefaults` on the copies' edges.
+    /// `Funcdata::installSwitchDefaults` on the copies' edges. The copy takes the basic block's
+    /// flags (`flags |= bl->flags`); of the basic flags only `f_switch_out` is read during
+    /// structuring, and ghidra-rs sets no other basic flag the hierarchy reads (`f_entry_point`
+    /// is read only by `spliceBlock`, which the hierarchy never runs), so only it is derived:
+    /// `BlockBasic::insert` sets it for a BRANCHIND, `newBlockCopy` for more than two outputs.
     fn build_copy(&mut self, fd: &Funcdata) -> Result<()> {
         self.blocks.clear();
         let root = self.new_block(Kind::Graph);
@@ -591,10 +614,6 @@ impl Structure {
             s.ins = bl.ins.iter().map(edge).collect();
             s.outs = bl.outs.iter().map(edge).collect();
             s.index = bl.index;
-            if g.is_entry_point(bb) {
-                s.flags |= F_ENTRY_POINT;
-            }
-            // `f_switch_out` is set on a basic block holding a BRANCHIND (`BlockBasic::insert`)
             let last = bl.ops.last().map(|&op| fd.op(op).opc);
             if last == Some(Opcode::Branchind) || s.outs.len() > 2 {
                 s.flags |= F_SWITCH_OUT;
@@ -612,33 +631,41 @@ impl Structure {
 
     // ---- virtual methods dispatched on the kind ----
 
-    /// `isComplex`: `BlockCopy` and `BlockCondition` delegate, a graph is complex.
-    pub(crate) fn is_complex(&self, fd: &Funcdata, b: SId) -> bool {
-        match self.b(b).kind {
-            Kind::Copy(bb) => basic_is_complex(fd, bb),
-            Kind::Condition(_) => self.is_complex(fd, self.b(b).list[0]),
-            _ => true,
+    /// `isComplex`: `BlockCopy` and `BlockCondition` delegate (to the copied block, to the
+    /// first component), a graph is complex.
+    pub(crate) fn is_complex(&self, fd: &Funcdata, mut b: SId) -> bool {
+        loop {
+            match self.b(b).kind {
+                Kind::Copy(bb) => return basic_is_complex(fd, bb),
+                Kind::Condition(_) => b = self.b(b).list[0],
+                _ => return true,
+            }
         }
     }
 
     /// `negateCondition`: `true` when the data-flow changed (a basic block's CBRANCH flipped).
+    /// A list negates its last component, a condition both components (and swaps AND/OR), a
+    /// copy its basic block; each of those inner calls passes `toporbottom` false, so only the
+    /// basic blocks and `b` itself swap edges. The effects touch distinct blocks, so the work
+    /// list visits them in any order with the same result.
     pub(crate) fn negate_condition(&mut self, fd: &mut Funcdata, b: SId, toporbottom: bool) -> Result<bool> {
-        let res = match self.b(b).kind {
-            Kind::Copy(bb) => basic_negate_condition(fd, bb)?,
-            Kind::List => {
-                let Some(&last) = self.b(b).list.last() else { return err("negating an empty list") };
-                self.negate_condition(fd, last, false)?
+        let mut res = false;
+        let mut work = vec![b];
+        while let Some(cur) = work.pop() {
+            match self.b(cur).kind {
+                Kind::Copy(bb) => res |= basic_negate_condition(fd, bb)?,
+                Kind::List => {
+                    let Some(&last) = self.b(cur).list.last() else { return err("negating an empty list") };
+                    work.push(last);
+                }
+                Kind::Condition(opc) => {
+                    work.extend_from_slice(&self.b(cur).list[..2]);
+                    let opc = if opc == Opcode::BoolAnd { Opcode::BoolOr } else { Opcode::BoolAnd };
+                    self.bm(cur).kind = Kind::Condition(opc);
+                }
+                _ => {}
             }
-            Kind::Condition(opc) => {
-                let (c0, c1) = (self.b(b).list[0], self.b(b).list[1]);
-                let r1 = self.negate_condition(fd, c0, false)?;
-                let r2 = self.negate_condition(fd, c1, false)?;
-                let opc = if opc == Opcode::BoolAnd { Opcode::BoolOr } else { Opcode::BoolAnd };
-                self.bm(b).kind = Kind::Condition(opc);
-                r1 || r2
-            }
-            _ => false,
-        };
+        }
         // FlowBlock::negateCondition
         if toporbottom {
             self.swap_edges(b);
@@ -646,28 +673,35 @@ impl Structure {
         Ok(res)
     }
 
-    /// `Funcdata::printBlockTree`: `printTree` of the root, if structured.
+    /// `Funcdata::printBlockTree`: `printTree` of the root, if structured: each block's header
+    /// indented two spaces a level, then a graph's components in order (a work stack, depth
+    /// first). `BlockCopy::printTree` prints its basic block.
     pub(crate) fn print_tree(&self, fd: &Funcdata) -> String {
+        use std::fmt::Write;
         let mut s = String::new();
-        if !self.is_empty() {
-            self.print_tree_at(fd, ROOT, 0, &mut s);
+        if self.is_empty() {
+            return s;
+        }
+        let mut stack = vec![(ROOT, 0usize)];
+        while let Some((b, level)) = stack.pop() {
+            s.push_str(&"  ".repeat(level));
+            let bl = self.b(b);
+            if let Kind::Copy(bb) = bl.kind {
+                let basic = fd.blocks.block(bb);
+                let _ = writeln!(s, "Basic Block {} 0x{:08x}-0x{:08x}", basic.index, basic.start, basic.stop);
+                continue;
+            }
+            let _ = writeln!(s, "{}{}", self.header_name(b), bl.index);
+            stack.extend(bl.list.iter().rev().map(|&c| (c, level + 1)));
         }
         s
     }
 
-    /// `printTree`: the header indented two spaces a level, then a graph's components.
-    /// `BlockCopy::printTree` prints its basic block.
-    fn print_tree_at(&self, fd: &Funcdata, b: SId, level: usize, s: &mut String) {
-        use std::fmt::Write;
-        s.push_str(&"  ".repeat(level));
+    /// The `printHeader` text before `FlowBlock::printHeader` (the index) of a graph block.
+    fn header_name(&self, b: SId) -> String {
         let bl = self.b(b);
-        let name = match &bl.kind {
-            Kind::Copy(bb) => {
-                let basic = fd.blocks.block(*bb);
-                let _ = writeln!(s, "Basic Block {} 0x{:08x}-0x{:08x}", basic.index, basic.start, basic.stop);
-                return;
-            }
-            Kind::Graph => String::new(),
+        match &bl.kind {
+            Kind::Copy(_) | Kind::Graph => String::new(),
             Kind::Goto(_) => "Plain goto block ".into(),
             Kind::MultiGoto { .. } => "Multi goto block ".into(),
             Kind::List => "List block ".into(),
@@ -681,10 +715,6 @@ impl Structure {
             Kind::DoWhile => "Dowhile block ".into(),
             Kind::InfLoop => "Infinite loop block ".into(),
             Kind::Switch => "Switch block ".into(),
-        };
-        let _ = writeln!(s, "{name}{}", bl.index);
-        for &c in &bl.list {
-            self.print_tree_at(fd, c, level + 1, s);
         }
     }
 }
@@ -695,6 +725,8 @@ impl Structure {
 /// a tie). Like the C++ `defaultBlock` it is an out-edge position as of `switchOver`: the flow
 /// (`flow.rs`) gives the BRANCHIND one out edge per distinct table address, in table order, so
 /// the position is the address's rank among the distinct addresses, whatever edits came since.
+/// When `switchnorm` is ported (`foldInGuards`, `setLastAsDefault` change the default after
+/// flow), the default must be stored on the `JumpTable` at switch-over time instead.
 fn switch_defaults(fd: &Funcdata) -> Vec<(usize, BlockId)> {
     let mut res = Vec::new();
     for jt in &fd.jumptables {
@@ -729,6 +761,7 @@ fn switch_defaults(fd: &Funcdata) -> Vec<(usize, BlockId)> {
 /// op whose output is read outside the block, by a marker, not at all, is address tied, or read
 /// more than `max_implied_ref` = 2 times is a statement).
 fn basic_is_complex(fd: &Funcdata, bb: BlockId) -> bool {
+    /// `Architecture::max_implied_ref` (architecture.cc: 2; no console command or spec sets it)
     const MAX_IMPLIED_REF: usize = 2;
     let bl = fd.blocks.block(bb);
     let mut statement = usize::from(bl.outs.len() >= 2);
@@ -785,4 +818,115 @@ pub(crate) fn block_structure(fd: &mut Funcdata, _: &super::Arch) -> Result<i32>
     let res = super::collapse::collapse_all(&mut s, fd);
     fd.structure = s;
     res
+}
+
+#[cfg(test)]
+mod tests {
+    //! Small hand-built graphs. The expected trees are derived by hand from the C++
+    //! (blockaction.cc, block.cc), not run on the reference: a binary producing exactly these
+    //! graphs is not practical to build. Block `i` starts at `0x1000 + 0x10 * i`.
+    use super::super::funcdata::JumpTable;
+    use super::super::op::OpId;
+    use super::*;
+
+    /// A function of `n` blocks with the edges in order (each block's out edges in the order
+    /// given), a CBRANCH ending each two-way block and a BRANCHIND each wider one.
+    fn graph(n: u64, edges: &[(usize, usize)]) -> (Funcdata, Vec<BlockId>) {
+        let mut fd = Funcdata::new(0x1000);
+        let b: Vec<BlockId> = (0..n).map(|i| fd.blocks.new_block(0x1000 + 0x10 * i)).collect();
+        fd.blocks.set_start_block(b[0]);
+        for &(f, t) in edges {
+            fd.blocks.add_edge(b[f], b[t]);
+        }
+        for &bl in &b {
+            let opc = match fd.blocks.block(bl).outs.len() {
+                2 => Opcode::Cbranch,
+                0 | 1 => continue,
+                _ => Opcode::Branchind,
+            };
+            let op = fd.new_op(opc, fd.blocks.block(bl).start);
+            fd.op_insert_end(op, bl);
+        }
+        fd.blocks.structure_loops().unwrap();
+        (fd, b)
+    }
+
+    fn last_op(fd: &Funcdata, bl: BlockId) -> OpId {
+        *fd.blocks.block(bl).ops.last().unwrap()
+    }
+
+    /// `ActionBlockStructure` without the architecture: the change count and the tree.
+    fn structure(fd: &mut Funcdata) -> (i32, String) {
+        let mut s = std::mem::take(&mut fd.structure);
+        s.build_copy(fd).unwrap();
+        let n = super::super::collapse::collapse_all(&mut s, fd).unwrap();
+        fd.structure = s;
+        (n, fd.structure.print_tree(fd))
+    }
+
+    /// A->{B,C}, B->D, C->D: if/else, no negation (the true clause is out 1). List order is
+    /// A, C, B, D (reverse post-order, out 0 first).
+    #[test]
+    fn if_else() {
+        let (mut fd, _) = graph(4, &[(0, 1), (0, 2), (1, 3), (2, 3)]);
+        let (n, tree) = structure(&mut fd);
+        assert_eq!(n, 0);
+        assert_eq!(
+            tree,
+            "0\n  List block 0\n    If/else block 0\n      Basic Block 0 0x00001000-0x00001000\n      \
+             Basic Block 1 0x00001020-0x00001020\n      Basic Block 2 0x00001010-0x00001010\n    \
+             Basic Block 3 0x00001030-0x00001030\n"
+        );
+    }
+
+    /// A->{B,D}, B->D: the clause is out 0, so `ruleBlockProperIf` negates A: both CBRANCH flags
+    /// flip and A's basic out edges swap.
+    #[test]
+    fn proper_if_negates() {
+        let (mut fd, b) = graph(3, &[(0, 1), (0, 2), (1, 2)]);
+        let (n, tree) = structure(&mut fd);
+        assert_eq!(n, 1);
+        let fl = fd.op(last_op(&fd, b[0])).flags;
+        assert!(fl.has(OpFlags::BOOLEAN_FLIP) && fl.has(OpFlags::FALLTHRU_TRUE));
+        assert_eq!(fd.blocks.block(b[0]).outs[0].point, b[2]);
+        assert_eq!(
+            tree,
+            "0\n  List block 0\n    If block 0\n      Basic Block 0 0x00001000-0x00001000\n      \
+             Basic Block 1 0x00001010-0x00001010\n    Basic Block 2 0x00001020-0x00001020\n"
+        );
+    }
+
+    /// A->B, A->C, B->C, C->B, B->X: a loop with two entries. `findIrreducible` marks A->C,
+    /// which becomes an if-goto; B (negated) and C make the while loop.
+    #[test]
+    fn irreducible_loop() {
+        let (mut fd, b) = graph(4, &[(0, 1), (0, 2), (1, 2), (2, 1), (1, 3)]);
+        let (n, tree) = structure(&mut fd);
+        assert_eq!(n, 1);
+        assert!(fd.op(last_op(&fd, b[1])).flags.has(OpFlags::BOOLEAN_FLIP));
+        assert_eq!(
+            tree,
+            "0\n  List block 0\n    If goto block 0\n      Basic Block 0 0x00001000-0x00001000\n    \
+             Whiledo block 1\n      Basic Block 1 0x00001010-0x00001010\n      \
+             Basic Block 3 0x00001020-0x00001020\n    Basic Block 2 0x00001030-0x00001030\n"
+        );
+    }
+
+    /// S switches to D, C, E (table D, C, D, E: D is the default at position 0); D->E, C->E.
+    /// The case edge S->E skips to the exit while the default does not, so `checkSwitchSkips`
+    /// makes it a goto (a multi-goto block), then the switch collapses.
+    #[test]
+    fn switch_with_skip() {
+        let (mut fd, b) = graph(4, &[(0, 1), (0, 2), (0, 3), (1, 3), (2, 3)]);
+        let op = last_op(&fd, b[0]);
+        fd.jumptables.push(JumpTable { op, targets: vec![0x1010, 0x1020, 0x1010, 0x1030] });
+        assert_eq!(switch_defaults(&fd), vec![(0, b[0])]);
+        let (_, tree) = structure(&mut fd);
+        assert_eq!(
+            tree,
+            "0\n  List block 0\n    Switch block 0\n      Multi goto block 0\n        \
+             Basic Block 0 0x00001000-0x00001000\n      Basic Block 2 0x00001010-0x00001010\n      \
+             Basic Block 1 0x00001020-0x00001020\n    Basic Block 3 0x00001030-0x00001030\n"
+        );
+    }
 }

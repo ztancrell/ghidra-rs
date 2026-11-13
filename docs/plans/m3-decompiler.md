@@ -590,6 +590,18 @@ Not ported, left for part two:
 - `normalizebranches` needs nothing: its group is not in the `decompile` root's groups, so the
   console never runs it.
 
+Review round (independent review of `collapse.rs` and `structure.rs` against the C++):
+`ActionNodeJoin`'s detection skips a pair when either CBRANCH has `boolean_flip` set, as
+`ConditionalJoin::findDups` does (`blockstructure` sets the flag earlier in the same main-loop
+pass; before, ghidra-rs failed where the C++ skips); `newBlockSwitch` fails with "Could not get
+switch leaf" when the switch's exit leaf (`getExitLeaf`) is not a copy; `printTree`,
+`negateCondition` and `isComplex` use a work stack or a loop instead of recursion (deep nesting
+is input-reachable); unit tests on hand-built graphs (if/else, a negated proper if, an
+irreducible two-entry loop, a switch with a duplicated table target and a skip edge to the
+exit; expected trees derived by hand from the C++). Bars after the round, unchanged: S8 M8 8 / 8,
+M500 499 / 499 (rules off) and 496 / 499 (rule-stage options); R3 check 495 / 499; S4 and S6
+checks 498 / 500.
+
 ## Running stages in parallel
 
 Strict chain first: S0 → S1a → S1b → S2. After S2 the work fans out. Under the cap of two

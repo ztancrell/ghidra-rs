@@ -320,7 +320,8 @@ impl<'a> Printer<'a> {
             }
             Opcode::Cbranch => {
                 self.out.str("goto ");
-                // out 0 is the fall-through (false) edge, out 1 the branch (true) edge
+                // out 0 is the false edge, out 1 the true edge (which one falls through is the
+                // CBRANCH's `fallthru_true`, `OpFlags::FALLTHRU_TRUE`)
                 let outs = parent.and_then(|b| <[_; 2]>::try_from(&b.outs[..]).ok());
                 match outs {
                     Some([_, t]) => self.short_header(t.point),

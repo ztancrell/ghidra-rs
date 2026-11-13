@@ -2181,9 +2181,12 @@ pub(crate) fn node_join(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
             if j == inslot || bb2 == bb || fd.blocks.block(bb2).outs.len() != 2 {
                 continue;
             }
+            // findDups: no join while a CBRANCH's boolean flip has not propagated (`blockstructure`
+            // sets it)
             let cond = |b: BlockId| {
                 let op = *fd.blocks.block(b).ops.last()?;
-                (fd.op(op).opc == Opcode::Cbranch).then(|| fd.op(op).ins[1])
+                let o = fd.op(op);
+                (o.opc == Opcode::Cbranch && !o.flags.has(OpFlags::BOOLEAN_FLIP)).then(|| o.ins[1])
             };
             if cond(bb).is_some() && cond(bb) == cond(bb2) {
                 return err(

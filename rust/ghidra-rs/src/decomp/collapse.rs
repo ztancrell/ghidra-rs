@@ -1258,7 +1258,7 @@ impl Collapse<'_> {
         }
         let mut cases = vec![bl];
         cases.extend((0..self.g.size_out(bl)).map(|i| self.g.out(bl, i)).filter(|&c| Some(c) != exit));
-        self.g.new_switch(&cases, exit.is_some());
+        self.g.new_switch(&cases, exit.is_some())?;
         Ok(true)
     }
 

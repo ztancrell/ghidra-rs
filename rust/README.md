@@ -1340,6 +1340,10 @@ this branch (R3 check 495 / 499, paramdouble 500 / 500, S4 and S6 checks 498 / 5
 
 New flag bit: `OpFlags::FALLTHRU_TRUE` (`1 << 16`).
 
+Review round: `ActionNodeJoin` skips a CBRANCH with `boolean_flip` set (`findDups`), the switch
+leaf check of `newBlockSwitch`, no recursion in `printTree`, `negateCondition`, `isComplex`, and
+unit tests on hand-built graphs (`structure.rs`). Details in the plan, "S8".
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The
