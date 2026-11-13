@@ -354,7 +354,7 @@ fn def(fd: &Funcdata, vn: VarnodeId) -> Option<OpId> {
 }
 
 /// `PcodeOp::isBoolOutput`
-fn is_bool_output(opc: Opcode) -> bool {
+pub(crate) fn is_bool_output(opc: Opcode) -> bool {
     use Opcode::*;
     matches!(
         opc,

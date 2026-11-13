@@ -15,7 +15,7 @@ use super::{err, heritage, Arch, Funcdata, Result};
 /// `universalAction` as the `decompile` root has it, with the groups in `disabled` switched
 /// off (`option currentaction decompile <group> off`): the root `universal` (restart group,
 /// once per function), its first actions, the repeating groups `fullloop`, `mainloop` and
-/// `stackstall`, and the root's actions after `fullloop` up to `assignhigh`. `oppool1` holds the
+/// `stackstall`, and the root's actions after `fullloop` to `stop` (ported through `copymarker`, stage S7). `oppool1` holds the
 /// ported rules (`rules::OPPOOL1`) less those `togglerule` switched off (`rule:<name>` in
 /// `disabled`); the actions named `action:<name>` there (`DECOMP_SKIP_ACTIONS`) are left out. An
 /// action that is not ported fails when it runs with its group on.
@@ -163,7 +163,33 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
             ("prefercomplement", "blockrecovery", not_ported),
             ("structuretransform", "blockrecovery", not_ported),
             ("normalizebranches", "normalizebranches", not_ported),
-            ("assignhigh", "merge", not_ported),
+            // stage S7 (`merge.rs`)
+            ("assignhigh", "merge", super::merge::assign_high_action),
+            ("mergerequired", "merge", super::merge::merge_required),
+            ("markexplicit", "merge", super::merge::mark_explicit_action),
+            ("markimplied", "merge", super::merge::mark_implied_leaf),
+            ("mergemultientry", "merge", super::merge::merge_multi_entry),
+            ("mergecopy", "merge", super::merge::merge_copy),
+            ("dominantcopy", "merge", super::merge::dominant_copy),
+            ("dynamicsymbols", "dynamic", not_ported),
+            ("markindirectonly", "merge", super::merge::mark_indirect_only),
+            ("mergeadjacent", "merge", super::merge::merge_adjacent_action),
+            ("mergetype", "merge", super::merge::merge_type),
+            ("hideshadow", "merge", super::merge::hide_shadow),
+            ("copymarker", "merge", super::merge::copy_marker),
+            ("latedonothing", "blockrecovery", not_ported),
+            ("blockstructure", "blockrecovery", not_ported),
+            ("prefercomplement", "blockrecovery", not_ported),
+            ("structuretransform", "blockrecovery", not_ported),
+            ("outputprototype", "localrecovery", not_ported),
+            ("inputprototype", "fixateproto", not_ported),
+            ("mapglobals", "fixateglobals", not_ported),
+            ("dynamicsymbols", "dynamic", not_ported),
+            ("namevars", "merge", not_ported),
+            ("setcasts", "casts", not_ported),
+            ("finalstructure", "blockrecovery", not_ported),
+            ("prototypewarnings", "protorecovery", not_ported),
+            ("stop", "base", c::nothing),
         ],
     ));
     t.restart_group("universal", root);
@@ -172,7 +198,7 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
 
 /// An action not ported yet: it fails when it runs (with its group on).
 fn not_ported(_: &mut Funcdata, _: &Arch) -> Result<i32> {
-    err("action not implemented in ghidra-rs yet (milestone 3: stage S4 ends before assignhigh, with the rule groups off)")
+    err("action not implemented in ghidra-rs yet (milestone 3: stage S7 ends after copymarker; see the action table)")
 }
 
 /// The `jumptable` root action (`buildDefaultGroups`: groups `base`, `noproto`, `analysis`, ...)
@@ -287,7 +313,9 @@ fn prototype_types(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     if !fd.proto.model_locked && !fd.proto.has_matching_model(evalfp) {
         fd.proto.set_model(models, evalfp);
     }
-    for op in fd.ops_with(Opcode::Return) {
+    // the C++ walks the per-opcode RETURN list (creation order), which decides the constants'
+    // create indices (high-variable ids, stage S7)
+    for op in fd.ops_created_with(Opcode::Return) {
         let Some(&in0) = fd.op(op).ins.first() else { continue };
         if !fd.vn(in0).is_constant() {
             let size = fd.vn(in0).size;

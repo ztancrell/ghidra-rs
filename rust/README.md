@@ -1313,6 +1313,52 @@ no such command. All bars rerun on the merged binary: R3 check M8 8 / 8, M500 49
 R1 set 451 / 453, the lane-divide set 44 / 46); paramdouble 500 / 500; S4 check M8 8 / 8,
 M500 498 / 500; the four S6 checks M8 8 / 8, M500 498 / 500 each.
 
+### Stage S7 (in part): merging varnodes into high variables
+
+Stage S7 (branch `m3-s7`) ports the merge range of the universal action, `assignhigh` through
+`copymarker`: `decomp/merge.rs` (merge.cc and the merge actions of coreaction.cc:
+`ActionAssignHigh`, `ActionMergeRequired`, `ActionMarkExplicit`, `ActionMarkImplied`,
+`ActionMergeMultiEntry`, `ActionMergeCopy`, `ActionDominantCopy`, `ActionMarkIndirectOnly`,
+`ActionMergeAdjacent`, `ActionMergeType`, `ActionHideShadow`, `ActionCopyMarker`),
+`decomp/variable.rs` (`HighVariable` in a `HighId` arena, `HighIntersectTest`, the copy-shadow
+tests of varnode.cc) and `decomp/cover.rs` (`Cover`, `CoverBlock`; unit tests for the
+intersection logic). The COPYs merging puts in (`snipReads`, `trimOpInput`, `trimOpOutput`,
+`snipOutputInterference`, dominant COPYs) are made in the C++ order, and the alive-list order
+the actions walk is kept (`PcodeOp::alive_key`). A fix found on the way: `ActionPrototypeTypes`
+walks the RETURN ops in creation order (it walked block order), which decides the create
+indices of the `return(#0x0)` constants.
+
+Check: `print raw` with types and high variables (`DECOMP_RAW_EXTRA=1`) at `break start
+inputprototype`, the first action after `copymarker` with its group on and not ported. The
+reference patch numbers each high variable by its first appearance in that print (`{hN}`,
+reset per print), the Rust side the same, so the check compares merging decisions, not
+pointers or create indices. Between `assignhigh` and `inputprototype` the options switch off
+`blockrecovery` (`latedonothing`, `blockstructure`, `prefercomplement`, `structuretransform`),
+`localrecovery` (`outputprototype`) and `dynamic` (`dynamicsymbols`) on both sides, so nothing
+else needs skipping:
+
+```sh
+cd rust
+DECOMP_RAW_EXTRA=1 DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst BREAK=inputprototype \
+  OPTIONS=tools/corpus/r1-options.txt tools/decomp-diff.sh m500   # rules on
+DECOMP_RAW_EXTRA=1 BREAK=inputprototype OPTIONS=tools/corpus/s6-options.txt tools/decomp-diff.sh m500   # types on
+```
+
+| options | M8 | M500 (of the functions the reference finishes) |
+|---|---|---|
+| `r1-options.txt` (rules on) | 8 / 8 | 489 / 499 (98.0 %) |
+| `s6-options.txt` (types on) | 8 / 8 | 492 / 499 (98.6 %) |
+
+Misses with `r1-options`: 3 need `VariablePiece` (0x402c20, 0x405990, 0x62f0d0: overlapping address-tied varnodes of different sizes, fail loudly); 4 are the R1/R3 misses (0x47a6b0, 0x4891e0, 0x4919f0, 0x6fa6e0); 3 print `<code() *>` on the reference for a global INDIRECT output where ghidra-rs keeps `xunknown4` (0x48a430, 0x5c5940, 0x6b3730: a type set before merging that only this check shows, as the R1/R3 check prints no types). With `s6-options`: 6 need `VariablePiece` (0x402c20, 0x405990, 0x4c0070, 0x62f0d0, 0x757810, 0x7586e0) and 0x4919f0 (as in S4).
+
+Not ported (each fails loudly, or cannot arise with the ported rules): `VariablePiece` and
+`VariableGroup` (overlapping address-tied varnodes of different sizes, proto-partial PIECEs),
+symbols and `mergeMultiEntry`'s multi-entry symbols (the local scope holds none), union
+resolution of trimmed COPYs, `stripType`, join padding records (`markPurePaddingCopies`),
+`dynamic.cc` (only `ActionDynamicSymbols` needs it, group `dynamic` is off), the STORE guards of
+`StackAffectingOps` (stack heritage). Later regressions held: R3 check 495 / 499, S3 paramdouble
+500 / 500, S4 check 498 / 500, S6 check 498 / 500 (M500).
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The

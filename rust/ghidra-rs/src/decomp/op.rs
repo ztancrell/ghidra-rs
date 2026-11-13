@@ -40,6 +40,10 @@ impl OpFlags {
     pub(crate) const CALCULATED_BOOL: OpFlags = OpFlags(1024);
     /// `immed_copy` (an additional flag in C++): a COPY was propagated into a MULTIEQUAL slot
     pub(crate) const IMMED_COPY: OpFlags = OpFlags(2048);
+    /// `nonprinting`: the op prints nothing (merging, stage S7)
+    pub(crate) const NONPRINTING: OpFlags = OpFlags(8192);
+    /// `special_print`: a call printing the NEW before it (`checkNewToConstructor`, stage S7)
+    pub(crate) const SPECIAL_PRINT: OpFlags = OpFlags(16384);
 
     pub(crate) fn has(self, f: OpFlags) -> bool {
         self.0 & f.0 != 0
@@ -76,6 +80,9 @@ pub(crate) struct PcodeOp {
     /// the position in the per-opcode list (`PcodeOp::codeiter`): an op goes to the end of
     /// its list when made and on every `opSetOpcode`
     pub(crate) list_key: u32,
+    /// when the op last went into a block: the order of the C++ alive list
+    /// (`PcodeOpBank::markAlive` appends), which the merge actions walk (stage S7)
+    pub(crate) alive_key: u32,
 }
 
 impl PcodeOp {

@@ -51,7 +51,7 @@ pub fn print_raw(fd: &Funcdata, arch: &Arch) -> Result<String> {
     if fd.blocks.list.is_empty() {
         return err("No operations to print");
     }
-    let mut p = Printer { fd, arch, out: Out { s: String::new(), hex: false } };
+    let mut p = Printer { fd, arch, out: Out { s: String::new(), hex: false }, highs: Default::default() };
     p.graph()?;
     Ok(p.out.s)
 }
@@ -60,6 +60,8 @@ struct Printer<'a> {
     fd: &'a Funcdata,
     arch: &'a Arch,
     out: Out,
+    /// the high variables printed so far, numbered by first appearance (stage S7)
+    highs: std::collections::HashMap<u64, usize>,
 }
 
 impl<'a> Printer<'a> {
@@ -182,6 +184,15 @@ impl<'a> Printer<'a> {
         }
         if raw_extra() {
             self.out.str(&format!("<{}>", self.fd().types.print_vn_type(v.ty, v.size)));
+            // the high variable, numbered by first appearance in this print (stage S7)
+            if let Some(k) = super::variable::high_key(self.fd(), id) {
+                let next = self.highs.len();
+                let n = *self.highs.entry(k).or_insert(next);
+                // the patched reference writes `dec << n`: the base stays decimal
+                self.out.str("{h");
+                self.out.dec(n as u64);
+                self.out.str("}");
+            }
         }
         if v.def.is_none() && !v.is_input() && !v.is_constant() {
             self.out.str("(free)");

@@ -102,6 +102,10 @@ pub struct Funcdata {
     pub(crate) constptr_passes: u32,
     /// `typerecovery_exceeded`: inference gave up after 7 passes
     pub(crate) typerecovery_exceeded: bool,
+    /// the high variables (stage S7, `variable.rs`)
+    pub(crate) highs: super::variable::Highs,
+    /// the next [`PcodeOp::alive_key`]
+    next_alive: u32,
 }
 
 impl Funcdata {
@@ -141,6 +145,8 @@ impl Funcdata {
             infer_passes: 0,
             constptr_passes: 0,
             typerecovery_exceeded: false,
+            highs: super::variable::Highs::default(),
+            next_alive: 0,
         }
     }
 
@@ -237,6 +243,7 @@ impl Funcdata {
             flags: OpFlags::default(),
             halt: None,
             list_key: self.next_list_key,
+            alive_key: 0,
         });
         self.next_list_key += 1;
         self.seqs.insert((addr, seq.time), id);
@@ -761,6 +768,8 @@ impl Funcdata {
         }
         self.blocks.block_mut(bl).ops.insert(at, op);
         self.op_mut(op).parent = Some(bl);
+        self.op_mut(op).alive_key = self.next_alive;
+        self.next_alive += 1;
         let ops = &self.blocks.block(bl).ops;
         let before = if at == 0 { 2 } else { self.op(ops[at - 1]).order };
         let after = match ops.get(at + 1) {
@@ -772,11 +781,6 @@ impl Funcdata {
         } else {
             self.op_mut(op).order = after / 2 + before / 2;
         }
-    }
-
-    /// The live ops with opcode `opc` (`Funcdata::beginOp(opc)`), in block order.
-    pub(crate) fn ops_with(&self, opc: Opcode) -> Vec<OpId> {
-        self.blocks.ops().filter(|&o| self.op(o).opc == opc).collect()
     }
 
     /// The ops with opcode `opc` in the order the C++ keeps its per-opcode lists (`returnlist`,
@@ -1059,7 +1063,7 @@ impl Funcdata {
     }
 
     /// Port of `FlowBlock::findCommonBlock`: the nearest block dominating both.
-    fn find_common_block(&self, b1: BlockId, b2: BlockId) -> Option<BlockId> {
+    pub(crate) fn find_common_block(&self, b1: BlockId, b2: BlockId) -> Option<BlockId> {
         let mut up = std::collections::HashSet::new();
         let mut b = Some(b1);
         while let Some(x) = b {

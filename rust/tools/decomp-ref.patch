@@ -1,20 +1,33 @@
 --- a/varnode.cc
 +++ b/varnode.cc
-@@ -16,6 +16,8 @@
+@@ -16,6 +16,21 @@
  #include "varnode.hh"
  #include "funcdata.hh"
- 
+
 +#include <cstdlib>
 +
++namespace ghidra {
++// ghidra-rs (rust/tools/decomp-ref.patch): the high variables of one `print raw`, numbered by
++// first appearance (Funcdata::printRaw resets the numbering), for stage S7
++static map<const HighVariable *,int4> rawHighIds;
++void rawHighReset(void) { rawHighIds.clear(); }
++static int4 rawHighNumber(const HighVariable *h) {
++  map<const HighVariable *,int4>::iterator iter = rawHighIds.find(h);
++  if (iter == rawHighIds.end())
++    iter = rawHighIds.insert(pair<const HighVariable *,int4>(h,(int4)rawHighIds.size())).first;
++  return (*iter).second;
++}
++}
++
  namespace ghidra {
- 
+
  AttributeId ATTRIB_ADDRTIED = AttributeId("addrtied",30);
-@@ -750,6 +752,18 @@
+@@ -750,6 +765,18 @@
      s << "(i)";
    if (isWritten())
      s << '(' << def->getSeqNum() << ')';
 +  // ghidra-rs (rust/tools/decomp-ref.patch): with DECOMP_RAW_EXTRA set, also print the data-type and
-+  // the high variable (by the create index of its name representative), for stages S6 and S7
++  // the high variable (numbered by first appearance in this print), for stages S6 and S7
 +  static const bool extra = getenv("DECOMP_RAW_EXTRA") != (char *)0;
 +  if (extra) {
 +    if (type != (Datatype *)0) {
@@ -23,11 +36,22 @@
 +      s << '>';
 +    }
 +    if (high != (HighVariable *)0)
-+      s << "{h" << dec << high->getNameRepresentative()->getCreateIndex() << '}';
++      s << "{h" << dec << rawHighNumber(high) << '}';
 +  }
    if ((flags&(Varnode::insert|Varnode::constant))==0) {
      s << "(free)";
      return;
+--- a/funcdata.cc
++++ b/funcdata.cc
+@@ -207,6 +207,8 @@
+ void Funcdata::printRaw(ostream &s) const
+
+ {
++  extern void rawHighReset(void);	// ghidra-rs: decomp-ref.patch, stage S7
++  rawHighReset();
+   if (bblocks.getSize()==0) {
+     if (obank.empty())
+       throw RecovError("No operations to print");
 --- a/funcdata_block.cc
 +++ b/funcdata_block.cc
 @@ -14,6 +14,9 @@

@@ -531,6 +531,42 @@ M500 498 / 500; S6 unlocked, locked `void`, locked `int4` and callees `int4(int4
 M8 8 / 8, M500 498 / 500 (498 / 499 the reference finishes; the miss is 0x4919f0).
 Superseded: the "446 / 446 non-SSE" results of the S6 section above.
 
+### S7: in part on branch `m3-s7` (2026-11-13)
+
+Ported: the merge range `assignhigh` .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`;
+list in `rust/README.md`, "Stage S7"). Check: `print raw` with types and high variables at
+`break start inputprototype` (the first action after `copymarker` whose group is on and that is
+not ported), `DECOMP_RAW_EXTRA=1`:
+
+```sh
+cd rust
+DECOMP_RAW_EXTRA=1 DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst BREAK=inputprototype \
+  OPTIONS=tools/corpus/r1-options.txt tools/decomp-diff.sh m500
+DECOMP_RAW_EXTRA=1 BREAK=inputprototype OPTIONS=tools/corpus/s6-options.txt tools/decomp-diff.sh m500
+```
+
+- High-variable ids: `rust/tools/decomp-ref.patch` now numbers each high by its first appearance
+  in one `print raw` (`{hN}`, reset by `Funcdata::printRaw`), and `print.rs` does the same.
+  Superseded: the first scheme, the create index of the high's name representative, which also
+  compared varnode create indices from before merging (it found one real bug, the RETURN order
+  of `ActionPrototypeTypes`, fixed; and one left, below).
+- Nothing extra is skipped: between `assignhigh` and `inputprototype` the actions not ported are
+  in groups the options switch off on both sides (`blockrecovery`: `latedonothing`,
+  `blockstructure`, `prefercomplement`, `structuretransform`; `localrecovery`:
+  `outputprototype`; `dynamic`: `dynamicsymbols`).
+- Results: M8 8 / 8 with both option files; M500 (of the 499 the reference finishes)
+  `r1-options` 489 / 499 (98.0 %), `s6-options` 492 / 499 (98.6 %). Bar (95 %): reached with both.
+- Misses by cause: misses with `r1-options`: 3 need `VariablePiece` (0x402c20, 0x405990, 0x62f0d0: overlapping address-tied varnodes of different sizes, fail loudly); 4 are the R1/R3 misses (0x47a6b0, 0x4891e0, 0x4919f0, 0x6fa6e0); 3 print `<code() *>` on the reference for a global INDIRECT output where ghidra-rs keeps `xunknown4` (0x48a430, 0x5c5940, 0x6b3730: a type set before merging that only this check shows, as the R1/R3 check prints no types). With `s6-options`: 6 need `VariablePiece` (0x402c20, 0x405990, 0x4c0070, 0x62f0d0, 0x757810, 0x7586e0) and 0x4919f0 (as in S4).
+- Left for S7b: `VariablePiece`/`VariableGroup` (`groupWith`; needed by overlapping
+  address-tied varnodes of different sizes, the main miss), `dynamic.cc` and
+  `ActionDynamicSymbols`, symbols and `mergeMultiEntry` (needs the local scope of `database.cc`),
+  union resolution of trimmed COPYs, `stripType`, `markPurePaddingCopies`, the STORE guards of
+  `StackAffectingOps` (stack heritage). A varnode create-index difference before merging
+  (an `ESP = ESP(i) + c` output created one varnode earlier than the reference in 0x401080 and
+  0x9eec5e) is not visible with the first-appearance ids; its cause is not found yet.
+- Regressions on the final binary: R3 check 495 / 499, S3 paramdouble 500 / 500, S4 498 / 500, S6
+  498 / 500.
+
 ## Running stages in parallel
 
 Strict chain first: S0 → S1a → S1b → S2. After S2 the work fans out. Under the cap of two

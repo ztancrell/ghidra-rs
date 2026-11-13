@@ -105,7 +105,7 @@ fn unknown_ptr(fd: &mut Funcdata, size: u32) -> TypeId {
 
 /// Port of `TypeOp::getOutputLocal` and its overrides (`PcodeOp::outputTypeLocal`); a call
 /// with a locked output gives its type.
-fn output_local(fd: &mut Funcdata, op: OpId) -> Result<TypeId> {
+pub(crate) fn output_local(fd: &mut Funcdata, op: OpId) -> Result<TypeId> {
     if let Some(t) = locked_output_type(fd, op) {
         return Ok(t);
     }
@@ -120,7 +120,7 @@ fn output_local(fd: &mut Funcdata, op: OpId) -> Result<TypeId> {
 }
 
 /// Port of `TypeOp::getInputLocal` and its overrides (`PcodeOp::inputTypeLocal`).
-fn input_local(fd: &mut Funcdata, op: OpId, slot: usize) -> TypeId {
+pub(crate) fn input_local(fd: &mut Funcdata, op: OpId, slot: usize) -> TypeId {
     if let Some(t) = locked_input_type(fd, op, slot) {
         return t;
     }

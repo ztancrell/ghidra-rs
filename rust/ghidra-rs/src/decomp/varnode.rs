@@ -98,6 +98,17 @@ impl VnFlags {
     /// `spacebase_placeholder`: the value a call loads from the stack to learn its stack offset
     /// (the placeholder, or a locked call's first stack parameter; stage S6)
     pub(crate) const SPACEBASE_PLACEHOLDER: VnFlags = VnFlags(1 << 22);
+    /// `implied`: printed inside the expression reading it (`ActionMarkImplied`, stage S7)
+    pub(crate) const IMPLIED: VnFlags = VnFlags(1 << 23);
+    /// `explicit`: printed as a variable of its own (`ActionMarkExplicit`, stage S7)
+    pub(crate) const EXPLICIT: VnFlags = VnFlags(1 << 24);
+    /// `indirectonly`: an illegal input only INDIRECTs read (`markIndirectOnly`, stage S7)
+    pub(crate) const INDIRECTONLY: VnFlags = VnFlags(1 << 25);
+
+    /// both sets of flags
+    pub(crate) const fn with(self, f: VnFlags) -> VnFlags {
+        VnFlags(self.0 | f.0)
+    }
 
     pub(crate) fn has(self, f: VnFlags) -> bool {
         self.0 & f.0 != 0

@@ -157,6 +157,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `subflow.cc`) and `RulePiecePathology` are not ported.
    Merged with S6: the S6 checks (unlocked, `void`, `int4`, callees) are M8 8 / 8, M500
    498 / 499 each with lane division on. Superseded: "446 / 446 non-SSE" above.
+   S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
+   .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
+   `break start inputprototype`: M8 8 / 8, M500 489 / 499 (98.0 %) (rules on) and 492 / 499 (98.6 %) (types on).
+   Open: `VariablePiece` groups, `dynamic.cc`, symbols.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.
