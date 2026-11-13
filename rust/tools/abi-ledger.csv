@@ -123,7 +123,7 @@ address,site,java,ghidra_rs,truth,evidence,cause
 0x0073c970,0073ff68,unknown,ok,unverified,group:live-at-return-rule; checked 0073feae,live-at-return-rule
 0x00874760,008735ad,unknown,ok,unverified,group:live-at-return-rule; checked 0073feae,live-at-return-rule
 0x00401740,00548f51,trivial,(none),ok,bytes e8: CALL 0x401740; contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
-0x004b2a50,005b2afb,unknown,(none),unknown,bytes e8 at site: CALL 0x4b2a50 then POP EDI/ESI/ECX: EDX live at return; same undecoded tail of 0x5b2950,missed-code-undecoded
+0x004b2a50,005b2afb,unknown,unknown,unknown,bytes e8 at site: CALL 0x4b2a50 then POP EDI/ESI/ECX: EDX live at return; same undecoded tail of 0x5b2950; fixed by pointer_targets (abi-coverage): ghidra-rs now decodes the site and agrees with Java,missed-code-undecoded
 0x00538cc0,005491be,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
 0x00541180,00545e1a,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
 0x00544610,00545ce0,trivial,(none),ok,bytes e8: CALL 0x544610; contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
@@ -133,27 +133,27 @@ address,site,java,ghidra_rs,truth,evidence,cause
 0x00587d80,00545da3,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
 0x00587d80,00545db7,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
 0x00597e80,0062307e,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
-0x0059f770,005b2a56,unknown,(none),unknown,bytes e8 at site: CALL 0x59f770 then CMP EAX; site past 0x5b2950's extent; not decoded,missed-code-undecoded
-0x0059f770,005b2a98,unknown,(none),unknown,bytes e8 at site: CALL 0x59f770; same undecoded tail of 0x5b2950 as 0x5b2a56,missed-code-undecoded
-0x0059f770,005b2ad6,unknown,(none),unverified,group:missed-code-undecoded; checked 005b2afb,missed-code-undecoded
-0x0059f770,005b2aed,unknown,(none),unverified,group:missed-code-undecoded; checked 005b2afb,missed-code-undecoded
+0x0059f770,005b2a56,unknown,unknown,unknown,bytes e8 at site: CALL 0x59f770 then CMP EAX; site past 0x5b2950's extent; not decoded; fixed by pointer_targets (abi-coverage): ghidra-rs now decodes the site and agrees with Java,missed-code-undecoded
+0x0059f770,005b2a98,unknown,unknown,unknown,bytes e8 at site: CALL 0x59f770; same undecoded tail of 0x5b2950 as 0x5b2a56; fixed by pointer_targets (abi-coverage): ghidra-rs now decodes the site and agrees with Java,missed-code-undecoded
+0x0059f770,005b2ad6,unknown,unknown,unverified,group:missed-code-undecoded; checked 005b2afb; fixed by pointer_targets (abi-coverage): ghidra-rs now decodes the site and agrees with Java,missed-code-undecoded
+0x0059f770,005b2aed,unknown,unknown,unverified,group:missed-code-undecoded; checked 005b2afb; fixed by pointer_targets (abi-coverage): ghidra-rs now decodes the site and agrees with Java,missed-code-undecoded
 0x005ffb10,004cd401,unknown,(none),unknown,PUSH 0x5ffb10 at site (code constant in undecoded tail of 0x4cd090),missed-code-undecoded
 0x005ffe90,004cd3e5,unknown,(none),unknown,JMP 0x5ffe90 at site (tail jump); site past 0x4cd090's extent; not decoded,missed-code-undecoded
 0x0064a000,005d961a,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
 0x00672e30,004c07be,unknown,(none),unknown,CALL EAX at site with EAX=[EDX+0x14] vtable load (Java resolved it to 0x672e30); site past 0x4c06e0's extent; not decoded,missed-code-undecoded
 0x006774c0,004c08b3,unknown,(none),unknown,CALL EAX at site (Java resolved it to 0x6774c0); same undecoded tail of 0x4c06e0 as 0x4c07be,missed-code-undecoded
-0x0084af20,0060f1e0,unknown,(none),unknown,bytes e8 at site: CALL 0x84af20 then MOV EAX;ESI/POP ESI/RET 4 (same destructor shape as 0x752050); code past functions.csv extent not decoded,missed-code-undecoded
-0x0084af20,0061bb70,unknown,(none),unknown,bytes e8 at site: CALL 0x84af20 then MOV EAX;ESI/POP ESI/RET 4 (same destructor shape as 0x752050); not decoded,missed-code-undecoded
-0x0084af20,00752050,unknown,(none),unknown,bytes e8 at site: CALL 0x84af20 (GameFree) in deleting destructor 0x752040 (vtable 0xbd4fac only); ECX/EDX live at its RET 0x752058; ghidra-rs never decodes 0x752040,missed-code-undecoded
-0x0088cdc0,00891372,trivial,(none),ok,bytes e8: CALL 0x88cdc0; contract trivial (ghidra-rs rows for it are trivial); site past 0x891320's extent,missed-code-undecoded
-0x0088cdc0,0089c0f3,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
-0x0088cdc0,0089c302,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
-0x0088cdc0,00956d0d,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
-0x0088cdc0,0095c862,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
-0x0088cdc0,0096aab2,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
-0x0088cdc0,00a06b12,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
-0x0088cdc0,00a089c4,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
-0x0088cdc0,00a08b64,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-code-undecoded
+0x0084af20,0060f1e0,unknown,unknown,unknown,bytes e8 at site: CALL 0x84af20 then MOV EAX;ESI/POP ESI/RET 4 (same destructor shape as 0x752050); code past functions.csv extent not decoded; fixed by pointer_targets (abi-coverage): ghidra-rs now decodes the site and agrees with Java,missed-code-undecoded
+0x0084af20,0061bb70,unknown,unknown,unknown,bytes e8 at site: CALL 0x84af20 then MOV EAX;ESI/POP ESI/RET 4 (same destructor shape as 0x752050); not decoded; fixed by pointer_targets (abi-coverage): ghidra-rs now decodes the site and agrees with Java,missed-code-undecoded
+0x0084af20,00752050,unknown,unknown,unknown,bytes e8 at site: CALL 0x84af20 (GameFree) in deleting destructor 0x752040 (vtable 0xbd4fac only); ECX/EDX live at its RET 0x752058; ghidra-rs never decodes 0x752040; fixed by pointer_targets (abi-coverage): ghidra-rs now decodes the site and agrees with Java,missed-code-undecoded
+0x0088cdc0,00891372,trivial,trivial,ok,bytes e8: CALL 0x88cdc0; contract trivial (ghidra-rs rows for it are trivial); site past 0x891320's extent; fixed by pointer_targets (abi-coverage): ghidra-rs now decodes the site and agrees with Java,missed-code-undecoded
+0x0088cdc0,0089c0f3,trivial,trivial,ok,contract trivial (ghidra-rs rows for it are trivial); fixed by pointer_targets (abi-coverage): ghidra-rs now decodes the site and agrees with Java,missed-code-undecoded
+0x0088cdc0,0089c302,trivial,trivial,ok,contract trivial (ghidra-rs rows for it are trivial); fixed by pointer_targets (abi-coverage): ghidra-rs now decodes the site and agrees with Java,missed-code-undecoded
+0x0088cdc0,00956d0d,trivial,trivial,ok,contract trivial (ghidra-rs rows for it are trivial); fixed by pointer_targets (abi-coverage): ghidra-rs now decodes the site and agrees with Java,missed-code-undecoded
+0x0088cdc0,0095c862,trivial,trivial,ok,contract trivial (ghidra-rs rows for it are trivial); fixed by pointer_targets (abi-coverage): ghidra-rs now decodes the site and agrees with Java,missed-code-undecoded
+0x0088cdc0,0096aab2,trivial,trivial,ok,contract trivial (ghidra-rs rows for it are trivial); fixed by pointer_targets (abi-coverage): ghidra-rs now decodes the site and agrees with Java,missed-code-undecoded
+0x0088cdc0,00a06b12,trivial,trivial,ok,contract trivial (ghidra-rs rows for it are trivial); fixed by pointer_targets (abi-coverage): ghidra-rs now decodes the site and agrees with Java,missed-code-undecoded
+0x0088cdc0,00a089c4,trivial,trivial,ok,contract trivial (ghidra-rs rows for it are trivial); fixed by pointer_targets (abi-coverage): ghidra-rs now decodes the site and agrees with Java,missed-code-undecoded
+0x0088cdc0,00a08b64,trivial,trivial,ok,contract trivial (ghidra-rs rows for it are trivial); fixed by pointer_targets (abi-coverage): ghidra-rs now decodes the site and agrees with Java,missed-code-undecoded
 0x0049f960,024d8150,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-ref-securom-section
 0x0049f960,output:024d8150,unconcluded,(none),unverified,group:missed-ref-securom-section; checked 024fd24e,missed-ref-securom-section
 0x004bdf30,024fd24e,trivial,(none),ok,contract trivial (ghidra-rs rows for it are trivial),missed-ref-securom-section
