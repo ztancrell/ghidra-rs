@@ -9,7 +9,7 @@ pub use super::actiontree::{ActionTree, Outcome};
 use super::fspec::{ExtraPop, ParamActive};
 use super::funcdata::CallId;
 use super::opcode::Opcode;
-use super::varnode::{Space, VnFlags};
+use super::varnode::{Space, VarnodeId, VnFlags};
 use super::{err, heritage, Arch, Funcdata, Result};
 
 /// `universalAction` as the `decompile` root has it, with the groups in `disabled` switched
@@ -396,6 +396,37 @@ fn varnode_props(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     Ok(changes)
 }
 
+/// Port of `ActionVarnodeProps::handleExtendedZero`: the ops reading `vn`, a `zext(#0)` wider
+/// than 8 bytes, become COPYs (of the other input, or of the zero).
+fn handle_extended_zero(fd: &mut Funcdata, vn: VarnodeId) -> i32 {
+    use Opcode::*;
+    let mut changes = 0;
+    let mut i = 0;
+    while let Some(&subop) = fd.vn(vn).descend.get(i) {
+        i += 1;
+        let slot = fd.slot_of(subop, vn);
+        let remove = match fd.op(subop).opc {
+            IntAdd | IntOr | IntXor => slot,
+            Int2comp => {
+                fd.op_set_opcode(subop, Copy);
+                changes += 1;
+                continue;
+            }
+            IntLeft | IntRight | IntSright | IntDiv | IntSdiv | IntRem | IntSrem => {
+                (fd.op(subop).ins.first() == Some(&vn)).then_some(1)
+            }
+            IntMult | IntAnd => slot.map(|s| 1 - s),
+            _ => None,
+        };
+        let Some(r) = remove else { continue };
+        fd.op_remove_input(subop, r);
+        fd.op_set_opcode(subop, Copy);
+        i = 0; // the descendants changed: from the first again
+        changes += 1;
+    }
+    changes
+}
+
 /// The parts of `ActionVarnodeProps::apply` that act after dead code ran: an auto-live hold
 /// (`lastChanceLoad`) is released unless its LOAD reads a constant address, and every read of a
 /// varnode whose non-zero mask and consume mask share no bit is replaced by zero
@@ -437,7 +468,7 @@ fn varnode_props_late(fd: &mut Funcdata) -> Result<i32> {
                     let zext0 =
                         o.opc == Opcode::IntZext && fd.vn(o.ins[0]).is_constant() && fd.vn(o.ins[0]).offset == 0;
                     if zext0 {
-                        return err("varnodeprops: handleExtendedZero is not implemented in ghidra-rs yet");
+                        changes += handle_extended_zero(fd, vn);
                     }
                     continue;
                 }

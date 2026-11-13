@@ -139,6 +139,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    M8 (8 / 8) and M500 (446 / 500); the rest need `ActionLaneDivide` (R3).
    R1 (rule pools; 19 copy, constant and arithmetic rules) done on branch `m3-r1`: M8 8 / 8;
    M500 less the 46 `ActionLaneDivide` functions 451 / 453 (99.6 %, bar 98 %).
+   R3 (in part) on branch `m3-r3`: `ActionLaneDivide` with `transform.cc`, and 21 extension,
+   concat and sub-piece rules; same check with `lanedivide` on both sides: M8 8 / 8, M500
+   495 / 499 (99.2 %, bar 98 %). Open: the `subvar` rules (`Subvar*`, `SplitFlow`; the rest of
+   `subflow.cc`) and `RulePiecePathology` are not ported.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.

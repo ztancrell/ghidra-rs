@@ -344,7 +344,8 @@ differs from the table row:
   `analysis`, `cleanup`, `typerecovery` (those three leave the `subvar`, `stackvars`,
   `blockrecovery`, ... groups on, whose rules and structuring change the output).
 - `ActionLaneDivide` (R3 in the table) is in group `base` and cannot be switched off: the
-  M500 functions using whole SSE registers differ until R3 ports it. Pass bar: 446 / 447 (every function the reference finishes)
+  M500 functions using whole SSE registers differ until R3 ports it. Superseded: R3 ported it (498 / 499 now).
+  Pass bar: 446 / 447 (every function the reference finishes)
   identical without them; with them the bar is not reached.
 - `multicse` and `conditionalconst` are in group `analysis` (off), so they wait for the rule
   stages; `paramid.cc` belongs to the `paramid` root action, which the console's `decompile`
@@ -379,6 +380,34 @@ whose non-zero and consume masks share no bit by 0 (the x87/SSE carry flags, 11 
 (`ActionConditionalExe` merging two blocks on equal conditions) and 0x6fa6e0 (a zero
 replacement the reference makes later than ghidra-rs). The jump-table stand-ins stay until R2 (the
 partial function needs the comparison rules too).
+
+### R3: in part on branch `m3-r3` (2026-11-13)
+
+Ported: `ActionLaneDivide` (`decomp/lanedivide.rs`: the action and `LaneDivide` of `subflow.cc`),
+`transform.cc` (`decomp/transform.rs`), the `.pspec` `vector_lane_sizes` records, and 21 rules of
+`oppool1` (list in `rust/README.md`, "Stage R3"), plus `ActionVarnodeProps::handleExtendedZero`.
+Superseded: the `lanedivide` exception of S4 and R1 (an action that did nothing) and the bar taken
+over M500 less `m500-lanedivide.txt`; `lanedivide` now runs on both sides.
+
+Check as R1 (`r1-options.txt` regenerated: 76 `togglerule`s; `DECOMP_SKIP_ACTIONS` unchanged):
+M8 8 / 8; M500 495 / 499 of the functions the reference finishes (99.2 %, bar 98 %: reached).
+Of the 46 lane-divide functions 44 are identical; of the other 453, 451 as in R1. S3's
+paramdouble check stays 500 / 500; the S4 check is now 498 / 499 (was 446). Misses: 0x47a6b0
+and 0x6fa6e0 as in R1; 0x4891e0 (a zero replacement ghidra-rs makes one main-loop pass before
+the reference, the cause of 0x6fa6e0 seen from the other side); 0x4919f0 (the reference empties
+a block whose branch ghidra-rs keeps, also under the S4 options, so not a rule).
+
+Not ported, left for a follow-up (R3b):
+
+- The `subvar` group: `RuleSubvarAnd`, `RuleSubvarSubpiece`, `RuleSubvarCompZero`,
+  `RuleSubvarShift`, `RuleSubvarZext`, `RuleSubvarSext`, `RuleSplitFlow` and their engines in
+  `subflow.cc` (`SubvariableFlow`, `SplitFlow`; `SubfloatFlow` is R4's). The group is off in the
+  check on both sides, so the bar does not see them; porting them needs a check with `subvar` on.
+- `RulePiecePathology` (group `protorecovery`, switched off by `togglerule`): it needs
+  `setInputBytesConsumed`/`setReturnBytesConsumed` in `fspec.rs` and their readers in dead code.
+- `prefersplit.cc`: no x86 `.cspec` has `<prefersplit>`, so nothing runs it; not ported.
+- `LaneDivide::setReplacement` refuses a type-locked primitive or structure; no type is locked
+  before S6, so the check is left out and must be added when S6 merges.
 
 ## Running stages in parallel
 

@@ -1,5 +1,6 @@
 //! Rule pools: the rules of `oppool1` ported so far (stage R1: copies, constants,
-//! arithmetic; ruleaction.cc) and the pool walk ([`pool`]). The rules are in families
+//! arithmetic; stage R3: extension, concat and sub-pieces in [`extend`], [`piece`],
+//! [`subpiece`]; ruleaction.cc) and the pool walk ([`pool`]). The rules are in families
 //! ([`copy`], [`arith`]) with the expression helpers they share ([`cse`]) and float constant
 //! folding ([`float`]); the `Funcdata` methods they need (`cseEliminateList`,
 //! `distributeIntMultAdd`, `totalReplaceConstant`, ...) are in `funcdata.rs`.
@@ -12,15 +13,21 @@
 mod arith;
 mod copy;
 mod cse;
+mod extend;
 mod float;
+mod piece;
 mod pool;
+mod subpiece;
 
 pub(crate) use pool::{nonzero_mask, pool_apply, select, Pool};
 
 use arith::*;
 use copy::*;
 use cse::*;
+use extend::*;
 use float::*;
+use piece::*;
+use subpiece::*;
 
 use std::collections::HashSet;
 
@@ -28,7 +35,7 @@ use super::block::BlockId;
 use super::emulate::{eval_binary, eval_unary};
 use super::op::{OpFlags, OpId};
 use super::opcode::Opcode;
-use super::rangeutil::calc_mask;
+use super::rangeutil::{calc_mask, sign_extend};
 use super::varnode::{Space, VarnodeId, VnFlags, CONST_SPACE};
 use super::{err, stdsort, Arch, Funcdata, LowlevelError, Result};
 
@@ -76,6 +83,8 @@ pub(crate) const OPPOOL1: &[Rule] = &[
     r("trivialbool", "analysis", &[BoolAnd, BoolOr, BoolXor], trivial_bool),
     r("trivialshift", "analysis", &[IntLeft, IntRight, IntSright], trivial_shift),
     r("identityel", "analysis", &[IntAdd, IntXor, IntOr, BoolXor, BoolOr, IntMult], identity_el),
+    r("doublesub", "analysis", &[Subpiece], double_sub),
+    r("concatshift", "analysis", &[IntRight, IntSright], concat_shift),
     r("multicollapse", "analysis", &[Multiequal], multi_collapse),
     r("2comp2mult", "analysis", &[Int2comp], two_comp_2_mult),
     r("sub2add", "analysis", &[IntSub], sub_2_add),
@@ -90,7 +99,26 @@ pub(crate) const OPPOOL1: &[Rule] = &[
         FloatFloat2float, FloatTrunc, FloatCeil, FloatFloor, FloatRound, Piece, Subpiece, Popcount,
         Lzcount], collapse_constants),
     r("propagatecopy", "analysis", &[Copy], propagate_copy),
+    r("zexteliminate", "analysis", &[IntEqual, IntNotequal, IntLess, IntLessequal], zext_eliminate),
+    r("zextsless", "analysis", &[IntSless, IntSlessequal], zext_sless),
+    r("subextcomm", "analysis", &[Subpiece], sub_ext_comm),
+    r("subcommute", "analysis", &[Subpiece], sub_commute),
+    r("concatcommute", "analysis", &[Piece], concat_commute),
+    r("concatzext", "analysis", &[Piece], concat_zext),
+    r("zextcommute", "analysis", &[IntRight], zext_commute),
+    r("zextshiftzext", "analysis", &[IntZext], zext_shift_zext),
+    r("concatzero", "analysis", &[Piece], concat_zero),
+    r("concatleftshift", "analysis", &[Piece], concat_left_shift),
+    r("subzext", "analysis", &[IntZext], sub_zext),
+    r("subcancel", "analysis", &[Subpiece], sub_cancel),
+    r("shiftsub", "analysis", &[Subpiece], shift_sub),
+    r("humptydumpty", "analysis", &[Piece], humpty_dumpty),
+    r("dumptyhump", "analysis", &[Subpiece], dumpty_hump),
+    r("humptyor", "analysis", &[IntOr], humpty_or),
     r("negateidentity", "analysis", &[IntNegate], negate_identity),
+    r("subnormal", "analysis", &[Subpiece], sub_normal),
+    r("piece2zext", "analysis", &[Piece], piece_2_zext),
+    r("piece2sext", "analysis", &[Piece], piece_2_sext),
     r("negatenegate", "analysis", &[IntNegate], negate_negate),
 ];
 
@@ -128,4 +156,20 @@ fn lone_descend(fd: &Funcdata, vn: VarnodeId) -> Option<OpId> {
 fn addr(fd: &Funcdata, vn: VarnodeId) -> (u32, u64) {
     let v = fd.vn(vn);
     (v.space.index(), v.offset)
+}
+
+/// The op defining `vn` when its opcode is `opc`.
+fn def_with(fd: &Funcdata, vn: VarnodeId, opc: Opcode) -> Option<OpId> {
+    def(fd, vn).filter(|&d| fd.op(d).opc == opc)
+}
+
+/// A constant's value as the C++ `int4` it is read into.
+fn int4(fd: &Funcdata, vn: VarnodeId) -> i64 {
+    i64::from(fd.vn(vn).offset as i32)
+}
+
+/// `Funcdata::newUniqueOut`: a new unique-space varnode of `size` bytes written by `op`.
+fn uniq_out(fd: &mut Funcdata, size: u32, op: OpId) -> Result<VarnodeId> {
+    let uniq = fd.uniq.ok_or_else(|| LowlevelError("no unique space".into()))?;
+    Ok(fd.new_unique_out(size, uniq, op))
 }
