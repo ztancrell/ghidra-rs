@@ -1575,9 +1575,11 @@ The reference does not finish 0x4c48d0 and 0x6b21e0 (on 0x6b21e0 ghidra-rs stops
 R1); with types, ten more, all one cause: the constant of an INT_SUB that the `cleanup` pool's
 `2comp2sub` builds after the last inference pass (`#0x1 - x`) is `int4` on the reference and
 `xunknown4` here (0x40ff50, 0x442c90, 0x479ac0, 0x494400, 0x4ea3ba, 0x5dec80, 0x5ffba0, 0x6b0260,
-0x74c9b0, 0x75e5a9). Not traced further: no pointer rule touches those ops, and no earlier check
-ran `analysis`, `cleanup` and `typerecovery` together with types printed.
-The rules are exercised: PTRADD/PTRSUB they make appear in 5 of the 8 M8 outputs. Not rerun at
+0x74c9b0, 0x75e5a9). Not caused by R5: the same ten differ with the five rules switched off on
+both sides (488 / 499); no earlier check ran `analysis`, `cleanup` and `typerecovery` together
+with types printed. Not traced further.
+The bar is meaningful: 326 of the M500 reference outputs (with types) change when the five rules
+are switched off. Not rerun at
 the commit (bars whose options leave the new code off: `typerecovery` is off in the R1, subvar,
 R4, S3 and S4 options and in the jump-table partial function): r1/subvar/r4 498 / 499,
 paramdouble 500 / 500, switch corpus 1,947 / 2,050, S4 498 / 500. The locked S6 checks (`void`,
