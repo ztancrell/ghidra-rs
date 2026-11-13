@@ -354,18 +354,6 @@ fn shr(v: u64, sa: i32) -> u64 {
     v.wrapping_shr(sa as u32)
 }
 
-/// Port of `Varnode::copySymbol` for a new constant, as far as constants carry it here: the
-/// data-type and the type lock (symbols and the name lock are not modelled yet).
-fn copy_symbol(fd: &mut Funcdata, to: VarnodeId, from: VarnodeId) {
-    let (ty, lock) = (fd.vn(from).ty, fd.vn(from).has(VnFlags::TYPELOCK));
-    fd.vn_mut(to).ty = ty;
-    if lock {
-        fd.vn_set(to, VnFlags::TYPELOCK);
-    } else {
-        fd.vn_clear(to, VnFlags::TYPELOCK);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

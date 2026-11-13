@@ -38,9 +38,14 @@ fn no_union(fd: &Funcdata, t: TypeId) -> Result<()> {
     Ok(())
 }
 
+/// `getTypeReadFacing(op)->getMetatype() == TYPE_PTR`. Only a type that could resolve to a
+/// pointer fails: a union (one of its fields may be a pointer) or a pointer to a union.
 fn is_ptr(fd: &mut Funcdata, vn: VarnodeId) -> Result<bool> {
-    let t = facing(fd, vn)?;
-    Ok(fd.types.meta(t) == Meta::Ptr)
+    let t = vn_type(fd, vn);
+    match fd.types.meta(t) {
+        Meta::Ptr | Meta::Union => no_union(fd, t).map(|_| true),
+        _ => Ok(false),
+    }
 }
 
 /// The C++ `sign_extend(v, size * 8 - 1)` as a signed value.
@@ -58,12 +63,15 @@ fn def_op(fd: &Funcdata, vn: VarnodeId) -> Result<OpId> {
     def(fd, vn).ok_or_else(|| LowlevelError("pointer rule: varnode has no defining op".into()))
 }
 
-/// Port of `Datatype::nearestArrayedComponent` for the kinds that can reach it: a space-base
-/// type's scopes hold only functions (`code`) and external references (pointers to `code`), so
-/// no symbol has an arrayed component; a struct is not ported.
+/// Port of `Datatype::nearestArrayedComponent` for the element types `testForArraySlack` reaches
+/// (the sub-types of a space-base type: `xunknown1`, `code`, a pointer to `code`): none has an
+/// arrayed component. A struct is not ported. The space-base type itself is never asked: see
+/// `AddTree::calc_subtype`.
 fn nearest_arrayed_component(fd: &Funcdata, t: TypeId) -> Result<bool> {
     match fd.types.meta(t) {
-        Meta::Struct | Meta::Union => err("nearestArrayedComponent of a struct: not implemented in ghidra-rs yet"),
+        Meta::Struct | Meta::Union | Meta::Spacebase => {
+            err("nearestArrayedComponent of a struct or space-base type: not implemented in ghidra-rs yet")
+        }
         _ => Ok(false),
     }
 }
@@ -140,6 +148,8 @@ impl AddTree {
         let ptr = inp(fd, op, slot)?;
         let ct = facing(fd, ptr)?;
         let base_type = fd.types.ptr_to(ct).ok_or_else(|| LowlevelError("AddTreeState: not a pointer".into()))?;
+        // `isVariableLength` (size 0) is never true here: the type store has no variable-length
+        // types (`varlength` structures and prototypes are not parsed)
         let align = i64::from(fd.types.align_size(base_type));
         let ptrsize = sz(fd, ptr);
         Ok(AddTree {
@@ -223,10 +233,8 @@ impl AddTree {
                         return self.span_add_tree(fd, d, val, depth + 1);
                     }
                 }
-                let vncoeff = sval.unsigned_abs() as u32;
-                if vncoeff > self.biggest_non_mult_coeff {
-                    self.biggest_non_mult_coeff = vncoeff;
-                }
+                // (uint4)|sval|
+                self.note_coeff(u64::from(sval.unsigned_abs() as u32));
                 return Ok(true);
             }
             if tree_coeff != 1 {
@@ -339,19 +347,13 @@ impl AddTree {
         }
         match fd.types.meta(self.base_type) {
             Meta::Spacebase => {
-                let offsetbytes = self.offset as i64;
-                let mut found = None;
-                if self.biggest_non_mult_coeff != 0 && nearest_arrayed_component(fd, self.base_type)? {
-                    return err("nearestArrayedComponent hit: not implemented in ghidra-rs yet");
-                }
-                if let Some((_, extra)) = sub_type(fd, arch, self.base_type, offsetbytes)? {
-                    found = Some(extra);
-                }
-                if found.is_none() && self.biggest_non_mult_coeff == 0 && nearest_arrayed_component(fd, self.base_type)?
-                {
-                    return err("nearestArrayedComponent hit: not implemented in ghidra-rs yet");
-                }
-                let Some(extra) = found else {
+                // The C++ asks `nearestArrayedComponent` before and after `getSubType`. It is
+                // false for every space-base type here: the global scope holds only functions and
+                // external references (`infertypes::Entry`), the local scope no symbols (no
+                // `localrecovery`), and neither kind has an arrayed component. When data symbols or
+                // local symbols land, port `TypeSpacebase::nearestArrayedComponent*` here (the
+                // marker: `nearest_arrayed_component` fails on a space-base type).
+                let Some((_, extra)) = sub_type(fd, arch, self.base_type, self.offset as i64)? else {
                     self.valid = false;
                     return Ok(());
                 };
@@ -466,7 +468,7 @@ impl AddTree {
         }
         if !self.valid {
             let addr = op_addr(fd, self.base_op);
-            fd.warning_header(format!("Problems distributing in pointer arithmetic at r0x{addr:08x}"));
+            fd.warning_header(format!("Problems distributing in pointer arithmetic at 0x{addr:08x}"));
             return Ok(true);
         }
         self.build_tree(fd)?;
@@ -516,7 +518,11 @@ impl AddTree {
             let o = new_op_before(fd, self.base_op, IntAdd, &[mult_node, e])?;
             newop = def(fd, o);
         }
-        let Some(newop) = newop else { return err("ptrarith problems") };
+        let Some(newop) = newop else {
+            // `data.warning("ptrarith problems", addr)`: a comment at the address, which only the C
+            // output shows (comments are stage S9); the tree is left as it is, as in the C++
+            return Ok(());
+        };
         let o = out(fd, self.base_op)?;
         fd.op_set_output(newop, o)?;
         fd.op_destroy(self.base_op);
@@ -665,7 +671,7 @@ pub(super) fn ptr_arith(fd: &mut Funcdata, op: OpId, arch: &Arch) -> Result<i32>
 
 /// Port of `RuleStructOffset0`: a LOAD or STORE of the first field through a pointer to a struct
 /// or array reads through a PTRSUB of 0.
-pub(super) fn struct_offset0(fd: &mut Funcdata, op: OpId, arch: &Arch) -> Result<i32> {
+pub(super) fn struct_offset0(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
     if !fd.typerecovery_start {
         return Ok(0);
     }
@@ -683,11 +689,7 @@ pub(super) fn struct_offset0(fd: &mut Funcdata, op: OpId, arch: &Arch) -> Result
             if base_size < movesize {
                 return Ok(0);
             }
-            // TypeStruct::getSubType is not ported: this fails
-            let Some((sub, _)) = sub_type(fd, arch, base, 0)? else { return Ok(0) };
-            if fd.types.size(sub) < movesize {
-                return Ok(0);
-            }
+            return err("RuleStructOffset0 on a struct (TypeStruct::getSubType): not implemented in ghidra-rs yet");
         }
         Meta::Array => {
             if base_size < movesize {
@@ -1013,13 +1015,87 @@ mod tests {
         assert_eq!(sext(0x80, 1), -128);
     }
 
+    /// A register input of 4 bytes at `off`.
+    fn input(fd: &mut Funcdata, off: u64) -> VarnodeId {
+        let v = fd.new_varnode(4, Space::Sleigh(1), off);
+        fd.vn_set(v, VnFlags::INPUT);
+        v
+    }
+
+    /// A new op `opc` with inputs `ins` and a register output at `off`.
+    fn op(fd: &mut Funcdata, opc: Opcode, ins: &[VarnodeId], off: u64) -> (OpId, VarnodeId) {
+        let o = fd.new_op(opc, 0x1000);
+        let out = fd.new_varnode_out(4, Space::Sleigh(1), off, o);
+        for (i, &v) in ins.iter().enumerate() {
+            fd.op_set_input(o, v, i).unwrap();
+        }
+        (o, out)
+    }
+
     #[test]
-    fn add_tree_remainder_and_division_are_signed() {
-        // calcSubtype / buildMultiples: C++ `%` and `/` on intb truncate toward zero
-        assert_eq!((-12i64).wrapping_rem(8), -4);
-        assert_eq!((-16i64).wrapping_div(8) as u64 & calc_mask(4), 0xffff_fffe);
-        // buildExtra's uintb_negate(correct - 1, 4) is -correct
-        let correct = 0x10u64;
-        assert_eq!(!correct.wrapping_sub(1) & calc_mask(4), 0xffff_fff0);
+    fn add_tree_splits_multiples_and_offsets() {
+        // p + (x * 8 + 6) with p an int4 *: x * 8 is a multiple of 4, 6 is not
+        let mut fd = Funcdata::new(0x1000);
+        let int4 = fd.types.base(4, Meta::Int);
+        let ptr_t = fd.types.pointer(4, int4, 1);
+        let p = input(&mut fd, 0);
+        fd.vn_mut(p).ty = Some(ptr_t);
+        let x = input(&mut fd, 4);
+        let c8 = fd.new_constant(4, 8);
+        let (_, m) = op(&mut fd, IntMult, &[x, c8], 0x10);
+        let c6 = fd.new_constant(4, 6);
+        let (_, t) = op(&mut fd, IntAdd, &[m, c6], 0x14);
+        let (base, _) = op(&mut fd, IntAdd, &[p, t], 0x18);
+        let mut st = AddTree::new(&mut fd, base, 0).unwrap();
+        assert_eq!(st.size, 4);
+        assert!(!st.is_degenerate);
+        st.span_root(&fd).unwrap();
+        assert!(st.valid);
+        assert_eq!((st.multiple.clone(), st.coeff.clone()), (vec![x], vec![8]));
+        assert_eq!(st.nonmult, vec![fd.op(fd.vn(t).def.unwrap()).ins[1]]);
+        assert_eq!((st.multsum, st.nonmultsum, st.biggest_non_mult_coeff), (0, 6, 0));
+    }
+
+    #[test]
+    fn undo_ptradd_scales_a_constant_index() {
+        let mut fd = Funcdata::new(0x1000);
+        let p = input(&mut fd, 0);
+        let (i, s) = (fd.new_constant(4, 3), fd.new_constant(4, 4));
+        let (o, _) = op(&mut fd, Ptradd, &[p, i, s], 0x10);
+        op_undo_ptradd(&mut fd, o).unwrap();
+        assert_eq!(code(&fd, o), IntAdd);
+        assert_eq!(ins(&fd, o).len(), 2);
+        assert_eq!(off(&fd, ins(&fd, o)[1]), 12);
+    }
+
+    #[test]
+    fn collapse_mult_mult() {
+        let mut fd = Funcdata::new(0x1000);
+        let x = input(&mut fd, 0);
+        let c3 = fd.new_constant(4, 3);
+        let (_, y) = op(&mut fd, IntMult, &[x, c3], 0x10);
+        let c5 = fd.new_constant(4, 5);
+        let (zop, z) = op(&mut fd, IntMult, &[y, c5], 0x14);
+        assert!(collapse_int_mult_mult(&mut fd, z).unwrap());
+        assert_eq!(ins(&fd, zop)[0], x);
+        assert_eq!(off(&fd, ins(&fd, zop)[1]), 15);
+        assert!(!collapse_int_mult_mult(&mut fd, x).unwrap());
+    }
+
+    #[test]
+    fn remove_local_adds_folds_constant_adds_into_copies() {
+        // s = p -> 8; u = s + 4: the add becomes a COPY, 4 comes back, s takes u's type
+        let mut fd = Funcdata::new(0x1000);
+        let p = input(&mut fd, 0);
+        let c8 = fd.new_constant(4, 8);
+        let (sop, s) = op(&mut fd, Ptrsub, &[p, c8], 0x10);
+        fd.op_mut(sop).flags.set(OpFlags::STOP_TYPE_PROPAGATION);
+        let c4 = fd.new_constant(4, 4);
+        let (uop, u) = op(&mut fd, IntAdd, &[s, c4], 0x14);
+        let int4 = fd.types.base(4, Meta::Int);
+        fd.vn_mut(u).ty = Some(int4);
+        assert_eq!(remove_local_adds(&mut fd, s).unwrap(), 4);
+        assert_eq!((code(&fd, uop), ins(&fd, uop).len()), (Copy, 1));
+        assert_eq!(fd.vn(s).ty, Some(int4));
     }
 }

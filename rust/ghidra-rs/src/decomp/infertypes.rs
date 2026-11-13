@@ -743,7 +743,9 @@ pub(crate) fn infer_types(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     Ok(0)
 }
 
-/// A symbol of the global scope a pointer constant can name (`MapEntry`).
+/// A symbol of the global scope a pointer constant can name (`MapEntry`): a function or an
+/// external reference. `rules/ptrarith.rs` (`AddTree::calc_subtype`) relies on no other kind
+/// existing; adding data symbols means porting `TypeSpacebase::nearestArrayedComponent*` there.
 struct Entry {
     addr: u64,
     externref: bool,

@@ -1171,7 +1171,7 @@ the tree; `ActionInferTypes` reads R1's computed non-zero masks (`Funcdata::nzma
 `getNZMask`) for its boolean guards. `PcodeOp::stopsTypePropagation` and
 `Varnode::stopsUpPropagation` stay unported: only `RulePtrArith`, `RuleStructOffset0` and
 `RulePushPtr` (R5) set the flag, and no R1 rule sets it or makes a PTRSUB/PTRADD; both checks
-come with R5. Every bar rerun on the merged binary: S6 unlocked, locked `void`, locked `int4`
+come with R5. Superseded (R5): ported, see "Stage R5 (in part)". Every bar rerun on the merged binary: S6 unlocked, locked `void`, locked `int4`
 and callees with a stack parameter each M8 8 / 8, M500 446 / 446 non-SSE (446 / 500; the misses
 are the 53 SSE functions and 0x4c48d0, which the reference does not finish); S4 regression
 M8 8 / 8; R1 check M8 8 / 8, M500 451 / 453.
@@ -1558,8 +1558,8 @@ types, `testForArraySlack`). Type inference now reads the two flags the rules se
 in `propagateTypeEdge`; PTRADD propagates types (`TypeOpPtradd::propagateType`) and prints in
 `print raw` as `out = p + i(*size)`. Not ported, failing loudly: `TypePointerRel`, struct
 sub-types and `nearestArrayedComponent` of structs, unions (`needsResolution`),
-`assignPropagatedType` (after type recovery gives up). Recursion over add trees is capped at
-depth 1,000 (an error past it). `tools/r1-options.sh` also reads `oppool2` (skipping commented
+`assignPropagatedType` (after type recovery gives up). Documented difference: the C++ recursion over add trees
+and local adds is unbounded; ghidra-rs fails with an error past depth 1,000 (`MAX_DEPTH`). `tools/r1-options.sh` also reads `oppool2` (skipping commented
 `addRule` lines) and writes `tools/corpus/r5-options.txt` (groups `analysis`, `cleanup`,
 `typerecovery`); `tools/corpus/s6-options.txt` no longer switches the five rules off.
 

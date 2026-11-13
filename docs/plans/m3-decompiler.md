@@ -474,7 +474,7 @@ the tree; `ActionInferTypes` reads R1's computed non-zero masks (`Funcdata::nzma
 `getNZMask`) for its boolean guards. `PcodeOp::stopsTypePropagation` and
 `Varnode::stopsUpPropagation` stay unported: only `RulePtrArith`, `RuleStructOffset0` and
 `RulePushPtr` (R5) set the flag, and no R1 rule sets it or makes a PTRSUB/PTRADD; both checks
-come with R5. Every bar rerun on the merged binary: S6 unlocked, locked `void`, locked `int4`
+come with R5. Superseded (R5): ported, see "R5". Every bar rerun on the merged binary: S6 unlocked, locked `void`, locked `int4`
 and callees with a stack parameter each M8 8 / 8, M500 446 / 446 non-SSE (446 / 500; the misses
 are the 53 SSE functions and 0x4c48d0, which the reference does not finish); S4 regression
 M8 8 / 8; R1 check M8 8 / 8, M500 451 / 453.
@@ -623,7 +623,8 @@ R5 rules toggled off" (`s6-options.txt` no longer switches them off).
 Not ported, failing loudly where reached: `TypePointerRel` (the type store never makes one, so
 `isFormalPointerRel` is false), struct sub-types inside the rules (`TypeStruct::getSubType`,
 `isOffsetValid`, `nearestArrayedComponent`), unions (`needsResolution`), and
-`AddTreeState::assignPropagatedType` (only after type recovery gives up). Space-base types answer
+`AddTreeState::assignPropagatedType` (only after type recovery gives up). Documented difference: the add-tree and
+local-add recursions, unbounded in the C++, fail with an error past depth 1,000 (`MAX_DEPTH`). Space-base types answer
 `nearestArrayedComponent` with false: their scopes hold only functions and external references,
 neither arrayed.
 

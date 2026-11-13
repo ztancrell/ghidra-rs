@@ -387,14 +387,29 @@ impl Funcdata {
         }
     }
 
-    /// `opSetInput`'s constant rule: a constant that already has a reader is copied.
+    /// `opSetInput`'s constant rule: a constant that already has a reader is copied, with its
+    /// symbol properties (`copySymbol`), unless it is a space base.
     fn unshared_constant(&mut self, vn: VarnodeId) -> VarnodeId {
         let v = self.vn(vn);
-        if v.is_constant() && !v.descend.is_empty() {
+        if v.is_constant() && !v.descend.is_empty() && !v.has(VnFlags::SPACEBASE) {
             let (size, offset) = (v.size, v.offset);
-            return self.new_constant(size, offset);
+            let c = self.new_constant(size, offset);
+            self.copy_symbol(c, vn);
+            return c;
         }
         vn
+    }
+
+    /// Port of `Varnode::copySymbol` as far as varnodes carry it here: the data-type and the type
+    /// lock (symbol entries and the name lock are not modelled yet).
+    pub(crate) fn copy_symbol(&mut self, to: VarnodeId, from: VarnodeId) {
+        let (ty, lock) = (self.vn(from).ty, self.vn(from).has(VnFlags::TYPELOCK));
+        self.vn_mut(to).ty = ty;
+        if lock {
+            self.vn_set(to, VnFlags::TYPELOCK);
+        } else {
+            self.vn_clear(to, VnFlags::TYPELOCK);
+        }
     }
 
     /// Port of `Funcdata::opSetInput`: `vn` becomes input `slot` of `op`; `slot` may be one past
