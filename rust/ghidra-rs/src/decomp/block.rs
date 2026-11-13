@@ -45,6 +45,16 @@ pub(crate) struct Edge {
     pub(crate) reverse: usize,
 }
 
+impl Edge {
+    /// The label with the C++ `FlowBlock::edge_flags` bit values (`f_irreducible` 8, `f_tree_edge`
+    /// 0x10, `f_forward_edge` 0x20, `f_cross_edge` 0x40, `f_back_edge` 0x80, `f_loop_edge` 2,
+    /// `f_loop_exit_edge` 0x100, `f_immed_copy` 0x200), for the structured copy (stage S8).
+    pub(crate) fn cpp_label(&self) -> u32 {
+        const MAP: [u32; 8] = [8, 0x10, 0x20, 0x40, 0x80, 2, 0x100, 0x200];
+        (0..8).filter(|&i| self.label.0 & (1 << i) != 0).map(|i| MAP[i]).fold(0, |a, b| a | b)
+    }
+}
+
 /// Port of `BlockBasic` (with its `FlowBlock` base).
 #[derive(Debug, Clone)]
 pub(crate) struct BlockBasic {
@@ -242,6 +252,16 @@ impl BlockGraph {
         }
         self.remove_block(outbl);
         self.block_mut(bl).entry_point = entry;
+    }
+
+    /// Port of `FlowBlock::swapEdges` on a two-way block (stage S8; `f_flip_path` is not kept:
+    /// nothing reads it).
+    pub(crate) fn swap_edges(&mut self, bl: BlockId) {
+        self.block_mut(bl).outs.swap(0, 1);
+        for i in 0..2 {
+            let Edge { point, reverse, .. } = self.block(bl).outs[i];
+            self.block_mut(point).ins[reverse].reverse = i;
+        }
     }
 
     fn set_out_edge_flag(&mut self, bl: BlockId, i: usize, f: EdgeFlags) {

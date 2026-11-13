@@ -531,6 +531,61 @@ M500 498 / 500; S6 unlocked, locked `void`, locked `int4` and callees `int4(int4
 M8 8 / 8, M500 498 / 500 (498 / 499 the reference finishes; the miss is 0x4919f0).
 Superseded: the "446 / 446 non-SSE" results of the S6 section above.
 
+### S8: in part on branch `m3-s8` (2026-11-13)
+
+Ported: `ActionBlockStructure` end to end. `decomp/structure.rs` holds the structured hierarchy
+(`Funcdata::sblocks`) as an arena of blocks with an enum for the `FlowBlock` subclass (graph,
+copy, goto, multi-goto, list, condition, if, if/else, if-no-exit, if-goto, while-do, do-while,
+infinite loop, switch), the edge edits of `FlowBlock`/`BlockGraph`, every `newBlock*`,
+`buildCopy` with `installSwitchDefaults`, `isComplex`, `negateCondition` (which flips the basic
+block's CBRANCH: `boolean_flip`, `fallthru_true` and the basic out edges) and `printTree`.
+`decomp/collapse.rs` ports `CollapseStructure` (every rule, in the C++ order), `LoopBody`,
+`TraceDAG` and `FloatingEdge`. `structureReset` clears the structure, as the C++ does.
+
+Check (from `rust/`):
+
+```sh
+PRINT=$'print tree block\nprint raw' BREAK=assignhigh \
+  DECOMP_SKIP_ACTIONS=prefercomplement,structuretransform \
+  OPTIONS=tools/corpus/s8-options.txt tools/decomp-diff.sh m500
+PRINT=$'print tree block\nprint raw' BREAK=assignhigh \
+  DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst,prefercomplement,structuretransform \
+  OPTIONS=tools/corpus/s8-r-options.txt tools/decomp-diff.sh m500
+```
+
+`s8-options.txt` is `s4-options.txt` and `s8-r-options.txt` is `r1-options.txt`, each without
+the `blockrecovery off` line (`grep -v blockrecovery`; regenerate when those change). Where it
+breaks and why that is fair: `blockstructure` runs in the main loop, so `break start assignhigh`
+stops after it and after the later main-loop passes that read the flipped branches. The two
+`blockrecovery` actions between `cleanup` and `assignhigh`, `prefercomplement` and
+`structuretransform`, are skipped on both sides: they only rework the finished structure
+(swap if/else clauses, normalize flipped conditions, move for-loop ops), so both engines
+compare the structure `blockstructure` built. `finalstructure` comes after the merge and cast
+actions (S7, S9), so no break can reach it yet. Printing `print raw` too checks the CBRANCH flips
+and edge swaps of the collapse rules on the basic blocks.
+
+| check | M8 | M500 |
+|---|---|---|
+| rule groups off (`s8-options.txt`) | 8 / 8 | 499 / 500; 499 / 499 of the functions the reference finishes |
+| rule-stage options (`s8-r-options.txt`) | not run yet | not run yet |
+
+The miss is 0x4c48d0, which neither engine finishes within the timeout. Existing bars on this
+branch: not rerun yet.
+
+Not ported, left for part two:
+
+- `prefercomplement` and `structuretransform`: they need `opFlipInPlaceTest/Execute`,
+  `opNormalizeFlip`, `replaceLessequal` and the boolean-flip table, which R2 ports
+  (`rules/boolean.rs`, `rules/compare.rs` on `m3-r2`). Blocked until R2 merges. The for-loop part
+  of `BlockWhileDo::finalTransform` (`findLoopVariable`, `findInitializer`,
+  `PcodeOp::isMoveable`) also comes with it.
+- `finalstructure` (`orderBlocks`, `finalizePrinting`, `scopeBreak`, `markUnstructured`,
+  `markLabelBumpUp`), `nextFlowAfter`, the case data of `BlockSwitch` (`grabCaseBasic`) and
+  structured `printRaw`: needed by S9 only.
+- `returnsplit` (group off in the check; needs `Funcdata::nodeSplit` and `gotoPrints`).
+- `normalizebranches` needs nothing: its group is not in the `decompile` root's groups, so the
+  console never runs it.
+
 ## Running stages in parallel
 
 Strict chain first: S0 → S1a → S1b → S2. After S2 the work fans out. Under the cap of two

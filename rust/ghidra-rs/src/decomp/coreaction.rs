@@ -1606,6 +1606,7 @@ pub(crate) fn deindirect(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
 fn structure_reset(fd: &mut Funcdata) -> Result<()> {
     fd.blocks.structure_loops()?;
     fd.heritage.force_restructure();
+    fd.structure.clear();
     Ok(())
 }
 

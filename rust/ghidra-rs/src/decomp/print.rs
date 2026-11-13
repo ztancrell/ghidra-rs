@@ -328,7 +328,8 @@ impl<'a> Printer<'a> {
                 }
                 self.out.str(" if (");
                 self.vn(ins[1]);
-                self.out.str(" != 0)");
+                let flip = op.flags.has(super::op::OpFlags::BOOLEAN_FLIP);
+                self.out.str(if flip { " == 0)" } else { " != 0)" });
                 if let Some([f, _]) = outs {
                     self.out.str(" else ");
                     self.short_header(f.point);

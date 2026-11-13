@@ -1313,6 +1313,32 @@ no such command. All bars rerun on the merged binary: R3 check M8 8 / 8, M500 49
 R1 set 451 / 453, the lane-divide set 44 / 46); paramdouble 500 / 500; S4 check M8 8 / 8,
 M500 498 / 500; the four S6 checks M8 8 / 8, M500 498 / 500 each.
 
+### Stage S8 (in part): structuring
+
+Stage S8 (branch `m3-s8`) ports `ActionBlockStructure`: `decomp/structure.rs` (the structured
+block hierarchy of block.cc as an arena with a block-kind enum, `buildCopy`,
+`installSwitchDefaults`, the `newBlock*` constructors, `negateCondition`, `printTree`) and
+`decomp/collapse.rs` (`CollapseStructure`, `LoopBody`, `TraceDAG`, `FloatingEdge` of
+blockaction.cc). `print tree block` prints the hierarchy (nothing before `blockstructure` ran),
+and `print raw` prints a flipped CBRANCH as `== 0`, as `TypeOpCbranch::printRaw` does.
+
+Check: `print tree block` and `print raw` at `break start assignhigh`, group `blockrecovery` on
+(`tools/corpus/s8-options.txt`, `s8-r-options.txt`: the S4 and rule-stage options without the
+`blockrecovery off` line), with `prefercomplement` and `structuretransform` skipped on both
+sides (`DECOMP_SKIP_ACTIONS`). The commands and the reasons are in
+`docs/plans/m3-decompiler.md`, "S8".
+
+| corpus | rule groups off | rule-stage options |
+|---|---|---|
+| m8 | 8 / 8 | not run yet |
+| m500 | 499 / 500 (499 / 499 the reference finishes) | not run yet |
+
+The miss is 0x4c48d0 (neither engine finishes within the timeout). Not ported yet:
+`prefercomplement` and `structuretransform` (they wait for R2's flip helpers), `finalstructure`,
+`returnsplit` and structured `printRaw`.
+
+New flag bit: `OpFlags::FALLTHRU_TRUE` (`1 << 16`).
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The

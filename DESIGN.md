@@ -157,6 +157,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `subflow.cc`) and `RulePiecePathology` are not ported.
    Merged with S6: the S6 checks (unlocked, `void`, `int4`, callees) are M8 8 / 8, M500
    498 / 499 each with lane division on. Superseded: "446 / 446 non-SSE" above.
+   S8 (structuring, in part) on branch `m3-s8`: `ActionBlockStructure` (`CollapseStructure`,
+   `LoopBody`, `TraceDAG`; `structure.rs`, `collapse.rs`) and `print tree block`; `print tree
+   block` plus `print raw` at `assignhigh` with `blockrecovery` on: M8 8 / 8, M500 499 / 499 the
+   reference finishes (bar 98 %); with the rule-stage options: not run yet. Open: `prefercomplement` and
+   `structuretransform` (blocked on R2's flip helpers), `finalstructure`, `returnsplit`.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.

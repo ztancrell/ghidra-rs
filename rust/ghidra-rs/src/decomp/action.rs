@@ -124,7 +124,7 @@ pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
         &mut t,
         &[
             ("redundbranch", "deadcontrolflow", c::redund_branch),
-            ("blockstructure", "blockrecovery", not_ported),
+            ("blockstructure", "blockrecovery", super::structure::block_structure),
             ("constantptr", "typerecovery", super::infertypes::constant_ptr),
             ("oppool2", "base", c::nothing),
             ("determinedbranch", "unreachable", c::determined_branch),
