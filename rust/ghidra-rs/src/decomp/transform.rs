@@ -34,6 +34,14 @@ impl LaneDescription {
             lane_position: (0..num).map(|i| i * sz).collect(),
         }
     }
+    /// Port of `LaneDescription(int4 origSize,int4 lo,int4 hi)`: a low and a high piece.
+    pub(crate) fn two(orig_size: i32, lo: i32, hi: i32) -> LaneDescription {
+        LaneDescription { whole_size: orig_size, lane_size: vec![lo, hi], lane_position: vec![0, lo] }
+    }
+    /// `getWholeSize`.
+    pub(crate) fn whole_size(&self) -> i32 {
+        self.whole_size
+    }
     pub(crate) fn num_lanes(&self) -> i32 {
         self.lane_size.len() as i32
     }

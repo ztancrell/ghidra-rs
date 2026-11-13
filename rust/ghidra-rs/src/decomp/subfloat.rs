@@ -1,8 +1,9 @@
 //! Port of `SubfloatFlow` and `RuleSubfloatConvert` (subflow.cc, group `floatprecision`), with
 //! the encoding conversion of `FloatFormat` (float.cc) they need: a float value carried in a
 //! wider format (an x87 10-byte register, a double) whose data-flow never needs more than the
-//! precision it came in with is rewritten at that precision. In its own file, not with
-//! `SubvariableFlow` (`subflow.rs`), so the two ports do not touch the same file.
+//! precision it came in with is rewritten at that precision. subflow.cc holds both this and
+//! `SubvariableFlow`; this one stays in its own file because it shares no code with
+//! `subflow.rs` beyond `TransformManager`, and that file is already the family's largest.
 //!
 //! The varnode and op marks of the trace are sets in the trace, not flags.
 
@@ -10,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::op::OpId;
 use super::opcode::Opcode::{self, *};
+use super::subflow::repeat_slot;
 use super::transform::{TVarId, TransformManager};
 use super::varnode::{VarnodeId, VnFlags};
 use super::{err, Arch, Funcdata, LowlevelError, Result};
@@ -313,26 +315,6 @@ impl<'a> SubfloatFlow<'a> {
         Ok(Some(res))
     }
 
-    /// `PcodeOp::getRepeatSlot`: the slot of the `count`-th read of `vn` by `op`, where `before`
-    /// is the part of `vn`'s descendant list ahead of the current read.
-    fn repeat_slot(&self, op: OpId, vn: VarnodeId, first: usize, before: &[OpId]) -> Result<usize> {
-        let count = 1 + before.iter().filter(|&&o| o == op).count();
-        if count == 1 {
-            return Ok(first);
-        }
-        let ins = &self.fd.op(op).ins;
-        let mut recount = 1;
-        for (i, &v) in ins.iter().enumerate().skip(first + 1) {
-            if v == vn {
-                recount += 1;
-                if recount == count {
-                    return Ok(i);
-                }
-            }
-        }
-        err("getRepeatSlot: no repeated slot")
-    }
-
     fn slot(&self, op: OpId, vn: VarnodeId) -> Result<usize> {
         self.fd.slot_of(op, vn).ok_or_else(|| LowlevelError("descendant does not read its varnode".into()))
     }
@@ -378,7 +360,7 @@ impl<'a> SubfloatFlow<'a> {
                     let mut slot = self.slot(op, vn)?;
                     let Some(rvn2) = self.set_replacement(fd.input(op, 1 - slot.min(1))?)? else { return Ok(false) };
                     if rvn == rvn2 {
-                        slot = self.repeat_slot(op, vn, slot, &desc[..idx])?;
+                        slot = repeat_slot(fd, op, vn, slot, idx)?;
                     }
                     if self.tm.preexisting_guard(slot, rvn2) {
                         let rop = self.tm.new_preexisting_op(2, opc, op);

@@ -1187,10 +1187,11 @@ need (`TermOrder`, `functionalEqualityLevel`, `cseEliminateList`, `cseEliminatio
 `distributeIntMultAdd`, float constant folding through `FloatFormat`). `propagatecopy` marks
 immediate-copy edges (`setCopyImmed`), which `donothing` reads (`hasNoImmediateCopy`): a block
 emptied by copy propagation stays. Group `analysis` is on, so the main loop's `nonzeromask`
-runs (`jumptable::calc_nz_mask`) and dead code reads its masks (`Funcdata::nzmask`).
+runs (`jumptable::calc_nz_mask`; superseded in R3 part two: `calc_nz_mask_unfolded`, without
+the constant folding) and dead code reads its masks (`Funcdata::nzmask`).
 
 The check: `tools/corpus/r1-options.txt` is S4's options with `analysis` on and every rule of
-the groups that are on and not ported switched off (97 `togglerule`s at R1, 76 after R3, 59 after R4), written by
+the groups that are on and not ported switched off (97 `togglerule`s at R1, 76 after R3 part one, 75 after part two, 58 after R4), written by
 `tools/r1-options.sh` from the table in `rules/mod.rs`: rerun it when rules land.
 `ghidra-rs decompile` honours `option togglerule`. Group `analysis` also holds three actions
 not ported yet, `multicse`, `shadowvar` and `condconst` (`ActionConditionalConst`). A console
@@ -1225,6 +1226,7 @@ The bar is taken over M500 less the functions that need `ActionLaneDivide` (R3),
 - 0x47a6b0: the reference merges two blocks testing the same condition (`ActionConditionalExe`,
   `condexe.cc`: ghidra-rs only detects a candidate on the same condition varnode and does not
   find this one; R2 or later).
+- Superseded (R3 part two): fixed, the main loop's non-zero masks no longer fold constants.
 - 0x6fa6e0: `varnodeprops` replaces a never-consumed `BL` by 0 later on the reference (through a
   COPY into a MULTIEQUAL); on ghidra-rs the rules have made it `COPY #0` by then, which the
   replacement skips. Not traced further.
@@ -1289,6 +1291,7 @@ functions exercise lane division.
 Remaining differences, by cause:
 
 - 0x47a6b0, 0x6fa6e0: as in stage R1.
+  Superseded: 0x6fa6e0 and 0x4891e0 are identical since part two (the non-zero masks).
 - 0x4891e0: `varnodeprops` replaces the reads of a MULTIEQUAL of two zeros by 0 one main-loop
   pass before the reference does (an extra `COPY #0` for a MULTIEQUAL reader, so later sequence
   numbers shift): the non-zero mask is 0 earlier on ghidra-rs. Same family as 0x6fa6e0; not
@@ -1314,10 +1317,65 @@ no such command. All bars rerun on the merged binary: R3 check M8 8 / 8, M500 49
 R1 set 451 / 453, the lane-divide set 44 / 46); paramdouble 500 / 500; S4 check M8 8 / 8,
 M500 498 / 500; the four S6 checks M8 8 / 8, M500 498 / 500 each.
 
+### Stage R3 part two: the `subvar` group, `RulePiecePathology`
+
+Branch `m3-r3b`. Superseded: "Not ported in this stage: the `subvar` group, `RulePiecePathology`"
+above.
+
+- `decomp/subflow.rs`: `SubvariableFlow` (subflow.cc). A logical value in some bits of larger
+  varnodes is traced forward and backward; a trace that succeeds gives a `Replacement`, which
+  rebuilds the flow on varnodes of the logical size (`doReplacement`).
+- `decomp/splitflow.rs`: `SplitFlow`, on `TransformManager` (`transform.rs` gains the two-piece
+  `LaneDescription::two`).
+- `decomp/rules/subvar.rs`: `subvar_and`, `subvar_subpiece`, `splitflow`, `subvar_compzero`,
+  `subvar_shift`, `subvar_zext`, `subvar_sext` (group `subvar`). No trace is aggressive:
+  `Varnode::isPtrFlow` needs `RulePtrFlow` (group `subvar`, not ported, switched off by
+  `togglerule ptrflow`) and `aggressive_ext_trim` is off for x86.
+- `piecepathology` (group `protorecovery`, `rules/piece.rs`) with the hints it writes,
+  `FuncProto::return_bytes_consumed` and `CallSpec::input_consume`, which dead code reads
+  (`gatherConsumedReturn`, `markConsumedParameters`). It is now on in every rule check.
+- `RuleSubfloatConvert` and `SubfloatFlow` are in group `floatprecision`: left to R4.
+  `SplitDatatype` (the `splitcopy`/`splitpointer` rules of the cleanup pool) is not ported.
+  The table in `rules/mod.rs` holds 48 rules.
+
+Two faults found on the way, both older than this stage:
+
+- `ActionNonzeroMask` on the function itself used the jump-table stand-in that folds inputs
+  to constants (`jumptable::calc_nz_mask`), so a mask could be tighter than the reference's
+  (`x ^ x` counted as 0 before `trivialarith` rewrote it). It now runs
+  `calc_nz_mask_unfolded`; the partial function of jump-table recovery keeps the folding.
+  Interim: branch `m3-r2` solves the same with a single `calc_nz_mask` and an explicit
+  `fold_constants` step on the partial function, and that shape replaces this pair when R2
+  merges.
+  This was the cause of 0x6fa6e0 and 0x4891e0. Superseded: "a zero replacement the reference
+  makes later" in the R1 and R3 notes.
+- Removing an unreachable block failed with "Deleting op with descendants" when a reader was
+  in another dead block; `descendantsOutside` only counts readers in blocks that are not dead.
+
+The subvar check: `tools/corpus/subvar-options.txt` (written by `tools/r1-options.sh` next to
+`r1-options.txt`: groups `analysis` and `subvar` on, 76 `togglerule`s), `print raw` at
+`break start assignhigh`, `DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst`:
+
+```sh
+export DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst
+BREAK=assignhigh OPTIONS=$PWD/tools/corpus/subvar-options.txt TIMEOUT=60 rust/tools/decomp-diff.sh m500
+```
+
+| check | m8 | m500 |
+|---|---|---|
+| subvar check (`subvar-options.txt`) | 8 / 8 | 497 / 500; 497 / 499 the reference finishes (99.6 %, bar 98 %: reached) |
+| R3 check (`r1-options.txt`, now 75 `togglerule`s) | 8 / 8 | 497 / 500 (was 495); R1 set 452 / 453, lane-divide set 45 / 46 |
+| paramdouble | – | 500 / 500 |
+| S4 check | 8 / 8 | 498 / 500 |
+| S6: unlocked, `void`, `int4`, callees `int4(int4 a)` | 8 / 8 each | 498 / 500 each |
+
+Remaining differences: 0x47a6b0 (`ActionConditionalExe`, as in R1; rule checks only),
+0x4919f0 (a block the reference empties; every check), 0x4c48d0 (reference timeout).
+
 ### Stage R4: division, remainder, sign and float rules
 
 Stage R4 (branch `m3-r4`) adds 20 rules of `oppool1` (the table in `rules/mod.rs` now holds
-60): `rules/div.rs` (`positivediv`, `divtermadd`, `divtermadd2`, `divopt`, `signdiv2`,
+68 with R3 part two's): `rules/div.rs` (`positivediv`, `divtermadd`, `divtermadd2`, `divopt`, `signdiv2`,
 `divchain`, with `Varnode::isConstantExtended` and `Funcdata::newExtendedConstant`),
 `rules/modulo.rs` (`signform`, `signform2`, `signnearmult`, `modopt`, `signmod2nopt`,
 `signmod2nopt2`, `signmod2opt`), `rules/floatrules.rs` (`floatrange`, `floatsign`,
@@ -1330,8 +1388,10 @@ as the C++; a division by zero fails as `udiv128` throws); C++ shifts by a count
 more are taken mod 64, as x86 does. `RuleSignForm2` reports no change after making one, as the
 C++. Helpers added elsewhere: `BlockGraph::find_condition` (`FlowBlock::findCondition`),
 `TransformManager::new_piece`/`get_piece`/`preexisting_guard` (the subclass's
-`preserveAddress` is passed in), `jumptable::is_bool_output` and `mostsigbit_set` made
-crate-visible. `option nanignore` (`OptionNanIgnore`) is read: `compare` (the default) and `all`
+`preserveAddress` is passed in), `jumptable::is_bool_output` made crate-visible. Shared after the merge with R3 part two:
+`rangeutil::mostsigbit_set`, `subflow::preferred_zext_size` and `subflow::repeat_slot`, and
+`infertypes::float_sign_manipulation` (one port of `TypeOp::floatSignManipulation` for type
+inference and `floatsign`); `TransformManager::has_def` became `var_def`. `option nanignore` (`OptionNanIgnore`) is read: `compare` (the default) and `all`
 enable `ignorenan`, `all` also makes every FLOAT_NAN a COPY of 0 (`nan_ignore_all`), `none`
 switches the rule off. Superseded: the console no longer reads and ignores every other option;
 those that only change the printed C (`nullprinting`, `inplaceops`, `conventionprinting`,
@@ -1340,8 +1400,9 @@ those that only change the printed C (`nullprinting`, `inplaceops`, `conventionp
 `forloops`) still are, any other one not ported is an error. Not ported: `RuleFloatSignCleanup`
 (the `cleanup` pool, R2).
 
+
 The check is R1's with group `floatprecision` on: `tools/corpus/r4-options.txt`, written by
-`tools/r1-options.sh` next to `r1-options.txt` (59 `togglerule`s).
+`tools/r1-options.sh` next to `r1-options.txt` (59 `togglerule`s; 58 after the merge with R3 part two, which ports `piecepathology`).
 
 ```sh
 export DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst
@@ -1362,6 +1423,13 @@ locked `void` and locked `int4` M500 498 / 500 each (misses 0x4919f0 and 0x4c48d
 callees `int4(int4 a)` 497 / 500: 0x4919f0, 0x4c48d0 (ghidra-rs over 60 s with two checks running
 side by side) and 0x5b59c0, where the reference aborts (a `std::string` assertion in the C++, with a
 prelude regenerated by this branch's `analyze`), so ghidra-rs prints a function the reference does not.
+
+Merged with R3 part two (`master` into `m3-r4`, 2026-11-13); every bar rerun on the merged binary:
+R4 check M8 8 / 8, M500 497 / 499 (the misses 0x47a6b0, 0x4919f0; 0x4c48d0 the reference does
+not finish); subvar check and R3 check 497 / 499 each; paramdouble 500 / 500; S4 check and the
+four S6 checks (unlocked, `void`, `int4`, callees) 498 / 500 each (0x4919f0; 0x4c48d0).
+Superseded: the 495 / 499 above (0x4891e0 and 0x6fa6e0 are fixed by part two's non-zero masks)
+and the callee check's 497 (the reference ran 0x5b59c0 this time).
 
 ## Speed
 

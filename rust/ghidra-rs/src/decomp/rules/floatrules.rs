@@ -56,22 +56,6 @@ pub(super) fn float_range(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> 
     Ok(1)
 }
 
-/// Port of `TypeOp::floatSignManipulation`: FLOAT_ABS for an INT_AND clearing the sign bit,
-/// FLOAT_NEG for an INT_XOR flipping it.
-fn float_sign_manipulation(fd: &Funcdata, op: OpId) -> Result<Option<Opcode>> {
-    let opc = fd.op(op).opc;
-    if !matches!(opc, IntAnd | IntXor) {
-        return Ok(None);
-    }
-    let cvn = inp(fd, op, 1)?;
-    if !is_const(fd, cvn) {
-        return Ok(None);
-    }
-    let mask = calc_mask(fd.vn(cvn).size);
-    let (val, res) = if opc == IntAnd { (mask >> 1, FloatAbs) } else { (mask ^ (mask >> 1), FloatNeg) };
-    Ok((val == fd.vn(cvn).offset).then_some(res))
-}
-
 /// Rewrites `op` as its float sign operation when it is one (`RuleFloatSign`'s inner step).
 fn convert_sign_op(fd: &mut Funcdata, op: OpId) -> Result<bool> {
     let Some(opc) = float_sign_manipulation(fd, op)? else { return Ok(false) };
@@ -287,15 +271,6 @@ pub(super) fn ignore_nan(fd: &mut Funcdata, op: OpId, arch: &Arch) -> Result<i32
         }
     }
     Ok(i32::from(count > 0))
-}
-
-/// `TypeOpFloatInt2Float::preferredZextSize`.
-fn preferred_zext_size(in_size: u32) -> u32 {
-    match in_size {
-        0..=3 => 4,
-        4..=7 => 8,
-        _ => in_size + 1,
-    }
 }
 
 /// `Varnode::constantMatch`.

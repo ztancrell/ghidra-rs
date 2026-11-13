@@ -1,7 +1,9 @@
 //! Rule pools: the rules of `oppool1` ported so far (stage R1: copies, constants,
 //! arithmetic; stage R3: extension, concat and sub-pieces in [`extend`], [`piece`],
 //! [`subpiece`]; stage R4: division, remainder, sign and float rules in [`div`], [`modulo`],
-//! [`floatrules`] and `RuleSubfloatConvert` in `decomp/subfloat.rs`; ruleaction.cc) and the pool walk ([`pool`]). The rules are in families
+//! [`floatrules`] and `RuleSubfloatConvert` in `decomp/subfloat.rs`; the `subvar` group and
+//! `RulePiecePathology` of stage R3b in [`subvar`], [`piece`]; ruleaction.cc) and the pool walk
+//! ([`pool`]). The rules are in families
 //! ([`copy`], [`arith`]) with the expression helpers they share ([`cse`]) and float constant
 //! folding ([`float`]); the `Funcdata` methods they need (`cseEliminateList`,
 //! `distributeIntMultAdd`, `totalReplaceConstant`, ...) are in `funcdata.rs`.
@@ -22,6 +24,7 @@ mod modulo;
 mod piece;
 mod pool;
 mod subpiece;
+mod subvar;
 
 pub(crate) use pool::{nonzero_mask, pool_apply, select, Pool};
 
@@ -35,16 +38,19 @@ use floatrules::*;
 use modulo::*;
 use piece::*;
 use subpiece::*;
+use subvar::*;
 
 use std::collections::HashSet;
 
 use super::block::BlockId;
 use super::emulate::{eval_binary, eval_unary};
-use super::jumptable::{is_bool_output, mostsigbit_set};
+use super::infertypes::float_sign_manipulation;
+use super::jumptable::is_bool_output;
 use super::op::{OpFlags, OpId};
 use super::opcode::Opcode;
-use super::rangeutil::{calc_mask, sign_extend};
+use super::rangeutil::{calc_mask, mostsigbit_set, sign_extend};
 use super::subfloat::subfloat_convert;
+use super::subflow::preferred_zext_size;
 use super::varnode::{Space, VarnodeId, VnFlags, CONST_SPACE};
 use super::{err, stdsort, Arch, Funcdata, LowlevelError, Result};
 
@@ -146,12 +152,20 @@ pub(crate) const OPPOOL1: &[Rule] = &[
         FloatEqual, FloatNotequal, FloatLess, FloatLessequal, FloatNan, FloatAdd, FloatDiv, FloatMult,
         FloatSub, FloatNeg, FloatAbs, FloatSqrt, FloatFloat2float, FloatCeil, FloatFloor, FloatRound,
         FloatInt2float, FloatTrunc], float_sign),
+    r("subvar_and", "subvar", &[IntAnd], subvar_and),
+    r("subvar_subpiece", "subvar", &[Subpiece], subvar_subpiece),
+    r("splitflow", "subvar", &[Subpiece], split_flow),
+    r("subvar_compzero", "subvar", &[IntNotequal, IntEqual], subvar_comp_zero),
+    r("subvar_shift", "subvar", &[IntRight], subvar_shift),
+    r("subvar_zext", "subvar", &[IntZext], subvar_ext),
+    r("subvar_sext", "subvar", &[IntSext], subvar_ext),
     r("negatenegate", "analysis", &[IntNegate], negate_negate),
     r("subfloat_convert", "floatprecision", &[FloatFloat2float], subfloat_convert),
     r("floatcast", "floatprecision", &[FloatFloat2float, FloatTrunc], float_cast),
     r("ignorenan", "floatprecision", &[FloatNan], ignore_nan),
     r("unsigned2float", "analysis", &[FloatInt2float], unsigned_2_float),
     r("int2floatcollapse", "analysis", &[FloatInt2float], int2float_collapse),
+    r("piecepathology", "protorecovery", &[Piece], piece_pathology),
 ];
 
 // ---- helpers on ops and varnodes ----

@@ -72,4 +72,3 @@ option togglerule orcompare off
 option togglerule conditionalmove off
 option togglerule orpredicate off
 option togglerule funcptrencoding off
-option togglerule piecepathology off
