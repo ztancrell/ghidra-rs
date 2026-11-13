@@ -1578,6 +1578,13 @@ R1); with types, ten more, all one cause: the constant of an INT_SUB that the `c
 0x74c9b0, 0x75e5a9). Not caused by R5: the same ten differ with the five rules switched off on
 both sides (488 / 499); no earlier check ran `analysis`, `cleanup` and `typerecovery` together
 with types printed. Not traced further.
+Superseded (fix round, 2026-11-13): traced and fixed. `Funcdata::opSetInput` clones a constant
+that already has a reader with `copySymbol` (type and type lock) unless it is a space base;
+`unshared_constant` made a bare constant. After the fix: R5 check M500 typed 497 / 498 and
+untyped 497 / 498 (miss 0x47a6b0; 0x4c48d0 and 0x6b21e0 the reference does not finish), M8
+8 / 8, the ten functions 10 / 10; S6 unlocked 498 / 500 (0x4919f0; 0x4c48d0); R1 check
+(`r1-options.txt`) 498 / 499 (0x47a6b0). S3, S4 and the three locked S6 checks were still
+running at this commit (outputs in `rust/target/r5-bars/`).
 The bar is meaningful: 326 of the M500 reference outputs (with types) change when the five rules
 are switched off. Not rerun at
 the commit (bars whose options leave the new code off: `typerecovery` is off in the R1, subvar,
