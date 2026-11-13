@@ -87,6 +87,17 @@ impl VnFlags {
     pub(crate) const CODEREF: VnFlags = VnFlags(1 << 17);
     /// `incidental_copy`, from the `.pspec`
     pub(crate) const INCIDENTAL_COPY: VnFlags = VnFlags(1 << 16);
+    /// `typelock`: the data-type is fixed (stage S6)
+    pub(crate) const TYPELOCK: VnFlags = VnFlags(1 << 18);
+    /// `symcheck_incomplete` (`ActionConstantPtr`)
+    pub(crate) const SYMCHECK_INCOMPLETE: VnFlags = VnFlags(1 << 19);
+    /// `symcheck_complete` (`ActionConstantPtr`)
+    pub(crate) const SYMCHECK_COMPLETE: VnFlags = VnFlags(1 << 20);
+    /// `lockedinput`: an input of a locked prototype (stage S6)
+    pub(crate) const LOCKED_INPUT: VnFlags = VnFlags(1 << 21);
+    /// `spacebase_placeholder`: the value a call loads from the stack to learn its stack offset
+    /// (the placeholder, or a locked call's first stack parameter; stage S6)
+    pub(crate) const SPACEBASE_PLACEHOLDER: VnFlags = VnFlags(1 << 22);
 
     pub(crate) fn has(self, f: VnFlags) -> bool {
         self.0 & f.0 != 0
@@ -112,6 +123,8 @@ pub(crate) struct Varnode {
     pub(crate) flags: VnFlags,
     /// the bits read by some op (`Varnode::consumed`, `ActionDeadCode`)
     pub(crate) consume: u64,
+    /// the data-type (`Varnode::type`); `None` until set: `getBase(size, TYPE_UNKNOWN)`
+    pub(crate) ty: Option<super::types::TypeId>,
 }
 
 impl Varnode {
@@ -124,6 +137,7 @@ impl Varnode {
             descend: Readers::default(),
             flags: VnFlags::default(),
             consume: u64::MAX,
+            ty: None,
         }
     }
 

@@ -137,8 +137,20 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    return recovery, stack-pointer flow, deindirect, branch cleanup, the ram heritage pass;
    `print raw` at `break start assignhigh` with every later stage's groups off identical on
    M8 (8 / 8) and M500 (446 / 500); the rest need `ActionLaneDivide` (R3).
+   S6 (types) done on branch `m3-s6`, with an S6b left: the data-type store (`types.rs`,
+   struct layout from `<data_organization>`), type inference (`ActionStartTypes`,
+   `ActionInferTypes`, `ActionConstantPtr`, `infertypes.rs`), the `parse line` declaration
+   parser (`cparse.rs`) and locked prototypes (`locked.rs`, `lateres.rs`). `print raw` with
+   types at `assignhigh`: M8 8 / 8, M500 446 / 446 non-SSE (the 53 SSE functions wait for
+   `ActionLaneDivide`, R3); with every mercs2 function locked (`decomp-locked-options.sh`,
+   `void` and `int4`): M8 8 / 8 and M500 446 / 446 non-SSE each. Bar changed by the user
+   (2026-11-13): the D-corpus `parse line` check moves to the stage that adds x86-64 (58 of
+   its 69 files are x86-64), the locked-prototype stand-in replaces it. Superseded: "D files
+   using `parse line` pass". S6b: locked stack parameters of the decompiled function, varargs
+   and hidden-return prototypes, scopes, unions, partial types; casts are S9.
    R1 (rule pools; 19 copy, constant and arithmetic rules) done on branch `m3-r1`: M8 8 / 8;
-   M500 less the 46 `ActionLaneDivide` functions 451 / 453 (99.6 %, bar 98 %).
+   M500 less the 46 `ActionLaneDivide` functions 451 / 453 (99.6 %, bar 98 %). S6 and R1 are
+   merged on `m3-s6`: every S6 and R1 number above holds on the merged binary.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.

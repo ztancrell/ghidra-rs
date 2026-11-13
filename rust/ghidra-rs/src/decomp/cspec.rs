@@ -3,9 +3,42 @@
 //! uses so far: the stack pointer, the return address, the prototype models with
 //! `<resolveprototype>` and the evaluation models, and the `<callfixup>` snippets.
 //!
-//! `<data_organization>` (type sizes and alignment) and `<global>` (the global scope's ranges)
-//! are skipped until the type store (stage S6) and the symbol scopes read them; any other element
-//! is an error, so a spec using something not ported fails at load instead of decompiling wrong.
+//! Of `<data_organization>` the size-alignment map is read (struct layout, stage S6); `<global>`
+//! (the global scope's ranges) is skipped; any other element is an error, so a spec using
+//! something not ported fails at load instead of decompiling wrong.
+//! Superseded: until S6 `<data_organization>` was skipped.
+
+/// Port of `TypeFactory::decodeAlignmentMap`: entries by size, the gaps copying the nearest
+/// smaller explicit size.
+fn decode_alignment_map(el: &Element) -> Result<Vec<u32>> {
+    let mut map: Vec<Option<u32>> = Vec::new();
+    for e in el.kids.iter().filter(|e| e.name == "entry") {
+        let num = |n: &str| -> Result<u32> {
+            let v = e.req(n)?;
+            v.parse().map_err(|_| LowlevelError(format!("<size_alignment_map>: bad {n} {v}")))
+        };
+        let (sz, val) = (num("size")? as usize, num("alignment")?);
+        if val == 0 || sz > 64 {
+            return err(format!("<size_alignment_map>: bad entry size {sz} alignment {val}"));
+        }
+        if map.len() <= sz {
+            map.resize(sz + 1, None);
+        }
+        map[sz] = Some(val);
+    }
+    if map.is_empty() {
+        return err("Alignment map empty");
+    }
+    map[0] = Some(1);
+    let mut cur = 1;
+    Ok(map
+        .into_iter()
+        .map(|a| {
+            cur = a.unwrap_or(cur);
+            cur
+        })
+        .collect())
+}
 
 use super::fspec::{ModelId, Models, ProtoModel, Storage};
 use super::inject::InjectLibrary;
@@ -23,6 +56,9 @@ pub(crate) struct CompilerSpec {
     pub(crate) stack_container: u32,
     pub(crate) models: Models,
     pub(crate) injects: InjectLibrary,
+    /// `<data_organization><size_alignment_map>`: the alignment of a primitive of each size
+    /// (`TypeFactory::decodeAlignmentMap`), if the spec gives one
+    pub(crate) align_map: Option<Vec<u32>>,
 }
 
 /// The `.sla`'s register and space names, for resolving the spec's `<register name=..>`.
@@ -88,6 +124,7 @@ impl CompilerSpec {
         let mut default = None;
         let (mut eval_current, mut eval_called) = (None, None);
         let mut injects = InjectLibrary::new(sleigh);
+        let mut align_map = None;
         for el in &root.kids {
             match el.name.as_str() {
                 "stackpointer" => {
@@ -112,7 +149,12 @@ impl CompilerSpec {
                     injects.add_callfixup(names, el.req("name")?, &body.text)?;
                 }
                 // read with the prototypes, or later (see the module comment)
-                "returnaddress" | "data_organization" | "global" => {}
+                "data_organization" => {
+                    if let Some(m) = el.kid("size_alignment_map") {
+                        align_map = Some(decode_alignment_map(m)?);
+                    }
+                }
+                "returnaddress" | "global" => {}
                 n => return err(format!("<compiler_spec>: <{n}> is not supported")),
             }
         }
@@ -122,7 +164,7 @@ impl CompilerSpec {
         models.eval_called = eval_called.map(|n| models.find(&n)).transpose()?;
         let (stack_pointer, stack_container) =
             stack_pointer.ok_or_else(|| LowlevelError("No stack pointer specified".into()))?;
-        Ok(CompilerSpec { stack_pointer, stack_container, models, injects })
+        Ok(CompilerSpec { stack_pointer, stack_container, models, injects, align_map })
     }
 }
 

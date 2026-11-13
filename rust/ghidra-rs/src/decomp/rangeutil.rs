@@ -22,7 +22,7 @@ fn sign_extend(val: u64, sizein: u32, sizeout: u32) -> u64 {
 }
 
 /// `bit_transitions` (address.cc)
-fn bit_transitions(mut val: u64, sz: u32) -> u32 {
+pub(crate) fn bit_transitions(mut val: u64, sz: u32) -> u32 {
     let mut res = 0;
     let mut last = val & 1;
     for _ in 1..8 * sz {

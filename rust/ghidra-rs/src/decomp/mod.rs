@@ -12,14 +12,18 @@ pub mod action;
 pub mod actiontree;
 mod block;
 mod coreaction;
+mod cparse;
 mod cspec;
 mod emulate;
 mod flow;
 mod fspec;
 mod funcdata;
 mod heritage;
+mod infertypes;
 mod inject;
 mod jumptable;
+mod lateres;
+mod locked;
 mod op;
 mod opcode;
 mod print;
@@ -27,6 +31,7 @@ mod rangeutil;
 mod readers;
 mod rules;
 mod stdsort;
+mod types;
 mod varnode;
 
 use crate::analysis::Image;
@@ -107,6 +112,9 @@ pub struct Arch {
     externrefs: HashMap<u64, u64>,
     /// `option readonly`: read-only memory propagates as constants (`readonlypropagate`)
     pub(crate) readonly_propagate: bool,
+    /// the program-wide data-types (`Architecture::types`): the core types and those `parse
+    /// line` defines; each decompile starts from a copy
+    pub(crate) types: types::TypeFactory,
 }
 
 impl Arch {
@@ -127,6 +135,10 @@ impl Arch {
             .map(|(name, val)| names.register(name).map(|(s, o, z)| (s, o, z, u64::from(*val))))
             .collect::<Result<_>>()?;
         let spec = CompilerSpec::parse(cspec, &sleigh, &names)?;
+        let mut type_factory = types::TypeFactory::new();
+        if let Some(m) = &spec.align_map {
+            type_factory.align_map = m.clone();
+        }
         let incidental = sleigh.incidental.iter().map(|n| names.register(n)).collect::<Result<_>>()?;
         let readonly = image
             .sections
@@ -145,10 +157,17 @@ impl Arch {
             readonly,
             externrefs: HashMap::new(),
             readonly_propagate: false,
+            types: type_factory,
         })
     }
 
     /// `map function`: a function at `entry` with the default (empty) prototype.
+    /// The locked prototype of the function at `entry` (`parse line extern`), which a decompile
+    /// starts from; an unlocked one starts fresh, as every corpus script decompiles once.
+    pub(crate) fn function_proto(&self, entry: u64) -> Option<FuncProto> {
+        self.functions.get(&entry).filter(|f| f.proto.locked.is_some()).map(|f| f.proto.clone())
+    }
+
     pub(crate) fn add_function(&mut self, entry: u64, name: String) {
         self.functions.insert(entry, Function { name, proto: FuncProto::default() });
     }
@@ -228,5 +247,24 @@ impl Arch {
         let a = u32::try_from(addr).ok()?;
         let sec = self.image.block_of(a)?;
         sec.data.get((a - sec.addr) as usize..)
+    }
+}
+
+/// Port of `IfcParseLine` (`parse_C`): a C declaration. Types (`struct`, `union`, `enum`,
+/// `typedef`) join the architecture's types; an `extern` function declaration locks the prototype
+/// of the function `find` names (`FuncProto::setPieces`).
+pub fn parse_line(arch: &mut Arch, text: &str, find: &dyn Fn(&str) -> Option<u64>) -> Result<()> {
+    let ptr_size = arch.spec.stack_pointer.2;
+    match cparse::parse_line(&mut arch.types, text, ptr_size)? {
+        cparse::Decl::Type(_) => Ok(()),
+        cparse::Decl::Function { name, model, output, inputs, dotdotdot } => {
+            let addr = find(&name).ok_or_else(|| LowlevelError(format!("Unknown function name: {name}")))?;
+            let proto = locked::lock_prototype(arch, model.as_deref(), (String::new(), output), inputs, dotdotdot)?;
+            match arch.functions.get_mut(&addr) {
+                Some(f) => f.proto = proto,
+                None => return err(format!("Unknown function name: {name}")),
+            }
+            Ok(())
+        }
     }
 }
