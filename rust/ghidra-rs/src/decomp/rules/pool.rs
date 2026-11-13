@@ -73,6 +73,6 @@ fn process_op(fd: &mut Funcdata, arch: &Arch, pool: &Pool, op: OpId) -> Result<i
 
 /// Port of `ActionNonzeroMask::apply` (`Funcdata::calcNZMask`).
 pub(crate) fn nonzero_mask(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
-    crate::decomp::jumptable::calc_nz_mask(fd, arch);
+    crate::decomp::jumptable::calc_nz_mask_unfolded(fd, arch);
     Ok(0)
 }

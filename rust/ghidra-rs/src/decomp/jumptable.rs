@@ -224,6 +224,22 @@ fn nz_mask_local(fd: &Funcdata, arch: &Arch, op: OpId, cliploop: bool) -> u64 {
 /// stack pointer's input counts as aligned (`isSpacebase`), as `ActionSpacebase` marks it.
 pub(crate) fn calc_nz_mask(fd: &mut Funcdata, arch: &Arch) {
     fd.folded = calc_folded(fd, arch);
+    nz_masks(fd, arch);
+}
+
+/// Port of `Funcdata::calcNZMask` as `ActionNonzeroMask` runs it on the function itself: the
+/// masks come from the ops as they are, with no input folded to a constant (the folding of
+/// [`calc_nz_mask`] stands in for rules the jump-table partial function runs).
+///
+/// Interim shape: branch `m3-r2` has a single `calc_nz_mask` and an explicit `fold_constants`
+/// step on the partial function; that replaces this pair when R2 merges.
+pub(crate) fn calc_nz_mask_unfolded(fd: &mut Funcdata, arch: &Arch) {
+    fd.folded = Vec::new();
+    nz_masks(fd, arch);
+}
+
+/// The walk of `Funcdata::calcNZMask`: every op's output mask from its inputs', depth first.
+fn nz_masks(fd: &mut Funcdata, arch: &Arch) {
     let n = fd.vns.len();
     let mut nzm: Vec<u64> = fd.vns.iter().map(|v| if v.is_constant() { v.offset } else { calc_mask(v.size) }).collect();
     let (sps, spo, spz) = arch.spec.stack_pointer;
@@ -344,10 +360,8 @@ fn calc_folded(fd: &Funcdata, arch: &Arch) -> Vec<Option<u64>> {
     val
 }
 
-/// `mostsigbit_set`: the index of the highest set bit, -1 for 0.
-fn mostsigbit_set(v: u64) -> i32 {
-    63 - v.leading_zeros() as i32
-}
+/// Kept at this path for the branches that call it; it lives in `rangeutil.rs`.
+pub(crate) use super::rangeutil::mostsigbit_set;
 
 fn def(fd: &Funcdata, vn: VarnodeId) -> Option<OpId> {
     fd.vn(vn).def

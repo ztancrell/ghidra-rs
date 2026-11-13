@@ -56,7 +56,7 @@ pub struct Highs {
     /// `Merge::copyTrims`
     pub(crate) copy_trims: Vec<OpId>,
     /// `Merge::protoPartial`: the PIECE ops `registerProtoPartialRoot` recorded (no ported rule
-    /// registers one yet; `SplitFlow` and `RulePieceStructure` will)
+    /// registers one yet; `SplitDatatype::buildOutConcats` and `RulePieceStructure` will)
     pub(crate) proto_partial: Vec<OpId>,
 }
 

@@ -157,6 +157,13 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `subflow.cc`) and `RulePiecePathology` are not ported.
    Merged with S6: the S6 checks (unlocked, `void`, `int4`, callees) are M8 8 / 8, M500
    498 / 499 each with lane division on. Superseded: "446 / 446 non-SSE" above.
+   R3 part two on branch `m3-r3b`: the `subvar` group (`SubvariableFlow`, `SplitFlow`, seven
+   rules) and `RulePiecePathology`; new check with `subvar` on: M8 8 / 8, M500 497 / 499;
+   R3 check now 497 / 499. Superseded: "Open: the `subvar` rules ... are not ported" above.
+   R4 on branch `m3-r4`: 20 division, remainder, sign and float rules, `floatprecision`
+   (`SubfloatFlow`) included; the R1 check with `floatprecision` on: M8 8 / 8, M500 495 / 499
+   (99.2 %, bar 98 %); 90 M500 functions exercise the rules, 89 of them identical. Merged with R3 part two:
+   R4 check M500 497 / 499; subvar, R3, S3, S4 and S6 bars all held.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

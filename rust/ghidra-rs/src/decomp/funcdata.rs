@@ -86,8 +86,9 @@ pub struct Funcdata {
     pub(crate) lane_access: BTreeMap<(u32, u64, Reverse<u32>), (Space, LanedRegister)>,
     /// `ActionStackPtrFlow::analysis_finished` (the action is made per function)
     pub(crate) stackptrflow_done: bool,
-    /// each varnode's non-zero mask (`Varnode::nzm`) once `ActionNonzeroMask` has run; so far
-    /// only jump-table recovery runs it, on its partial function (`jumptable::calc_nz_mask`)
+    /// each varnode's non-zero mask (`Varnode::nzm`) once `ActionNonzeroMask` has run: the
+    /// main loop (`jumptable::calc_nz_mask_unfolded`) and jump-table recovery on its partial
+    /// function (`jumptable::calc_nz_mask`). Superseded: "only jump-table recovery runs it"
     pub(crate) nzm: Vec<u64>,
     /// jump-table recovery's partial function: each varnode's value where it folds to a
     /// constant (`jumptable::calc_folded`)

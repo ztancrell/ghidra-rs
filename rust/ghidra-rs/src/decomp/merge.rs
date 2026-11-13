@@ -1596,7 +1596,7 @@ pub(crate) fn merge_required(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
 }
 
 /// `Merge::registerProtoPartialRoot`: for the rules that make proto-partial PIECEs.
-#[allow(dead_code)] // ponytail: no ported rule makes one yet; R3b's SplitFlow will call it
+#[allow(dead_code)] // ponytail: its callers, SplitDatatype::buildOutConcats (RuleSplitCopy/Load/Store) and RulePieceStructure, are not ported
 pub(crate) fn register_proto_partial_root(fd: &mut Funcdata, piece: OpId) {
     fd.highs.proto_partial.push(piece);
 }

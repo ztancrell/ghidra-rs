@@ -1,0 +1,75 @@
+option currentaction decompile cleanup off
+option currentaction decompile typerecovery off
+option currentaction decompile stackvars off
+option currentaction decompile floatprecision off
+option currentaction decompile doubleload off
+option currentaction decompile doubleprecis off
+option currentaction decompile segment off
+option currentaction decompile blockrecovery off
+option currentaction decompile localrecovery off
+option currentaction decompile switchnorm off
+option currentaction decompile returnsplit off
+option currentaction decompile splitcopy off
+option currentaction decompile splitpointer off
+option currentaction decompile constsequence off
+option currentaction decompile bitfields off
+option currentaction decompile dynamic off
+option togglerule pullsub_indirect off
+option togglerule sborrow off
+option togglerule scarry off
+option togglerule intlessequal off
+option togglerule signshift off
+option togglerule testsign off
+option togglerule ormask off
+option togglerule andmask off
+option togglerule orconsume off
+option togglerule orcollapse off
+option togglerule andorlump off
+option togglerule shiftbitops off
+option togglerule rightshiftand off
+option togglerule notdistribute off
+option togglerule highorderand off
+option togglerule anddistribute off
+option togglerule andcommute off
+option togglerule andpiece off
+option togglerule andzext off
+option togglerule andcompare off
+option togglerule doubleshift off
+option togglerule doublearithshift off
+option togglerule leftright off
+option togglerule shiftcompare off
+option togglerule shift2mult off
+option togglerule shiftpiece off
+option togglerule aliasupdate off
+option togglerule bxor2notequal off
+option togglerule less2zero off
+option togglerule lessequal2zero off
+option togglerule sless2zero off
+option togglerule equal2zero off
+option togglerule equal2constant off
+option togglerule threewaycomp off
+option togglerule xorcollapse off
+option togglerule transformcpool off
+option togglerule slesstoless off
+option togglerule bitundistribute off
+option togglerule booleanundistribute off
+option togglerule booleandedup off
+option togglerule boolzext off
+option togglerule booleannegate off
+option togglerule logic2bool off
+option togglerule shiftand off
+option togglerule switchsingle off
+option togglerule condnegate off
+option togglerule boolnegate off
+option togglerule lessequal off
+option togglerule lessnotequal off
+option togglerule lessone off
+option togglerule rangemeld off
+option togglerule popcountboolxor off
+option togglerule xorswap off
+option togglerule lzcountshiftbool off
+option togglerule orcompare off
+option togglerule ptrflow off
+option togglerule conditionalmove off
+option togglerule orpredicate off
+option togglerule funcptrencoding off
