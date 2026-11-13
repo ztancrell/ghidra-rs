@@ -527,6 +527,7 @@ impl Flow<'_> {
     ) -> Result<std::result::Result<Vec<u64>, Fail>> {
         if partial.is_none() {
             let mut p = self.fd.clone();
+            p.jumptablerecovery_on = true;
             let mut pflow = Flow {
                 fd: &mut p,
                 arch: self.arch,
@@ -540,8 +541,21 @@ impl Flow<'_> {
             };
             pflow.generate_blocks()?;
             if let Err(e) = action::jumptable_partial(&mut p, self.arch) {
+                // An error of the jumptable action fails the table, as in the C++ (`stageJumpTable`
+                // catches `LowlevelError`). One from a path ghidra-rs does not port is not a
+                // failure the reference has: it is reported on stderr, always, so a check
+                // cannot take it for one (`decomp-diff.sh` compares stderr too).
+                if e.is_unported() {
+                    eprintln!(
+                        "jumptable partial of 0x{:x}: unported path, table at 0x{:x} not recovered: {}",
+                        self.fd.entry,
+                        self.fd.op(op).seq.addr,
+                        e.0
+                    );
+                }
                 return Ok(Err(Fail::Normal(e.0)));
             }
+            jumptable::fold_constants(&mut p, self.arch);
             jumptable::calc_nz_mask(&mut p, self.arch);
             *partial = Some(p);
         }

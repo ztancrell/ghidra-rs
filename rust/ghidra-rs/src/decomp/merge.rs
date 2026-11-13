@@ -1418,7 +1418,7 @@ fn multiple_interaction(fd: &mut Funcdata, list: &[VarnodeId], marks: &mut HashS
     for &vn in list {
         let Some(op) = fd.vn(vn).def else { continue };
         let opc = fd.op(op).opc;
-        if !(super::jumptable::is_bool_output(opc) || matches!(opc, Opcode::IntZext | Opcode::IntSext | Opcode::Ptradd))
+        if !(super::opcode::is_bool_output(opc) || matches!(opc, Opcode::IntZext | Opcode::IntSext | Opcode::Ptradd))
         {
             continue;
         }
@@ -1427,7 +1427,7 @@ fn multiple_interaction(fd: &mut Funcdata, list: &[VarnodeId], marks: &mut HashS
                 continue;
             }
             let topopc = match fd.vn(top).def {
-                Some(d) if super::jumptable::is_bool_output(fd.op(d).opc) => continue,
+                Some(d) if super::opcode::is_bool_output(fd.op(d).opc) => continue,
                 Some(d) => fd.op(d).opc,
                 None => Opcode::Copy,
             };

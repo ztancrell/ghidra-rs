@@ -87,7 +87,7 @@ pub struct Funcdata {
     /// `ActionStackPtrFlow::analysis_finished` (the action is made per function)
     pub(crate) stackptrflow_done: bool,
     /// each varnode's non-zero mask (`Varnode::nzm`) once `ActionNonzeroMask` has run: the
-    /// main loop (`jumptable::calc_nz_mask_unfolded`) and jump-table recovery on its partial
+    /// main loop (`jumptable::calc_nz_mask`) and jump-table recovery on its partial
     /// function (`jumptable::calc_nz_mask`). Superseded: "only jump-table recovery runs it"
     pub(crate) nzm: Vec<u64>,
     /// jump-table recovery's partial function: each varnode's value where it folds to a
@@ -107,6 +107,11 @@ pub struct Funcdata {
     pub(crate) highs: super::variable::Highs,
     /// the next [`PcodeOp::alive_key`]
     next_alive: u32,
+    /// `typerecovery_on` (`ActionStartTypes::reset`): the running action has group `typerecovery`
+    pub(crate) typerecovery_on: bool,
+    /// `jumptablerecovery_on`: this is the partial function of jump-table recovery
+    /// (`Funcdata::stageJumpTable`)
+    pub(crate) jumptablerecovery_on: bool,
 }
 
 impl Funcdata {
@@ -148,6 +153,8 @@ impl Funcdata {
             typerecovery_exceeded: false,
             highs: super::variable::Highs::default(),
             next_alive: 0,
+            typerecovery_on: false,
+            jumptablerecovery_on: false,
         }
     }
 
