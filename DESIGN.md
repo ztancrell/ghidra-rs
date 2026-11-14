@@ -91,6 +91,13 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
     ghidra-rs the fast bulk work; full parity with everything Ghidra does is not the bar.
   - Speed claims still need a measurement on the same input (the 2026-11-11 decision); the
     decompiler's speed is unmeasured until it prints C.
+- 2026-11-14: Order of breadth after the decompiler prints C (the user's decision, on Claude's
+  recommendation): (a) every Ghidra script mercs2 uses (17 in `mercs2-decomp/tools/ghidra/`;
+  13 not started: 8 read-only exports, 5 project-editing), so one real project runs without
+  Java; then (c) a project store and scripting, designed from what (a) showed it must hold;
+  then (b) more processors and file formats, when a second game asks for them. The 8 export
+  scripts need nothing else and come first. Superseded: the open question "which breadth
+  comes first" (asked 2026-11-13).
 
 ## Milestones
 
@@ -225,12 +232,6 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
 
 ## Open questions
 
-- After the decompiler prints C, which breadth comes first: (a) every Ghidra script mercs2 uses
-  (17 scripts in `mercs2-decomp/tools/ghidra/`; 2 are covered, CheckAbiCallers shadows, Decompile
-  is in progress, 8 read-only exports and 5 project-editing scripts are not started), so one real
-  project runs without Java; (b) more processors and file formats (ELF/Mach-O loaders, the engine
-  parts milestone 4 lists), so other games work; (c) a project store and scripting, so it is a
-  workbench and not only a command. Asked 2026-11-13; not ranked yet.
 - Where the edits of mercs2's five project-editing scripts live without a Ghidra database: plain
   files in the mercs2 repo (re-analysis takes about 10 s) or a project database (milestone 4).
   Asked 2026-11-13.
