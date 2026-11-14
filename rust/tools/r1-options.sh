@@ -60,8 +60,8 @@ echo "s8-options.txt, s8-r-options.txt: blockrecovery and returnsplit on"
 grep -v "decompile blockrecovery off\|decompile returnsplit off" "$rust/tools/corpus/s6-options.txt" > "$rust/tools/corpus/s8-t-options.txt"
 echo "s8-t-options.txt: s6-options.txt with blockrecovery and returnsplit on"
 # the prototype checks (outputprototype, inputprototype, mapglobals): the same two with group
-# `localrecovery` on, so that `outputprototype` runs; its three other actions are skipped on both
-# engines (DECOMP_SKIP_ACTIONS=restrictlocal,restructure_varnode,mapped_local_sync)
+# `localrecovery` on, so that `outputprototype` runs; its two unported actions are skipped on both
+# engines (DECOMP_SKIP_ACTIONS=restructure_varnode,mapped_local_sync)
 grep -v "decompile localrecovery off" "$rust/tools/corpus/s8-r-options.txt" > "$rust/tools/corpus/tail-r-options.txt"
 grep -v "decompile localrecovery off" "$rust/tools/corpus/s8-t-options.txt" > "$rust/tools/corpus/tail-t-options.txt"
 echo "tail-r-options.txt, tail-t-options.txt: s8-r/s8-t with localrecovery on"

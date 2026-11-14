@@ -36,12 +36,24 @@ struct NodeMarks {
 fn space_mask(arch: &Arch, space: Space) -> u64 {
     let size = match space {
         Space::Sleigh(i) => arch.sleigh.spaces.get(i as usize).map_or(8, |s| s.size),
+        Space::Stack => return super::heritage_guard::stack_mask(arch),
         _ => 8,
     };
     if size >= 8 {
         u64::MAX
     } else {
         (1u64 << (8 * size)) - 1
+    }
+}
+
+/// The space a [`LocationMap`] entry's index names, given the space of the range it is compared
+/// with: the map keeps indices, and only a SLEIGH space's index rebuilds as `Space::Sleigh`
+/// (the stack's would not, and no stack range would ever be found again).
+fn same_index(index: u32, like: Space) -> Space {
+    if index == like.index() {
+        like
+    } else {
+        Space::Sleigh(index)
     }
 }
 
@@ -88,12 +100,12 @@ impl LocationMap {
         let s = space.index();
         let lower = self.map.partition_point(|e| (e.0, e.1) < (s, off));
         let mut at = lower.saturating_sub(1);
-        if self.map.get(at).is_some_and(|e| overlap(space, off, Space::Sleigh(e.0), e.1, e.2, mask).is_none()) {
+        if self.map.get(at).is_some_and(|e| overlap(space, off, same_index(e.0, space), e.1, e.2, mask).is_none()) {
             at += 1;
         }
         let mut intersect = Intersect::New;
         if let Some(&(es, eoff, esize, epass)) = self.map.get(at) {
-            if let Some(w) = overlap(space, off, Space::Sleigh(es), eoff, esize, mask) {
+            if let Some(w) = overlap(space, off, same_index(es, space), eoff, esize, mask) {
                 if w + size <= esize {
                     let i = if epass < pass { Intersect::Old } else { Intersect::New };
                     return (eoff, esize, i);
@@ -108,7 +120,7 @@ impl LocationMap {
             }
         }
         while let Some(&(es, eoff, esize, epass)) = self.map.get(at) {
-            let Some(w) = overlap(Space::Sleigh(es), eoff, space, off, size, mask) else { break };
+            let Some(w) = overlap(same_index(es, space), eoff, space, off, size, mask) else { break };
             size = size.max(w + esize);
             if epass < pass {
                 intersect = Intersect::Partial;
@@ -128,7 +140,7 @@ impl LocationMap {
         let s = space.index();
         let at = self.map.partition_point(|e| (e.0, e.1) <= (s, off)).checked_sub(1)?;
         let e = self.map[at];
-        overlap(space, off, Space::Sleigh(e.0), e.1, e.2, mask).map(|_| at)
+        overlap(space, off, same_index(e.0, space), e.1, e.2, mask).map(|_| at)
     }
 }
 
@@ -187,10 +199,15 @@ pub(crate) struct Heritage {
     maxdepth: i32,
     merge: Vec<usize>,
     pq: PriorityQueue,
-    /// by SLEIGH space index: dead code was removed there (`HeritageInfo::deadremoved`)
-    deadremoved: Vec<bool>,
+    /// the spaces dead code was removed from (`HeritageInfo::deadremoved`)
+    deadremoved: Vec<Space>,
     /// the call placeholders were cleared, at the stack's first pass (`hasCallPlaceholders`)
     placeholders_cleared: bool,
+    /// the stack space's `HeritageInfo::loadGuardSearch`
+    stack_guard_search: bool,
+    /// `Heritage::loadGuard`, `storeGuard`
+    pub(crate) load_guards: Vec<super::heritage_guard::LoadGuard>,
+    pub(crate) store_guards: Vec<super::heritage_guard::LoadGuard>,
 }
 
 impl Default for Heritage {
@@ -208,6 +225,9 @@ impl Default for Heritage {
             pq: PriorityQueue::default(),
             deadremoved: Vec::new(),
             placeholders_cleared: false,
+            stack_guard_search: false,
+            load_guards: Vec::new(),
+            store_guards: Vec::new(),
         }
     }
 }
@@ -216,24 +236,32 @@ impl Default for Heritage {
 /// delay 0) plus one (`Architecture::addSpacebase`).
 const STACK_DELAY: i32 = 1;
 
+/// The heritage delay of a space (`HeritageInfo::delay`): a SLEIGH space's from the .sla
+/// (`AddrSpace::getDelay`), the stack's [`STACK_DELAY`]; `None` if it is not heritaged.
+pub(crate) fn space_delay(arch: &Arch, space: Space) -> Option<i32> {
+    match space {
+        Space::Sleigh(i) => arch.sleigh.spaces.get(i as usize).and_then(|s| s.delay),
+        Space::Stack => Some(STACK_DELAY),
+        _ => None,
+    }
+}
+
 impl Heritage {
     /// Port of `Heritage::deadRemovalAllowed`: dead code may go from a space once it has been
     /// heritaged (its dead-code delay is its heritage delay; x86 sets no other).
-    pub(crate) fn dead_removal_allowed(&self, arch: &Arch, space: u32) -> bool {
-        arch.sleigh.spaces[space as usize].delay.is_some_and(|d| self.pass > d)
+    pub(crate) fn dead_removal_allowed(&self, arch: &Arch, space: Space) -> bool {
+        space_delay(arch, space).is_some_and(|d| self.pass > d)
     }
 
     /// Port of `Heritage::seenDeadCode`.
-    pub(crate) fn seen_dead_code(&mut self, space: u32) {
-        let i = space as usize;
-        if self.deadremoved.len() <= i {
-            self.deadremoved.resize(i + 1, false);
+    pub(crate) fn seen_dead_code(&mut self, space: Space) {
+        if !self.deadremoved.contains(&space) {
+            self.deadremoved.push(space);
         }
-        self.deadremoved[i] = true;
     }
 
-    fn dead_removed(&self, space: u32) -> bool {
-        self.deadremoved.get(space as usize).copied().unwrap_or(false)
+    fn dead_removed(&self, space: Space) -> bool {
+        self.deadremoved.contains(&space)
     }
 
     /// Port of `Heritage::forceRestructure`: the dominator tree is rebuilt at the next pass.
@@ -272,24 +300,40 @@ pub(crate) fn heritage(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
         let space = Space::Sleigh(i as u32);
         add_space_ranges(fd, arch, space, space_mask(arch, space))?;
     }
-    // the stack space comes last in space order: its first pass clears the call placeholders
-    // (clearStackPlaceholders). discoverIndexedStackPointers only marks LOADs and STOREs and
-    // records guards for stack ranges, and no stack varnode exists without the `stackvars`
-    // rules (stage R5), so the stack contributes no range.
-    if pass >= STACK_DELAY && !fd.heritage.placeholders_cleared {
+    // the stack space comes last in space order (`Architecture::addSpacebase`)
+    let free_stores = if pass >= STACK_DELAY { stack_space_ranges(fd, arch)? } else { None };
+    if !fd.heritage.disjoint.is_empty() {
+        place_multiequals(fd, arch)?;
+        rename(fd, arch)?;
+    }
+    if let Some(free) = free_stores {
+        super::heritage_guard::reprocess_free_stores(fd, arch, &free)?;
+    }
+    // analyzeNewLoadGuards: the value-set analysis is not ported (heritage_guard.rs);
+    // handleNewLoadCopies: guardLoads makes no COPYs
+    fd.heritage.pass += 1;
+    Ok(())
+}
+
+/// The stack space's turn in `Heritage::heritage`: its first pass clears the call placeholders
+/// (`clearStackPlaceholders`) and traces the stack pointer once
+/// (`discoverIndexedStackPointers`), then its varnodes join the ranges to link. Returns the free
+/// STOREs to look at again after renaming.
+fn stack_space_ranges(fd: &mut Funcdata, arch: &Arch) -> Result<Option<Vec<OpId>>> {
+    if !fd.heritage.placeholders_cleared {
         for i in 0..fd.qlst.len() {
             let c = fd.qlst[i];
             abort_spacebase_relative(fd, c)?;
         }
         fd.heritage.placeholders_cleared = true;
     }
-    if !fd.heritage.disjoint.is_empty() {
-        place_multiequals(fd, arch)?;
-        rename(fd, arch)?;
+    let mut free = None;
+    if !fd.heritage.stack_guard_search {
+        fd.heritage.stack_guard_search = true;
+        free = super::heritage_guard::discover_indexed_stack_pointers(fd, arch, true)?;
     }
-    // analyzeNewLoadGuards and handleNewLoadCopies act on the load guards of stack ranges
-    fd.heritage.pass += 1;
-    Ok(())
+    add_space_ranges(fd, arch, Space::Stack, space_mask(arch, Space::Stack))?;
+    Ok(free)
 }
 
 /// Port of `FuncCallSpecs::abortSpacebaseRelative`: the call's stack-pointer placeholder input
@@ -325,8 +369,10 @@ fn arch_uniq(fd: &Funcdata, vn: VarnodeId) -> u32 {
 /// an input joins a disjoint range to link.
 fn add_space_ranges(fd: &mut Funcdata, arch: &Arch, space: Space, mask: u64) -> Result<()> {
     let pass = fd.heritage.pass;
-    let Space::Sleigh(si) = space else { return Ok(()) };
-    let deadremoved = fd.heritage.dead_removed(si);
+    let deadremoved = fd.heritage.dead_removed(space);
+    if space == Space::Stack {
+        check_locked_param_pieces(fd)?;
+    }
     let mut needwarning = false;
     for vn in fd.loc_range(space, 0, None) {
         let v = fd.vn(vn);
@@ -345,14 +391,14 @@ fn add_space_ranges(fd: &mut Funcdata, arch: &Arch, space: Space, mask: u64) -> 
             Intersect::Old => {
                 if !needwarning && deadremoved && !fd.jumptablerecovery_on {
                     needwarning = true;
-                    bump_deadcode_delay(arch, si)?;
+                    bump_deadcode_delay(arch, space)?;
                 }
                 (false, true)
             }
             Intersect::Partial => {
                 if !needwarning && deadremoved && !known && !fd.jumptablerecovery_on {
                     needwarning = true;
-                    bump_deadcode_delay(arch, si)?;
+                    bump_deadcode_delay(arch, space)?;
                 }
                 (true, true)
             }
@@ -368,14 +414,36 @@ fn add_space_ranges(fd: &mut Funcdata, arch: &Arch, space: Space, mask: u64) -> 
 
 /// Port of `Heritage::bumpDeadcodeDelay`: a processor space (not the unique space) gets a
 /// longer dead-code delay and the decompile restarts, which is not ported.
-fn bump_deadcode_delay(arch: &Arch, space: u32) -> Result<()> {
-    if space == arch.sleigh.uniq_space() {
-        return Ok(());
-    }
+fn bump_deadcode_delay(arch: &Arch, space: Space) -> Result<()> {
+    let name = match space {
+        Space::Sleigh(s) if s == arch.sleigh.uniq_space() => return Ok(()),
+        Space::Sleigh(s) => arch.sleigh.spaces.get(s as usize).map_or("?", |sp| sp.name.as_str()),
+        _ => "stack",
+    };
     err(format!(
-        "heritage after dead-code removal in the {} space: the restart with a longer dead-code delay is not implemented in ghidra-rs yet",
-        arch.sleigh.spaces[space as usize].name
+        "heritage after dead-code removal in the {name} space: the restart with a longer dead-code delay is not implemented in ghidra-rs yet"
     ))
+}
+
+/// A stack varnode covering part of a locked parameter of the function would take a piece of
+/// the parameter's type (`SymbolEntry::getSizedType`, `getExactPiece`), which `Funcdata::scoped`
+/// does not give: fail instead.
+fn check_locked_param_pieces(fd: &Funcdata) -> Result<()> {
+    let Some(l) = &fd.proto.locked else { return Ok(()) };
+    for p in &l.inputs {
+        let Some(super::fspec::Storage::Stack { offset, size }) = p.storage else { continue };
+        for vn in fd.loc_range(Space::Stack, 0, None) {
+            let v = fd.vn(vn);
+            if v.offset >= offset + u64::from(size) {
+                break;
+            }
+            let exact = v.offset == offset && v.size == size;
+            if !exact && v.offset + u64::from(v.size) > offset {
+                return err("a piece of a locked stack parameter: not implemented in ghidra-rs yet");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Port of `TaskList::add`: ranges come sorted; one overlapping the last is merged into it.
@@ -649,12 +717,14 @@ fn guard(fd: &mut Funcdata, arch: &Arch, range: &MemRange, c: &mut Collected) ->
         fd.vn_set(*w, VnFlags::ACTIVE_HERITAGE);
     }
     if range.new_addresses {
-        // queryProperties: the global scope owns ram (persist, addrtied); no other space has
-        // properties. LOAD guards exist only for stack ranges (guardLoads).
+        // queryProperties: the global scope owns ram (persist, addrtied), the local scope its
+        // stack ranges (addrtied); no other space has properties
         let global = fd.ram.is_some_and(|r| range.space == Space::Sleigh(r));
-        guard_calls(fd, arch, range, &mut c.write, global)?;
+        let addrtied = global || (range.space == Space::Stack && fd.localmap.in_scope(range.off, range.size));
+        guard_calls(fd, arch, range, &mut c.write, addrtied)?;
         guard_returns(fd, arch, range, global)?;
-        guard_stores(fd, range, &mut c.write)?;
+        guard_stores(fd, arch, range, &mut c.write)?;
+        super::heritage_guard::guard_loads(fd, range.space, addrtied)?;
     }
     Ok(())
 }
@@ -781,10 +851,17 @@ fn guard_calls(
             }
         }
         let call = fd.call(c);
-        let mut effect = call.proto.has_effect(arch, space, off, size);
+        // a stack range as the callee sees it; with the call's stack offset unknown (until
+        // RuleLoadVarnode resolves it, stage R5) it is no trial (`tryregister`)
+        let (toff, tryregister) = match (space, call.stack_offset) {
+            (Space::Stack, Some(so)) => (off.wrapping_sub(so) & range.mask, true),
+            (Space::Stack, None) => (off, false),
+            _ => (off, true),
+        };
+        let mut effect = call.proto.has_effect(arch, space, toff, size);
         let mut possibleoutput = false;
-        if call.active_output.is_some() {
-            match call.proto.characterize_as_output(arch, space, off, size) {
+        if call.active_output.is_some() && tryregister {
+            match call.proto.characterize_as_output(arch, space, toff, size) {
                 Containment::None => {}
                 Containment::ContainedBy => {
                     return err("heritage: guarding an output overlap is not implemented in ghidra-rs yet");
@@ -794,8 +871,8 @@ fn guard_calls(
                         effect = Some(EffectKind::KilledByCall);
                     }
                     if let Some(active) = &mut fd.call_mut(c).active_output {
-                        if !active.has_trial(space, off, size) {
-                            active.register_trial(space, off, size);
+                        if !active.has_trial(space, toff, size) {
+                            active.register_trial(space, toff, size);
                             possibleoutput = true;
                         }
                     }
@@ -803,12 +880,25 @@ fn guard_calls(
             }
         }
         let call = fd.call(c);
-        if call.active_input.is_some() {
-            match call.proto.characterize_as_input(arch, space, off, size) {
+        // `else if (fc->isStackOutputLock() && tryregister)`: tryOutputStackGuard
+        let stack_output_lock = call
+            .proto
+            .locked
+            .as_ref()
+            .is_some_and(|l| matches!(l.output.storage, Some(super::fspec::Storage::Stack { .. })));
+        if call.active_output.is_none()
+            && tryregister
+            && stack_output_lock
+            && call.proto.characterize_as_output(arch, space, toff, size) != Containment::None
+        {
+            return err("heritage: guarding a call's locked stack return value (tryOutputStackGuard): not implemented in ghidra-rs yet");
+        }
+        if call.active_input.is_some() && tryregister {
+            match call.proto.characterize_as_input(arch, space, toff, size) {
                 Containment::ContainsJustified => {
                     let fresh = match &mut fd.call_mut(c).active_input {
-                        Some(active) if !active.has_trial(space, off, size) => {
-                            active.register_trial(space, off, size);
+                        Some(active) if !active.has_trial(space, toff, size) => {
+                            active.register_trial(space, toff, size);
                             true
                         }
                         _ => false,
@@ -884,16 +974,20 @@ fn guard_returns(fd: &mut Funcdata, arch: &Arch, range: &MemRange, persist: bool
 }
 
 /// Port of `Heritage::guardStores`: every STORE into the range's space may change it, so an
-/// INDIRECT before each (`indirect_store`). (A STORE through the stack pointer guards stack
-/// ranges, which do not exist yet.)
-fn guard_stores(fd: &mut Funcdata, range: &MemRange, write: &mut Vec<VarnodeId>) -> Result<()> {
-    let Space::Sleigh(si) = range.space else { return Ok(()) };
+/// INDIRECT before each (`indirect_store`); a stack range is guarded at the STOREs into its
+/// container through the stack pointer (`spacebase_ptr`).
+fn guard_stores(fd: &mut Funcdata, arch: &Arch, range: &MemRange, write: &mut Vec<VarnodeId>) -> Result<()> {
+    let (si, via_sp) = match range.space {
+        Space::Sleigh(si) => (si, false),
+        Space::Stack => (arch.spec.stack_container, true),
+        _ => return Ok(()),
+    };
     for op in fd.ops_created_with(Opcode::Store) {
         if fd.op(op).is_dead() {
             continue;
         }
         let Some(&spc) = fd.op(op).ins.first() else { continue };
-        if fd.vn(spc).offset != u64::from(si) {
+        if fd.vn(spc).offset != u64::from(si) || (via_sp && !fd.op(op).flags.has(OpFlags::SPACEBASE_PTR)) {
             continue;
         }
         let ind = fd.new_indirect_op(op, range.space, range.off, range.size, OpFlags::INDIRECT_STORE)?;
@@ -1280,6 +1374,20 @@ fn rename_block(fd: &mut Funcdata, arch: &Arch, stacks: &mut VarStack, i: usize)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stack range heritaged in one pass is found again in the next (the map keeps space
+    /// indices; it once rebuilt them as SLEIGH spaces and lost every stack range).
+    #[test]
+    fn location_map_finds_stack_ranges_of_earlier_passes() {
+        let mut m = LocationMap::default();
+        let mask = 0xffff_ffff;
+        assert!(matches!(m.add(Space::Stack, mask, 4, 4, 1), (4, 4, Intersect::New)));
+        assert!(matches!(m.add(Space::Stack, mask, 4, 4, 2), (4, 4, Intersect::Old)));
+        assert!(matches!(m.add(Space::Stack, mask, 4, 8, 2), (4, 8, Intersect::Partial)));
+        assert!(m.find(Space::Stack, mask, 10).is_some() && m.find(Space::Stack, mask, 12).is_none());
+        // the same offset in a SLEIGH space is another range
+        assert!(matches!(m.add(Space::Sleigh(4), mask, 4, 4, 2), (4, 4, Intersect::New)));
+    }
 
     /// A function of empty blocks `0..n` with `edges`, block 0 the entry, and a write of EAX
     /// (register space 4, offset 0) in each block of `writers`; returns the blocks that get a

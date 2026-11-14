@@ -1008,14 +1008,17 @@ pub(crate) fn dead_code(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             v.flags.clear(VnFlags::ADDRFORCE);
         }
     }
-    let deadcode_spaces: Vec<u32> = (0..arch.sleigh.spaces.len() as u32)
-        .filter(|&i| i != 0 && arch.sleigh.spaces[i as usize].delay.is_some())
+    // the spaces that do dead code (`AddrSpace::doesDeadcode`), the stack last
+    let deadcode_spaces: Vec<Space> = (1..arch.sleigh.spaces.len() as u32)
+        .filter(|&i| arch.sleigh.spaces[i as usize].delay.is_some())
+        .map(Space::Sleigh)
+        .chain([Space::Stack])
         .collect();
     for &sp in &deadcode_spaces {
         if fd.heritage.dead_removal_allowed(arch, sp) {
             continue;
         }
-        for vn in fd.loc_space(Space::Sleigh(sp)) {
+        for vn in fd.loc_space(sp) {
             push_consumed(fd, u64::MAX, vn, &mut worklist);
         }
     }
@@ -1130,7 +1133,7 @@ pub(crate) fn dead_code(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             continue;
         }
         let mut changes = 0;
-        for vn in fd.loc_space(Space::Sleigh(sp)) {
+        for vn in fd.loc_space(sp) {
             let v = fd.vn(vn);
             if v.is_dead() || !v.is_written() {
                 continue;
@@ -1265,7 +1268,7 @@ fn split_uses(fd: &mut Funcdata, vn: VarnodeId) -> Result<()> {
         fd.op_set_input(useop, newvn, slot)?;
         fd.op_insert_before(newop, op)?;
     }
-    fd.op_destroy(op);
+    // the original op stays, without readers: dead code removes it, as in the C++
     Ok(())
 }
 
@@ -2324,7 +2327,6 @@ pub(crate) fn input_prototype(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             }
         }
         // updateInputTypes: one parameter symbol per used trial, in order
-        let ranges = super::scope::local_ranges(arch);
         for (count, t) in active.trials.iter().filter(|t| t.is_used()).enumerate() {
             let ty = *types
                 .get(t.slot.wrapping_sub(1))
@@ -2332,8 +2334,7 @@ pub(crate) fn input_prototype(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             let size = fd.types.size(ty);
             // discoverScope: storage the local scope owns is valid everywhere; any other only at
             // the restricted use point, just before the entry
-            let last = t.off + u64::from(size).max(1) - 1;
-            let local = t.space == Space::Stack && ranges.iter().any(|&(a, b)| a <= t.off && last <= b);
+            let local = t.space == Space::Stack && fd.localmap.in_scope(t.off, size);
             let (first_use, uselimit) = if local {
                 (None, UseLimit::default())
             } else {

@@ -227,9 +227,6 @@ pub(crate) fn prototype_types(fd: &mut Funcdata, arch: &Arch) -> Result<bool> {
     }
     for p in &locked.inputs {
         let Some(st) = &p.storage else { continue };
-        if matches!(st, Storage::Stack { .. }) {
-            return err("a locked stack parameter of the function itself needs stack heritage: not implemented in ghidra-rs yet");
-        }
         let (space, off, size) = location(fd, st)?;
         let vn = fd.new_varnode(size, space, off);
         let vn = fd.set_input_varnode(vn, arch)?;

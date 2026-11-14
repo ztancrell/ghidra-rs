@@ -23,6 +23,7 @@ mod flow;
 mod fspec;
 mod funcdata;
 mod heritage;
+mod heritage_guard;
 mod infertypes;
 mod inject;
 mod jumptable;
@@ -48,6 +49,7 @@ mod subflow;
 mod transform;
 mod types;
 mod variable;
+mod varmap;
 mod varnode;
 
 use crate::analysis::Image;

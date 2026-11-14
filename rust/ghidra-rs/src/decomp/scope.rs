@@ -9,8 +9,8 @@
 //! [`SymbolId`]. A scope's name tree is the C++ `SymbolNameTree` (by name, then `nameDedup`).
 //! Its map is a list of entries per space; [`Database::find_container`] walks the entries
 //! containing the point in the order of the C++ `rangemap` (first offset, then the use-point
-//! subsort, then insertion) from the last, with `findContainer`'s conditions. The stack
-//! branch (`m3-stack`, `LocalMap` in `varmap.rs`) is meant to hold its local scope here.
+//! subsort, then insertion) from the last, with `findContainer`'s conditions. The local
+//! scope's stack ranges are `Funcdata::localmap` (`LocalMap`, varmap.rs).
 
 use std::collections::BTreeMap;
 
@@ -568,21 +568,6 @@ impl Database {
     }
 }
 
-/// The stack ranges the local scope owns (`ScopeLocal::resetLocalWindow`): the parameter range
-/// of the function's model (the stack entries of the model it starts with) and the default
-/// local range (`ProtoModel::defaultLocalRange`, a stack growing down), in order.
-/// ponytail: touching ranges are not merged as `RangeList::insertRange` would; x86's do not touch.
-pub(crate) fn local_ranges(arch: &super::Arch) -> Vec<(u64, u64)> {
-    let models = &arch.spec.models;
-    let model = models.get(models.eval_current.unwrap_or(models.default));
-    let bits = 8 * arch.spec.stack_pointer.2.min(8);
-    let highest = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
-    let mut ranges = model.input.stack_ranges();
-    ranges.push((highest - (highest >> 1).min(0x7fff_ffff), highest));
-    ranges.sort_unstable();
-    ranges
-}
-
 /// `print map` of the function's local scope (`IfcPrintMap`, `Scope::printBounds`,
 /// `ScopeInternal::printEntries`). With `DECOMP_MAP_EXTRA` set (rust/tools/decomp-ref.patch) the
 /// prototype comes first, as `FuncProto::printRaw` writes it.
@@ -617,7 +602,7 @@ pub(crate) fn print_map(fd: &super::Funcdata, arch: &super::Arch, name: &str) ->
         s += &format!("{model} {out} {name}({}) extrapop={pop}\n", params.join(","));
     }
     s += &format!("{name}\n");
-    for (first, last) in local_ranges(arch) {
+    for &(first, last) in fd.localmap.ranges() {
         s += &format!("stack: {first:x}-{last:x}\n");
     }
     s += &format!("Scope {name}\n");

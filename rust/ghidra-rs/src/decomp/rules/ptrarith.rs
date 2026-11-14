@@ -348,11 +348,25 @@ impl AddTree {
         match fd.types.meta(self.base_type) {
             Meta::Spacebase => {
                 // The C++ asks `nearestArrayedComponent` before and after `getSubType`. It is
-                // false for every space-base type here: the global scope holds only functions and
-                // external references (`infertypes::Entry`), the local scope no symbols (no
-                // `localrecovery`), and neither kind has an arrayed component. When data symbols or
-                // local symbols land, port `TypeSpacebase::nearestArrayedComponent*` here (the
-                // marker: `nearest_arrayed_component` fails on a space-base type).
+                // false here while no symbol has an arrayed component: the global scope holds only
+                // functions and external references (`infertypes::Entry`), the local scope only
+                // the locked stack parameters of the function (stack heritage, `varmap.rs`), which
+                // count while their type is primitive or a pointer. A parameter of any other type
+                // fails; when data symbols or other local symbols land, port
+                // `TypeSpacebase::nearestArrayedComponent*` here (the marker:
+                // `nearest_arrayed_component` fails on a space-base type).
+                let local = !matches!(
+                    fd.types.get(self.base_type).kind,
+                    crate::decomp::types::Kind::Spacebase { scope: crate::decomp::types::GLOBAL_SCOPE, .. }
+                );
+                let addr = self.offset & self.ptrmask;
+                if let Some((_, ty)) =
+                    local.then(|| crate::decomp::varmap::LocalMap::locked_param_at(fd, addr)).flatten()
+                {
+                    if matches!(fd.types.meta(ty), Meta::Struct | Meta::Union | Meta::Array) {
+                        return err("RulePtrArith into a locked stack parameter of struct, union or array type (TypeSpacebase::nearestArrayedComponent): not implemented in ghidra-rs yet");
+                    }
+                }
                 let Some((_, extra)) = sub_type(fd, arch, self.base_type, self.offset as i64)? else {
                     self.valid = false;
                     return Ok(());
