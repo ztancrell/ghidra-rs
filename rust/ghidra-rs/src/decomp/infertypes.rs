@@ -221,15 +221,15 @@ fn sub_type(fd: &mut Funcdata, arch: &Arch, t: TypeId, off: i64) -> Result<Optio
                 return Ok(Some((ty, (addr - e.addr) as i64)));
             }
         }
-        // the local scope holds no symbols before `localrecovery`; its range
-        // (`ScopeLocal::resetLocalWindow`) is the prototype's local range, the default
-        // `ProtoModel::defaultLocalRange` (the upper half of the stack), and its parameter
-        // range. ponytail: the parameter range is x86win.cspec's stack `<pentry>` (offset 4,
-        // maxsize 500); read it from the model when another `.cspec` is used.
-        let highest = calc_mask(arch.spec.stack_pointer.2);
-        let local_first = highest - (highest >> 1).min(0x7fff_ffff);
-        if scope != GLOBAL_SCOPE && addr < local_first && !(4..504).contains(&addr) {
-            return Ok(None);
+        if scope != GLOBAL_SCOPE {
+            // the local scope's only symbols are the locked stack parameters of the function
+            // (localrecovery maps none); its range is `ScopeLocal`'s (varmap.rs)
+            if let Some((poff, ty)) = super::varmap::LocalMap::locked_param_at(fd, addr) {
+                return Ok(Some((ty, (addr - poff) as i64)));
+            }
+            if !fd.localmap.in_scope(addr, 1) {
+                return Ok(None);
+            }
         }
         return Ok(Some((fd.types.base(1, Meta::Unknown), 0)));
     }

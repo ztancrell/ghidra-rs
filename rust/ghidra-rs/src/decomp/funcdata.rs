@@ -133,7 +133,7 @@ impl Funcdata {
             proto: FuncProto::default(),
             active_output: None,
             heritage: Heritage::default(),
-            localmap: super::varmap::LocalMap::new(4),
+            localmap: super::varmap::LocalMap::new(4, &[]),
             next_unique: UNIQUE_ANALYSIS,
             warnings: Vec::new(),
             ram: None,
@@ -833,7 +833,21 @@ impl Funcdata {
         self.incidental = arch.incidental.clone();
         self.laned = arch.laned.clone();
         let stack_size = arch.sleigh.spaces.get(arch.spec.stack_container as usize).map_or(8, |s| s.size);
-        self.localmap = super::varmap::LocalMap::new(stack_size);
+        let models = &arch.spec.models;
+        let params: Vec<(u64, u64)> = models
+            .get(self.proto.model.unwrap_or(models.default))
+            .input
+            .entries
+            .iter()
+            .filter_map(|e| match e.storage {
+                // ParamEntry::getSize: a stack entry's size is its maxsize
+                super::fspec::Storage::Stack { offset, .. } => {
+                    Some((offset, offset + u64::try_from(e.size.max(1)).unwrap_or(1) - 1))
+                }
+                _ => None,
+            })
+            .collect();
+        self.localmap = super::varmap::LocalMap::new(stack_size, &params);
         if self.blocks.list.is_empty() {
             flow::follow_flow(self, arch)?;
         }

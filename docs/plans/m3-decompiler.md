@@ -621,9 +621,21 @@ with two stack parameters, so stack varnodes exist without the R5 rules:
 The options are `s6-options.txt` (no new group switch): `stackvars` holds only
 `RuleLoadVarnode`/`RuleStoreVarnode` (R5) and stays off, `localrecovery` stays off because
 `ActionRestructureVarnode` builds local symbols. M8 8 / 8 (the reference shows SSA stack
-varnodes in 4 of 8: call INDIRECTs and MULTIEQUALs of `s0x4`/`s0x8`). M500 and the regression
-bars: the run was still going when the slice was committed (results in
-`rust/target/stk/bars.out`, script `rust/target/stk/bars.sh`).
+varnodes in 4 of 8: call INDIRECTs and MULTIEQUALs of `s0x4`/`s0x8`). M500 496 / 499 (the
+reference finishes 499; 319 of its outputs hold stack varnodes in SSA form). Misses: 0x4919f0
+(the block-numbering difference every M500 check has), 0x4098c0 (sequence numbers two higher
+from 0x409ae2 on, not yet traced), 0x40ad80 (the load-guard error below). Bars held, same
+binary: S4 498 / 500, S6 unlocked / `void` / `int4` / callees with a stack parameter each
+498 / 500 (the callee check's output did not change: its callers have no stack parameters of
+their own), paramdouble 500 / 500, switch corpus 1,947 / 2,050; the rule checks (r1, subvar, r4,
+with `DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst`, without types) each 498 / 499.
+The load-guard value-set analysis (`ValueSetSolver`) is hit by 1 function (0x40ad80);
+`removeRevisitedMarkers`, the dead-code restart and pieces of a locked parameter by none, so
+none of them was ported in this round.
+Verification found and fixed: the local scope's parameter range is the model's stack
+`<pentry>` ranges (`ParamListStandard::getRangeList`, offsets 4 to 503 on x86win), its local
+range the upper half of the stack (`defaultLocalRange`); and `TypeSpacebase::getSubType` now
+answers a locked stack parameter's type (10 functions typed `ESP + 4` as `int4 *`).
 
 - Ported: the stack space in the heritage pass loop (delay 1, dead-code delay 1, dead code
   and `deadRemovalAllowedSeen` per space incl. the stack), `discoverIndexedStackPointers`,

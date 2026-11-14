@@ -24,20 +24,47 @@ pub(crate) struct LocalMap {
 }
 
 impl LocalMap {
-    /// Port of `ScopeLocal::resetLocalWindow` with the model's default ranges
-    /// (`ProtoModel::defaultLocalRange`, `defaultParamRange`; x86's models declare neither): the
-    /// million bytes below the top of the stack space and the 512 bytes from offset 0, for a
-    /// stack that grows down. `addr_size` is the stack space's address size in bytes.
-    pub(crate) fn new(addr_size: u32) -> LocalMap {
+    /// Port of `ScopeLocal::resetLocalWindow` for a stack that grows down: the model's local
+    /// range (`ProtoModel::defaultLocalRange`, the upper half of the space; x86 declares none)
+    /// and its parameter range, the stack `<pentry>` ranges of its input list
+    /// (`ParamListStandard::getRangeList`; `params`, inclusive). `addr_size` is the stack
+    /// space's address size in bytes.
+    pub(crate) fn new(addr_size: u32, params: &[(u64, u64)]) -> LocalMap {
         let highest = if addr_size >= 8 { u64::MAX } else { (1u64 << (8 * addr_size)) - 1 };
-        let (local, param) = match addr_size {
-            4.. => (999_999, 511),
-            2..=3 => (9_999, 255),
-            _ => (99, 15),
-        };
-        let mut ranges = vec![(0, param), (highest - local, highest)];
-        ranges.dedup();
-        LocalMap { ranges, highest, min_param: u64::MAX, max_param: 0 }
+        let mut m = LocalMap { ranges: Vec::new(), highest, min_param: u64::MAX, max_param: 0 };
+        m.insert(highest - (highest >> 1).min(0x7fff_ffff), highest);
+        for &(a, b) in params {
+            m.insert(a, b);
+        }
+        m
+    }
+
+    /// Port of `RangeList::insertRange`: overlapping or touching ranges merge.
+    fn insert(&mut self, mut first: u64, mut last: u64) {
+        let mut out = Vec::with_capacity(self.ranges.len() + 1);
+        for &(a, b) in &self.ranges {
+            if b.saturating_add(1) < first || last.saturating_add(1) < a {
+                out.push((a, b));
+            } else {
+                first = first.min(a);
+                last = last.max(b);
+            }
+        }
+        out.push((first, last));
+        out.sort_unstable();
+        self.ranges = out;
+    }
+
+    /// The locked-parameter "symbol" of the local scope holding stack offset `addr`
+    /// (`Scope::queryContainer`): its offset and type.
+    pub(crate) fn locked_param_at(fd: &Funcdata, addr: u64) -> Option<(u64, super::types::TypeId)> {
+        let l = fd.proto.locked.as_ref()?;
+        l.inputs.iter().find_map(|p| match p.storage {
+            Some(Storage::Stack { offset, size }) if offset <= addr && addr < offset + u64::from(size) => {
+                Some((offset, p.ty))
+            }
+            _ => None,
+        })
     }
 
     /// Port of `RangeList::inRange` on the scope's ranges: whether one range holds
@@ -168,26 +195,27 @@ mod tests {
 
     #[test]
     fn default_window_is_params_and_locals() {
-        let m = LocalMap::new(4);
-        assert_eq!(m.ranges, vec![(0, 511), (0xfff0_bdc0, 0xffff_ffff)]);
-        assert!(m.in_scope(4, 4));
-        assert!(m.in_scope(508, 4));
-        assert!(!m.in_scope(510, 4));
-        assert!(!m.in_scope(0x1000, 4));
-        assert!(m.in_scope(0xffff_fffc, 4));
-        assert!(!m.in_scope(0xffff_fffe, 4));
+        // x86win: one stack <pentry> at offset 4, 500 bytes
+        let m = LocalMap::new(4, &[(4, 503)]);
+        assert_eq!(m.ranges, vec![(4, 503), (0x8000_0000, 0xffff_ffff)]);
+        assert!(m.in_scope(4, 4) && m.in_scope(500, 4));
+        assert!(!m.in_scope(0, 4) && !m.in_scope(502, 4) && !m.in_scope(0x1000, 4));
+        assert!(m.in_scope(0xffff_fffc, 4) && !m.in_scope(0xffff_fffe, 4));
+        // touching ranges merge
+        let m = LocalMap::new(4, &[(0x7fff_fff0, 0x7fff_ffff), (4, 7), (8, 11)]);
+        assert_eq!(m.ranges, vec![(4, 11), (0x7fff_fff0, 0xffff_ffff)]);
     }
 
     #[test]
     fn removing_splits_and_records_the_parameter_extent() {
-        let mut m = LocalMap::new(4);
+        let mut m = LocalMap::new(4, &[(0, 511)]);
         m.remove(8, 4, true);
         assert_eq!(m.ranges[..2], [(0, 7), (12, 511)]);
         assert!(!m.in_scope(8, 1) && m.in_scope(4, 4) && !m.in_scope(4, 8));
         assert_eq!((m.min_param, m.max_param), (8, 11));
         // clipped at the top of the space
         m.remove(0xffff_fff0, 0x40, false);
-        assert_eq!(m.ranges.last(), Some(&(0xfff0_bdc0, 0xffff_ffef)));
+        assert_eq!(m.ranges.last(), Some(&(0x8000_0000, 0xffff_ffef)));
         // a range covering a whole piece removes it
         m.remove(0, 8, false);
         assert_eq!(m.ranges[0], (12, 511));

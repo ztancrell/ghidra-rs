@@ -173,7 +173,8 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    R4 check M500 497 / 499; subvar, R3, S3, S4 and S6 bars all held.
    Stack heritage slice one on branch `m3-stack`: the stack heritage pass, stack-pointer
    tracing, the local scope's stack ranges, `ActionRestrictLocal`, locked stack parameters of
-   the function; check with every function locked with two stack parameters, M8 8 / 8.
+   the function; check with every function locked with two stack parameters, M8 8 / 8,
+   M500 496 / 499; S4, S6, rule, paramdouble and switch bars held.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.

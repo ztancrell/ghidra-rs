@@ -1551,7 +1551,10 @@ Locked stack parameters of the decompiled function are now supported (S6 failed 
 Check, with every function and callee locked:
 `tools/decomp-locked-options.sh void target/stack-lock.txt "int4 a, int4 b"`, then
 `DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=target/stack-lock.txt tools/decomp-diff.sh m8`
-(M8 8 / 8). LOADs and STOREs through the stack pointer stay unconverted until R5's
+(M8 8 / 8; M500 496 / 499, 319 reference outputs with stack SSA varnodes; misses 0x4919f0,
+shared by every M500 check, 0x4098c0, sequence numbers, and 0x40ad80, the load-guard error).
+Bars held: S4 and the four S6 checks 498 / 500, paramdouble 500 / 500, switch corpus
+1,947 / 2,050, r1 / subvar / r4 498 / 499. LOADs and STOREs through the stack pointer stay unconverted until R5's
 `RuleLoadVarnode`/`RuleStoreVarnode`. Not ported, fails loudly: the load-guard value-set
 analysis, revisited markers, the dead-code restart, `ActionRestructureVarnode`. Details and
 the M500 numbers in `docs/plans/m3-decompiler.md`, "Stack heritage".
