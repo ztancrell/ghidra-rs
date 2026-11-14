@@ -752,6 +752,12 @@ untyped 497 / 498 (miss 0x47a6b0; 0x4c48d0 and 0x6b21e0 the reference does not f
 (`r1-options.txt`) 498 / 499 (0x47a6b0). S3 paramdouble 500 / 500; S4 498 / 500 and the locked S6
 checks (`void`, `int4`, callees `int4(int4 a)`) 498 / 500 each (0x4919f0; 0x4c48d0). Switch
 corpus not rerun (`typerecovery` is off in the jump-table partial function).
+Merged with S8 part one (`master` into `m3-r5`, 2026-11-13); every bar rerun on the merged binary:
+R5 check M8 8 / 8, M500 497 / 498 with and without types (0x47a6b0); R1 check 498 / 499;
+S8 rules-off 499 / 499 and S8 rule-stage 498 / 499 (neither S8 options file turns
+`typerecovery` on, so the pointer rules do not run there); S3 paramdouble 500 / 500; S4 and S6
+unlocked 499 / 500 each (0x4c48d0, which the reference does not finish); switch corpus
+1,947 / 2,050, the same misses as before. Superseded: "Switch corpus not rerun" above.
 The bar is meaningful: 326 of the M500 reference outputs (with types) change when the five rules
 are switched off. Not rerun at
 the commit (bars whose options leave the new code off: `typerecovery` is off in the R1, subvar,
