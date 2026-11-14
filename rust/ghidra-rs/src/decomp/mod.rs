@@ -18,6 +18,7 @@ mod cover;
 mod cparse;
 mod cspec;
 mod emulate;
+mod finalstructure;
 mod flow;
 mod fspec;
 mod funcdata;
@@ -30,14 +31,17 @@ mod lanedivide;
 mod lateres;
 mod locked;
 mod merge;
+mod namevars;
 mod nodejoin;
 mod op;
 mod opcode;
 mod print;
+mod rangemap;
 mod rangeutil;
 mod readers;
 mod returnsplit;
 mod rules;
+mod scope;
 mod splitflow;
 mod stdsort;
 mod structure;
@@ -57,6 +61,11 @@ use std::collections::{BTreeMap, HashMap};
 
 pub use funcdata::Funcdata;
 pub use print::print_raw;
+
+/// `print map` (`IfcPrintMap` without a name): the bounds and symbols of the local scope.
+pub fn print_map(fd: &Funcdata, arch: &Arch, name: &str) -> std::result::Result<String, LowlevelError> {
+    scope::print_map(fd, arch, name)
+}
 
 /// `Funcdata::printBlockTree` (`print tree block`): the structured hierarchy, empty before
 /// `ActionBlockStructure` ran.

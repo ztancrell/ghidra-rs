@@ -94,6 +94,11 @@ pub(crate) struct SBlock {
     pub(crate) depth: i32,
     /// `BlockWhileDo`'s `loopDef`, `iterateOp` and `initializeOp` (`finalTransform`)
     pub(crate) for_loop: ForLoop,
+    /// `gototype` of a `BlockGoto` or `BlockIfGoto` (`f_goto_goto` until `scopeBreak` makes it a
+    /// break); unused by the other kinds
+    pub(crate) goto_type: u32,
+    /// `BlockSwitch::caseblocks` (`grabCaseBasic`, completed by `finalizePrinting`)
+    pub(crate) cases: Vec<super::finalstructure::CaseOrder>,
 }
 
 /// The for-loop ops `BlockWhileDo::finalTransform` finds.
@@ -151,6 +156,8 @@ impl Structure {
             leaf_count: i32::from(kind_is_copy),
             depth: 0,
             for_loop: ForLoop::default(),
+            goto_type: super::finalstructure::F_GOTO_GOTO,
+            cases: Vec::new(),
         });
         id
     }
@@ -586,14 +593,17 @@ impl Structure {
         ret
     }
 
-    /// `BlockGraph::newBlockSwitch`. `grabCaseBasic` (the case order and labels) is left out:
-    /// only printing (`BlockSwitch::finalizePrinting`, stage S9) reads it.
+    /// `BlockGraph::newBlockSwitch`. `grabCaseBasic` runs before `identifyInternal`, as in the
+    /// C++, for the part that reads the hierarchy's edges ([`super::finalstructure::grab_cases`]);
+    /// the basic-block part waits for `finalizePrinting`.
     pub(crate) fn new_switch(&mut self, cs: &[SId], has_exit: bool) -> Result<()> {
         let leaf = cs.first().and_then(|&root| self.exit_leaf(root));
         if !leaf.is_some_and(|l| matches!(self.b(l).kind, Kind::Copy(_))) {
             return err("Could not get switch leaf");
         }
+        let cases = super::finalstructure::grab_cases(self, cs);
         let ret = self.new_internal(Kind::Switch, cs);
+        self.bm(ret).cases = cases;
         if has_exit {
             self.force_output_num(ret, 1);
         }
@@ -603,7 +613,7 @@ impl Structure {
 
     /// `getExitLeaf`: a copy is its own; goto, multi-goto and if-goto blocks take component 0's,
     /// a list its last component's; the other kinds have none.
-    fn exit_leaf(&self, mut b: SId) -> Option<SId> {
+    pub(crate) fn exit_leaf(&self, mut b: SId) -> Option<SId> {
         loop {
             let bl = self.b(b);
             b = match bl.kind {
@@ -712,10 +722,12 @@ impl Structure {
             let bl = self.b(b);
             if let Kind::Copy(bb) = bl.kind {
                 let basic = fd.blocks.block(bb);
-                let _ = writeln!(s, "Basic Block {} 0x{:08x}-0x{:08x}", basic.index, basic.start, basic.stop);
+                let extra = super::finalstructure::tree_extra(self, fd, b);
+                let _ = writeln!(s, "Basic Block {} 0x{:08x}-0x{:08x}{extra}", basic.index, basic.start, basic.stop);
                 continue;
             }
-            let _ = writeln!(s, "{}{}", self.header_name(b), bl.index);
+            let extra = super::finalstructure::tree_extra(self, fd, b);
+            let _ = writeln!(s, "{}{}{extra}", self.header_name(b), bl.index);
             stack.extend(bl.list.iter().rev().map(|&c| (c, level + 1)));
         }
         s
@@ -751,7 +763,7 @@ impl Structure {
 /// the position is the address's rank among the distinct addresses, whatever edits came since.
 /// When `switchnorm` is ported (`foldInGuards`, `setLastAsDefault` change the default after
 /// flow), the default must be stored on the `JumpTable` at switch-over time instead.
-fn switch_defaults(fd: &Funcdata) -> Vec<(usize, BlockId)> {
+pub(crate) fn switch_defaults(fd: &Funcdata) -> Vec<(usize, BlockId)> {
     let mut res = Vec::new();
     for jt in &fd.jumptables {
         let Some(bb) = fd.op(jt.op).parent else { continue };
@@ -925,6 +937,27 @@ mod tests {
             "0\n  List block 0\n    If block 0\n      Basic Block 0 0x00001000-0x00001000\n      \
              Basic Block 1 0x00001010-0x00001010\n    Basic Block 2 0x00001020-0x00001020\n"
         );
+    }
+
+    #[test]
+    fn irreducible_loop_final_structure() {
+        // the tree of `irreducible_loop`: List [IfGoto(A -> C), WhileDo(B, C), X]. Expected by hand
+        // from block.cc: the if-goto is outside the loop, so it stays a goto (no loop exit
+        // matches) and marks C's copy as an unstructured target; the while-do passes the label
+        // bump to B only and keeps none itself.
+        let (mut fd, b) = graph(4, &[(0, 1), (0, 2), (1, 2), (2, 1), (1, 3)]);
+        structure(&mut fd);
+        let mut s = std::mem::take(&mut fd.structure);
+        super::super::finalstructure::finalize_hierarchy(&mut s, &mut fd).unwrap();
+        let copy = |bb: BlockId| s.blocks.iter().position(|x| x.kind == Kind::Copy(bb)).map(|i| s.b(SId(i as u32)));
+        use super::super::finalstructure::{F_GOTO_GOTO, F_LABEL_BUMPUP, F_UNSTRUCTURED_TARG};
+        assert_eq!(copy(b[2]).unwrap().flags & (F_UNSTRUCTURED_TARG | F_LABEL_BUMPUP), F_UNSTRUCTURED_TARG);
+        assert_eq!(copy(b[1]).unwrap().flags & (F_UNSTRUCTURED_TARG | F_LABEL_BUMPUP), F_LABEL_BUMPUP);
+        assert_eq!(copy(b[0]).unwrap().flags & (F_UNSTRUCTURED_TARG | F_LABEL_BUMPUP), 0);
+        let ifgoto = s.blocks.iter().find(|x| matches!(x.kind, Kind::IfGoto(_))).unwrap();
+        assert_eq!(ifgoto.goto_type, F_GOTO_GOTO);
+        let whiledo = s.blocks.iter().find(|x| x.kind == Kind::WhileDo).unwrap();
+        assert_eq!(whiledo.flags & F_LABEL_BUMPUP, 0);
     }
 
     /// A->B, A->C, B->C, C->B, B->X: a loop with two entries. `findIrreducible` marks A->C,

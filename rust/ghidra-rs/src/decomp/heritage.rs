@@ -717,9 +717,9 @@ fn guard(fd: &mut Funcdata, arch: &Arch, range: &MemRange, c: &mut Collected) ->
         fd.vn_set(*w, VnFlags::ACTIVE_HERITAGE);
     }
     if range.new_addresses {
-        // queryProperties: the global scope owns ram (persist, addrtied), the local scope its
+        // queryProperties: the global scope owns its ranges (persist, addrtied), the local scope its
         // stack ranges (addrtied); no other space has properties
-        let global = fd.ram.is_some_and(|r| range.space == Space::Sleigh(r));
+        let global = fd.in_global_scope(range.space, range.off, range.size);
         let addrtied = global || (range.space == Space::Stack && fd.localmap.in_scope(range.off, range.size));
         guard_calls(fd, arch, range, &mut c.write, addrtied)?;
         guard_returns(fd, arch, range, global)?;

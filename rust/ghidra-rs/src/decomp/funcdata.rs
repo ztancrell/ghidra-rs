@@ -74,9 +74,16 @@ pub struct Funcdata {
     next_unique: u64,
     /// header warnings (`Funcdata::warningHeader`), for `print C`
     pub(crate) warnings: Vec<String>,
+    /// `Varnode::mapentry`: the symbol and entry a varnode is linked to (`setSymbolEntry`,
+    /// from `ActionNameVars` on)
+    pub(crate) mapentry: BTreeMap<VarnodeId, (super::scope::SymbolId, usize)>,
+    /// warnings at an address (`Funcdata::warning`), for `print C`
+    pub(crate) comments: Vec<(u64, String)>,
     /// the space the global scope owns (ram): its varnodes are `persist` and `addrtied`
     /// (`setVarnodeProperties` through `Scope::queryProperties`)
     pub(crate) ram: Option<u32>,
+    /// the ranges the global scope owns (`CompilerSpec::global`)
+    global: Vec<(u32, u64, u64)>,
     /// the unique space (`IPTR_INTERNAL`)
     pub(crate) uniq: Option<u32>,
     /// the join records (pieces, most significant first) of `Space::Join` varnodes
@@ -116,6 +123,9 @@ pub struct Funcdata {
     /// `jumptablerecovery_on`: this is the partial function of jump-table recovery
     /// (`Funcdata::stageJumpTable`)
     pub(crate) jumptablerecovery_on: bool,
+    /// the scopes and symbols (`Architecture::symboltab`, one per function here): the global
+    /// scope and the local scope (`localmap`), see `scope.rs`
+    pub(crate) symtab: super::scope::Database,
 }
 
 impl Funcdata {
@@ -143,7 +153,10 @@ impl Funcdata {
             localmap: super::varmap::LocalMap::empty(),
             next_unique: UNIQUE_ANALYSIS,
             warnings: Vec::new(),
+            mapentry: BTreeMap::new(),
+            comments: Vec::new(),
             ram: None,
+            global: Vec::new(),
             uniq: None,
             incidental: Vec::new(),
             joins: Vec::new(),
@@ -161,6 +174,7 @@ impl Funcdata {
             next_alive: 0,
             typerecovery_on: false,
             jumptablerecovery_on: false,
+            symtab: super::scope::Database::for_function(),
         }
     }
 
@@ -287,11 +301,19 @@ impl Funcdata {
         }
     }
 
+    /// `Scope::inScope` of the global scope: one of its ranges (the compiler spec's `<global>`:
+    /// ram, and on x86 the MXCSR register) holds the whole storage.
+    pub(crate) fn in_global_scope(&self, space: Space, off: u64, size: u32) -> bool {
+        let Space::Sleigh(s) = space else { return false };
+        let last = off.wrapping_add(u64::from(size.max(1)) - 1);
+        self.global.iter().any(|&(gs, first, glast)| gs == s && first <= off && off <= last && last <= glast)
+    }
+
     /// The scope's properties of a new varnode (`Scope::queryProperties`): the global scope
-    /// owns ram, so its varnodes are `persist` and `addrtied`; the local scope (the stack) holds
-    /// no symbols the console could give.
+    /// owns its ranges, so varnodes there are `persist` and `addrtied`; the local scope (the
+    /// stack) holds no symbols the console could give.
     fn scoped(&self, mut v: Varnode) -> Varnode {
-        if self.ram.is_some_and(|r| v.space == Space::Sleigh(r)) {
+        if self.in_global_scope(v.space, v.offset, v.size) {
             v.flags.set(VnFlags::PERSIST);
             v.flags.set(VnFlags::ADDRTIED);
         }
@@ -544,6 +566,9 @@ impl Funcdata {
 
     /// Port of `Funcdata::deleteVarnode` (`VarnodeBank::destroy`).
     pub(crate) fn delete_varnode(&mut self, vn: VarnodeId) {
+        // Varnode::~Varnode: out of its high variable, and its symbol link goes with it
+        super::variable::high_remove(self, vn);
+        self.mapentry.remove(&vn);
         self.loc_del(vn);
         let v = self.vn(vn);
         if v.is_input() {
@@ -855,6 +880,7 @@ impl Funcdata {
     /// at once for `blocks_generated`).
     pub(crate) fn start_processing(&mut self, arch: &Arch) -> Result<()> {
         self.ram = Some(arch.spec.stack_container);
+        self.global = arch.spec.global.clone();
         self.uniq = Some(arch.sleigh.uniq_space());
         self.incidental = arch.incidental.clone();
         self.laned = arch.laned.clone();
@@ -1001,6 +1027,21 @@ impl Funcdata {
             .collect()
     }
 
+    /// The input varnodes in `beginDef(Varnode::input)` order (address, then size).
+    pub(crate) fn input_list(&self) -> Vec<VarnodeId> {
+        self.inputs.iter().map(|k| k.3).collect()
+    }
+
+    /// Port of `VarnodeBank::hasInputIntersection`: the first input at or after the address, or
+    /// the one before it, overlaps the range.
+    pub(crate) fn has_input_intersection(&self, space: Space, off: u64, size: u32) -> bool {
+        let key = (space.index(), off, 0, VarnodeId(0));
+        let hit = |k: Option<&(u32, u64, u32, VarnodeId)>| {
+            k.is_some_and(|&(s, o, z, _)| s == key.0 && o < off + u64::from(size) && off < o + u64::from(z))
+        };
+        hit(self.inputs.range(key..).next()) || hit(self.inputs.range(..key).next_back())
+    }
+
     /// Port of `Funcdata::findCoveredInput`: the input containing the range.
     pub(crate) fn find_covered_input(&self, space: Space, off: u64, size: u32) -> Option<VarnodeId> {
         let s = space.index();
@@ -1076,6 +1117,19 @@ impl Funcdata {
     /// or for a varnode made since) [`Varnode::nzmask`].
     pub(crate) fn nzmask(&self, vn: VarnodeId) -> u64 {
         self.nzm.get(vn.0 as usize).copied().unwrap_or_else(|| self.vn(vn).nzmask())
+    }
+
+    /// The ops with a sequence number at `addr` (`beginOp(addr)` to `endOp(addr)`), by time.
+    pub(crate) fn ops_at(&self, addr: u64) -> Vec<OpId> {
+        self.seqs.range((addr, 0)..=(addr, u32::MAX)).map(|(_, &id)| id).collect()
+    }
+
+    /// Port of `Funcdata::warning`: a warning comment at an address (`Comment::warning`, kept
+    /// for `print C`), not stored twice (`addCommentNoDuplicate`).
+    pub(crate) fn warning(&mut self, msg: &str, addr: u64) {
+        if !self.comments.iter().any(|(a, m)| *a == addr && m == msg) {
+            self.comments.push((addr, msg.to_string()));
+        }
     }
 
     /// Port of `Funcdata::warningHeader`.

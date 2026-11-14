@@ -73,6 +73,11 @@ pub(crate) struct BlockBasic {
     copymap: BlockId,
     mark: bool,
     entry_point: bool,
+    /// `f_delayed_donothing`: `ActionDoNothing` left this do-nothing block for
+    /// `ActionLateDoNothing` (an immediate COPY crosses its out edge)
+    pub(crate) delayed_donothing: bool,
+    /// `f_donothing_loop`: the do-nothing infinite-loop warning was given
+    pub(crate) donothing_loop: bool,
     /// the immediate dominator (`immed_dom`), none for the entry
     pub(crate) idom: Option<BlockId>,
 }
@@ -112,6 +117,8 @@ impl BlockGraph {
             visitcount: 0,
             numdesc: 0,
             copymap: id,
+            delayed_donothing: false,
+            donothing_loop: false,
             mark: false,
             entry_point: false,
             idom: None,

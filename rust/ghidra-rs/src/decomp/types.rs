@@ -352,6 +352,17 @@ impl TypeFactory {
         }
     }
 
+    /// Port of `Datatype::printNameBase` and its overrides: the prefix a default variable name
+    /// takes from its type (`p` per pointer level, `a` per array, then the first letter).
+    pub(crate) fn print_name_base(&self, id: TypeId) -> String {
+        let t = self.get(id);
+        match t.kind {
+            Kind::Pointer { to, .. } => format!("p{}", self.print_name_base(to)),
+            Kind::Array { elem, .. } => format!("a{}", self.print_name_base(elem)),
+            _ => t.name.as_deref().and_then(|n| n.chars().next()).map(String::from).unwrap_or_default(),
+        }
+    }
+
     /// Port of `Datatype::printRaw` and its overrides.
     pub(crate) fn print_raw(&self, id: TypeId) -> String {
         let t = self.get(id);

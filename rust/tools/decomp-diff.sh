@@ -28,8 +28,8 @@ set -e
 rust=$(cd "$(dirname "$0")/.." && pwd)
 root=$(cd "$rust/.." && pwd)
 export SLEIGHHOME=$root
-export DECOMP=$rust/target/decomp-build/decomp_dbg
-export GHIDRA_RS=$rust/target/release/ghidra-rs
+export DECOMP=${DECOMP:-$rust/target/decomp-build/decomp_dbg}
+export GHIDRA_RS=${GHIDRA_RS:-$rust/target/release/ghidra-rs}
 export GHIDRA_RS_SLA=${GHIDRA_RS_SLA:-$root/Ghidra/Processors/x86/data/languages/x86.sla}
 export BIN=${BIN:-/home/zpt/projects/mercs/mercs2-decomp/orig/Mercenaries2.analysis.exe}
 export PRELUDE=${PRELUDE:-$rust/target/decomp-check/mercs2.prelude}

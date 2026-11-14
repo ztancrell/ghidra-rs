@@ -107,7 +107,7 @@ fn goto_target_leaf(s: &Structure, b: SId) -> Result<Option<BlockId>> {
 }
 
 /// `getFrontLeaf` as a structure block (the copy reached through component 0).
-fn front_leaf(s: &Structure, mut b: SId) -> Option<SId> {
+pub(crate) fn front_leaf(s: &Structure, mut b: SId) -> Option<SId> {
     loop {
         match s.b(b).kind {
             Kind::Copy(_) => return Some(b),
@@ -117,7 +117,7 @@ fn front_leaf(s: &Structure, mut b: SId) -> Option<SId> {
 }
 
 /// `BlockGoto::gotoPrints`: the goto prints unless the flow after it reaches its target anyway.
-fn goto_prints(s: &Structure, b: SId, target: SId) -> bool {
+pub(crate) fn goto_prints(s: &Structure, b: SId, target: SId) -> bool {
     match s.b(b).parent {
         Some(p) => front_leaf(s, target) != next_flow_after(s, p, b),
         None => false,

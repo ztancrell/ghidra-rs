@@ -517,7 +517,7 @@ table row:
   data-types (`addunsigned`, `subright`, `piecestructure`, `andstructure`) or belong to R3 to R5.
 - The partial function of jump-table recovery runs the `jumptable` root action (the tree of
   `universal` with its groups; eight actions left out while they are not ported, of which
-  `restructurevarnode`, `condconst` and `normalizebranches` can change table recovery) instead of
+  `restructure_varnode`, `condconst` and `normalizebranches` can change table recovery) instead of
   S3's stand-ins, with `jumptablerecovery_on` gating heritage's dead-code delay, `lastChanceLoad`
   and `donothing`; `analyzeGuards` is the C++ loop. Left: the fold through read-only loads
   (`RuleLoadVarnode`, R5). S3 recheck at `paramdouble`: M8 8 / 8, M500 500 / 500, switch
@@ -704,8 +704,8 @@ checks 498 / 500.
 
 Ported: the merge range `assignhigh` .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`;
 list in `rust/README.md`, "Stage S7"). Check: `print raw` with types and high variables at
-`break start inputprototype` (the first action after `copymarker` whose group is on and that is
-not ported), `DECOMP_RAW_EXTRA=1`:
+`break start inputprototype` (then the first action after `copymarker` whose group is on and that
+was not ported; superseded: ported in "Tail", the break point stays), `DECOMP_RAW_EXTRA=1`:
 
 ```sh
 cd rust
@@ -1025,7 +1025,261 @@ Bars after the S7 merge: S8 rules off M500 499 / 499, rule-stage 498 / 499 (pref
 structuretransform, returnsplit and nodejoin on both sides); S7 checks (their own options,
 `blockrecovery` off) rules on 498 / 499, types on 493 / 499, unchanged. Part three stays open until those land. The S7 checks keep `blockrecovery` off (their option files
 are S4's); with it on they would reach `latedonothing`, which ghidra-rs does not port, so
-none of the S8 actions runs inside them.
+none of the S8 actions runs inside them. Superseded by "Tail" below: `latedonothing`, the
+prototype actions, `mapglobals` and `finalstructure` are ported.
+
+### Tail: in part on branch `m3-tail` (2026-11-14)
+
+The leaves between `copymarker` and `stop`. Ported:
+
+- `latedonothing` (`ActionLateDoNothing`, with `ActionDoNothing`'s delayed mark and
+  `removingCreatesRedundancy`; `coreaction.rs`). Fixed with it: `isDoNothing` now tests a switch
+  predecessor as the C++ does (a BRANCHIND block, and only when the successor joins edges); S4
+  refused any predecessor with more than two out edges.
+- `outputprototype` (`ActionOutputPrototype`, `updateOutputTypes`: the first input of the first
+  RETURN that is not a special halt, with its high variable's type) and `inputprototype`
+  (`ActionInputPrototype`: the input varnodes the model could pass become trials,
+  `ProtoModelMerged::selectModel` with `ScoreProtoModel` resolves the merged
+  `__fastcall/__thiscall/__stdcall` model, `ParamListStandard::fillinMap` with `buildTrialMap`,
+  `forceExclusionGroup`, `forceNoUse`, `forceInactiveChain` picks the parameters,
+  `updateInputTypes` stores them as symbols of category 0 in the local scope, `clearDeadVarnodes`);
+  `coreaction.rs`, `fspec.rs`.
+- Scopes and symbols, the part these need (`scope.rs`, wired as `Funcdata::symtab`: a global and a
+  local scope per function): symbols with map entries and use limits, categories
+  (`setCategory`, `clearCategory`, `removeSymbol`), `$$undef` names, `findContainer`, the local
+  scope's ranges (`resetLocalWindow`: the model's stack parameter range and the default local
+  range), `print map`. Functions and external references stay in `Arch` (`query_global`).
+- `mapglobals` (`ActionMapGlobals`, `Funcdata::mapGlobals` with `coverVarnodes`): data symbols
+  of the global scope, named by `buildVariableName` (`iRam0256f88a`).
+- `finalstructure` (`ActionFinalStructure`: `orderBlocks`, `finalizePrinting` with
+  `BlockWhileDo::testTerminal`/`testIterateForm`, `Funcdata::moveRespectingCover`,
+  `HighVariable::markExpression`, `BlockSwitch` cases (`grabCaseBasic`/`addCase` at
+  `newBlockSwitch`, the basic-block part, fall-through chains, the label sort), `scopeBreak`,
+  `markUnstructured`, `markLabelBumpUp`; `finalstructure.rs`).
+
+Also fixed: the action table named two unported leaves `restructurevarnode` and
+`mappedlocalsync`; the C++ names are `restructure_varnode` and `mapped_local_sync` (they are what
+`break start` and `DECOMP_SKIP_ACTIONS` take).
+Superseded: S8 part two's "part three waits" and "`latedonothing` ... cannot be skipped fairly".
+
+Not ported (left `not_ported`): `dynamicsymbols` (group `dynamic`, off), `namevars` (superseded:
+ported, see "`namevars`" below)
+(`Funcdata::linkSymbol` with `detectSymbolConflicts` and `MapEntryConflict`, `linkSymbolReference`,
+`HighVariable::getNameRepresentative`/`hasName`, `buildDefaultName`, `assignDefaultNames`; the name
+scheme itself, `buildVariableName` with `iVar1`, `param_1`, `in_EAX`, `unaff_ESI`,
+`extraout_EAX`, `iStack_14`, is in `scope.rs` and unit tested, not wired), `setcasts` (S9),
+`prototypewarnings` (warnings only), and the case labels: `switchnorm` (`matchModel`,
+`recoverLabels`, `foldInNormalization`, `foldInGuards`) is not ported, so `finalstructure` fails
+loudly on a switch with cases. The reference with `switchnorm` off fails there too (an assertion
+on the empty label table), so switch functions count as "the reference does not finish" in the
+`finalstructure` checks. Known gaps in what is ported, each failing loudly or marked in the code:
+a persistent input as a parameter (`findDisjointCover`), the open parameter references and fake
+inputs of `restructure_varnode`, `print map` of a locked prototype,
+`coverVarnodes` inside an external reference.
+
+Check design. `decomp-ref.patch` gains two devices. `DECOMP_TREE_EXTRA=1` (`FlowBlock::printTree`,
+`BlockCopy::printTree`; `structure.rs` prints the same) adds to each `print tree block` line what
+`finalstructure` sets: `{f<flags>` (`f_unstructured_targ` 0x20, `f_label_bumpup` 0x1000),
+` g<gototype>` for goto and if-goto blocks, ` c<index>:<gototype>` for each switch case in order,
+` it<time>`/` in<time>` for a while-do's for-loop ops, `}`. `DECOMP_MAP_EXTRA=1` (`IfcPrintMap`)
+makes `print map` of the current function start with its prototype (`FuncProto::printRaw`: model,
+return type, parameter types, extrapop; since the review also one `param <i>: <name> : <storage>:<size>`
+line per parameter with `typelock`, `namelock`, `this`, and an `output:` line with the return
+storage) and end with the data symbols of the global scope (`Global data`; functions, labels and
+external references left out); each mapped symbol also gets an `attributes <name> :` line
+(`addrtied`, `typelock`, `namelock`, `this`, `category <n>:<index>`). Option files, all from
+`tools/r1-options.sh`: `s8-r-options.txt` (rules on), the new `s8-t-options.txt` (types on:
+`s6-options` with `blockrecovery`, `returnsplit` on), and the new `tail-r-options.txt` /
+`tail-t-options.txt` (the same two with `localrecovery` on, so that `outputprototype` runs; the
+group's two other unported actions are skipped on both engines). `decomp-diff.sh` takes `DECOMP` and
+`GHIDRA_RS` from the environment, `decomp-ref.sh` takes `DECOMP_BUILD` and `JOBS`. Run
+`decomp_dbg` by its absolute path: its `discoverGhidraRoot` aborts on a relative `argv[0]`.
+
+```sh
+cd rust; export DECOMP_RAW_EXTRA=1
+S3=multicse,shadowvar,condconst
+L=restructure_varnode,mapped_local_sync
+S=inputprototype,mapglobals,namevars,setcasts
+# prototypes and globals: everything before namevars runs on both engines
+export DECOMP_MAP_EXTRA=1 PRINT=$'print map\nprint raw'
+DECOMP_SKIP_ACTIONS=$S3,$L BREAK=namevars OPTIONS=$PWD/tools/corpus/tail-r-options.txt tools/decomp-diff.sh m500
+DECOMP_SKIP_ACTIONS=$L BREAK=namevars OPTIONS=$PWD/tools/corpus/tail-t-options.txt tools/decomp-diff.sh m500
+# latedonothing: everything before inputprototype
+export DECOMP_TREE_EXTRA=1 PRINT=$'print tree block\nprint raw'
+DECOMP_SKIP_ACTIONS=$S3 BREAK=inputprototype OPTIONS=$PWD/tools/corpus/s8-r-options.txt tools/decomp-diff.sh m500
+DECOMP_SKIP_ACTIONS= BREAK=inputprototype OPTIONS=$PWD/tools/corpus/s8-t-options.txt tools/decomp-diff.sh m500
+# finalstructure: the four leaves before it skipped on both engines
+DECOMP_SKIP_ACTIONS=$S3,$S BREAK=prototypewarnings OPTIONS=$PWD/tools/corpus/s8-r-options.txt tools/decomp-diff.sh m500
+DECOMP_SKIP_ACTIONS=$S BREAK=prototypewarnings OPTIONS=$PWD/tools/corpus/s8-t-options.txt tools/decomp-diff.sh m500
+```
+
+Why skipping the four before `finalstructure` is fair: `finalizePrinting` reads high variables,
+`isExplicit`, `notPrinted` and the op order; `inputprototype`, `mapglobals` and `namevars` change
+prototypes, symbols and names only, and `setcasts` inserts CAST ops that `moveRespectingCover`
+and `testTerminal` could meet. Measured on the reference over M500 (the tree with the extras, the
+four running against skipped): 0 / 500 outputs differ, rules on and types on; with only
+`setcasts` skipped, rules on, 0 / 500.
+
+| check | M8 | M500 (of the functions the reference finishes) |
+|---|---|---|
+| prototypes and globals, rules on | 8 / 8 | 498 / 499 (99.8 %) |
+| prototypes and globals, types on | 8 / 8 | 493 / 499 (98.8 %) |
+| `latedonothing`, rules on | 8 / 8 | 498 / 499 (99.8 %) |
+| `latedonothing`, types on | 8 / 8 | 493 / 499 (98.8 %) |
+| `finalstructure`, rules on | 7 / 7 (0x4042e0: switch) | 494 / 495 (99.8 %) |
+| `finalstructure`, types on | 7 / 7 (0x4042e0: switch) | 489 / 495 (98.8 %) |
+
+How much M500 exercises each (reference outputs): `latedonothing` changes 9 / 500 with rules on
+and 0 / 500 with types on (that check only shows it does no harm there); `finalstructure` changes
+151 / 500 (rules on) and 173 / 500 (types on); with types on, 229 of the 499 functions get
+parameters (all resolve to `__fastcall`; none to `__thiscall`, so `updateThisPointer` is not
+exercised), 235 a return value and 234 at least one global data symbol.
+Misses: the six types-on misses are S7's (`mergeAddrTied` needs `VariablePiece`: 0x402c20, 0x405990, 0x4c0070, 0x62f0d0, 0x757810, 0x7586e0), the rules-on miss is 0x47a6b0 (the known block-order difference from R3); no miss is new, and none is in the ported tail actions. 0x4c48d0 the reference does not finish; with `finalstructure` neither the four switch functions 0x4173a0, 0x442c90, 0x5f40b0, 0x5f8f30.
+Existing bars on this branch (final binary): R1/R3, subvar and R4 checks 498 / 499, R5 typed 497 / 498, S7 rules on 498 / 499 and types on 493 / 499, S8 rules off 499 / 499 and rule stage 498 / 499, S3 paramdouble 500 / 500, S4 and S6 499 / 500, switch corpus 1,947 / 2,050: all unchanged.
+
+Merged with master 836d04baee (stack heritage) on 2026-11-14. One conflict, `rust/README.md`: both
+sides had added a section at the same place, both are kept (stack heritage first). After the merge
+the tail code reads the local scope's real stack ranges (`Funcdata::localmap`, `LocalMap::ranges`
+and `in_scope` in `varmap.rs`): the bounds `print map` prints and the use-limit test of
+`inputprototype` (`discoverScope`). Superseded: `scope::local_ranges` and
+`ParamList::stack_ranges`, which computed static ranges from the default model.
+`restrictlocal` (`varmap::restrict_local`) now runs in the prototype checks on both engines and
+the reference agrees; `L` below no longer names it. Tail checks on the merged binary, M8 then
+M500: prototypes and globals 8 / 8, 498 / 499 (rules on) and 8 / 8, 493 / 499 (types on);
+`latedonothing` 8 / 8, 498 / 499 and 8 / 8, 493 / 499; `finalstructure` 7 / 7, 494 / 495 and
+7 / 7, 489 / 495: unchanged.
+
+Review fixes (2026-11-14, after an independent review reading the Rust against the C++):
+
+- `rangemap.rs` ports the `rangemap` template (the sub-range multiset with libstdc++'s placement
+  of equal keys, `insert` with `unzip`, `erase` with `zip`, `find`). A scope's map is one per
+  space, so `printEntries` and `findContainer` meet entries in the C++ order: a record sorts by
+  its last offset and goes before an equal one (a symbol inside an earlier one is listed first).
+  Superseded: the list sorted by first offset, sub-sort and insertion.
+- `Scope::addMap`: a symbol whose entry has no use limit is address-tied (stack parameters too,
+  not only the globals); the rangemap sub-sort is the first range of the use limit.
+- `ActionOutputPrototype`: a size-locked output (locked with an unknown type) takes the type of
+  a return value at its storage (`overrideSizeLockType`); with high variables off the output is
+  an unknown of the varnode's size (`updateOutputNoTypes`). `mapGlobals` fails without high
+  variables, as `Varnode::getHigh` does.
+- `ActionInputPrototype` replaces the model only when it is merged (`resolveModel`).
+- `orderBlocks` sorts with the port of `std::sort` (`stdsort.rs`) and the literal
+  `compareFinalOrder`, which is not a strict order.
+- `mapGlobals` names a persistent register by its register name (`getRegisterName` first).
+- `ActionDoNothing` and `ActionLateDoNothing` give the warning "Do nothing block with infinite
+  loop" once per block (`Funcdata::warning`, kept in `Funcdata::comments` for the printer; no
+  compared output shows warnings yet); `isDoNothing` accepts any branch op (`hasOnlyMarkers`).
+- The compiler spec's `<global>` is read: its ranges belong to the global scope
+  (`CompilerSpec::global`, `Funcdata::in_global_scope`), so a varnode on x86's `MXCSR` register is
+  persistent and address-tied as in the C++. Superseded: "the global scope owns ram" only.
+- `fspec.rs`: `justifiedContain` handles a join entry; `resourceStart` ends with the group count;
+  loud errors for `separatefloat="false"`, entries not ordered by storage class, an
+  unreferenced parameter in a join entry, a stack growing up or `reversejustify`.
+  `findEntry` in list order is the C++ order (the resolver sub-sorts by entry position).
+- Arithmetic on untrusted input wraps where the C++ wraps (`mapGlobals`, `justifiedContain`,
+  slot addresses) and is checked elsewhere (the for-loop head's other in edge).
+- `print map` prints an address as `AddrSpace::printRaw` does (padded to the space's address
+  size; `print::shortcut` is shared with `print raw`).
+- An unported action's error names the action. `action::PARTIAL_SKIP` no longer names
+  `restrictlocal` (ported on the stack branch; the entry had no effect).
+- Dead code removed: `Scope::name`/`parent`, `find_overlap`; the blanket `allow(dead_code)` on
+  `scope.rs` is gone.
+- Known limit, not changed: the symbol database is per function (`Database::for_function`),
+  the C++ has one global scope per process. The checks run one process per function, so a
+  global symbol made by an earlier decompilation is never seen.
+
+Check coverage: with the extended `DECOMP_MAP_EXTRA` print the prototype checks also compare the
+order of the parameters, their names and storage, the return storage and the symbol attributes.
+Tail checks after these fixes (reference rebuilt with the new patch), M8 then M500: prototypes
+and globals 8 / 8, 498 / 499 (rules on) and 8 / 8, 493 / 499 (types on); `latedonothing` 8 / 8,
+498 / 499 and 8 / 8, 493 / 499; `finalstructure` 7 / 7, 494 / 495 and 7 / 7, 489 / 495: unchanged.
+The 24 other bars on M8: 8 / 8 each.
+
+`namevars` (2026-11-14, `namevars.rs`). Ported: `ActionNameVars::apply` with `linkSymbols`,
+`linkSpacebaseSymbol`, `lookForBadJumpTables` and `lookForFuncParamNames`;
+`Funcdata::linkSymbol` (the high's symbol, else an entry of the local scope holding the first
+byte at the use point, else a new local symbol), `detectSymbolConflicts` with `MapEntryConflict`
+entries (`SymbolEntry::conflict`; `print map` shows ` (conflicts)` where the C++ does, after the
+line end of the bounds), `linkSymbolReference` for stack addresses, `Varnode::getUsePoint`,
+`HighVariable::getNameRepresentative` (`compareName`), `hasName`, `getSymbol`,
+`getSymbolOffset`, `Scope::buildDefaultName` and `ScopeInternal::assignDefaultNames`. The name
+scheme of `scope.rs` is wired (`iVar1`, `param_1`, `in_EAX`, `unaff_EBP`, `extraout_EAX`,
+`iStack_14`, `UNRECOVERED_JUMPTABLE`); `ScopeLocal`'s stack data comes with each request
+(`NameRequest::stack`, from `Funcdata::localmap`), a call made from a failed jump table carries
+`CallSpec::bad_jump_table`, and `Funcdata::mapentry` is `Varnode::mapentry`. Superseded:
+"`namevars` ... not wired" above and `Scope::stack`.
+Left out, each without effect on the compared output or failing loudly (listed in the module
+comment): the link of a persistent varnode to its global symbol (read by the printer only),
+name recommendations (the scope holds none), CAST ops and proto-partial varnodes (do not exist
+yet), `finalizeDatatype` of a piece of a symbol (loud error).
+
+Check: `print map` with `DECOMP_MAP_EXTRA=1` after `namevars` (`BREAK=setcasts`), the options
+and skip lists of the prototype checks: the names, storage, types and use limits of every local
+symbol, the conflict marks, the parameter names of the prototype and the symbol attributes.
+
+```sh
+export DECOMP_MAP_EXTRA=1 PRINT=$'print map\nprint raw'
+DECOMP_SKIP_ACTIONS=$S3,$L BREAK=setcasts OPTIONS=$PWD/tools/corpus/tail-r-options.txt tools/decomp-diff.sh m500
+DECOMP_SKIP_ACTIONS=$L BREAK=setcasts OPTIONS=$PWD/tools/corpus/tail-t-options.txt tools/decomp-diff.sh m500
+```
+
+| check | M8 | M500 (of the functions the reference finishes) |
+|---|---|---|
+| names, rules on | 8 / 8 | 498 / 499 (99.8 %) |
+| names, types on | 8 / 8 | 493 / 499 (98.8 %) |
+
+Misses: rules on 0x47a6b0 (the known block-order difference from R3); types on the six
+`VariablePiece` functions of S7 (0x402c20, 0x405990, 0x4c0070, 0x62f0d0, 0x757810, 0x7586e0);
+none is in `namevars`. 0x4c48d0 the reference does not finish. The first M500 run found two
+things, both fixed: a symbol stored in the join space (13 functions failed; `Scope::addMap` maps
+each piece of the join too, `SymbolEntry::piece`, and `print map` prints a join by its pieces),
+and a destroyed varnode staying a member of its high variable (0x43d846 failed in `hasName`;
+`Funcdata::delete_varnode` now takes it out, as `Varnode::~Varnode` does).
+Not exercised by these checks: `lookForFuncParamNames` (no callee has a locked, named
+prototype in the tail option files) and `updateThisPointer` (no M500 function resolves to
+`__thiscall`).
+
+Every bar on the final binary of this branch (2026-11-14, the tree of the `namevars` commit;
+reference rebuilt with the new `decomp-ref.patch`). M8: 8 / 8 in the 24 checks of the table,
+the prototype, `latedonothing` and names checks, 7 / 7 in `finalstructure`. M500:
+
+| check | before | now |
+|---|---|---|
+| stack check (`stack-lock.txt` at `assignhigh`) | 498 / 499 | 498 / 499 |
+| S7 print with `stack-lock.txt` (`inputprototype`) | 492 / 499 | 492 / 499 |
+| `funclink`, `heritage` (S1a, S1b) | 500 / 500 | 500 / 500, 500 / 500 |
+| S3 `paramdouble` | 500 / 500 | 500 / 500 |
+| S3 switch corpus | 1,947 / 2,050 | 1,947 / 2,050 |
+| S4 | 499 / 500 | 499 / 500 |
+| S6 unlocked | 499 / 500 | 499 / 500 |
+| S6 locked `void`, locked `int4`, callees with a stack parameter | 499 / 500 each | 499 / 500 each |
+| R1/R2/R3 (`r1-options`), subvar, R4 | 498 / 499 each | 498 / 499 each |
+| R5, with and without types | 497 / 498 | 497 / 498 |
+| S7 `r1-options` (also with create indices), `subvar-options`, `r4-options` | 498 / 499 | 498 / 499 |
+| S7 `r5-options` | 497 / 498 | 497 / 498 |
+| S7 `s6-options` (also with create indices) | 493 / 499 | 493 / 499 |
+| S8 rules off, rule stage | 499 / 499, 498 / 499 | 499 / 499, 498 / 499 |
+| prototypes and globals, rules on, types on | 498 / 499, 493 / 499 | 498 / 499, 493 / 499 |
+| `latedonothing`, rules on, types on | 498 / 499, 493 / 499 | 498 / 499, 493 / 499 |
+| `finalstructure`, rules on, types on | 494 / 495, 489 / 495 | 494 / 495, 489 / 495 |
+| names (`print map` after `namevars`), rules on, types on | new | 498 / 499, 493 / 499 |
+
+No bar fell. The switch functions were not compared for real in `finalstructure` and the switch
+corpus got no `finalstructure` run: both wait for `switchnorm`.
+
+Not started: the case labels. `switchnorm` needs, beyond `matchModel`/`recoverLabels`/
+`foldInNormalization`/`foldInGuards` themselves: the flow-time model's value range kept on the
+`JumpTable` (`buildLabels` walks the range of the model the addresses were recovered with),
+`JumpTable::switchOver` state (`block2addr`, `defaultBlock`, `lastBlock`, now recomputed in
+`structure::switch_defaults`), guard records with their CBRANCH, read op, path and the
+`unrolled` mark (`checkUnrolledGuard`, `markFoldableGuards`; `jumptable.rs` returns early where
+the C++ checks unrolled guards), `findSmallestNormal` matching the earlier range,
+`findUnnormalized` with op marks, `backup2Switch` with `TypeOp::recoverInputBinary/Unary`
+(not in `emulate.rs`), `switchVarConsume` in dead code, `FlowBlock::getFlipPath` (`f_flip_path`
+is not kept by `swap_edges`), `BlockBasic::noInterveningStatement`, `Funcdata::pushBranch`,
+`JumpTable::addBlockToSwitch`, and a print of the labels in the reference patch. Until then a
+switch with cases fails loudly in `finalstructure` and the five switch functions (0x4042e0 in
+M8; 0x4173a0, 0x442c90, 0x5f40b0, 0x5f8f30 in M500) stay "the reference does not finish" there.
 
 ## Running stages in parallel
 

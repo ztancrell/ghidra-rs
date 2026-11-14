@@ -11,6 +11,7 @@
 use super::cspec::SleighNames;
 use super::inject::InjectId;
 use super::op::OpId;
+use super::types::TypeId;
 use super::varnode::Space;
 use super::{err, Arch, LowlevelError, Result};
 use crate::xml::Element;
@@ -219,6 +220,10 @@ impl ParamList {
     /// Port of `ParamListStandard::decode`: the `<pentry>`s of `<input>`/`<output>`; with
     /// `killedbycall="true"` each entry is also a killed-by-call effect.
     fn decode(el: &Element, regs: &SleighNames, effects: &mut Vec<Effect>) -> Result<ParamList> {
+        // `separatefloat="false"` puts every entry in one resource section; not ported
+        if el.attr("separatefloat").is_some() && !el.flag("separatefloat") {
+            return err(format!("<{}>: separatefloat=\"false\" is not supported", el.name));
+        }
         let entries = el
             .kids
             .iter()
@@ -227,6 +232,14 @@ impl ParamList {
                 n => err(format!("<{}>: <{n}> is not supported", el.name)),
             })
             .collect::<Result<Vec<_>>>()?;
+        // parsePentry: the storage classes only go down, each change starting a resource section
+        let mut last = TypeClass::Class(4);
+        for e in &entries {
+            if last.rank() < e.class.rank() {
+                return err("parameter list entries must be ordered by storage class");
+            }
+            last = e.class;
+        }
         if el.flag("killedbycall") {
             effects
                 .extend(entries.iter().map(|e| Effect { storage: e.storage.clone(), kind: EffectKind::KilledByCall }));
@@ -293,6 +306,9 @@ pub(crate) struct ProtoModel {
     /// sorted by address (`EffectRecord::compareByAddress`)
     pub(crate) effects: Vec<Effect>,
     pub(crate) likelytrash: Vec<Storage>,
+    /// `ProtoModelMerged::modellist`: the models a `<resolveprototype>` chooses among, in its
+    /// order; empty for a plain model
+    pub(crate) members: Vec<ModelId>,
 }
 
 impl ProtoModel {
@@ -340,17 +356,18 @@ impl ProtoModel {
         effects.sort_by_key(|e| e.storage.address_key());
         // VarnodeData::operator<: space, offset, then the larger size first
         likelytrash.sort_by_key(|s: &Storage| (s.address_key(), std::cmp::Reverse(s.size())));
-        Ok(ProtoModel { name, extrapop, input, output, effects, likelytrash })
+        Ok(ProtoModel { name, extrapop, input, output, effects, likelytrash, members: Vec::new() })
     }
 
     /// Port of `ProtoModelMerged::decode` + `foldIn`: the models of a `<resolveprototype>`
     /// folded into one (the effects and likely-trash registers they share; extrapop unknown
     /// unless all agree; the input entries of all).
-    pub(crate) fn merged(name: &str, members: &[&ProtoModel]) -> Result<ProtoModel> {
+    pub(crate) fn merged(name: &str, members: &[&ProtoModel], ids: Vec<ModelId>) -> Result<ProtoModel> {
         let Some((first, rest)) = members.split_first() else {
             return err(format!("resolveprototype {name}: no models"));
         };
-        let mut m = ProtoModel { name: name.to_string(), input: ParamList::default(), ..(*first).clone() };
+        let mut m =
+            ProtoModel { name: name.to_string(), input: ParamList::default(), members: ids, ..(*first).clone() };
         m.input.fold_in(&first.input);
         for other in rest {
             m.input.fold_in(&other.input);
@@ -430,6 +447,9 @@ pub(crate) struct FuncProto {
     /// The C++ resets it in `clearUnlockedOutput` (a decompile restart); restarts are not
     /// ported, and the reset must come with them.
     pub(crate) return_bytes_consumed: u32,
+    /// the return value `ActionOutputPrototype` stores (`ProtoStoreSymbol::outparam`): storage and
+    /// data-type; none is `void`. The inputs are the local scope's category-0 symbols.
+    pub(crate) out_param: Option<(Space, u64, TypeId)>,
 }
 
 impl FuncProto {
@@ -488,6 +508,8 @@ pub(crate) struct CallSpec {
     pub(crate) active_output: Option<ParamActive>,
     /// `effective_extrapop`, from `ActionStackPtrFlow`
     pub(crate) effective_extrapop: Option<i32>,
+    /// `isBadJumpTable`: the call stands for an indirect jump whose table was not recovered
+    pub(crate) bad_jump_table: bool,
     /// `FuncCallSpecs::stackoffset`: the stack pointer at the call relative to its value on entry
     /// (`None`: `offset_unknown`); set by `resolveSpacebaseRelative` (RuleLoadVarnode, stage R5)
     pub(crate) stack_offset: Option<u64>,
@@ -520,6 +542,7 @@ impl CallSpec {
             active_input: None,
             active_output: None,
             effective_extrapop: None,
+            bad_jump_table: false,
             input_consume: Vec::new(),
             stack_offset: None,
         }
@@ -956,5 +979,508 @@ impl FuncProto {
     /// Port of `FuncProto::isAutoKilledByCall`.
     pub(crate) fn is_auto_killed_by_call(&self, arch: &Arch) -> bool {
         self.model_of(arch).is_some_and(|m| m.output.killed_by_call)
+    }
+}
+
+// ---- recovering the function's own inputs (ActionInputPrototype, the tail stage) ----
+
+impl ParamTrial {
+    pub(crate) const UNREF: u32 = 0x10;
+
+    fn is_def_no_use(&self) -> bool {
+        self.has(Self::DEFNOUSE)
+    }
+}
+
+impl ParamList {
+    /// The entry's base offset when it lives in `space` (a join entry lives in none).
+    fn base_in(&self, i: usize, space: Space) -> Option<u64> {
+        match (&self.entries[i].storage, space) {
+            (Storage::Space { space: s, offset, .. }, Space::Sleigh(sp)) if *s == sp => Some(*offset),
+            (Storage::Stack { offset, .. }, Space::Stack) => Some(*offset),
+            _ => None,
+        }
+    }
+
+    /// Port of `ParamEntry::justifiedContain` (little endian): the range's offset in the entry,
+    /// modulo the alignment of a multi-slot entry; for a join entry, its offset from the least
+    /// significant piece on.
+    fn justified_in(&self, i: usize, space: Space, off: u64, size: u32) -> Option<i32> {
+        let e = &self.entries[i];
+        let end = off.checked_add(u64::from(size))?.checked_sub(1)?;
+        if let Storage::Join(pieces) = &e.storage {
+            let mut res = 0u32;
+            for &(s, o, z) in pieces.iter().rev() {
+                if space == Space::Sleigh(s) && off >= o && end <= o.wrapping_add(u64::from(z)).wrapping_sub(1) {
+                    return i32::try_from(u64::from(res) + (off - o)).ok();
+                }
+                res = res.wrapping_add(z);
+            }
+            return None;
+        }
+        let base = self.base_in(i, space)?;
+        if off < base || end > base.wrapping_add(e.size as u64).wrapping_sub(1) {
+            return None;
+        }
+        let rel = off - base;
+        Some(if e.align == 0 { rel as i32 } else { (rel % e.align as u64) as i32 })
+    }
+
+    /// Port of `ParamListStandard::findEntry` with `just` true: the first entry holding the
+    /// range justified. The C++ walks the resolver's pieces at the offset, which sort by the
+    /// entry's position (`ParamEntryRange::getSubsort`), so list order is its order.
+    pub(crate) fn find_entry(&self, space: Space, off: u64, size: u32) -> Option<usize> {
+        (0..self.entries.len())
+            .find(|&i| self.entries[i].minsize <= size as i32 && self.justified_in(i, space, off, size) == Some(0))
+    }
+
+    /// Port of `ParamEntry::getSlot`.
+    fn get_slot(&self, i: usize, space: Space, off: u64, skip: u32) -> i32 {
+        let e = &self.entries[i];
+        let mut res = self.group(i) as i32;
+        if e.align != 0 {
+            let base = self.base_in(i, space).unwrap_or(0);
+            res += (off.wrapping_add(u64::from(skip)).wrapping_sub(base) as i32) / e.align;
+        }
+        res
+    }
+
+    /// Port of `ParamListStandard::possibleParamWithSlot`: the slot and slot count of a range.
+    fn possible_param_with_slot(&self, space: Space, off: u64, size: u32) -> Option<(i32, i32)> {
+        let i = self.find_entry(space, off, size)?;
+        let e = &self.entries[i];
+        let slotsize = if e.align == 0 { 1 } else { (size as i32 - 1) / e.align + 1 };
+        Some((self.get_slot(i, space, off, 0), slotsize))
+    }
+
+    /// `resourceStart` (`parsePentry`): the first group of each run of entries of one storage
+    /// class, then the number of groups.
+    fn resource_start(&self) -> Vec<usize> {
+        let mut res = Vec::new();
+        let mut last = None;
+        for (i, e) in self.entries.iter().enumerate() {
+            if last != Some(e.class) {
+                res.push(self.group(i));
+                last = Some(e.class);
+            }
+        }
+        res.push((0..self.entries.len()).map(|i| self.group(i) + 1).max().unwrap_or(0)); // numgroup
+        res
+    }
+
+    /// The address and size of slot `slot` of entry `i`, as `buildTrialMap` asks
+    /// `ParamEntry::getAddrBySlot` for an unreferenced trial (little endian, no reverse stack).
+    fn slot_address(&self, i: usize, slot: u64) -> Result<(Space, u64, u32)> {
+        let e = &self.entries[i];
+        let (sz, step) = if e.align == 0 { (e.size, 0) } else { (e.align, (e.align as u64).wrapping_mul(slot)) };
+        match &e.storage {
+            Storage::Space { space, offset, .. } => Ok((Space::Sleigh(*space), offset.wrapping_add(step), sz as u32)),
+            Storage::Stack { offset, .. } => Ok((Space::Stack, offset.wrapping_add(step), sz as u32)),
+            Storage::Join(_) => err("buildTrialMap: an unreferenced parameter in a join entry is not ported"),
+        }
+    }
+
+    /// Port of `ParamListStandard::selectUnreferenceEntry`.
+    fn select_unreference_entry(&self, grp: usize, pref: TypeClass) -> Option<usize> {
+        let mut best = None;
+        let mut best_score = -1;
+        for i in (0..self.entries.len()).filter(|&i| self.group(i) == grp) {
+            let score = if self.entries[i].class == pref {
+                2
+            } else if pref == TypeClass::General {
+                1
+            } else {
+                0
+            };
+            if score > best_score {
+                best_score = score;
+                best = Some(i);
+            }
+        }
+        best
+    }
+
+    /// Port of `ParamListStandard::buildTrialMap`: each trial gets its entry (none: not used),
+    /// groups and slots before a seen one get unreferenced trials, and the trials are sorted.
+    fn build_trial_map(&self, active: &mut ParamActive) -> Result<()> {
+        let mut hitlist: Vec<Option<usize>> = Vec::new();
+        let (mut float_count, mut int_count) = (0, 0);
+        for t in &mut active.trials {
+            match self.find_entry(t.space, t.off, t.size) {
+                None => t.mark_no_use(),
+                Some(e) => {
+                    t.entry = Some(e);
+                    t.offset = 0;
+                    if t.is_active() {
+                        if self.entries[e].class == TypeClass::Float {
+                            float_count += 1;
+                        } else {
+                            int_count += 1;
+                        }
+                    }
+                    let grp = self.group(e);
+                    if hitlist.len() <= grp {
+                        hitlist.resize(grp + 1, None);
+                    }
+                    hitlist[grp].get_or_insert(e);
+                }
+            }
+        }
+        for (grp, hit) in hitlist.into_iter().enumerate() {
+            let Some(cur) = hit else {
+                let pref = if float_count > int_count { TypeClass::Float } else { TypeClass::General };
+                let Some(cur) = self.select_unreference_entry(grp, pref) else { continue };
+                let (space, off, size) = self.slot_address(cur, 0)?;
+                active.register_unref(space, off, size, cur);
+                continue;
+            };
+            if self.entries[cur].align == 0 {
+                continue;
+            }
+            // holes inside a multi-slot entry
+            let mut slots: Vec<bool> = Vec::new();
+            for t in active.trials.iter().filter(|t| t.entry == Some(cur)) {
+                let grp = self.group(cur) as i32;
+                let a = self.get_slot(cur, t.space, t.off, 0) - grp;
+                let b = self.get_slot(cur, t.space, t.off, t.size.wrapping_sub(1)) - grp;
+                let (lo, hi) = (a.min(b).max(0) as usize, a.max(b).max(0) as usize);
+                if slots.len() <= hi {
+                    slots.resize(hi + 1, false);
+                }
+                slots[lo..=hi].iter_mut().for_each(|s| *s = true);
+            }
+            for (j, _) in slots.iter().enumerate().filter(|(_, &s)| !s) {
+                let (space, off, size) = self.slot_address(cur, j as u64)?;
+                active.register_unref(space, off, size, cur);
+            }
+        }
+        active.sort_trials(self);
+        Ok(())
+    }
+
+    /// Port of `ParamListStandard::separateSections`.
+    fn separate_sections(&self, active: &ParamActive, starts: &[usize]) -> Result<Vec<usize>> {
+        let mut res = vec![0];
+        let mut next_group = starts.get(1).copied().unwrap_or(usize::MAX);
+        let mut next_section = 2;
+        for (i, t) in active.trials.iter().enumerate() {
+            let Some(e) = t.entry else { continue };
+            if self.group(e) >= next_group {
+                next_group =
+                    *starts.get(next_section).ok_or_else(|| LowlevelError("Missing next resource start".into()))?;
+                next_section += 1;
+                res.push(i);
+            }
+        }
+        res.push(active.trials.len());
+        Ok(res)
+    }
+
+    /// Port of `ParamListStandard::markGroupNoUse` (an entry has one group here).
+    fn mark_group_no_use(&self, active: &mut ParamActive, keep: usize, start: usize) {
+        let Some(grp) = active.trials[keep].entry.map(|e| self.group(e)) else { return };
+        for i in start..active.trials.len() {
+            if i == keep || active.trials[i].is_def_no_use() {
+                continue;
+            }
+            if active.trials[i].entry.map(|e| self.group(e)) != Some(grp) {
+                break;
+            }
+            active.trials[i].mark_no_use();
+        }
+    }
+
+    /// Port of `ParamListStandard::markBestInactive`.
+    fn mark_best_inactive(&self, active: &mut ParamActive, group: usize, start: usize, pref: TypeClass) {
+        let mut best = None;
+        let mut best_score = -1;
+        for i in start..active.trials.len() {
+            let t = &active.trials[i];
+            if t.is_def_no_use() {
+                continue;
+            }
+            let Some(e) = t.entry else { break };
+            if self.group(e) != group {
+                break;
+            }
+            let mut score = 0;
+            if t.has(ParamTrial::ANCESTOR_REALISTIC) {
+                score += 5;
+                if t.has(ParamTrial::ANCESTOR_SOLID) {
+                    score += 5;
+                }
+            }
+            if self.entries[e].class == pref {
+                score += 1;
+            }
+            if score > best_score {
+                best_score = score;
+                best = Some(i);
+            }
+        }
+        if let Some(b) = best {
+            self.mark_group_no_use(active, b, start);
+        }
+    }
+
+    /// Port of `ParamListStandard::forceExclusionGroup`.
+    fn force_exclusion_group(&self, active: &mut ParamActive) {
+        let mut cur_group = None;
+        let mut group_start = 0;
+        let mut inactive = 0;
+        for i in 0..active.trials.len() {
+            let t = &active.trials[i];
+            let Some(e) = t.entry.filter(|&e| !t.is_def_no_use() && self.entries[e].align == 0) else { continue };
+            let grp = self.group(e);
+            if cur_group != Some(grp) {
+                if let Some(g) = cur_group.filter(|_| inactive > 1) {
+                    self.mark_best_inactive(active, g, group_start, TypeClass::General);
+                }
+                cur_group = Some(grp);
+                group_start = i;
+                inactive = 0;
+            }
+            if active.trials[i].is_active() {
+                self.mark_group_no_use(active, i, group_start);
+            } else {
+                inactive += 1;
+            }
+        }
+        if let Some(g) = cur_group.filter(|_| inactive > 1) {
+            self.mark_best_inactive(active, g, group_start, TypeClass::General);
+        }
+    }
+
+    /// Port of `ParamListStandard::forceNoUse`: once a whole group is definitely not used,
+    /// every later trial of the section is inactive.
+    fn force_no_use(&self, active: &mut ParamActive, start: usize, stop: usize) {
+        let (mut seen, mut all) = (false, false);
+        let mut cur_group = -1;
+        for t in &mut active.trials[start..stop] {
+            let Some(e) = t.entry else { continue };
+            let grp = self.group(e) as i32;
+            if grp <= cur_group && self.entries[e].align == 0 {
+                if !t.is_def_no_use() {
+                    all = false;
+                }
+            } else {
+                if all {
+                    seen = true;
+                }
+                all = t.is_def_no_use();
+                cur_group = grp;
+            }
+            if seen {
+                t.mark_inactive();
+            }
+        }
+    }
+
+    /// Port of `ParamListStandard::forceInactiveChain` for the function's own inputs (not a
+    /// sub-call): a chain of more than `maxchain` inactive slots ends the parameters; inactive
+    /// trials before the last active one become active.
+    fn force_inactive_chain(
+        &self,
+        active: &mut ParamActive,
+        maxchain: i32,
+        start: usize,
+        stop: usize,
+        group_start: i32,
+    ) {
+        let slot_group =
+            |t: &ParamTrial| t.entry.map_or(0, |e| self.get_slot(e, t.space, t.off, t.size.wrapping_sub(1)));
+        let (mut seen, mut chain) = (false, 0);
+        let mut max = None;
+        for i in start..stop {
+            if active.trials[i].is_def_no_use() {
+                continue;
+            }
+            if !active.trials[i].is_active() {
+                chain += if i == start {
+                    slot_group(&active.trials[i]) - group_start + 1
+                } else {
+                    slot_group(&active.trials[i]) - slot_group(&active.trials[i - 1])
+                };
+                if chain > maxchain {
+                    seen = true;
+                }
+            } else {
+                chain = 0;
+                if !seen {
+                    max = Some(i);
+                }
+            }
+            if seen {
+                active.trials[i].mark_inactive();
+            }
+        }
+        if let Some(max) = max {
+            for t in &mut active.trials[start..=max] {
+                if !t.is_def_no_use() && !t.is_active() {
+                    t.mark_active();
+                }
+            }
+        }
+    }
+
+    /// Port of `ParamListStandard::fillinMap` (the input list): which trials are parameters.
+    pub(crate) fn fillin_map_input(&self, active: &mut ParamActive) -> Result<()> {
+        if active.trials.is_empty() {
+            return Ok(());
+        }
+        if self.entries.is_empty() {
+            return err("Cannot derive parameter storage for prototype model without parameter entries");
+        }
+        self.build_trial_map(active)?;
+        self.force_exclusion_group(active);
+        let starts = self.resource_start();
+        let sections = self.separate_sections(active, &starts)?;
+        for w in sections.windows(2) {
+            self.force_no_use(active, w[0], w[1]);
+        }
+        for (i, w) in sections.windows(2).enumerate() {
+            self.force_inactive_chain(active, 2, w[0], w[1], starts.get(i).copied().unwrap_or(0) as i32);
+        }
+        for t in &mut active.trials {
+            if t.is_active() {
+                t.set(ParamTrial::USED);
+            }
+        }
+        Ok(())
+    }
+
+    /// Port of `ScoreProtoModel` for inputs (`addParameter`, `doScore`): how badly the active
+    /// trials fit this list; 0 is a perfect fit.
+    fn score(&self, active: &ParamActive) -> i32 {
+        let mut entries = Vec::new();
+        let mut mismatch = 0;
+        for t in active.trials.iter().filter(|t| t.is_active()) {
+            match self.possible_param_with_slot(t.space, t.off, t.size) {
+                Some(p) => entries.push(p),
+                None => mismatch += 1,
+            }
+        }
+        entries.sort_by_key(|&(slot, _)| slot);
+        const PENALTY: [i32; 4] = [16, 10, 7, 5];
+        let (mut next_free, mut base) = (0, 0);
+        for (slot, size) in entries {
+            if slot > next_free {
+                while next_free < slot {
+                    base += PENALTY.get(next_free as usize).copied().unwrap_or(3);
+                    next_free += 1;
+                }
+                next_free += size;
+            } else if next_free > slot {
+                base += 20;
+                next_free = next_free.max(slot + size);
+            } else {
+                next_free = slot + size;
+            }
+        }
+        base + 20 * mismatch
+    }
+}
+
+impl ParamActive {
+    /// `registerTrial` + `markUnref` + `setEntry`: a trial for a slot nothing in the function reads.
+    fn register_unref(&mut self, space: Space, off: u64, size: u32, entry: usize) {
+        self.register_trial(space, off, size);
+        if let Some(t) = self.trials.last_mut() {
+            t.flags |= ParamTrial::UNREF | ParamTrial::CHECKED;
+            t.entry = Some(entry);
+            t.offset = 0;
+        }
+    }
+}
+
+impl Models {
+    /// Port of `ProtoModelMerged::selectModel`: the member of the merged model `id` the active
+    /// trials fit best (the first on a tie); `id` itself when it is not merged.
+    pub(crate) fn select_model(&self, id: ModelId, active: &ParamActive) -> Result<ModelId> {
+        let members = &self.get(id).members;
+        if members.is_empty() {
+            return Ok(id);
+        }
+        let mut best = None;
+        let mut best_score = 500;
+        for &m in members {
+            let score = self.get(m).input.score(active);
+            if score < best_score {
+                best_score = score;
+                best = Some(m);
+                if score == 0 {
+                    break;
+                }
+            }
+        }
+        best.ok_or_else(|| LowlevelError("No model matches : missing default".into()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reg(offset: u64) -> ParamEntry {
+        ParamEntry {
+            storage: Storage::Space { space: 3, offset, size: 4 },
+            class: TypeClass::General,
+            minsize: 1,
+            size: 4,
+            align: 0,
+        }
+    }
+    fn stack() -> ParamEntry {
+        ParamEntry {
+            storage: Storage::Stack { offset: 4, size: 500 },
+            class: TypeClass::General,
+            minsize: 1,
+            size: 500,
+            align: 4,
+        }
+    }
+    fn list(entries: Vec<ParamEntry>) -> ParamList {
+        ParamList { entries, killed_by_call: false }
+    }
+    fn trials(active: &[(Space, u64)]) -> ParamActive {
+        let mut a = ParamActive::new(0);
+        for &(space, off) in active {
+            a.register_trial(space, off, 4);
+            a.trials.last_mut().unwrap().mark_active();
+        }
+        a
+    }
+
+    /// x86 `__fastcall` (ECX, EDX, then the stack): a read of ECX and of the second stack slot.
+    /// By fspec.cc: EDX (its group has no trial) and the first stack slot (a hole) get
+    /// unreferenced trials; both sit before the last active trial with inactive chains of at most
+    /// two slots, so `forceInactiveChain` makes them active, and all four are parameters.
+    #[test]
+    fn fillin_map_fills_holes_before_the_last_active_trial() {
+        let l = list(vec![reg(4), reg(8), stack()]);
+        let mut a = trials(&[(Space::Sleigh(3), 4), (Space::Stack, 8)]);
+        l.fillin_map_input(&mut a).unwrap();
+        let got: Vec<_> = a.trials.iter().map(|t| (t.space, t.off, t.is_used(), t.has(ParamTrial::UNREF))).collect();
+        assert_eq!(
+            got,
+            vec![
+                (Space::Sleigh(3), 4, true, false),
+                (Space::Sleigh(3), 8, true, true),
+                (Space::Stack, 4, true, true),
+                (Space::Stack, 8, true, false),
+            ]
+        );
+    }
+
+    /// `ScoreProtoModel`: a read of ECX fits a list starting with ECX (0) and misses a
+    /// stack-only list (one mismatch, 20); a stack-only read leaves two register slots empty in
+    /// the first (16 + 10).
+    #[test]
+    fn score_prefers_the_model_whose_slots_are_filled() {
+        let (fast, std) = (list(vec![reg(4), reg(8), stack()]), list(vec![stack()]));
+        let ecx = trials(&[(Space::Sleigh(3), 4)]);
+        assert_eq!((fast.score(&ecx), std.score(&ecx)), (0, 20));
+        let stk = trials(&[(Space::Stack, 4)]);
+        assert_eq!((fast.score(&stk), std.score(&stk)), (26, 0));
     }
 }

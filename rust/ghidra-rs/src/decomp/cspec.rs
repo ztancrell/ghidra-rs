@@ -54,6 +54,9 @@ pub(crate) struct CompilerSpec {
     pub(crate) stack_pointer: (u32, u64, u32),
     /// `<stackpointer space=..>`: the space the stack lives in (the stack space's container)
     pub(crate) stack_container: u32,
+    /// `<global>`: the ranges the global scope owns (space, first, last); a varnode inside one
+    /// is `persist` and `addrtied`
+    pub(crate) global: Vec<(u32, u64, u64)>,
     pub(crate) models: Models,
     pub(crate) injects: InjectLibrary,
     /// `<data_organization><size_alignment_map>`: the alignment of a primitive of each size
@@ -125,9 +128,14 @@ impl CompilerSpec {
         let (mut eval_current, mut eval_called) = (None, None);
         let mut injects = InjectLibrary::new(sleigh);
         let mut align_map = None;
+        let mut global = Vec::new();
         for el in &root.kids {
             match el.name.as_str() {
                 "stackpointer" => {
+                    // parameter storage is ported for a stack growing down, left justified
+                    if el.attr("growth").is_some_and(|g| g != "negative") || el.flag("reversejustify") {
+                        return err("<stackpointer>: growth=\"positive\" and reversejustify are not supported");
+                    }
                     stack_pointer = Some((names.register(el.req("register")?)?, names.space(el.req("space")?)?));
                 }
                 "default_proto" => {
@@ -154,7 +162,30 @@ impl CompilerSpec {
                         align_map = Some(decode_alignment_map(m)?);
                     }
                 }
-                "returnaddress" | "global" => {}
+                // Architecture::decodeGlobal, addToGlobalScope: the ranges the global scope owns
+                "global" => {
+                    for r in &el.kids {
+                        global.push(match r.name.as_str() {
+                            "register" => {
+                                let (space, off, size) = names.register(r.req("name")?)?;
+                                (space, off, off.wrapping_sub(1).wrapping_add(u64::from(size)))
+                            }
+                            "range" => {
+                                let space = names.space(r.req("space")?)?;
+                                let size = sleigh.spaces[space as usize].size;
+                                let highest = if size >= 8 { u64::MAX } else { (1u64 << (8 * size)) - 1 };
+                                let first = if r.attr("first").is_some() { r.int("first")? as u64 } else { 0 };
+                                let last = if r.attr("last").is_some() { r.int("last")? as u64 } else { highest };
+                                if first > highest || last > highest || last < first {
+                                    return err("Illegal range tag");
+                                }
+                                (space, first, last)
+                            }
+                            _ => return err("Expecting <range> or <register> element"),
+                        });
+                    }
+                }
+                "returnaddress" => {}
                 n => return err(format!("<compiler_spec>: <{n}> is not supported")),
             }
         }
@@ -164,20 +195,22 @@ impl CompilerSpec {
         models.eval_called = eval_called.map(|n| models.find(&n)).transpose()?;
         let (stack_pointer, stack_container) =
             stack_pointer.ok_or_else(|| LowlevelError("No stack pointer specified".into()))?;
-        Ok(CompilerSpec { stack_pointer, stack_container, models, injects, align_map })
+        Ok(CompilerSpec { stack_pointer, stack_container, models, injects, align_map, global })
     }
 }
 
 /// Port of `Architecture::decodeProto` for `<resolveprototype>` (`ProtoModelMerged::decode`).
 fn resolve_prototype(el: &Element, list: &[ProtoModel]) -> Result<ProtoModel> {
-    let members = el
+    let ids = el
         .kids_named("model")
         .map(|m| {
             let name = m.req("name")?;
             list.iter()
-                .find(|p| p.name == name)
+                .position(|p| p.name == name)
+                .map(|i| super::fspec::ModelId(i as u32))
                 .ok_or_else(|| LowlevelError(format!("Missing prototype model: {name}")))
         })
         .collect::<Result<Vec<_>>>()?;
-    ProtoModel::merged(el.req("name")?, &members)
+    let members: Vec<&ProtoModel> = ids.iter().map(|id| &list[id.0 as usize]).collect();
+    ProtoModel::merged(el.req("name")?, &members, ids)
 }

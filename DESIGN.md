@@ -209,7 +209,16 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    ported; both S8 checks unchanged with them on (499 / 499, 498 / 499). Superseded: the earlier
    "Open: `prefercomplement`, `structuretransform`" (their second, no-mods instances are wired since the S7 merge). Part three
    (`finalstructure`) is blocked by `latedonothing`, the prototype and cast actions, and switch labels. Open: `finalstructure`,
-   structured `printRaw`.
+   structured `printRaw`. Superseded (tail, branch `m3-tail`, 2026-11-14): `latedonothing`, `outputprototype`,
+   `inputprototype`, `mapglobals` and `finalstructure` are ported, with the scopes and symbols they need
+   (`scope.rs`, `finalstructure.rs`). Checks (M8; M500 of the functions the reference finishes), rules on and types on:
+   prototypes and globals (`print map` with `DECOMP_MAP_EXTRA`) 8 / 8, 498 / 499 and 493 / 499; `latedonothing` 8 / 8,
+   498 / 499 and 493 / 499; `finalstructure` (`print tree block` with `DECOMP_TREE_EXTRA`) 7 / 7, 494 / 495 and 489 / 495.
+   After a review the scopes' maps follow the C++ `rangemap` order, the compiler spec's `<global>` ranges are read and the prototype checks also compare parameter names, storage and symbol attributes; the six checks are unchanged.
+   `namevars` is ported (`namevars.rs`: symbols linked to the named variables, Ghidra's default names); its check (`print map`
+   after `namevars`) is M8 8 / 8, M500 498 / 499 (99.8 %) rules on and 493 / 499 (98.8 %) types on.
+   Open: `switchnorm` case labels (not started; a switch with cases fails loudly in `finalstructure`), `setcasts` (S9). Structured `printRaw` is not reachable from the
+   console (`print raw` prints the basic blocks), so it waits for S9's printer.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.

@@ -156,13 +156,8 @@ impl<'a> Printer<'a> {
             // stack varnodes come with the `stackvars` rules (stage R5)
             // JoinSpace::printRaw: the pieces' names
             Space::Join => {
-                let names: Vec<String> = self.fd().joins[v.offset as usize]
-                    .iter()
-                    .map(|&(s, o, z)| {
-                        self.arch.register_name(s, o, z).map_or_else(|| format!("r0x{o:x}"), |r| r.0.to_string())
-                    })
-                    .collect();
-                self.out.str(&format!("j{{{}}}", names.join(",")));
+                let text = join_raw(self.fd(), self.arch, v.offset).unwrap_or_else(|e| e.0);
+                self.out.str(&text);
                 0
             }
             Space::Stack => {
@@ -224,12 +219,7 @@ impl<'a> Printer<'a> {
             let _ = write!(self.out.s, "0x{off:x}");
             return 4;
         }
-        let shortcut = match sp.name.as_str() {
-            "register" => '%',
-            "unique" => 'u',
-            n => n.chars().next().unwrap_or('x').to_ascii_lowercase(),
-        };
-        self.out.s.push(shortcut);
+        self.out.s.push(shortcut(&sp.name));
         self.out.addr(off);
         4
     }
@@ -436,4 +426,25 @@ fn raw_extra() -> bool {
 fn raw_index() -> bool {
     static INDEX: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *INDEX.get_or_init(|| std::env::var("DECOMP_RAW_EXTRA").is_ok_and(|v| v.starts_with('2')))
+}
+
+/// `AddrSpace::getShortcut` of the space called `name`: the shortcuts the architecture assigns
+/// (`%` register, `u` unique, else the first letter).
+pub(crate) fn shortcut(name: &str) -> char {
+    match name {
+        "register" => '%',
+        "unique" => 'u',
+        n => n.chars().next().unwrap_or('x').to_ascii_lowercase(),
+    }
+}
+
+/// The join space's shortcut and `JoinSpace::printRaw`: the pieces' names.
+pub(crate) fn join_raw(fd: &Funcdata, arch: &Arch, index: u64) -> super::Result<String> {
+    let pieces = usize::try_from(index).ok().and_then(|i| fd.joins.get(i));
+    let pieces = pieces.ok_or_else(|| super::LowlevelError("join address without a record".into()))?;
+    let names: Vec<String> = pieces
+        .iter()
+        .map(|&(s, o, z)| arch.register_name(s, o, z).map_or_else(|| format!("r0x{o:x}"), |r| r.0.to_string()))
+        .collect();
+    Ok(format!("j{{{}}}", names.join(",")))
 }

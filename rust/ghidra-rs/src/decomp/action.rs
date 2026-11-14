@@ -15,7 +15,7 @@ use super::{err, heritage, Arch, Funcdata, Result};
 /// `universalAction` as the `decompile` root has it, with the groups in `disabled` switched
 /// off (`option currentaction decompile <group> off`): the root `universal` (restart group,
 /// once per function), its first actions, the repeating groups `fullloop`, `mainloop` and
-/// `stackstall`, and the root's actions after `fullloop` to `stop` (ported through `copymarker`, stage S7). `oppool1` holds the
+/// `stackstall`, and the root's actions after `fullloop` to `stop` (ported through `mapglobals` and `finalstructure`, the tail; `namevars`, `setcasts` and `switchnorm` are not). `oppool1` holds the
 /// ported rules (`rules::OPPOOL1`) less those `togglerule` switched off (`rule:<name>` in
 /// `disabled`); the actions named `action:<name>` there (`DECOMP_SKIP_ACTIONS`) are left out. An
 /// action that is not ported fails when it runs with its group on.
@@ -143,7 +143,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("spacebase", "base", c::spacebase),
             ("infertypes", "typerecovery", super::infertypes::infer_types),
             ("nonzeromask", "analysis", super::rules::nonzero_mask),
-            ("restructurevarnode", "localrecovery", not_ported),
+            ("restructure_varnode", "localrecovery", not_ported),
         ],
     );
     mainloop.push(stackstall);
@@ -192,7 +192,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
     root.extend(leaves(
         &mut t,
         &[
-            ("mappedlocalsync", "localrecovery", not_ported),
+            ("mapped_local_sync", "localrecovery", not_ported),
             // ActionStartCleanUp only records the varnode create index (`clean_up_index`), which
             // nothing ported reads
             ("startcleanup", "cleanup", c::nothing),
@@ -220,19 +220,19 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("mergetype", "merge", super::merge::merge_type),
             ("hideshadow", "merge", super::merge::hide_shadow),
             ("copymarker", "merge", super::merge::copy_marker),
-            ("latedonothing", "blockrecovery", not_ported),
+            ("latedonothing", "blockrecovery", c::late_do_nothing),
             // the second instances: the same ActionBlockStructure (nothing to do once structured),
             // then the two transforms without op modifications
             ("blockstructure", "blockrecovery", super::structure::block_structure),
             ("prefercomplement", "blockrecovery", super::blocktransform::prefer_complement_no_mods),
             ("structuretransform", "blockrecovery", super::blocktransform::structure_transform_no_mods),
-            ("outputprototype", "localrecovery", not_ported),
-            ("inputprototype", "fixateproto", not_ported),
-            ("mapglobals", "fixateglobals", not_ported),
+            ("outputprototype", "localrecovery", c::output_prototype),
+            ("inputprototype", "fixateproto", c::input_prototype),
+            ("mapglobals", "fixateglobals", c::map_globals),
             ("dynamicsymbols", "dynamic", not_ported),
-            ("namevars", "merge", not_ported),
+            ("namevars", "merge", super::namevars::name_vars),
             ("setcasts", "casts", not_ported),
-            ("finalstructure", "blockrecovery", not_ported),
+            ("finalstructure", "blockrecovery", super::finalstructure::final_structure),
             ("prototypewarnings", "protorecovery", not_ported),
             ("stop", "base", c::nothing),
         ],
@@ -241,25 +241,25 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
     t
 }
 
-/// An action not ported yet: it fails when it runs (with its group on).
-fn not_ported(_: &mut Funcdata, _: &Arch) -> Result<i32> {
-    err("action not implemented in ghidra-rs yet (milestone 3: stage S7 ends after copymarker; see the action table)")
+/// An action not ported yet: it fails when it runs (with its group on); `ActionTree::apply`
+/// reports it by the name of the action it stands for.
+pub(crate) fn not_ported(_: &mut Funcdata, _: &Arch) -> Result<i32> {
+    err("action not implemented in ghidra-rs yet (milestone 3)")
 }
 
 /// The actions of the `jumptable` root's groups the partial function is simplified without while
 /// they are not ported (an entry is skipped only as long as its leaf is `not_ported`; any other
 /// unported action reached in the partial fails the table and is reported, `flow.rs`). Three
-/// of them can change which tables are recovered: `restructurevarnode` (in the partial it also
+/// of them can change which tables are recovered: `restructure_varnode` (in the partial it also
 /// runs `protectSwitchPaths`, coreaction.cc), `condconst` (constants along a guarded path) and
 /// `normalizebranches` (flips the CBRANCHs the guards are read from).
 const PARTIAL_SKIP: &[&str] = &[
     "funclinkoutonly",
-    "restrictlocal",
-    "restructurevarnode",
+    "restructure_varnode",
     "multicse",
     "shadowvar",
     "condconst",
-    "mappedlocalsync",
+    "mapped_local_sync",
     "normalizebranches",
     // stage S7: the last `localrecovery` action, after merging (not in the `jumptable` groups);
     // it only sets the output prototype's types, which no recovered address reads
