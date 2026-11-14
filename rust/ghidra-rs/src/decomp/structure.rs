@@ -29,6 +29,8 @@ const F_MARK2: u32 = 0x100;
 const F_INTERIOR_GOTOOUT: u32 = 0x400;
 const F_INTERIOR_GOTOIN: u32 = 0x800;
 pub(crate) const F_WHILEDO_OVERFLOW: u32 = 0x8000;
+/// `f_final_transform`: `finalTransform` has run on the graph
+pub(crate) const F_FINAL_TRANSFORM: u32 = 0x100000;
 
 // `FlowBlock::edge_flags` (block.hh)
 const E_GOTO: u32 = 1;
@@ -86,6 +88,20 @@ pub(crate) struct SBlock {
     pub(crate) flags: u32,
     pub(crate) index: i32,
     pub(crate) visitcount: i32,
+    /// `leafCount`: 1 for a copy, the components' sum for a graph (`getBasicCount`)
+    pub(crate) leaf_count: i32,
+    /// `structureDepth`: 0 for a copy, one more than the deepest component for a graph
+    pub(crate) depth: i32,
+    /// `BlockWhileDo`'s `loopDef`, `iterateOp` and `initializeOp` (`finalTransform`)
+    pub(crate) for_loop: ForLoop,
+}
+
+/// The for-loop ops `BlockWhileDo::finalTransform` finds.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ForLoop {
+    pub(crate) loop_def: Option<super::op::OpId>,
+    pub(crate) iterate: Option<super::op::OpId>,
+    pub(crate) initialize: Option<super::op::OpId>,
 }
 
 /// The structured hierarchy (`Funcdata::sblocks`); empty until `ActionBlockStructure`.
@@ -122,6 +138,7 @@ impl Structure {
 
     fn new_block(&mut self, kind: Kind) -> SId {
         let id = SId(self.blocks.len() as u32);
+        let kind_is_copy = matches!(kind, Kind::Copy(_));
         self.blocks.push(SBlock {
             kind,
             parent: None,
@@ -131,6 +148,9 @@ impl Structure {
             flags: 0,
             index: 0,
             visitcount: 0,
+            leaf_count: i32::from(kind_is_copy),
+            depth: 0,
+            for_loop: ForLoop::default(),
         });
         id
     }
@@ -375,6 +395,10 @@ impl Structure {
         }
         self.bm(bl).parent = Some(g);
         self.bm(g).list.push(bl);
+        let (leaves, depth) = (self.b(bl).leaf_count, self.b(bl).depth + 1);
+        let gb = self.bm(g);
+        gb.leaf_count += leaves;
+        gb.depth = gb.depth.max(depth);
     }
 
     /// `BlockGraph::forceOutputNum`: self loop edges until `b` has `n` outputs.
@@ -820,6 +844,16 @@ pub(crate) fn block_structure(fd: &mut Funcdata, _: &super::Arch) -> Result<i32>
     res
 }
 
+/// `ActionBlockStructure` without the architecture, for unit tests.
+#[cfg(test)]
+pub(crate) fn build_and_collapse(fd: &mut Funcdata) -> Result<i32> {
+    let mut s = std::mem::take(&mut fd.structure);
+    s.build_copy(fd)?;
+    let n = super::collapse::collapse_all(&mut s, fd);
+    fd.structure = s;
+    n
+}
+
 #[cfg(test)]
 mod tests {
     //! Small hand-built graphs. The expected trees are derived by hand from the C++
@@ -857,10 +891,7 @@ mod tests {
 
     /// `ActionBlockStructure` without the architecture: the change count and the tree.
     fn structure(fd: &mut Funcdata) -> (i32, String) {
-        let mut s = std::mem::take(&mut fd.structure);
-        s.build_copy(fd).unwrap();
-        let n = super::super::collapse::collapse_all(&mut s, fd).unwrap();
-        fd.structure = s;
+        let n = build_and_collapse(fd).unwrap();
         (n, fd.structure.print_tree(fd))
     }
 
@@ -927,6 +958,24 @@ mod tests {
             "0\n  List block 0\n    Switch block 0\n      Multi goto block 0\n        \
              Basic Block 0 0x00001000-0x00001000\n      Basic Block 2 0x00001010-0x00001010\n      \
              Basic Block 1 0x00001020-0x00001020\n    Basic Block 3 0x00001030-0x00001030\n"
+        );
+    }
+
+    /// A -> {B, C}, B -> {D, E}, C -> {D, E}, D -> F, E -> F: no rule applies at the start
+    /// (no clause has a single entry), so `selectGoto` runs `TraceDAG` on the DAG to pick an
+    /// unstructured edge. The expected tree is this port's output, pinned as a regression check;
+    /// it is not derived by hand or run on the reference (marked so).
+    #[test]
+    fn trace_dag_goto() {
+        let (mut fd, _) = graph(6, &[(0, 1), (0, 2), (1, 3), (1, 4), (2, 3), (2, 4), (3, 5), (4, 5)]);
+        let (_, tree) = structure(&mut fd);
+        assert_eq!(
+            tree,
+            "0\n  List block 0\n    If/else block 0\n      Basic Block 0 0x00001000-0x00001000\n      \
+             If goto block 1\n        Basic Block 1 0x00001020-0x00001020\n      If block 2\n        \
+             Basic Block 2 0x00001010-0x00001010\n        Plain goto block 3\n          \
+             Basic Block 3 0x00001040-0x00001040\n    List block 4\n      \
+             Basic Block 4 0x00001030-0x00001030\n      Basic Block 5 0x00001050-0x00001050\n"
         );
     }
 }

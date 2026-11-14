@@ -77,6 +77,20 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
     with no new unsafe-side error. mercs2's own DESIGN.md records the switch; this repo doesn't
     write there.
   - Speed is not part of the bar (already seconds against minutes); timing is reported, not gated.
+- 2026-11-13: Change of direction (the user's decision): the goal widens from "a headless Rust
+  Ghidra for old games, mercs2 first" to Java Ghidra's completeness on the fast Rust engine, as
+  far as that is reachable. Old games and mercs2 stay the first user and the test bed. Still no
+  GUI. How it is pursued:
+  - Knowledge is reused as data, never rewritten: Ghidra's processor specs (`.sla`, `.pspec`,
+    `.cspec`), Function ID databases and (not started) data-type archives are read as they are.
+  - Engines are ported, not features: the instruction decoder, the analysis core and the
+    decompiler, each checked against Ghidra's own output. Java Ghidra and the C++ decompiler stay
+    the oracle; parity first, improvements behind options (the 2026-11-12 decision).
+  - Breadth is picked by real work: what a real project needs next is built next.
+  - Files are exchanged with Ghidra both ways where possible, so Ghidra covers the rare case and
+    ghidra-rs the fast bulk work; full parity with everything Ghidra does is not the bar.
+  - Speed claims still need a measurement on the same input (the 2026-11-11 decision); the
+    decompiler's speed is unmeasured until it prints C.
 
 ## Milestones
 
@@ -190,10 +204,23 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
    Merged with R3b, R4, R2, S8, R5: rules on 498 / 499, types on 493 / 499 (a copySymbol type fix;
    superseded: 481 / 499). Open: `VariablePiece` groups, `dynamic.cc`, symbols.
+   reference finishes (bar 98 %); with the rule-stage options M8 8 / 8, M500 496 / 499 before R2, 463 / 499 after R2 until `ConditionalJoin` was ported, 498 / 499 now (`ActionNodeJoin` ported, `nodejoin.rs`). Part two on `m3-s8b`: `prefercomplement`, `structuretransform` (for loops) and `returnsplit`
+   ported; both S8 checks unchanged with them on (499 / 499, 498 / 499). Superseded: the earlier
+   "Open: `prefercomplement`, `structuretransform`" (their second, no-mods instances are wired since the S7 merge). Part three
+   (`finalstructure`) is blocked by `latedonothing`, the prototype and cast actions, and switch labels. Open: `finalstructure`,
+   structured `printRaw`.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.
 
 ## Open questions
 
-- None right now.
+- After the decompiler prints C, which breadth comes first: (a) every Ghidra script mercs2 uses
+  (17 scripts in `mercs2-decomp/tools/ghidra/`; 2 are covered, CheckAbiCallers shadows, Decompile
+  is in progress, 8 read-only exports and 5 project-editing scripts are not started), so one real
+  project runs without Java; (b) more processors and file formats (ELF/Mach-O loaders, the engine
+  parts milestone 4 lists), so other games work; (c) a project store and scripting, so it is a
+  workbench and not only a command. Asked 2026-11-13; not ranked yet.
+- Where the edits of mercs2's five project-editing scripts live without a Ghidra database: plain
+  files in the mercs2 repo (re-analysis takes about 10 s) or a project database (milestone 4).
+  Asked 2026-11-13.

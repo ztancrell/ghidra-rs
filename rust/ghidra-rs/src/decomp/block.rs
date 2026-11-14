@@ -240,6 +240,15 @@ impl BlockGraph {
         self.replace_in_edge(point, reverse, blnew);
     }
 
+    /// Port of `BlockGraph::switchEdge`: every out-edge of `inb` to `before` now goes to `after`.
+    pub(crate) fn switch_edge(&mut self, inb: BlockId, before: BlockId, after: BlockId) {
+        for i in 0..self.block(inb).outs.len() {
+            if self.block(inb).outs[i].point == before {
+                self.replace_out_edge(inb, i, after);
+            }
+        }
+    }
+
     /// Port of `FlowBlock::replaceInEdge`: in-edge `num` of `bl` now comes from `b`.
     fn replace_in_edge(&mut self, bl: BlockId, num: usize, b: BlockId) {
         let Edge { point: oldb, reverse, label } = self.block(bl).ins[num];

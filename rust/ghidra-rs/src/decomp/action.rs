@@ -177,12 +177,13 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
         ("deadcode", "deadcode", c::dead_code),
         ("donothing", "deadcontrolflow", c::do_nothing),
         ("switchnorm", "switchnorm", not_ported),
-        ("returnsplit", "returnsplit", not_ported),
+        ("returnsplit", "returnsplit", super::returnsplit::return_split),
         ("unjustifiedparams", "protorecovery", c::unjustified_params),
         ("starttypes", "typerecovery", super::infertypes::start_types),
         ("activereturn", "protorecovery", c::active_return),
     ] {
-        if on(g) {
+        // `DECOMP_SKIP_ACTIONS` (`action:<name>`) applies here too, as `leaves` does
+        if on(g) && !disabled.contains(&format!("action:{name}")) {
             // ActionDoNothing is rule_repeatapply
             fullloop.push(if name == "donothing" { t.leaf_repeat(name, f) } else { t.leaf(name, f) });
         }
@@ -202,8 +203,8 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
     root.extend(leaves(
         &mut t,
         &[
-            ("prefercomplement", "blockrecovery", not_ported),
-            ("structuretransform", "blockrecovery", not_ported),
+            ("prefercomplement", "blockrecovery", super::blocktransform::prefer_complement),
+            ("structuretransform", "blockrecovery", super::blocktransform::structure_transform),
             ("normalizebranches", "normalizebranches", not_ported),
             // stage S7 (`merge.rs`)
             ("assignhigh", "merge", super::merge::assign_high_action),
@@ -220,9 +221,11 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("hideshadow", "merge", super::merge::hide_shadow),
             ("copymarker", "merge", super::merge::copy_marker),
             ("latedonothing", "blockrecovery", not_ported),
-            ("blockstructure", "blockrecovery", not_ported),
-            ("prefercomplement", "blockrecovery", not_ported),
-            ("structuretransform", "blockrecovery", not_ported),
+            // the second instances: the same ActionBlockStructure (nothing to do once structured),
+            // then the two transforms without op modifications
+            ("blockstructure", "blockrecovery", super::structure::block_structure),
+            ("prefercomplement", "blockrecovery", super::blocktransform::prefer_complement_no_mods),
+            ("structuretransform", "blockrecovery", super::blocktransform::structure_transform_no_mods),
             ("outputprototype", "localrecovery", not_ported),
             ("inputprototype", "fixateproto", not_ported),
             ("mapglobals", "fixateglobals", not_ported),

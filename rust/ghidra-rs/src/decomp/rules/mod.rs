@@ -31,6 +31,8 @@ mod ptrarith;
 mod subpiece;
 mod subvar;
 
+pub(crate) use boolean::{boolean_flip, op_normalize_flip};
+pub(crate) use compare::replace_lessequal;
 pub(crate) use cse::func_eq_level;
 pub(crate) use cse::func_equal;
 pub(crate) use pool::{nonzero_mask, pool_apply, select, Pool};
