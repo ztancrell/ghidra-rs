@@ -7,7 +7,6 @@ option currentaction decompile doubleprecis off
 option currentaction decompile segment off
 option currentaction decompile localrecovery off
 option currentaction decompile switchnorm off
-option currentaction decompile returnsplit off
 option currentaction decompile splitcopy off
 option currentaction decompile splitpointer off
 option currentaction decompile constsequence off

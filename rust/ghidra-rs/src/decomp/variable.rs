@@ -5,7 +5,8 @@
 //!
 //! Not ported: `VariablePiece`/`VariableGroup` (only `groupWith` makes them, from address-tied
 //! overlaps of different sizes and from proto-partial PIECEs, which no ported rule makes: both
-//! fail loudly), symbols (the local scope holds none; `localrecovery` is not ported), and
+//! fail loudly), symbols (the local scope holds only the locked parameters, which `merge.rs`
+//! reads from the prototype in `high_symbol`; `localrecovery` is not ported), and
 //! `stripType` (no ported data-type has a stripped form).
 
 use std::collections::BTreeMap;
@@ -511,7 +512,7 @@ fn untied_call_intersection(fd: &mut Funcdata, tied: HighId, untied: HighId) -> 
     }
     tied_varnode(fd, tied)?;
     if fd.highs.affecting.is_none() {
-        fd.highs.affecting = Some(stack_affecting_ops(fd));
+        fd.highs.affecting = Some(stack_affecting_ops(fd)?);
     }
     let ui = |o| op_uindex(fd, o);
     let set = fd.highs.affecting.as_ref().map(|s| s.intersects(h_cover(fd, untied), &ui));
@@ -519,12 +520,15 @@ fn untied_call_intersection(fd: &mut Funcdata, tied: HighId, untied: HighId) -> 
 }
 
 /// Port of `StackAffectingOps::populate`: every call, sorted by block
-/// (`PcodeOpSet::finalize`). The STORE guards of the stack heritage pass are not ported (no
-/// stack varnode exists before the `stackvars` rules), so none join and `affectsTest` is
-/// always true.
-fn stack_affecting_ops(fd: &Funcdata) -> OpSet {
+/// (`PcodeOpSet::finalize`). The STOREs of valid store guards would join, with `affectsTest`
+/// reading the guard's analysed range, which is not ported (`heritage_guard.rs`): fail while
+/// one exists. Without them `affectsTest` is always true.
+fn stack_affecting_ops(fd: &Funcdata) -> Result<OpSet> {
+    if super::heritage_guard::has_valid_guards(fd, true) {
+        return err("merge: a STORE guard of the stack heritage pass would affect a merge (StackAffectingOps), and its range needs the value-set analysis (ValueSetSolver): not implemented in ghidra-rs yet");
+    }
     let ops = fd.qlst.iter().map(|&c| fd.call(c).op).map(|op| (op_block_index(fd, op), fd.op(op).order, op));
-    OpSet::finalize(ops.collect())
+    Ok(OpSet::finalize(ops.collect()))
 }
 
 /// Port of `Varnode::copyShadow`: the two hold the same value through COPYs.

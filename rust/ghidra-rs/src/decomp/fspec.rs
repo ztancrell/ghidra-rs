@@ -488,6 +488,9 @@ pub(crate) struct CallSpec {
     pub(crate) active_output: Option<ParamActive>,
     /// `effective_extrapop`, from `ActionStackPtrFlow`
     pub(crate) effective_extrapop: Option<i32>,
+    /// `FuncCallSpecs::stackoffset`: the stack pointer at the call relative to its value on entry
+    /// (`None`: `offset_unknown`); set by `resolveSpacebaseRelative` (RuleLoadVarnode, stage R5)
+    pub(crate) stack_offset: Option<u64>,
     /// `inputConsume`: per input slot of the CALL, the bytes the callee is known to use, 0
     /// for all
     pub(crate) input_consume: Vec<u32>,
@@ -518,6 +521,7 @@ impl CallSpec {
             active_output: None,
             effective_extrapop: None,
             input_consume: Vec::new(),
+            stack_offset: None,
         }
     }
 
@@ -606,6 +610,18 @@ impl ProtoModel {
             return Some(EffectKind::Unaffected);
         }
         let dist = off.checked_sub(hit).filter(|_| s == space)?;
+        (dist + u64::from(size) <= u64::from(sz)).then_some(e.kind)
+    }
+
+    /// `ProtoModel::lookupEffect` for a stack range (the stack's records sort last).
+    pub(crate) fn lookup_stack_effect(&self, off: u64, size: u32) -> Option<EffectKind> {
+        let at = self.effects.partition_point(|e| e.storage.address_key() <= (u32::MAX, off));
+        let e = self.effects.get(at.checked_sub(1)?)?;
+        let Storage::Stack { offset: hit, size: sz } = e.storage else { return None };
+        if sz == 0 {
+            return Some(EffectKind::Unaffected);
+        }
+        let dist = off.checked_sub(hit)?;
         (dist + u64::from(size) <= u64::from(sz)).then_some(e.kind)
     }
 }
@@ -902,8 +918,12 @@ impl FuncProto {
     /// Port of `FuncProto::hasEffect` (an unlocked prototype has no effect list of its own, so
     /// the model's): `None` is `unknown_effect`.
     pub(crate) fn has_effect(&self, arch: &Arch, space: Space, off: u64, size: u32) -> Option<EffectKind> {
-        let Space::Sleigh(s) = space else { return None };
-        self.model_of(arch)?.lookup_effect(arch.sleigh.uniq_space(), s, off, size)
+        let model = self.model_of(arch)?;
+        match space {
+            Space::Sleigh(s) => model.lookup_effect(arch.sleigh.uniq_space(), s, off, size),
+            Space::Stack => model.lookup_stack_effect(off, size),
+            _ => None,
+        }
     }
 
     /// The model of an unlocked prototype, as `characterizeAs*` read it.
