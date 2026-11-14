@@ -27,8 +27,8 @@ fn calc_mask(size: u32) -> u64 {
 }
 
 /// An action with nothing to do on x86 without locked prototypes, segment ops or overrides
-/// (`paramdouble`: only stack trials split, and none exist before the `stackvars` rules;
-/// `segmentize`, `internalstorage`). Superseded: `lanedivide` was one until R3
+/// (`segmentize`, `internalstorage`; superseded: `paramdouble` was one until R5 slice 3, now
+/// `rules::param_double`). Superseded: `lanedivide` was one until R3
 /// (`lanedivide.rs`).
 pub(crate) fn nothing(_: &mut Funcdata, _: &Arch) -> Result<i32> {
     Ok(0)
@@ -760,6 +760,11 @@ fn build_output_from_trials(
             fd.op_set_output(subop, vn)?;
             fd.op_insert_after(subop, op)?;
             trunc += u64::from(fd.vn(vn).size);
+        }
+        if finalvn.len() == 2 && fd.double_precis_on {
+            // the pieces of a larger precision whole (finalvn is most significant first)
+            fd.vn_set(finalvn[1], VnFlags::PRECIS_LO);
+            fd.vn_set(finalvn[0], VnFlags::PRECIS_HI);
         }
     }
     for dop in deleted {

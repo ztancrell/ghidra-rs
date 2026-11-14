@@ -107,6 +107,10 @@ impl VnFlags {
     pub(crate) const EXPLICIT: VnFlags = VnFlags(1 << 24);
     /// `indirectonly`: an illegal input only INDIRECTs read (`markIndirectOnly`, stage S7)
     pub(crate) const INDIRECTONLY: VnFlags = VnFlags(1 << 25);
+    /// `precislo`: the least significant half of a double-precision whole (double.cc, stage R5)
+    pub(crate) const PRECIS_LO: VnFlags = VnFlags(1 << 27);
+    /// `precishi`: the most significant half of a double-precision whole (double.cc, stage R5)
+    pub(crate) const PRECIS_HI: VnFlags = VnFlags(1 << 28);
 
     /// both sets of flags
     pub(crate) const fn with(self, f: VnFlags) -> VnFlags {
@@ -157,6 +161,18 @@ impl Varnode {
 
     pub(crate) fn is_constant(&self) -> bool {
         self.space == CONST_SPACE
+    }
+    /// `Varnode::isPrecisLo`.
+    pub(crate) fn is_precis_lo(&self) -> bool {
+        self.flags.has(VnFlags::PRECIS_LO)
+    }
+    /// `Varnode::isPrecisHi`.
+    pub(crate) fn is_precis_hi(&self) -> bool {
+        self.flags.has(VnFlags::PRECIS_HI)
+    }
+    /// `isPrecisLo() || isPrecisHi()`: a piece of a double-precision whole.
+    pub(crate) fn is_precis(&self) -> bool {
+        self.is_precis_lo() || self.is_precis_hi()
     }
     pub(crate) fn is_annotation(&self) -> bool {
         matches!(self.space, Space::Iop | Space::Fspec) || self.has(VnFlags::CODEREF)

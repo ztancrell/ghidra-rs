@@ -845,6 +845,21 @@ Left for R5 (slices 2 to 5, not started): `RuleLoadVarnode`/`RuleStoreVarnode` (
 the stack heritage pass, not ported; the constant-pointer path also needs `fillinReadOnly` after
 the ram pass to replace `fold_constants` in the jump-table partial function, where `stackvars` is
 on), double.cc, constseq.cc, bitfield.cc, and the `cleanup` rules that read types.
+Superseded: double.cc is ported (slice 3, below).
+
+**R5 slice 3 (double.cc)**, branch `m3-r5-double` (2026-11-13). Ported in the C++ order and
+conditions: `SplitVarnode` and every form (`AddForm`, `SubForm`, `LogicalForm`, `Equal1Form`,
+`Equal2Form`, `Equal3Form`, `LessThreeWay`, `LessConstForm`, `ShiftForm`, `MultForm`, `PhiForm`,
+`IndirectForm`, `CopyForceForm`), `RuleDoubleIn` (its `reset`: `Funcdata::double_precis_on`, set
+from `ActionTree::perform`), `RuleDoubleOut` (with `Funcdata::combine_input_varnodes`),
+`RuleDoubleLoad`, `RuleDoubleStore`, the `precislo`/`precishi` marks (`VnFlags` 1 << 27, 1 << 28)
+and their readers (`RulePullsubMulti`, `RuleSubCommute`, `RuleSubNormal`, `RuleSplitFlow`,
+`SplitFlow::traceForward`, the setter in `buildOutputFromTrials`), and `ActionParamDouble`
+(unported join path errors). Code in `rust/ghidra-rs/src/decomp/rules/double/`; details and
+check commands in `rust/README.md`, "R5 slice 3". Not modelled: symbol entries, big-endian.
+Check (`r5d-options.txt`, break `assignhigh`): M8 8 / 8, M500 498 / 499 (0x47a6b0), exercise
+corpus `r5d-adc.txt` 215 / 215; the double rules change 0 M500 reference outputs and 23 of the
+215 r5d-adc ones, all matched. R1 check (`r1-options.txt`) rerun on the branch: M500 498 / 499.
 
 R5 slices 4 and 5 (branch `m3-r5b`, 2026-11-13). Superseded: "constseq.cc, bitfield.cc and the
 `cleanup` rules that read types" in the list above (slice 3, double.cc, is on its own branch).
