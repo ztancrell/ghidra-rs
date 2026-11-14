@@ -1375,6 +1375,20 @@ fn rename_block(fd: &mut Funcdata, arch: &Arch, stacks: &mut VarStack, i: usize)
 mod tests {
     use super::*;
 
+    /// A stack range heritaged in one pass is found again in the next (the map keeps space
+    /// indices; it once rebuilt them as SLEIGH spaces and lost every stack range).
+    #[test]
+    fn location_map_finds_stack_ranges_of_earlier_passes() {
+        let mut m = LocationMap::default();
+        let mask = 0xffff_ffff;
+        assert!(matches!(m.add(Space::Stack, mask, 4, 4, 1), (4, 4, Intersect::New)));
+        assert!(matches!(m.add(Space::Stack, mask, 4, 4, 2), (4, 4, Intersect::Old)));
+        assert!(matches!(m.add(Space::Stack, mask, 4, 8, 2), (4, 8, Intersect::Partial)));
+        assert!(m.find(Space::Stack, mask, 10).is_some() && m.find(Space::Stack, mask, 12).is_none());
+        // the same offset in a SLEIGH space is another range
+        assert!(matches!(m.add(Space::Sleigh(4), mask, 4, 4, 2), (4, 4, Intersect::New)));
+    }
+
     /// A function of empty blocks `0..n` with `edges`, block 0 the entry, and a write of EAX
     /// (register space 4, offset 0) in each block of `writers`; returns the blocks that get a
     /// MULTIEQUAL for EAX, by index in reverse post-order.

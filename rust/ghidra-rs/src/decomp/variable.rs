@@ -5,7 +5,8 @@
 //!
 //! Not ported: `VariablePiece`/`VariableGroup` (only `groupWith` makes them, from address-tied
 //! overlaps of different sizes and from proto-partial PIECEs, which no ported rule makes: both
-//! fail loudly), symbols (the local scope holds none; `localrecovery` is not ported), and
+//! fail loudly), symbols (the local scope holds only the locked parameters, which `merge.rs`
+//! reads from the prototype in `high_symbol`; `localrecovery` is not ported), and
 //! `stripType` (no ported data-type has a stripped form).
 
 use std::collections::BTreeMap;

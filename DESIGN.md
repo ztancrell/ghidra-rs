@@ -188,7 +188,8 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    Stack heritage slice one on branch `m3-stack`: the stack heritage pass, stack-pointer
    tracing, the local scope's stack ranges, `ActionRestrictLocal`, locked stack parameters of
    the function; check with every function locked with two stack parameters, M8 8 / 8,
-   M500 496 / 499; S4, S6, rule, paramdouble and switch bars held.
+   M500 496 / 499 (498 / 499 after the review fixes and the merge with S7 and S8 part two,
+   2026-11-14; the merge tests read the symbols of locked parameters); every older bar held.
    R5 (in part) on branch `m3-r5`: the five `typerecovery` pointer rules (`RulePtrArith` with
    `AddTreeState`, `RuleStructOffset0`, `RulePushPtr` in `oppool2`, `RulePtraddUndo`,
    `RulePtrsubUndo`) and the stop-propagation flags; R5 check M8 8 / 8, M500 497 / 498 without
