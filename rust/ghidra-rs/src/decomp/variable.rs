@@ -40,6 +40,13 @@ pub(crate) struct HighVariable {
     pub(crate) copy_in2: bool,
 }
 
+impl HighVariable {
+    /// `HighVariable::getNumMergeClasses`
+    pub(crate) fn num_merge_classes(&self) -> u32 {
+        self.merge_classes
+    }
+}
+
 /// The high-variable state of a function: `Funcdata::highlevel_on`, the arena, the per-varnode
 /// links and covers, and `HighIntersectTest`'s cache and call set.
 #[derive(Debug, Clone, Default)]

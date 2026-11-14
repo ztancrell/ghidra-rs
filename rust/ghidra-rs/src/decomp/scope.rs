@@ -2,8 +2,8 @@
 //! default-name scheme of `ScopeInternal::buildVariableName` / `ScopeLocal::buildVariableName`
 //! (varmap.cc), `buildUndefinedName` and `makeNameUnique`. Wired as `Funcdata::symtab`: `ActionInputPrototype`
 //! keeps the parameters here (`ProtoStoreSymbol`), `ActionMapGlobals` the global data symbols;
-//! `print map` prints the local scope. `ActionNameVars` is not ported, so the local default
-//! names are only unit tested.
+//! `ActionNameVars` (namevars.rs) the local symbols of the named variables; `print map` prints
+//! the local scope.
 //!
 //! Scopes and symbols live in one arena ([`Database`]) addressed by [`ScopeId`] and
 //! [`SymbolId`]. A scope's name tree is the C++ `SymbolNameTree` (by name, then `nameDedup`).
@@ -65,6 +65,11 @@ pub(crate) struct SymbolEntry {
     pub(crate) offset: u64,
     pub(crate) size: u32,
     pub(crate) uselimit: UseLimit,
+    /// a `MapEntryConflict`: another variable is written to the storage at the same address
+    pub(crate) conflict: bool,
+    /// `SymbolEntry::piece`: the entry maps one piece of a symbol stored in a join, at this
+    /// offset into the symbol (`Scope::addMap`)
+    pub(crate) piece: Option<u32>,
 }
 
 impl SymbolEntry {
@@ -101,13 +106,12 @@ pub(crate) struct Symbol {
 
 impl Symbol {
     /// `Symbol::isNameUndefined`: a `$$undefXXXXXXXX` placeholder.
-    #[allow(dead_code)] // for ActionNameVars, not ported yet
     pub(crate) fn is_name_undefined(&self) -> bool {
         self.name.len() == 15 && self.name.starts_with("$$undef")
     }
 }
 
-/// Port of `ScopeInternal` (with `ScopeLocal`'s stack naming data).
+/// Port of `ScopeInternal`.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Scope {
     /// `nametree`
@@ -116,9 +120,6 @@ pub(crate) struct Scope {
     maps: BTreeMap<u32, RangeMap<(SymbolId, usize)>>,
     /// `category`
     categories: Vec<Vec<Option<SymbolId>>>,
-    /// `ScopeLocal`: the stack space, whether it grows down, the parameter range
-    /// (`minParamOffset`, `maxParamOffset`) and the local range test of the prototype
-    pub(crate) stack: Option<StackNaming>,
 }
 
 /// What `ScopeLocal::buildVariableName` reads about the stack.
@@ -157,6 +158,8 @@ pub(crate) struct NameRequest<'a> {
     pub(crate) flags: NameFlags,
     /// the address is inside the prototype's local range (`getLocalRange().inRange`)
     pub(crate) in_local_range: bool,
+    /// `ScopeLocal`'s stack data, for a name in the local scope
+    pub(crate) stack: Option<StackNaming>,
 }
 
 /// The scopes and symbols of a program and its functions (`Database`).
@@ -181,9 +184,9 @@ impl Database {
     }
 
     /// A new empty scope.
-    pub(crate) fn new_scope(&mut self, stack: Option<StackNaming>) -> ScopeId {
+    pub(crate) fn new_scope(&mut self) -> ScopeId {
         let id = ScopeId(self.scopes.len() as u32);
-        self.scopes.push(Scope { stack, ..Scope::default() });
+        self.scopes.push(Scope::default());
         id
     }
 
@@ -261,8 +264,21 @@ impl Database {
         Ok(id)
     }
 
+    /// `ScopeInternal::addMapInternal` for one more entry of `sym`: a piece of a symbol stored
+    /// in a join (`Scope::addMap` maps each piece of the join too).
+    pub(crate) fn add_piece(&mut self, sym: SymbolId, e: SymbolEntry) -> Result<()> {
+        let s = &mut self.symbols[sym.0 as usize];
+        if e.last() < e.offset {
+            return Err(LowlevelError(format!("Symbol {} extends beyond the end of the address space", s.name)));
+        }
+        let sub = e.subsort(s.flags.addr_tied)?;
+        let map = self.scopes[s.scope.0 as usize].maps.entry(e.space.index()).or_default();
+        map.insert((sym, s.entries.len()), e.offset, e.last(), sub);
+        s.entries.push(e);
+        Ok(())
+    }
+
     /// `ScopeInternal::renameSymbol`.
-    #[allow(dead_code)] // for ActionNameVars, not ported yet
     pub(crate) fn rename_symbol(&mut self, sym: SymbolId, name: &str) {
         let s = &self.symbols[sym.0 as usize];
         let key = (s.name.clone(), s.dedup);
@@ -355,7 +371,7 @@ impl Database {
     /// Port of `ScopeLocal::buildVariableName` (stack locals) falling back to
     /// `ScopeInternal::buildVariableName`. `index` is the running `Var` counter.
     pub(crate) fn build_variable_name(&self, scope: ScopeId, r: &NameRequest, index: &mut i32) -> Result<String> {
-        if let (Some(st), Some((space, off))) = (self.scope(scope).stack, r.addr) {
+        if let (Some(st), Some((space, off))) = (r.stack, r.addr) {
             if r.flags.addr_tied && !r.flags.persist && space == st.space && r.in_local_range {
                 return self.make_name_unique(scope, &stack_name(&st, r, off));
             }
@@ -449,8 +465,8 @@ impl Database {
     /// scope ([`GLOBAL`], [`LOCAL`]).
     pub(crate) fn for_function() -> Database {
         let mut db = Database::default();
-        db.new_scope(None);
-        db.new_scope(None);
+        db.new_scope();
+        db.new_scope();
         db
     }
 
@@ -507,6 +523,9 @@ impl Database {
             }
             for &(sp, first, last) in &e.uselimit.0 {
                 s += &format!("{}: {:x}-{:x}\n", (p.space)(sp)?, first, last);
+            }
+            if e.conflict {
+                s += " (conflicts)"; // MapEntryConflict::printEntry, after the bounds' line end
             }
             if attributes && scope == GLOBAL {
                 s += &self.attributes(id);
@@ -577,10 +596,34 @@ impl Database {
         s.cat_index = index as u32;
     }
 
+    /// `Scope::overrideSizeLockType`: a size-locked symbol takes a data-type of its size.
+    pub(crate) fn set_type(&mut self, sym: SymbolId, ty: super::types::TypeId) {
+        self.symbols[sym.0 as usize].ty = Some(ty);
+    }
+
+    /// The symbols `ScopeInternal::assignDefaultNames` walks: those with an undefined name,
+    /// in name order.
+    pub(crate) fn undefined_symbols(&self, scope: ScopeId) -> Vec<SymbolId> {
+        let names = &self.scope(scope).names;
+        let from = ("$$undef".to_string(), u32::MAX);
+        names.range(from..).map(|(_, &s)| s).take_while(|&s| self.symbol(s).is_name_undefined()).collect()
+    }
+
     /// `Scope::setThisPointer`.
     pub(crate) fn set_this_pointer(&mut self, sym: SymbolId) {
         self.symbols[sym.0 as usize].this_ptr = true;
     }
+}
+
+/// A space's name and address size (the stack space has its container's size).
+pub(crate) fn space_info(arch: &super::Arch, sp: Space) -> Result<(String, u32)> {
+    match sp {
+        Space::Sleigh(i) => arch.sleigh.spaces.get(i as usize).map(|s| (s.name.clone(), s.size)),
+        Space::Stack => arch.sleigh.spaces.get(arch.spec.stack_container as usize).map(|s| ("stack".into(), s.size)),
+        Space::Join => Some(("join".into(), 4)), // JoinSpace: sizeof(uintm)
+        _ => None,
+    }
+    .ok_or_else(|| LowlevelError("a symbol in a space without a name".into()))
 }
 
 /// `print map` of the function's local scope (`IfcPrintMap`, `Scope::printBounds`,
@@ -606,6 +649,9 @@ pub(crate) fn print_map(fd: &super::Funcdata, arch: &super::Arch, name: &str) ->
     let space_name = |sp: Space| space(sp).map(|(n, _)| n);
     // `Address::getShortcut` and `AddrSpace::printRaw`: the offset padded to the address size
     let addr = |sp: Space, off: u64| {
+        if sp == Space::Join {
+            return super::print::join_raw(fd, arch, off); // JoinSpace::printRaw
+        }
         let (n, size) = space(sp)?;
         Ok(format!("{}0x{off:0w$x}", super::print::shortcut(&n), w = 2 * size as usize))
     };
@@ -665,13 +711,22 @@ mod tests {
     const REG: Space = Space::Sleigh(2);
 
     fn req<'a>(addr: Option<(Space, u64)>, base: &'a str, reg: &'a str, flags: NameFlags) -> NameRequest<'a> {
-        NameRequest { addr, space_name: "register", addr_size: 4, name_base: base, reg, flags, in_local_range: false }
+        NameRequest {
+            addr,
+            space_name: "register",
+            addr_size: 4,
+            name_base: base,
+            reg,
+            flags,
+            in_local_range: false,
+            stack: None,
+        }
     }
 
     #[test]
     fn undefined_names_count_up() {
         let mut db = Database::default();
-        let sc = db.new_scope(None);
+        let sc = db.new_scope();
         assert_eq!(db.build_undefined_name(sc).unwrap(), "$$undef00000000");
         let a = db.add_symbol(sc, "", None, None, None).unwrap();
         assert!(db.symbol(a).is_name_undefined());
@@ -684,7 +739,7 @@ mod tests {
     #[test]
     fn var_names_and_uniqueness() {
         let mut db = Database::default();
-        let sc = db.new_scope(None);
+        let sc = db.new_scope();
         let mut index = 1;
         let r = req(Some((REG, 0)), "i", "EAX", NameFlags::default());
         assert_eq!(db.build_variable_name(sc, &r, &mut index).unwrap(), "iVar1");
@@ -707,7 +762,7 @@ mod tests {
     fn register_and_param_names() {
         let db = {
             let mut db = Database::default();
-            db.new_scope(None);
+            db.new_scope();
             db
         };
         let sc = ScopeId(0);
@@ -737,11 +792,12 @@ mod tests {
     fn stack_names() {
         let mut db = Database::default();
         let st = StackNaming { space: Space::Stack, grows_negative: true, min_param: 4, max_param: 0x40, addr_size: 4 };
-        let sc = db.new_scope(Some(st));
+        let sc = db.new_scope();
         let tied = NameFlags { addr_tied: true, ..NameFlags::default() };
         let mut r = req(Some((Space::Stack, 0xffff_ffec)), "i", "", tied);
         r.space_name = "stack";
         r.in_local_range = true;
+        r.stack = Some(st);
         let mut ix = 1;
         assert_eq!(db.build_variable_name(sc, &r, &mut ix).unwrap(), "iStack_14");
         r.addr = Some((Space::Stack, 8));
@@ -751,12 +807,44 @@ mod tests {
     #[test]
     fn container_prefers_smallest_in_use() {
         let mut db = Database::default();
-        let sc = db.new_scope(None);
-        let entry = |offset, size, uselimit| SymbolEntry { space: REG, offset, size, uselimit };
+        let sc = db.new_scope();
+        let entry =
+            |offset, size, uselimit| SymbolEntry { space: REG, offset, size, uselimit, conflict: false, piece: None };
         let whole = db.add_symbol(sc, "a", None, None, Some(entry(0, 4, UseLimit(vec![(RAM, 0x10, 0x40)])))).unwrap();
         let low = db.add_symbol(sc, "b", None, None, Some(entry(0, 2, UseLimit(vec![(RAM, 0x10, 0x20)])))).unwrap();
         assert_eq!(db.find_container(sc, REG, 0, 2, Some((RAM, 0x18))), Some((low, 0)));
         assert_eq!(db.find_container(sc, REG, 0, 2, Some((RAM, 0x30))), Some((whole, 0)));
         assert_eq!(db.find_container(sc, REG, 0, 4, None), None);
+    }
+
+    /// `assignDefaultNames` walks the unnamed symbols in name order; a conflict entry prints
+    /// its mark after the line end of its bounds, as the C++ does.
+    #[test]
+    fn undefined_symbols_and_conflict_entries() {
+        let mut db = Database::default();
+        let sc = db.new_scope();
+        let e = |offset, conflict| SymbolEntry {
+            space: REG,
+            offset,
+            size: 4,
+            uselimit: UseLimit(vec![(RAM, 0x10, 0x10)]),
+            conflict,
+            piece: None,
+        };
+        let a = db.add_symbol(sc, "", None, None, Some(e(0, true))).unwrap();
+        let b = db.add_symbol(sc, "", None, None, Some(e(4, false))).unwrap();
+        db.add_symbol(sc, "named", None, None, None).unwrap();
+        assert_eq!(db.undefined_symbols(sc), vec![a, b]);
+        db.rename_symbol(a, "iVar1");
+        assert_eq!(db.undefined_symbols(sc), vec![b]);
+        let p = EntryPrinter {
+            addr: &|_, o| Ok(format!("%0x{o:08x}")),
+            ty: &|_| (4, "int4".into()),
+            space: &|_| Ok("ram".into()),
+        };
+        assert_eq!(
+            db.print_entries(sc, &p, false).unwrap(),
+            "iVar1 : %0x00000000:4 int4 : ram: 10-10\n (conflicts)$$undef00000001 : %0x00000004:4 int4 : ram: 10-10\n"
+        );
     }
 }

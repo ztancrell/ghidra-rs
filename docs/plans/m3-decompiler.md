@@ -1062,7 +1062,8 @@ Also fixed: the action table named two unported leaves `restructurevarnode` and
 `break start` and `DECOMP_SKIP_ACTIONS` take).
 Superseded: S8 part two's "part three waits" and "`latedonothing` ... cannot be skipped fairly".
 
-Not ported (left `not_ported`): `dynamicsymbols` (group `dynamic`, off), `namevars`
+Not ported (left `not_ported`): `dynamicsymbols` (group `dynamic`, off), `namevars` (superseded:
+ported, see "`namevars`" below)
 (`Funcdata::linkSymbol` with `detectSymbolConflicts` and `MapEntryConflict`, `linkSymbolReference`,
 `HighVariable::getNameRepresentative`/`hasName`, `buildDefaultName`, `assignDefaultNames`; the name
 scheme itself, `buildVariableName` with `iVar1`, `param_1`, `in_EAX`, `unaff_ESI`,
@@ -1193,6 +1194,64 @@ Tail checks after these fixes (reference rebuilt with the new patch), M8 then M5
 and globals 8 / 8, 498 / 499 (rules on) and 8 / 8, 493 / 499 (types on); `latedonothing` 8 / 8,
 498 / 499 and 8 / 8, 493 / 499; `finalstructure` 7 / 7, 494 / 495 and 7 / 7, 489 / 495: unchanged.
 The 24 other bars on M8: 8 / 8 each.
+
+`namevars` (2026-11-14, `namevars.rs`). Ported: `ActionNameVars::apply` with `linkSymbols`,
+`linkSpacebaseSymbol`, `lookForBadJumpTables` and `lookForFuncParamNames`;
+`Funcdata::linkSymbol` (the high's symbol, else an entry of the local scope holding the first
+byte at the use point, else a new local symbol), `detectSymbolConflicts` with `MapEntryConflict`
+entries (`SymbolEntry::conflict`; `print map` shows ` (conflicts)` where the C++ does, after the
+line end of the bounds), `linkSymbolReference` for stack addresses, `Varnode::getUsePoint`,
+`HighVariable::getNameRepresentative` (`compareName`), `hasName`, `getSymbol`,
+`getSymbolOffset`, `Scope::buildDefaultName` and `ScopeInternal::assignDefaultNames`. The name
+scheme of `scope.rs` is wired (`iVar1`, `param_1`, `in_EAX`, `unaff_EBP`, `extraout_EAX`,
+`iStack_14`, `UNRECOVERED_JUMPTABLE`); `ScopeLocal`'s stack data comes with each request
+(`NameRequest::stack`, from `Funcdata::localmap`), a call made from a failed jump table carries
+`CallSpec::bad_jump_table`, and `Funcdata::mapentry` is `Varnode::mapentry`. Superseded:
+"`namevars` ... not wired" above and `Scope::stack`.
+Left out, each without effect on the compared output or failing loudly (listed in the module
+comment): the link of a persistent varnode to its global symbol (read by the printer only),
+name recommendations (the scope holds none), CAST ops and proto-partial varnodes (do not exist
+yet), `finalizeDatatype` of a piece of a symbol (loud error).
+
+Check: `print map` with `DECOMP_MAP_EXTRA=1` after `namevars` (`BREAK=setcasts`), the options
+and skip lists of the prototype checks: the names, storage, types and use limits of every local
+symbol, the conflict marks, the parameter names of the prototype and the symbol attributes.
+
+```sh
+export DECOMP_MAP_EXTRA=1 PRINT=$'print map\nprint raw'
+DECOMP_SKIP_ACTIONS=$S3,$L BREAK=setcasts OPTIONS=$PWD/tools/corpus/tail-r-options.txt tools/decomp-diff.sh m500
+DECOMP_SKIP_ACTIONS=$L BREAK=setcasts OPTIONS=$PWD/tools/corpus/tail-t-options.txt tools/decomp-diff.sh m500
+```
+
+| check | M8 | M500 (of the functions the reference finishes) |
+|---|---|---|
+| names, rules on | 8 / 8 | 498 / 499 (99.8 %) |
+| names, types on | 8 / 8 | 493 / 499 (98.8 %) |
+
+Misses: rules on 0x47a6b0 (the known block-order difference from R3); types on the six
+`VariablePiece` functions of S7 (0x402c20, 0x405990, 0x4c0070, 0x62f0d0, 0x757810, 0x7586e0);
+none is in `namevars`. 0x4c48d0 the reference does not finish. The first M500 run found two
+things, both fixed: a symbol stored in the join space (13 functions failed; `Scope::addMap` maps
+each piece of the join too, `SymbolEntry::piece`, and `print map` prints a join by its pieces),
+and a destroyed varnode staying a member of its high variable (0x43d846 failed in `hasName`;
+`Funcdata::delete_varnode` now takes it out, as `Varnode::~Varnode` does).
+Not exercised by these checks: `lookForFuncParamNames` (no callee has a locked, named
+prototype in the tail option files) and `updateThisPointer` (no M500 function resolves to
+`__thiscall`).
+
+Not started: the case labels. `switchnorm` needs, beyond `matchModel`/`recoverLabels`/
+`foldInNormalization`/`foldInGuards` themselves: the flow-time model's value range kept on the
+`JumpTable` (`buildLabels` walks the range of the model the addresses were recovered with),
+`JumpTable::switchOver` state (`block2addr`, `defaultBlock`, `lastBlock`, now recomputed in
+`structure::switch_defaults`), guard records with their CBRANCH, read op, path and the
+`unrolled` mark (`checkUnrolledGuard`, `markFoldableGuards`; `jumptable.rs` returns early where
+the C++ checks unrolled guards), `findSmallestNormal` matching the earlier range,
+`findUnnormalized` with op marks, `backup2Switch` with `TypeOp::recoverInputBinary/Unary`
+(not in `emulate.rs`), `switchVarConsume` in dead code, `FlowBlock::getFlipPath` (`f_flip_path`
+is not kept by `swap_edges`), `BlockBasic::noInterveningStatement`, `Funcdata::pushBranch`,
+`JumpTable::addBlockToSwitch`, and a print of the labels in the reference patch. Until then a
+switch with cases fails loudly in `finalstructure` and the five switch functions (0x4042e0 in
+M8; 0x4173a0, 0x442c90, 0x5f40b0, 0x5f8f30 in M500) stay "the reference does not finish" there.
 
 ## Running stages in parallel
 

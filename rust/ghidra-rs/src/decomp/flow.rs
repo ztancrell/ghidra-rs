@@ -507,7 +507,7 @@ impl Flow<'_> {
                         let why = if let Fail::Normal(m) = &f { m.as_str() } else { "likely thunk" };
                         eprintln!("jumptable in 0x{:x} at 0x{:x}: {why}", self.fd.entry, self.fd.op(op).seq.addr);
                     }
-                    self.truncate_indirect_jump(op)?
+                    self.truncate_indirect_jump(op, matches!(f, Fail::Normal(_)))?
                 }
                 Err(Fail::Callother) => {
                     return err("jump table: an address made by a CALLOTHER (fail_callother) is not implemented");
@@ -576,10 +576,12 @@ impl Flow<'_> {
     }
 
     /// Port of `FlowInfo::truncateIndirectJump` for a failed recovery (`fail_normal`,
-    /// `fail_thunk`): the jump becomes a call followed by a halt.
-    fn truncate_indirect_jump(&mut self, op: OpId) -> Result<()> {
+    /// `fail_thunk`): the jump becomes a call followed by a halt; `bad` (`fail_normal`) marks
+    /// the call as a bad jump table (`setBadJumpTable`).
+    fn truncate_indirect_jump(&mut self, op: OpId, bad: bool) -> Result<()> {
         self.fd.op_set_opcode(op, Opcode::Callind);
-        self.setup_callind_specs(op);
+        let call = self.new_call(CallSpec::new(op, None, false)); // setupCallindSpecs
+        self.fd.call_mut(call).bad_jump_table = bad;
         let halt = self.artificial_halt(self.fd.op(op).seq.addr, None)?;
         self.fd.op_dead_insert_after(halt, op);
         Ok(())

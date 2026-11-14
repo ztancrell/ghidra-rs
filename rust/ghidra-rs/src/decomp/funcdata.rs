@@ -74,6 +74,9 @@ pub struct Funcdata {
     next_unique: u64,
     /// header warnings (`Funcdata::warningHeader`), for `print C`
     pub(crate) warnings: Vec<String>,
+    /// `Varnode::mapentry`: the symbol and entry a varnode is linked to (`setSymbolEntry`,
+    /// from `ActionNameVars` on)
+    pub(crate) mapentry: BTreeMap<VarnodeId, (super::scope::SymbolId, usize)>,
     /// warnings at an address (`Funcdata::warning`), for `print C`
     pub(crate) comments: Vec<(u64, String)>,
     /// the space the global scope owns (ram): its varnodes are `persist` and `addrtied`
@@ -150,6 +153,7 @@ impl Funcdata {
             localmap: super::varmap::LocalMap::empty(),
             next_unique: UNIQUE_ANALYSIS,
             warnings: Vec::new(),
+            mapentry: BTreeMap::new(),
             comments: Vec::new(),
             ram: None,
             global: Vec::new(),
@@ -562,6 +566,9 @@ impl Funcdata {
 
     /// Port of `Funcdata::deleteVarnode` (`VarnodeBank::destroy`).
     pub(crate) fn delete_varnode(&mut self, vn: VarnodeId) {
+        // Varnode::~Varnode: out of its high variable, and its symbol link goes with it
+        super::variable::high_remove(self, vn);
+        self.mapentry.remove(&vn);
         self.loc_del(vn);
         let v = self.vn(vn);
         if v.is_input() {
@@ -1110,6 +1117,11 @@ impl Funcdata {
     /// or for a varnode made since) [`Varnode::nzmask`].
     pub(crate) fn nzmask(&self, vn: VarnodeId) -> u64 {
         self.nzm.get(vn.0 as usize).copied().unwrap_or_else(|| self.vn(vn).nzmask())
+    }
+
+    /// The ops with a sequence number at `addr` (`beginOp(addr)` to `endOp(addr)`), by time.
+    pub(crate) fn ops_at(&self, addr: u64) -> Vec<OpId> {
+        self.seqs.range((addr, 0)..=(addr, u32::MAX)).map(|(_, &id)| id).collect()
     }
 
     /// Port of `Funcdata::warning`: a warning comment at an address (`Comment::warning`, kept

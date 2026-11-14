@@ -65,6 +65,26 @@ impl LocalMap {
         &self.ranges
     }
 
+    /// The stack space's highest offset.
+    pub(crate) fn highest(&self) -> u64 {
+        self.highest
+    }
+
+    /// `minParamOffset` and `maxParamOffset`: the extent of the stack parameters of calls
+    /// (`markNotMapped`).
+    pub(crate) fn min_param(&self) -> u64 {
+        self.min_param
+    }
+    pub(crate) fn max_param(&self) -> u64 {
+        self.max_param
+    }
+
+    /// `ProtoModel::getLocalRange().inRange(addr, 1)` for the default local range, the upper
+    /// half of the space (`defaultLocalRange`; x86 declares no `<localrange>`).
+    pub(crate) fn in_local_range(&self, off: u64) -> bool {
+        off >= self.highest - (self.highest >> 1).min(0x7fff_ffff) && off <= self.highest
+    }
+
     /// The locked-parameter "symbol" of the local scope holding stack offset `addr`
     /// (`Scope::queryContainer`): its offset and type.
     pub(crate) fn locked_param_at(fd: &Funcdata, addr: u64) -> Option<(u64, super::types::TypeId)> {

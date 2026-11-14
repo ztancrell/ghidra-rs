@@ -508,6 +508,8 @@ pub(crate) struct CallSpec {
     pub(crate) active_output: Option<ParamActive>,
     /// `effective_extrapop`, from `ActionStackPtrFlow`
     pub(crate) effective_extrapop: Option<i32>,
+    /// `isBadJumpTable`: the call stands for an indirect jump whose table was not recovered
+    pub(crate) bad_jump_table: bool,
     /// `FuncCallSpecs::stackoffset`: the stack pointer at the call relative to its value on entry
     /// (`None`: `offset_unknown`); set by `resolveSpacebaseRelative` (RuleLoadVarnode, stage R5)
     pub(crate) stack_offset: Option<u64>,
@@ -540,6 +542,7 @@ impl CallSpec {
             active_input: None,
             active_output: None,
             effective_extrapop: None,
+            bad_jump_table: false,
             input_consume: Vec::new(),
             stack_offset: None,
         }

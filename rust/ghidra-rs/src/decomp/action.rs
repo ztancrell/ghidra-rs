@@ -230,7 +230,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("inputprototype", "fixateproto", c::input_prototype),
             ("mapglobals", "fixateglobals", c::map_globals),
             ("dynamicsymbols", "dynamic", not_ported),
-            ("namevars", "merge", not_ported),
+            ("namevars", "merge", super::namevars::name_vars),
             ("setcasts", "casts", not_ported),
             ("finalstructure", "blockrecovery", super::finalstructure::final_structure),
             ("prototypewarnings", "protorecovery", not_ported),

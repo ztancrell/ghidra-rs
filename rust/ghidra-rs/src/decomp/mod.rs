@@ -31,6 +31,7 @@ mod lanedivide;
 mod lateres;
 mod locked;
 mod merge;
+mod namevars;
 mod nodejoin;
 mod op;
 mod opcode;

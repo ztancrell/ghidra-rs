@@ -156,13 +156,8 @@ impl<'a> Printer<'a> {
             // stack varnodes come with the `stackvars` rules (stage R5)
             // JoinSpace::printRaw: the pieces' names
             Space::Join => {
-                let names: Vec<String> = self.fd().joins[v.offset as usize]
-                    .iter()
-                    .map(|&(s, o, z)| {
-                        self.arch.register_name(s, o, z).map_or_else(|| format!("r0x{o:x}"), |r| r.0.to_string())
-                    })
-                    .collect();
-                self.out.str(&format!("j{{{}}}", names.join(",")));
+                let text = join_raw(self.fd(), self.arch, v.offset).unwrap_or_else(|e| e.0);
+                self.out.str(&text);
                 0
             }
             Space::Stack => {
@@ -441,4 +436,15 @@ pub(crate) fn shortcut(name: &str) -> char {
         "unique" => 'u',
         n => n.chars().next().unwrap_or('x').to_ascii_lowercase(),
     }
+}
+
+/// The join space's shortcut and `JoinSpace::printRaw`: the pieces' names.
+pub(crate) fn join_raw(fd: &Funcdata, arch: &Arch, index: u64) -> super::Result<String> {
+    let pieces = usize::try_from(index).ok().and_then(|i| fd.joins.get(i));
+    let pieces = pieces.ok_or_else(|| super::LowlevelError("join address without a record".into()))?;
+    let names: Vec<String> = pieces
+        .iter()
+        .map(|&(s, o, z)| arch.register_name(s, o, z).map_or_else(|| format!("r0x{o:x}"), |r| r.0.to_string()))
+        .collect();
+    Ok(format!("j{{{}}}", names.join(",")))
 }

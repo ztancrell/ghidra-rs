@@ -52,7 +52,8 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   (the action framework: groups, repeat, breakpoints, `continue`), `heritage.rs` (SSA: phi
   placement and renaming), `action.rs` (the universal
   action up to `paramdouble`), `print.rs` (`print raw`), `stdsort.rs` (libstdc++'s `std::sort`), `rangemap.rs` (the
-  `rangemap` template the scopes' maps use).
+  `rangemap` template the scopes' maps use), `scope.rs` (symbols, default names), `namevars.rs`
+  (`ActionNameVars`).
   See "Decompiler (Milestone 3)" below.
 - `ghidra-rs/tests/decomp.rs`, `tests/data/raw-funclink-*.txt`, `tests/data/raw-heritage-40a110.txt`,
   `tests/data/raw-paramdouble-40ad80.txt` (S2: a loop at `paramdouble`):
@@ -1794,8 +1795,10 @@ bar fell; the table is in `docs/plans/m3-decompiler.md`, "Stack heritage".
   `buildTrialMap`, `forceExclusionGroup`, `forceNoUse`, `forceInactiveChain`), `ScoreProtoModel`
   and `Models::select_model` (a merged model keeps its `members`).
 - `scope.rs`, wired as `Funcdata::symtab` (a global and a local scope per function): symbols,
-  map entries (one `rangemap.rs` map per space, in the C++ order), categories, `print map`; the default variable names (`build_variable_name`) are
-  there and unit tested but only `mapglobals` uses them, `namevars` is not ported.
+  map entries (one `rangemap.rs` map per space, in the C++ order), categories, `print map`, the
+  default variable names (`build_variable_name`).
+- `namevars.rs`: `ActionNameVars` (`linkSymbol` with conflict entries, `linkSymbolReference` for
+  the stack, `getNameRepresentative`, `hasName`, `buildDefaultName`, `assignDefaultNames`).
 - `finalstructure.rs`: `ActionFinalStructure` (`orderBlocks`, `finalizePrinting` for while-do and
   switch blocks, `scopeBreak`, `markUnstructured`, `markLabelBumpUp`), `moveRespectingCover`,
   `markExpression`, the switch's `CaseOrder` list (`structure.rs` calls `grab_cases` in
@@ -1817,7 +1820,9 @@ reference finishes): prototypes and globals 8 / 8, 498 / 499 (99.8 %) (rules on)
 on); `latedonothing` 8 / 8, 498 / 499 (99.8 %) and 8 / 8, 493 / 499 (98.8 %); `finalstructure` 7 / 7, 494 / 495 (99.8 %) and
 7 / 7, 489 / 495 (98.8 %) (switch functions do not finish on the reference with `switchnorm` off).
 Existing bars on the final binary: R1/R3, subvar and R4 checks 498 / 499, R5 typed 497 / 498, S7 rules on 498 / 499 and types on 493 / 499, S8 rules off 499 / 499 and rule stage 498 / 499, S3 paramdouble 500 / 500, S4 and S6 499 / 500, switch corpus 1,947 / 2,050: all unchanged.
-Open before S9: `namevars`, the case labels (`switchnorm`), `setcasts`.
+Open before S9: the case labels (`switchnorm`, not started; its needs are listed in the plan),
+`setcasts`. Superseded: `namevars` in this list (ported: names check, `print map` after
+`namevars`, M8 8 / 8 and 8 / 8, M500 498 / 499 (99.8 %) rules on and 493 / 499 (98.8 %) types on).
 
 Merged with master 836d04baee (stack heritage): `print map` and the use-limit test of
 `inputprototype` read the local scope's real ranges (`Funcdata::localmap`), and `restrictlocal`

@@ -2393,7 +2393,7 @@ pub(crate) fn input_prototype(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
                 let at = fd.entry.wrapping_sub(1);
                 UseLimit(vec![(code, at, at)])
             };
-            let entry = SymbolEntry { space: t.space, offset: t.off, size, uselimit };
+            let entry = SymbolEntry { space: t.space, offset: t.off, size, uselimit, conflict: false, piece: None };
             let sym = fd.symtab.add_symbol(LOCAL, "", Some(ty), None, Some(entry))?;
             fd.symtab.set_category(sym, 0, count as u32);
         }
@@ -2489,11 +2489,13 @@ pub(crate) fn map_globals(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
                 reg: arch.register_name(sp, addr, size).map_or("", |r| r.0),
                 flags: NameFlags { persist: true, addr_tied: true, ..NameFlags::default() },
                 in_local_range: false,
+                stack: None,
             };
             // ponytail: uniqueness is against the data symbols only; a function named like a
             // default data name (`uRam...`) would need the functions in the name tree
             let name = fd.symtab.build_variable_name(GLOBAL, &req, &mut 0)?;
-            let entry = SymbolEntry { space, offset: addr, size, uselimit: UseLimit::default() };
+            let entry =
+                SymbolEntry { space, offset: addr, size, uselimit: UseLimit::default(), conflict: false, piece: None };
             fd.symtab.add_symbol(GLOBAL, &name, Some(ct), None, Some(entry))?;
             continue;
         };
@@ -2513,7 +2515,14 @@ pub(crate) fn map_globals(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
                 };
                 let name = format!("{ename}_{}", uoff.wrapping_sub(eoff) as i32);
                 let ty = high_type(fd, u)?;
-                let entry = SymbolEntry { space, offset: uoff, size: fd.types.size(ty), uselimit: UseLimit::default() };
+                let entry = SymbolEntry {
+                    space,
+                    offset: uoff,
+                    size: fd.types.size(ty),
+                    uselimit: UseLimit::default(),
+                    conflict: false,
+                    piece: None,
+                };
                 fd.symtab.add_symbol(GLOBAL, &name, Some(ty), None, Some(entry))?;
             }
         }
