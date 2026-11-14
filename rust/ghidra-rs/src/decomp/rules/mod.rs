@@ -3,8 +3,8 @@
 //! in [`bits`], [`compare`], [`boolean`], [`cleanup`]; stage R3: extension, concat and sub-pieces
 //! in [`extend`], [`piece`], [`subpiece`]; stage R4: division, remainder, sign and float rules in
 //! [`div`], [`modulo`], [`floatrules`] and `RuleSubfloatConvert` in `decomp/subfloat.rs`; the
-//! `subvar` group and `RulePiecePathology` of stage R3b in [`subvar`], [`piece`]; ruleaction.cc)
-//! and the pool walk ([`pool`]), with the expression helpers they share ([`cse`]) and float constant
+//! `subvar` group and `RulePiecePathology` of stage R3b in [`subvar`], [`piece`]; ruleaction.cc),
+//! the double-precision rules of stage R5 slice 3 in [`double`] (double.cc), and the pool walk ([`pool`]), with the expression helpers they share ([`cse`]) and float constant
 //! folding ([`float`]); the `Funcdata` methods they need (`cseEliminateList`,
 //! `distributeIntMultAdd`, `totalReplaceConstant`, ...) are in `funcdata.rs`.
 //!
@@ -21,6 +21,7 @@ mod compare;
 mod copy;
 mod cse;
 mod div;
+mod double;
 mod extend;
 mod float;
 mod floatrules;
@@ -33,6 +34,7 @@ mod subvar;
 
 pub(crate) use cse::func_eq_level;
 pub(crate) use cse::func_equal;
+pub(crate) use double::param_double;
 pub(crate) use pool::{nonzero_mask, pool_apply, select, Pool};
 
 use arith::*;
@@ -43,6 +45,7 @@ use compare::*;
 use copy::*;
 use cse::*;
 use div::*;
+use double::*;
 use extend::*;
 use float::*;
 use floatrules::*;
@@ -229,6 +232,10 @@ pub(crate) const OPPOOL1: &[Rule] = &[
     r("ptraddundo", "typerecovery", &[Ptradd], ptradd_undo),
     r("ptrsubundo", "typerecovery", &[Ptrsub], ptrsub_undo),
     r("piecepathology", "protorecovery", &[Piece], piece_pathology),
+    r("doubleload", "doubleload", &[Piece], double_load),
+    r("doublestore", "doubleprecis", &[Store], double_store),
+    r("doublein", "doubleprecis", &[Subpiece], double_in),
+    r("doubleout", "doubleprecis", &[Piece], double_out),
 ];
 
 /// The ported rules of `oppool2`, in `universalAction`'s order (stage R5).

@@ -114,6 +114,9 @@ pub struct Funcdata {
     /// `jumptablerecovery_on`: this is the partial function of jump-table recovery
     /// (`Funcdata::stageJumpTable`)
     pub(crate) jumptablerecovery_on: bool,
+    /// `doublePrecisRecovery` (`Funcdata::isDoublePrecisOn`): set by `RuleDoubleIn::reset` when
+    /// the running action has group `doubleprecis` ([`super::actiontree::ActionTree::perform`])
+    pub(crate) double_precis_on: bool,
 }
 
 impl Funcdata {
@@ -158,6 +161,7 @@ impl Funcdata {
             next_alive: 0,
             typerecovery_on: false,
             jumptablerecovery_on: false,
+            double_precis_on: false,
         }
     }
 
@@ -1227,6 +1231,58 @@ impl Funcdata {
 
     /// Port of `Funcdata::totalReplaceConstant`: every read of `vn` reads the constant `val`; a
     /// marker reads one COPY of it made after `vn`'s definition (or at the function's start).
+    /// Port of `Funcdata::combineInputVarnodes` (little-endian; stage R5 slice 3,
+    /// `RuleDoubleOut`): the contiguous inputs `vn_hi`, `vn_lo` become one input. The PIECEs of
+    /// exactly them become COPYs of it; other readers read SUBPIECEs of it made at the start.
+    pub(crate) fn combine_input_varnodes(&mut self, vn_hi: VarnodeId, vn_lo: VarnodeId, arch: &Arch) -> Result<()> {
+        let (hi, lo) = (self.vn(vn_hi).clone(), self.vn(vn_lo).clone());
+        if !hi.is_input() || !lo.is_input() {
+            return err("Varnodes being combined are not inputs");
+        }
+        if hi.space != lo.space || lo.offset.wrapping_add(u64::from(lo.size)) != hi.offset {
+            return err("Input varnodes being combined are not contiguous");
+        }
+        let is_pair = |f: &Funcdata, op: OpId| {
+            let o = f.op(op);
+            o.opc == Opcode::Piece && o.ins.first() == Some(&vn_hi) && o.ins.get(1) == Some(&vn_lo)
+        };
+        let piece_list: Vec<OpId> = hi.descend.iter().copied().filter(|&op| is_pair(self, op)).collect();
+        let other_hi = hi.descend.iter().any(|&op| !is_pair(self, op));
+        let other_lo = lo.descend.iter().any(|&op| !is_pair(self, op));
+        for &op in &piece_list {
+            self.op_remove_input(op, 1);
+            self.op_clear_inputs(op);
+        }
+        let sub_hi = if other_hi { Some(self.combine_split(vn_hi, u64::from(lo.size))?) } else { None };
+        let sub_lo = if other_lo { Some(self.combine_split(vn_lo, 0)?) } else { None };
+        self.delete_varnode(vn_hi);
+        self.delete_varnode(vn_lo);
+        let in_vn = self.new_varnode(hi.size + lo.size, lo.space, lo.offset);
+        let in_vn = self.set_input_varnode(in_vn, arch)?;
+        for &op in &piece_list {
+            self.op_set_input(op, in_vn, 0)?;
+            self.op_set_opcode(op, Opcode::Copy);
+        }
+        for sub in [sub_hi, sub_lo].into_iter().flatten() {
+            self.op_insert_input(sub, in_vn, 0)?;
+        }
+        Ok(())
+    }
+
+    /// The SUBPIECE of `combineInputVarnodes` replacing the other reads of `vn` (input 0 set
+    /// later): `vn`'s storage, written at the start of the first block.
+    fn combine_split(&mut self, vn: VarnodeId, offset: u64) -> Result<OpId> {
+        let bb = *self.blocks.list.first().ok_or_else(|| LowlevelError("no blocks".into()))?;
+        let sub = self.new_op(Opcode::Subpiece, self.blocks.block(bb).start);
+        let c = self.new_constant(4, offset);
+        self.op_insert_input(sub, c, 0)?; // slot 1 once input 0 is inserted before it
+        let (size, space, off) = (self.vn(vn).size, self.vn(vn).space, self.vn(vn).offset);
+        let newvn = self.new_varnode_out(size, space, off, sub);
+        self.op_insert_begin(sub, bb);
+        self.total_replace(vn, newvn)?;
+        Ok(sub)
+    }
+
     pub(crate) fn total_replace_constant(&mut self, vn: VarnodeId, val: u64) -> Result<()> {
         let size = self.vn(vn).size;
         let uniq = self.uniq.ok_or_else(|| LowlevelError("no unique space".into()))?;

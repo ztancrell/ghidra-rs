@@ -2,8 +2,8 @@
 //! data-flow only moves the pieces side by side, is split into a low and a high varnode. The
 //! trace builds [`TransformManager`] placeholders, lane 0 the low piece and lane 1 the high.
 //!
-//! The double-precision marks (`isPrecisLo`, `isPrecisHi`) come with `double.cc` (R5): no
-//! varnode has them yet. Partial structure types are not ported, so any locked type refuses.
+//! A double-precision piece (`isPrecisLo`, `isPrecisHi`, set by the double.cc rules of R5) is
+//! not split. Superseded: "no varnode has them yet" (before R5 slice 3). Partial structure types are not ported, so any locked type refuses.
 
 use std::collections::HashSet;
 
@@ -155,6 +155,8 @@ impl<'a> SplitFlow<'a> {
             }
             let ok = match fd.op(op).opc {
                 Copy | Multiequal | Indirect | IntAnd | IntOr | IntXor => self.add_op(op, rvn, fd.slot_of(op, orig))?,
+                // do not split a value known to come from double precision pieces
+                Subpiece if fd.op(op).out.is_some_and(|o| fd.vn(o).is_precis()) => false,
                 Subpiece | IntLeft | IntRight | IntSright => self.forward_piece(op, rvn)?,
                 _ => false,
             };

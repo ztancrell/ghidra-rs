@@ -1257,7 +1257,7 @@ would round it up to the smallest one; ghidra-rs rounds as IEEE does (a known di
 met in the checks).
 
 Not ported, with no effect on `print raw`: `isPrecisLo`/`isPrecisHi` (set by R5's
-double-precision rules), big-endian address arithmetic. A `pullsub_multi` on a join varnode
+double-precision rules; superseded: ported in R5 slice 3), big-endian address arithmetic. A `pullsub_multi` on a join varnode
 fails loudly (`Address::renormalize` of join addresses is not ported). The jump-table
 stand-ins (`jumptable.rs`) stay as they are: the partial function would need the `jumptable`
 root action's pool with R2's comparison rules too.
@@ -1715,7 +1715,39 @@ paramdouble 500 / 500, switch corpus 1,947 / 2,050, S4 498 / 500. The locked S6 
 
 Left for R5: `RuleLoadVarnode`/`RuleStoreVarnode` and removing `jumptable::fold_constants`
 (stack loads need the stack heritage pass), double.cc, constseq.cc, bitfield.cc and the
-`cleanup` rules that read types (see the plan, "R5").
+`cleanup` rules that read types (see the plan, "R5"). Superseded: double.cc is ported (R5
+slice 3, below).
+
+**R5 slice 3 (double.cc)**, branch `m3-r5-double`. `ghidra-rs/src/decomp/rules/double/`:
+`split.rs` (`SplitVarnode` and its static helpers), `forms.rs` (`AddForm`, `SubForm`,
+`LogicalForm`, `Equal1Form`, `Equal2Form`, `Equal3Form`, `ShiftForm`, `MultForm`, `PhiForm`,
+`IndirectForm`, `CopyForceForm`), `less.rs` (`LessThreeWay`, `LessConstForm`), `mod.rs`
+(`RuleDoubleIn`, `RuleDoubleOut`, `RuleDoubleLoad`, `RuleDoubleStore`, `applyRuleIn`, and
+`ActionParamDouble`), `tests.rs`. The four rules end `OPPOOL1` in the C++ order (`doubleload`
+group `doubleload`, the others `doubleprecis`). New varnode marks `VnFlags::PRECIS_LO` (1 << 27)
+and `PRECIS_HI` (1 << 28); the readers that test them are in place: `RulePullsubMulti`,
+`RuleSubCommute`, `RuleSubNormal`, `RuleSplitFlow` and `SplitFlow::traceForward`;
+`buildOutputFromTrials` sets them on a two-piece call output when double precision is on.
+`RuleDoubleIn::reset` is `ActionTree::double_precis` (the `decompile` root has group
+`doubleprecis` on), which `ActionTree::perform` copies into `Funcdata::double_precis_on`
+(`doublePrecisRecovery`; set even when `togglerule doublein off`, as `ActionPool::reset` resets
+every rule). `Funcdata::combine_input_varnodes` is new (`RuleDoubleOut`). Not modelled: symbol
+entries (`getSymbolEntry` is null: `isAddrTiedContiguous` tests storage only), big-endian spaces;
+erroring paths: `ActionParamDouble` joining two call inputs that are the pieces of one whole
+(`checkInputJoin`/`doInputJoin` not ported), and `isPrimitiveWhole` of a type-locked struct or
+array whole. The check (options `rust/tools/corpus/r5d-options.txt`: r1's with `doubleload` and
+`doubleprecis` on; corpus `rust/tools/corpus/r5d-adc.txt`: the 215 mercs2 functions under 600
+bytes with an ADC, SHLD or SHRD), from the worktree root with
+`DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst`:
+`BREAK=assignhigh OPTIONS=$PWD/rust/tools/corpus/r5d-options.txt OUT=$PWD/rust/target/r5d-m8 rust/tools/decomp-diff.sh m8`
+(and `m500` with `TIMEOUT=120`, and `rust/tools/corpus/r5d-adc.txt`). Results: M8 8 / 8, M500
+498 / 499 the reference finishes (0x47a6b0, the known `ActionConditionalExe` miss; 0x4c48d0
+never finishes), r5d-adc 215 / 215. Exercise: on M500 the double rules change no reference
+output; on r5d-adc they change 23 of the 215 reference outputs (rules on against r1-options), and
+ghidra-rs's output changes on the same 23 and matches the reference on all of them (for
+example 0x7b8f10: `AddForm` on a call's `j{EDX,EAX}` output, then `RuleDoubleStore`).
+R1 check (`r1-options.txt`) rerun on the branch: M500 498 / 499 (0x47a6b0). `cargo test --release`
+and `cargo clippy --release --all-targets -- -D warnings` clean.
 
 Merged with S8 part one and R5 slice one (2026-11-13). Superseded: the rules-on 481 / 499 above.
 The `X & #0x1` constant-type misses were `copySymbol` on an untyped source: every C++ varnode

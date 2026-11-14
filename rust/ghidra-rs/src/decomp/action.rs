@@ -79,6 +79,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
     ];
     let groups = if jumptable { JUMPTABLE } else { DECOMPILE };
     let on = |g: &str| groups.contains(&g) && !disabled.contains(g);
+    t.double_precis = on("doubleprecis");
     let rule_on = |rl: &super::rules::Rule| on(rl.group) && !disabled.contains(&format!("rule:{}", rl.name));
     let leaves = |t: &mut ActionTree, list: &[(&'static str, &str, super::actiontree::ApplyFn)]| -> Vec<_> {
         list.iter()
@@ -129,7 +130,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("unreachable", "base", unreachable),
             ("varnodeprops", "base", varnode_props),
             ("heritage", "base", heritage_pass),
-            ("paramdouble", "protorecovery", c::nothing),
+            ("paramdouble", "protorecovery", super::rules::param_double),
             ("segmentize", "base", c::nothing),
             ("internalstorage", "base", c::nothing),
             ("forcegoto", "blockrecovery", c::nothing),
