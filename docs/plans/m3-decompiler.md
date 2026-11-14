@@ -607,6 +607,97 @@ not finish); subvar check and R3 check 497 / 499 each; paramdouble 500 / 500; S4
 four S6 checks (unlocked, `void`, `int4`, callees) 498 / 500 each (0x4919f0; 0x4c48d0).
 Superseded: the 495 / 499 above (0x4891e0 and 0x6fa6e0 are fixed by part two's non-zero masks)
 and the callee check's 497 (the reference ran 0x5b59c0 this time).
+### S8: in part on branch `m3-s8` (2026-11-13)
+
+Ported: `ActionBlockStructure` end to end. `decomp/structure.rs` holds the structured hierarchy
+(`Funcdata::sblocks`) as an arena of blocks with an enum for the `FlowBlock` subclass (graph,
+copy, goto, multi-goto, list, condition, if, if/else, if-no-exit, if-goto, while-do, do-while,
+infinite loop, switch), the edge edits of `FlowBlock`/`BlockGraph`, every `newBlock*`,
+`buildCopy` with `installSwitchDefaults`, `isComplex`, `negateCondition` (which flips the basic
+block's CBRANCH: `boolean_flip`, `fallthru_true` and the basic out edges) and `printTree`.
+`decomp/collapse.rs` ports `CollapseStructure` (every rule, in the C++ order), `LoopBody`,
+`TraceDAG` and `FloatingEdge`. `structureReset` clears the structure, as the C++ does.
+
+Check (from `rust/`):
+
+```sh
+PRINT=$'print tree block\nprint raw' BREAK=assignhigh \
+  DECOMP_SKIP_ACTIONS=prefercomplement,structuretransform \
+  OPTIONS=tools/corpus/s8-options.txt tools/decomp-diff.sh m500
+PRINT=$'print tree block\nprint raw' BREAK=assignhigh \
+  DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst,prefercomplement,structuretransform \
+  OPTIONS=tools/corpus/s8-r-options.txt tools/decomp-diff.sh m500
+```
+
+`s8-options.txt` is `s4-options.txt` and `s8-r-options.txt` is `r1-options.txt`, each without
+the `blockrecovery off` line (`tools/r1-options.sh` writes both). Where it
+breaks and why that is fair: `blockstructure` runs in the main loop, so `break start assignhigh`
+stops after it and after the later main-loop passes that read the flipped branches. The two
+`blockrecovery` actions between `cleanup` and `assignhigh`, `prefercomplement` and
+`structuretransform`, are skipped on both sides: they only rework the finished structure
+(swap if/else clauses, normalize flipped conditions, move for-loop ops), so both engines
+compare the structure `blockstructure` built. `finalstructure` comes after the merge and cast
+actions (S7, S9), so no break can reach it yet. Printing `print raw` too checks the CBRANCH flips
+and edge swaps of the collapse rules on the basic blocks.
+
+| check | M8 | M500 |
+|---|---|---|
+| rule groups off (`s8-options.txt`) | 8 / 8 | 499 / 500; 499 / 499 of the functions the reference finishes |
+| rule-stage options (`s8-r-options.txt`) | 8 / 8 | 496 / 500; 496 / 499 of the functions the reference finishes (99.4 %) |
+
+The miss in both is 0x4c48d0, which neither engine finishes within the timeout. The other
+misses with the rule-stage options are R3's, unchanged: 0x47a6b0 (`ActionConditionalExe`), 0x4891e0
+and 0x6fa6e0 (a zero replacement one main-loop pass apart). R3's fourth miss, 0x4919f0, is identical
+here: it differs only with `blockrecovery` off. Existing bars on this branch: the R3 check M500 495 / 500 (495 / 499),
+paramdouble 500 / 500, the S4 check 498 / 500, the S6 check (unlocked) 498 / 500: unchanged. Those
+checks keep `blockrecovery` off, so `blockstructure` never runs in them.
+
+After merging R2 (2026-11-13; `cleanup` on, `condnegate` ported): rules off M8 8 / 8, M500 499 / 499;
+rule-stage options M8 8 / 8, M500 463 / 499. Superseded by the `ConditionalJoin` port below. The 35
+new misses came from `ActionNodeJoin`:
+`RuleCondNegate` now turns the flips `blockstructure` sets into BOOL_NEGATE ops, so two branches
+get functionally equal conditions in different varnodes and the reference joins them
+(`ConditionalJoin`), which ghidra-rs does not port (its detection only sees one shared varnode,
+so it misses them silently). With `nodejoin` skipped on both sides the rule-stage check is
+498 / 499 (miss 0x47a6b0, `ActionConditionalExe`). Ported since (below):
+(`functionalEqualityLevel`, `nodeJoinCreateBlock`).
+
+`ActionNodeJoin` is now ported (`decomp/nodejoin.rs`: `ConditionalJoin` with `findDups`,
+`checkExitBlock`, `setupMultiequals`, `moveCbranch`, `cutDownMultiequals`, and
+`Funcdata::nodeJoinCreateBlock`; it reuses R2's `functionalEqualityLevel`), replacing S4's
+detection. With `nodejoin` running on both sides: rules off M8 8 / 8, M500 499 / 499; rule-stage
+options M8 8 / 8, M500 498 / 499 (miss 0x47a6b0, `ActionConditionalExe`). The action changes the
+reference output of 35 M500 functions under the rule-stage options; all 35 are identical.
+Other bars on the same binary: R3 check 498 / 499, subvar and R4 checks 498 / 499, paramdouble
+500 / 500; the S4 and S6 (unlocked) checks rise to 499 / 500 (499 / 499 the reference finishes):
+0x4919f0, the miss R3 left "not traced", is a join of two branches on one condition, which S4's
+detection let through.
+
+Not ported, left for part two:
+
+- `prefercomplement` and `structuretransform`: they need `opFlipInPlaceTest/Execute`,
+  `opNormalizeFlip`, `replaceLessequal` and the boolean-flip table, which R2 ports
+  (`rules/boolean.rs`, `rules/compare.rs` on `m3-r2`). Superseded: "blocked until R2 merges"; R2 is on master now, so they are next. The for-loop part
+  of `BlockWhileDo::finalTransform` (`findLoopVariable`, `findInitializer`,
+  `PcodeOp::isMoveable`) also comes with it.
+- `finalstructure` (`orderBlocks`, `finalizePrinting`, `scopeBreak`, `markUnstructured`,
+  `markLabelBumpUp`), `nextFlowAfter`, the case data of `BlockSwitch` (`grabCaseBasic`) and
+  structured `printRaw`: needed by S9 only.
+- `returnsplit` (group off in the check; needs `Funcdata::nodeSplit` and `gotoPrints`).
+- `normalizebranches` needs nothing: its group is not in the `decompile` root's groups, so the
+  console never runs it.
+
+Review round (independent review of `collapse.rs` and `structure.rs` against the C++):
+`ActionNodeJoin`'s detection skips a pair when either CBRANCH has `boolean_flip` set, as
+`ConditionalJoin::findDups` does (`blockstructure` sets the flag earlier in the same main-loop
+pass; before, ghidra-rs failed where the C++ skips); `newBlockSwitch` fails with "Could not get
+switch leaf" when the switch's exit leaf (`getExitLeaf`) is not a copy; `printTree`,
+`negateCondition` and `isComplex` use a work stack or a loop instead of recursion (deep nesting
+is input-reachable); unit tests on hand-built graphs (if/else, a negated proper if, an
+irreducible two-entry loop, a switch with a duplicated table target and a skip edge to the
+exit; expected trees derived by hand from the C++). Bars after the round, unchanged: S8 M8 8 / 8,
+M500 499 / 499 (rules off) and 496 / 499 (rule-stage options); R3 check 495 / 499; S4 and S6
+checks 498 / 500.
 ### S7: in part on branch `m3-s7` (2026-11-13)
 
 Ported: the merge range `assignhigh` .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`;

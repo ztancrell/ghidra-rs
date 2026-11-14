@@ -171,6 +171,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    (`SubfloatFlow`) included; the R1 check with `floatprecision` on: M8 8 / 8, M500 495 / 499
    (99.2 %, bar 98 %); 90 M500 functions exercise the rules, 89 of them identical. Merged with R3 part two:
    R4 check M500 497 / 499; subvar, R3, S3, S4 and S6 bars all held.
+   S8 (structuring, in part) on branch `m3-s8`: `ActionBlockStructure` (`CollapseStructure`,
+   `LoopBody`, `TraceDAG`; `structure.rs`, `collapse.rs`) and `print tree block`; `print tree
+   block` plus `print raw` at `assignhigh` with `blockrecovery` on: M8 8 / 8, M500 499 / 499 the
+   reference finishes (bar 98 %); with the rule-stage options M8 8 / 8, M500 496 / 499 before R2, 463 / 499 after R2 until `ConditionalJoin` was ported, 498 / 499 now (`ActionNodeJoin` ported, `nodejoin.rs`). Open: `prefercomplement` and
+   `structuretransform` (R2's flip helpers they need are now on master), `finalstructure`, `returnsplit`.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

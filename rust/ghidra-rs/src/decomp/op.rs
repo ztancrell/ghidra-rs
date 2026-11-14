@@ -40,6 +40,8 @@ impl OpFlags {
     pub(crate) const CALCULATED_BOOL: OpFlags = OpFlags(1024);
     /// `immed_copy` (an additional flag in C++): a COPY was propagated into a MULTIEQUAL slot
     pub(crate) const IMMED_COPY: OpFlags = OpFlags(2048);
+    /// `fallthru_true`: the fall-through out edge is the true branch (`BlockBasic::negateCondition`)
+    pub(crate) const FALLTHRU_TRUE: OpFlags = OpFlags(1 << 16);
     /// `nonprinting`: the op prints nothing (merging, stage S7)
     pub(crate) const NONPRINTING: OpFlags = OpFlags(8192);
     /// `special_print`: a call printing the NEW before it (`checkNewToConstructor`, stage S7)
