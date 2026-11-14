@@ -101,6 +101,17 @@ impl VnFlags {
     /// `stop_uppropagation` (an additional flag in C++): data-types do not propagate from a
     /// reader into this varnode (`ActionInferTypes::buildLocaltypes`, stage R5)
     pub(crate) const STOP_UPPROPAGATION: VnFlags = VnFlags(1 << 26);
+    /// `implied`: printed inside the expression reading it (`ActionMarkImplied`, stage S7)
+    pub(crate) const IMPLIED: VnFlags = VnFlags(1 << 23);
+    /// `explicit`: printed as a variable of its own (`ActionMarkExplicit`, stage S7)
+    pub(crate) const EXPLICIT: VnFlags = VnFlags(1 << 24);
+    /// `indirectonly`: an illegal input only INDIRECTs read (`markIndirectOnly`, stage S7)
+    pub(crate) const INDIRECTONLY: VnFlags = VnFlags(1 << 25);
+
+    /// both sets of flags
+    pub(crate) const fn with(self, f: VnFlags) -> VnFlags {
+        VnFlags(self.0 | f.0)
+    }
 
     pub(crate) fn has(self, f: VnFlags) -> bool {
         self.0 & f.0 != 0

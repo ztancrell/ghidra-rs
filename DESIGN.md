@@ -181,6 +181,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    block` plus `print raw` at `assignhigh` with `blockrecovery` on: M8 8 / 8, M500 499 / 499 the
    reference finishes (bar 98 %); with the rule-stage options M8 8 / 8, M500 496 / 499 before R2, 463 / 499 after R2 until `ConditionalJoin` was ported, 498 / 499 now (`ActionNodeJoin` ported, `nodejoin.rs`). Open: `prefercomplement` and
    `structuretransform` (R2's flip helpers they need are now on master), `finalstructure`, `returnsplit`.
+   S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
+   .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
+   `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
+   Merged with R3b, R4, R2, S8, R5: rules on 498 / 499, types on 493 / 499 (a copySymbol type fix;
+   superseded: 481 / 499). Open: `VariablePiece` groups, `dynamic.cc`, symbols.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.
