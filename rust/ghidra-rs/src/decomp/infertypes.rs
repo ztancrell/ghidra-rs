@@ -746,9 +746,9 @@ pub(crate) fn infer_types(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
 /// A symbol of the global scope a pointer constant can name (`MapEntry`): a function or an
 /// external reference. `rules/ptrarith.rs` (`AddTree::calc_subtype`) relies on no other kind
 /// existing; adding data symbols means porting `TypeSpacebase::nearestArrayedComponent*` there.
-struct Entry {
-    addr: u64,
-    externref: bool,
+pub(crate) struct Entry {
+    pub(crate) addr: u64,
+    pub(crate) externref: bool,
 }
 
 impl Entry {
@@ -765,7 +765,7 @@ impl Entry {
 
 /// Port of `Scope::queryContainer(addr, 1)` on the global scope: a function covers its entry
 /// byte, an external reference its pointer-sized slot.
-fn query_global(arch: &Arch, addr: u64) -> Option<Entry> {
+pub(crate) fn query_global(arch: &Arch, addr: u64) -> Option<Entry> {
     if arch.functions.contains_key(&addr) {
         return Some(Entry { addr, externref: false });
     }

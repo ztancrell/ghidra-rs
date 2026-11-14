@@ -8,12 +8,12 @@ set -e
 here=$(cd "$(dirname "$0")/.." && pwd)
 root=$(cd "$here/.." && pwd)
 src="$root/Ghidra/Features/Decompiler/src/decompile/cpp"
-build="$here/target/decomp-build"
+build="${DECOMP_BUILD:-$here/target/decomp-build}"
 [ -f "$root/Ghidra/Processors/x86/data/languages/x86.sla" ] || "$here/build-sla.sh"
 mkdir -p "$build"
 cp "$src"/*.cc "$src"/*.hh "$src"/*.h "$src"/*.y "$src"/*.l "$src"/Makefile "$build"/
 patch -s -d "$build" -p1 < "$here/tools/decomp-ref.patch"
 # -o: use the checked-in bison/flex outputs instead of regenerating them
-make -C "$build" -j"$(nproc)" -o xml.cc -o pcodeparse.cc -o slghparse.cc -o slghparse.hh -o slghscan.cc \
+make -C "$build" -j"${JOBS:-$(nproc)}" -o xml.cc -o pcodeparse.cc -o slghparse.cc -o slghparse.hh -o slghscan.cc \
     -o grammar.cc -o ruleparse.cc decomp_dbg decomp_test_dbg
 ls -l "$build/decomp_dbg" "$build/decomp_test_dbg"

@@ -100,3 +100,99 @@
  
    do {
      switch(status) {
+--- a/block.cc
++++ b/block.cc
+@@ -17,8 +17,38 @@
+ #include "block.hh"
+ #include "funcdata.hh"
+ 
++#include <cstdlib>
++
+ namespace ghidra {
+ 
++// ghidra-rs (rust/tools/decomp-ref.patch): with DECOMP_TREE_EXTRA set, `print tree block` also
++// shows what ActionFinalStructure sets: the f_unstructured_targ and f_label_bumpup flags, the
++// goto type of goto blocks, the case blocks of a switch in their final order with their goto
++// types, and the for-loop iterate and initialize ops of a while-do (their sequence times)
++static void printTreeExtra(const FlowBlock *b,ostream &s)
++{
++  static const bool extra = getenv("DECOMP_TREE_EXTRA") != (char *)0;
++  if (!extra) return;
++  s << " {f" << hex << (b->getFlags() & (FlowBlock::f_unstructured_targ|FlowBlock::f_label_bumpup)) << dec;
++  if (b->getType() == FlowBlock::t_goto)
++    s << " g" << ((const BlockGoto *)b)->getGotoType();
++  else if (b->getType() == FlowBlock::t_ifgoto)
++    s << " g" << ((const BlockIfGoto *)b)->getGotoType();
++  else if (b->getType() == FlowBlock::t_switch) {
++    const BlockSwitch *sw = (const BlockSwitch *)b;
++    for(int4 i=0;i<sw->getNumCaseBlocks();++i)
++      s << " c" << sw->getCaseBlock(i)->getIndex() << ':' << sw->getGotoType(i);
++  }
++  else if (b->getType() == FlowBlock::t_whiledo) {
++    const BlockWhileDo *wd = (const BlockWhileDo *)b;
++    if (wd->getIterateOp() != (PcodeOp *)0)
++      s << " it" << wd->getIterateOp()->getSeqNum().getTime();
++    if (wd->getInitializeOp() != (PcodeOp *)0)
++      s << " in" << wd->getInitializeOp()->getSeqNum().getTime();
++  }
++  s << '}';
++}
++
+ AttributeId ATTRIB_ALTINDEX = AttributeId("altindex",75);
+ AttributeId ATTRIB_DEPTH = AttributeId("depth",76);
+ AttributeId ATTRIB_END = AttributeId("end",77);
+@@ -625,6 +655,7 @@
+   for(i=0;i<level;++i)
+     s << "  ";
+   printHeader(s);
++  printTreeExtra(this,s);
+   s << endl;
+ }
+ 
+@@ -2904,7 +2935,12 @@
+ void BlockCopy::printTree(ostream &s,int4 level) const
+ 
+ {
+-  copy->printTree(s,level);
++  // ghidra-rs (decomp-ref.patch): the basic block's header with the copy's extras
++  for(int4 i=0;i<level;++i)
++    s << "  ";
++  copy->printHeader(s);
++  printTreeExtra(this,s);
++  s << endl;
+ }
+ 
+ void BlockCopy::encodeHeader(Encoder &encoder) const
+--- a/ifacedecomp.cc
++++ b/ifacedecomp.cc
+@@ -2375,9 +2375,30 @@
+   if (scope == (Scope *)0)
+     throw IfaceExecutionError("No map named: "+name);
+ 
++  // ghidra-rs (rust/tools/decomp-ref.patch): with DECOMP_MAP_EXTRA set, `print map` of the current
++  // function starts with its prototype (model, return type, parameter types, extrapop)
++  if (name.size() == 0 && dcp->fd != (Funcdata *)0 && getenv("DECOMP_MAP_EXTRA") != (char *)0) {
++    dcp->fd->getFuncProto().printRaw(dcp->fd->getName(),*status->fileoptr);
++    *status->fileoptr << endl;
++  }
+   *status->fileoptr << scope->getFullName() << endl;
+   scope->printBounds(*status->fileoptr);
+   scope->printEntries(*status->fileoptr);
++  // ghidra-rs (decomp-ref.patch): and, after the local scope, the data symbols of the global scope
++  // (what ActionMapGlobals adds; functions, labels and external references left out)
++  if (name.size() == 0 && dcp->fd != (Funcdata *)0 && getenv("DECOMP_MAP_EXTRA") != (char *)0) {
++    Scope *glob = dcp->conf->symboltab->getGlobalScope();
++    *status->fileoptr << "Global data" << endl;
++    MapIterator giter = glob->begin();
++    MapIterator gend = glob->end();
++    for(;giter!=gend;++giter) {
++      Symbol *sym = (*giter)->getSymbol();
++      if (dynamic_cast<FunctionSymbol *>(sym) != (FunctionSymbol *)0) continue;
++      if (dynamic_cast<ExternRefSymbol *>(sym) != (ExternRefSymbol *)0) continue;
++      if (dynamic_cast<LabSymbol *>(sym) != (LabSymbol *)0) continue;
++      (*giter)->printEntry(*status->fileoptr);
++    }
++  }
+ }
+ 
+ /// \class IfcProduceC

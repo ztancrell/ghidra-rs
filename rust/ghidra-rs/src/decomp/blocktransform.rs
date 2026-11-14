@@ -467,7 +467,7 @@ fn find_loop_variable(fd: &Funcdata, cbranch: OpId, head: BlockId, tail: BlockId
 
 /// `BlockWhileDo::findInitializer`: the op writing the loop variable's value on entry, in the
 /// block flowing into `head` (its only exit), and the op it would move after.
-fn find_initializer(fd: &Funcdata, head: BlockId, slot: usize, loop_def: OpId) -> Option<(OpId, OpId)> {
+pub(crate) fn find_initializer(fd: &Funcdata, head: BlockId, slot: usize, loop_def: OpId) -> Option<(OpId, OpId)> {
     let h = fd.blocks.block(head);
     if h.ins.len() != 2 {
         return None;

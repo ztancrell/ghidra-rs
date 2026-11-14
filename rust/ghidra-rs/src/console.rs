@@ -311,6 +311,19 @@ impl Console {
                 crate::decomp::parse_line(arch, text, &|n| functions.get(n).map(|&a| u64::from(a)))
                     .map_err(|e| e.to_string())?;
             }
+            // `IfcPrintMap` without a name: the local scope of the current function
+            ["print", "map"] => {
+                let (Some(arch), Some(fd)) = (&self.arch, &self.fd) else {
+                    return Err("print map: no function selected".into());
+                };
+                write!(
+                    out,
+                    "{}",
+                    crate::decomp::print_map(fd, arch, self.function.as_ref().map_or("", |f| f.1.as_str()))
+                        .map_err(|e| e.to_string())?
+                )
+                .map_err(io)?;
+            }
             // read by the corpora but needing later stages
             ["print", "tree", "block"] => {
                 let Some(fd) = &self.fd else { return Err("No function selected".into()) };

@@ -170,14 +170,16 @@ impl CompilerSpec {
 
 /// Port of `Architecture::decodeProto` for `<resolveprototype>` (`ProtoModelMerged::decode`).
 fn resolve_prototype(el: &Element, list: &[ProtoModel]) -> Result<ProtoModel> {
-    let members = el
+    let ids = el
         .kids_named("model")
         .map(|m| {
             let name = m.req("name")?;
             list.iter()
-                .find(|p| p.name == name)
+                .position(|p| p.name == name)
+                .map(|i| super::fspec::ModelId(i as u32))
                 .ok_or_else(|| LowlevelError(format!("Missing prototype model: {name}")))
         })
         .collect::<Result<Vec<_>>>()?;
-    ProtoModel::merged(el.req("name")?, &members)
+    let members: Vec<&ProtoModel> = ids.iter().map(|id| &list[id.0 as usize]).collect();
+    ProtoModel::merged(el.req("name")?, &members, ids)
 }

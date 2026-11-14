@@ -1,4 +1,4 @@
-//! Stage S4: the main-loop actions of `universalAction` that run with the rule groups off
+//! S        for (count, t) in active.trials.iter().filter(|t| t.is_used()).enumerate() {age S4: the main-loop actions of `universalAction` that run with the rule groups off
 //! (coreaction.cc, condexe.cc, the block edits of funcdata_block.cc, and the parameter and
 //! return-value recovery of fspec.cc and funcdata_varnode.cc).
 //!
@@ -1848,19 +1848,21 @@ fn descend_to_undef(fd: &mut Funcdata, vn: VarnodeId, dead: &[BlockId]) -> Resul
 pub(crate) fn do_nothing(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     for i in 0..fd.blocks.list.len() {
         let bb = fd.blocks.list[i];
+        fd.blocks.block_mut(bb).delayed_donothing = false; // clearDelayedDonothing
         if !is_do_nothing(fd, bb) {
             continue;
         }
-        let b = fd.blocks.block(bb);
-        if b.outs[0].point == bb {
-            continue; // an infinite loop: a warning only
+        if fd.blocks.block(bb).outs[0].point == bb {
+            fd.blocks.block_mut(bb).donothing_loop = true; // the warning only
+            continue;
         }
         if !unblocked_multi(fd, bb) {
             continue;
         }
         // jump-table recovery removes the block whatever was copied into it (`isJumptableRecoveryOn`)
         if !fd.jumptablerecovery_on && !has_no_immediate_copy(fd, bb) {
-            continue; // setDelayedDonothing: for ActionLateDoNothing (group blockrecovery)
+            fd.blocks.block_mut(bb).delayed_donothing = true; // for ActionLateDoNothing
+            continue;
         }
         remove_do_nothing_block(fd, arch, bb)?;
         return Ok(1);
@@ -1868,15 +1870,53 @@ pub(crate) fn do_nothing(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     Ok(0)
 }
 
-/// Port of `BlockBasic::isDoNothing` (no switch exists without S3's switch flags; an indirect
-/// jump is never one).
+/// Port of `ActionLateDoNothing::apply`: the do-nothing blocks [`do_nothing`] delayed go now,
+/// unless removing one would leave a predecessor whose out edges all reach the same block.
+pub(crate) fn late_do_nothing(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
+    let mut remove = Vec::new();
+    for &bb in &fd.blocks.list {
+        if !fd.blocks.block(bb).delayed_donothing || !is_do_nothing(fd, bb) {
+            continue;
+        }
+        if removing_creates_redundancy(fd, bb) || fd.blocks.block(bb).outs[0].point == bb {
+            continue; // the infinite loop: the warning `do_nothing` already marks
+        }
+        if unblocked_multi(fd, bb) {
+            remove.push(bb);
+        }
+    }
+    let count = remove.len() as i32;
+    for bb in remove {
+        remove_do_nothing_block(fd, arch, bb)?;
+    }
+    Ok(count)
+}
+
+/// Port of `ActionLateDoNothing::removingCreatesRedundancy`: some predecessor of `bb` with more
+/// than one out edge has every out edge going to `bb` or to `bb`'s successor.
+fn removing_creates_redundancy(fd: &Funcdata, bb: BlockId) -> bool {
+    let b = fd.blocks.block(bb);
+    let outbl = b.outs[0].point;
+    b.ins.iter().any(|e| {
+        let inbl = fd.blocks.block(e.point);
+        inbl.outs.len() != 1 && inbl.outs.iter().all(|o| o.point == bb || o.point == outbl)
+    })
+}
+
+/// `FlowBlock::isSwitchOut` of a basic block: it ends in a BRANCHIND (`BlockBasic::insert`).
+fn is_basic_switch_out(fd: &Funcdata, bb: BlockId) -> bool {
+    fd.blocks.block(bb).ops.last().is_some_and(|&op| fd.op(op).opc == Opcode::Branchind)
+}
+
+/// Port of `BlockBasic::isDoNothing`.
 fn is_do_nothing(fd: &Funcdata, bb: BlockId) -> bool {
     let b = fd.blocks.block(bb);
     if b.outs.len() != 1 || b.ins.is_empty() {
         return false;
     }
-    if b.ins.iter().any(|e| fd.blocks.block(e.point).outs.len() > 2) {
-        return false; // a predecessor that is a switch: S3 decides
+    let out_joins = fd.blocks.block(b.outs[0].point).ins.len() > 1;
+    if out_joins && b.ins.iter().any(|e| is_basic_switch_out(fd, e.point) && fd.blocks.block(e.point).outs.len() > 1) {
+        return false; // a switch target whose edge may still carry a unique value
     }
     b.ops.iter().all(|&o| {
         let op = fd.op(o);
@@ -2204,6 +2244,235 @@ pub(crate) fn conditional_exe(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
         if fd.op(icb).opc == Opcode::Cbranch && fd.op(icb).ins[1] == fd.op(cb).ins[1] {
             return err("ActionConditionalExe: removing a re-tested condition is not implemented in ghidra-rs yet");
         }
+    }
+    Ok(0)
+}
+
+/// The data-type a prototype takes from `vn`: its high variable's once highs exist
+/// (`isHighOn`), else the varnode's own.
+fn proto_type(fd: &mut Funcdata, vn: VarnodeId) -> super::types::TypeId {
+    match fd.highs.of(vn) {
+        Some(h) => super::variable::h_type(fd, h).0,
+        None => super::infertypes::vn_type(fd, vn),
+    }
+}
+
+/// Port of `ActionOutputPrototype::apply` for an unlocked output (`updateOutputTypes`,
+/// `updateOutputNoTypes`): the return value is the first input of the first RETURN that is not
+/// a special halt, with its data-type; none makes the function `void`.
+pub(crate) fn output_prototype(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
+    if fd.proto.locked.is_some() {
+        // ponytail: a locked output keeps its type; a size-locked one (`undefined4 f()`) would take
+        // the varnode's (`overrideSizeLockType`), to add when a check locks prototypes this far
+        return Ok(0);
+    }
+    let ret = fd.ops_created_with(Opcode::Return).into_iter().find(|&o| !fd.op(o).is_dead() && fd.op(o).halt.is_none());
+    fd.proto.out_param = match ret.and_then(|o| fd.op(o).ins.get(1).copied()) {
+        None => None,
+        Some(vn) => {
+            let ty = proto_type(fd, vn);
+            let v = fd.vn(vn);
+            Some((v.space, v.offset, ty))
+        }
+    };
+    Ok(0)
+}
+
+/// Port of `ActionInputPrototype::apply`: the function's parameters are recovered from its
+/// input varnodes (each one the model could pass is a trial, active when something reads it;
+/// a merged model resolves to its best member; `fillinMap` picks the used trials) and stored
+/// as the local scope's category-0 symbols (`FuncProto::updateInputTypes`,
+/// `ProtoStoreSymbol::setInput`). Without `restructure_varnode` (not ported) the scope has no
+/// fake inputs and no open parameter references, so those parts have nothing to do.
+pub(crate) fn input_prototype(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
+    use super::scope::{SymbolEntry, UseLimit, LOCAL};
+    if fd.proto.locked.is_none() {
+        fd.symtab.clear_category(LOCAL, 0); // clearUnlockedInput
+        let models = &arch.spec.models;
+        let model = fd.proto.model.ok_or_else(|| LowlevelError("input recovery without a model".into()))?;
+        let mut active = ParamActive::new(0);
+        let mut types = Vec::new();
+        for vn in fd.input_list() {
+            let v = fd.vn(vn);
+            let (space, off, size) = (v.space, v.offset, v.size);
+            if models.get(model).input.find_entry(space, off, size).is_none() {
+                continue; // possibleInputParam
+            }
+            if v.has(VnFlags::PERSIST) {
+                return err("ActionInputPrototype: a persistent input as parameter (findDisjointCover) is not ported");
+            }
+            let read = !v.descend.is_empty();
+            active.register_trial(space, off, size);
+            types.push(proto_type(fd, vn));
+            if read {
+                if let Some(t) = active.trials.last_mut() {
+                    t.mark_active();
+                }
+            }
+        }
+        let model = models.select_model(model, &active)?; // resolveModel
+        fd.proto.set_model(models, model);
+        models.get(model).input.fillin_map_input(&mut active)?; // deriveInputMap
+        for t in &mut active.trials {
+            if t.has(ParamTrial::UNREF) && t.is_used() {
+                if fd.has_input_intersection(t.space, t.off, t.size) {
+                    t.mark_no_use(); // something is in the way of the unreferenced parameter
+                } else {
+                    types.push(fd.types.base(t.size, super::types::Meta::Unknown));
+                    t.slot = types.len();
+                }
+            }
+        }
+        // updateInputTypes: one parameter symbol per used trial, in order
+        let ranges = super::scope::local_ranges(arch);
+        for (count, t) in active.trials.iter().filter(|t| t.is_used()).enumerate() {
+            let ty = *types
+                .get(t.slot.wrapping_sub(1))
+                .ok_or_else(|| LowlevelError("parameter trial without a data-type".into()))?;
+            let size = fd.types.size(ty);
+            // discoverScope: storage the local scope owns is valid everywhere; any other only at
+            // the restricted use point, just before the entry
+            let last = t.off + u64::from(size).max(1) - 1;
+            let local = t.space == Space::Stack && ranges.iter().any(|&(a, b)| a <= t.off && last <= b);
+            let (first_use, uselimit) = if local {
+                (None, UseLimit::default())
+            } else {
+                let code = Space::Sleigh(arch.sleigh.code_space());
+                let at = fd.entry.wrapping_sub(1);
+                (Some(at), UseLimit(vec![(code, at, at)]))
+            };
+            let entry = SymbolEntry { space: t.space, offset: t.off, size, first_use, uselimit };
+            let sym = fd.symtab.add_symbol(LOCAL, "", Some(ty), None, Some(entry))?;
+            fd.symtab.set_category(sym, 0, count as u32);
+        }
+        // updateThisPointer (no ported path makes a hidden return parameter)
+        if models.get(model).name == "__thiscall" {
+            if let Some(&first) = fd.symtab.category(LOCAL, 0).first() {
+                fd.symtab.set_this_pointer(first);
+            }
+        }
+    }
+    fd.clear_dead_varnodes();
+    Ok(0)
+}
+
+/// Port of `ActionMapGlobals::apply` (`Funcdata::mapGlobals`): each run of overlapping
+/// persistent varnodes without a symbol gets one in the global scope, named by
+/// `buildVariableName` (`uRam00b12345`) with the type of the varnode covering the run, else
+/// an unknown of the run's size. A run reaching past the symbol at its start (a function, an
+/// external reference) only warns, and its inner varnodes get `<name>_<offset>` symbols
+/// (`coverVarnodes`).
+pub(crate) fn map_globals(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
+    use super::infertypes::query_global;
+    use super::scope::{NameFlags, NameRequest, SymbolEntry, UseLimit, GLOBAL};
+    let ptr = u64::from(arch.spec.stack_pointer.2);
+    // `Varnode::getSymbolEntry`: only a type-locked symbol holding the whole varnode links it
+    // when it is made (`setSymbolProperties`): a function (one byte) or an external reference
+    let span = |e: &super::infertypes::Entry| if e.externref { ptr } else { 1 };
+    let linked = |fd: &Funcdata, vn: VarnodeId| {
+        let v = fd.vn(vn);
+        query_global(arch, v.offset).is_some_and(|e| v.offset + u64::from(v.size) <= e.addr + span(&e))
+    };
+    let all = fd.loc_all();
+    let mut inconsistent = false;
+    let mut i = 0;
+    while i < all.len() {
+        let vn = all[i];
+        i += 1;
+        let v = fd.vn(vn);
+        if v.is_free() || !v.has(VnFlags::PERSIST) || linked(fd, vn) {
+            continue;
+        }
+        let (space, addr) = (v.space, v.offset);
+        let mut end = addr + u64::from(v.size);
+        let mut maxvn = vn;
+        let mut uncovered = Vec::new();
+        while let Some(&next) = all.get(i) {
+            let w = fd.vn(next);
+            if !w.has(VnFlags::PERSIST) || (w.space.index(), w.offset) >= (space.index(), end) {
+                break;
+            }
+            if w.offset != addr && !linked(fd, next) {
+                uncovered.push(next);
+            }
+            end = w.offset + u64::from(w.size); // as the C++: the last varnode's end, not the furthest
+            if w.size > fd.vn(maxvn).size {
+                maxvn = next;
+            }
+            i += 1;
+        }
+        let m = fd.vn(maxvn);
+        let ct = if m.offset == addr && addr + u64::from(m.size) == end {
+            proto_type(fd, maxvn)
+        } else {
+            fd.types.base(end.wrapping_sub(addr) as u32, super::types::Meta::Unknown)
+        };
+        let size = fd.types.size(ct);
+        // queryProperties(addr, 1): a symbol over the first byte
+        let old = fd
+            .symtab
+            .find_container(GLOBAL, space, addr, 1, None)
+            .map(|(sym, e)| {
+                let s = fd.symtab.symbol(sym);
+                (s.entries[e].offset, u64::from(s.entries[e].size), Some(s.name.clone()))
+            })
+            .or_else(|| {
+                query_global(arch, addr).map(|e| {
+                    let name = (!e.externref).then(|| arch.functions.get(&e.addr).map(|f| f.name.clone())).flatten();
+                    (e.addr, span(&e), name)
+                })
+            });
+        let Some((eoff, esize, ename)) = old else {
+            // discoverScope: the global scope owns the space of every persistent varnode
+            let Space::Sleigh(sp) = space else { return err("Could not discover scope") };
+            let base = fd.types.print_name_base(ct);
+            let req = NameRequest {
+                addr: Some((space, addr)),
+                space_name: arch.sleigh.spaces.get(sp as usize).map_or("", |s| s.name.as_str()),
+                addr_size: ptr as u32, // ponytail: the pointer size stands in for the space's address size
+                name_base: &base,
+                reg: "",
+                flags: NameFlags { persist: true, addr_tied: true, ..NameFlags::default() },
+                in_local_range: false,
+            };
+            // ponytail: uniqueness is against the data symbols only; a function named like a
+            // default data name (`uRam...`) would need the functions in the name tree
+            let name = fd.symtab.build_variable_name(GLOBAL, &req, &mut 0)?;
+            let entry = SymbolEntry { space, offset: addr, size, first_use: None, uselimit: UseLimit::default() };
+            let sym = fd.symtab.add_symbol(GLOBAL, &name, Some(ct), None, Some(entry))?;
+            fd.symtab.set_addr_tied(sym);
+            continue;
+        };
+        if addr + u64::from(size) - 1 > eoff + esize - 1 {
+            inconsistent = true;
+            // coverVarnodes: the biggest varnode at each inner address, unless a symbol holds it
+            for (k, &u) in uncovered.iter().enumerate() {
+                let (uoff, usize_) = (fd.vn(u).offset, fd.vn(u).size);
+                if uncovered.get(k + 1).is_some_and(|&n| fd.vn(n).offset == uoff) {
+                    continue;
+                }
+                if fd.symtab.find_container(GLOBAL, space, uoff, usize_, None).is_some() {
+                    continue;
+                }
+                let Some(ename) = &ename else {
+                    return err("mapGlobals: covering varnodes inside an external reference is not ported");
+                };
+                let name = format!("{ename}_{}", uoff.wrapping_sub(eoff) as i32);
+                let ty = proto_type(fd, u);
+                let entry = SymbolEntry {
+                    space,
+                    offset: uoff,
+                    size: fd.types.size(ty),
+                    first_use: None,
+                    uselimit: UseLimit::default(),
+                };
+                let sym = fd.symtab.add_symbol(GLOBAL, &name, Some(ty), None, Some(entry))?;
+                fd.symtab.set_addr_tied(sym);
+            }
+        }
+    }
+    if inconsistent {
+        fd.warnings.push("Globals starting with '_' overlap smaller symbols at the same address".into());
     }
     Ok(0)
 }

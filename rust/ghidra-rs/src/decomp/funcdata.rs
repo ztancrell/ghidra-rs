@@ -114,6 +114,9 @@ pub struct Funcdata {
     /// `jumptablerecovery_on`: this is the partial function of jump-table recovery
     /// (`Funcdata::stageJumpTable`)
     pub(crate) jumptablerecovery_on: bool,
+    /// the scopes and symbols (`Architecture::symboltab`, one per function here): the global
+    /// scope and the local scope (`localmap`), see `scope.rs`
+    pub(crate) symtab: super::scope::Database,
 }
 
 impl Funcdata {
@@ -158,6 +161,7 @@ impl Funcdata {
             next_alive: 0,
             typerecovery_on: false,
             jumptablerecovery_on: false,
+            symtab: super::scope::Database::for_function(),
         }
     }
 
@@ -957,6 +961,21 @@ impl Funcdata {
             .filter(|k| k.size == size)
             .map(|k| k.id)
             .collect()
+    }
+
+    /// The input varnodes in `beginDef(Varnode::input)` order (address, then size).
+    pub(crate) fn input_list(&self) -> Vec<VarnodeId> {
+        self.inputs.iter().map(|k| k.3).collect()
+    }
+
+    /// Port of `VarnodeBank::hasInputIntersection`: the first input at or after the address, or
+    /// the one before it, overlaps the range.
+    pub(crate) fn has_input_intersection(&self, space: Space, off: u64, size: u32) -> bool {
+        let key = (space.index(), off, 0, VarnodeId(0));
+        let hit = |k: Option<&(u32, u64, u32, VarnodeId)>| {
+            k.is_some_and(|&(s, o, z, _)| s == key.0 && o < off + u64::from(size) && off < o + u64::from(z))
+        };
+        hit(self.inputs.range(key..).next()) || hit(self.inputs.range(..key).next_back())
     }
 
     /// Port of `Funcdata::findCoveredInput`: the input containing the range.

@@ -1311,10 +1311,10 @@ The partial function of jump-table recovery now runs the real `jumptable` root a
 `subvar`, `normalizebranches`, `conditionalexe`), every ported rule on (`togglerule` and
 `option currentaction` reach only the `decompile` root, on the reference too). Eight actions of
 those groups are not ported and are left out of the partial's tree while they are
-(`action::PARTIAL_SKIP`: `funclinkoutonly`, `restrictlocal`, `restructurevarnode`, `multicse`,
-`shadowvar`, `condconst`, `mappedlocalsync`, `normalizebranches`); an entry is skipped only as
+(`action::PARTIAL_SKIP`: `funclinkoutonly`, `restrictlocal`, `restructure_varnode`, `multicse`,
+`shadowvar`, `condconst`, `mapped_local_sync`, `normalizebranches`); an entry is skipped only as
 long as its leaf is `not_ported`, so a later port runs in the partial too. Three of them can
-change which tables are recovered: `restructurevarnode` (in the partial it also runs
+change which tables are recovered: `restructure_varnode` (in the partial it also runs
 `protectSwitchPaths`), `condconst` and `normalizebranches`. The partial carries
 `Funcdata::jumptablerecovery_on` (`isJumptableRecoveryOn`): heritage does not bump the
 dead-code delay in it, dead code skips `lastChanceLoad`, and `donothing` removes an empty block
@@ -1581,7 +1581,7 @@ and 10 reference outputs; all match. `ActionReturnSplit` (`decomp/returnsplit.rs
 checks too (group `returnsplit` now on in the S8 option files; it changes 52 reference outputs, all
 match). `ActionFinalStructure` and structured `printRaw` are not ported: after the S7 merge they still
 need `latedonothing`, the prototype and cast actions and switch labels before a fair check exists
-(plan, "S8 part two"). The second `prefercomplement`/`structuretransform` instances (without op
+(plan, "S8 part two"). Superseded: `latedonothing`, the prototype actions, `mapglobals` and `ActionFinalStructure` are ported (section "Tail" below). The second `prefercomplement`/`structuretransform` instances (without op
 modifications) are wired to the rows after `copymarker` since the S7 merge. Superseded: "Not ported yet: `prefercomplement` and `structuretransform`" above.
 
 Review round: `ActionNodeJoin` skips a CBRANCH with `boolean_flip` set (`findDups`), the switch
@@ -1603,7 +1603,7 @@ walks the RETURN ops in creation order (it walked block order), which decides th
 indices of the `return(#0x0)` constants.
 
 Check: `print raw` with types and high variables (`DECOMP_RAW_EXTRA=1`) at `break start
-inputprototype`, the first action after `copymarker` with its group on and not ported. The
+inputprototype` (when S7 landed, the first action after `copymarker` with its group on and not ported; superseded: it is ported, section "Tail"; the break point stays). The
 reference patch numbers each high variable by its first appearance in that print (`{hN}`,
 reset per print), the Rust side the same. `{hN}` is a canonical labelling of the merge
 partition of the printed varnodes: it shows which printed varnodes share a high, but not
@@ -1743,6 +1743,41 @@ functions (0x402c20, 0x405990, 0x4c0070, 0x62f0d0, 0x757810, 0x7586e0; with the 
 rules remove those overlaps); with R5, 0x6b21e0 (R5's unported `assignPropagatedType`).
 Existing bars on the merged binary: R3, subvar and R4 checks 498 / 499, R5 typed 497 / 498,
 S3 500 / 500, S4 and S6 499 / 500, S8 rules off 499 / 499 and rule stage 498 / 499.
+
+### Tail (in part): `latedonothing`, prototypes, `mapglobals`, `finalstructure`
+
+- `coreaction.rs`: `ActionLateDoNothing` (`late_do_nothing`, `removingCreatesRedundancy`);
+  `ActionDoNothing` now sets and clears the delayed mark (`BlockBasic::delayed_donothing`) and
+  `isDoNothing` tests switch predecessors as the C++ does. `ActionOutputPrototype`
+  (`output_prototype`), `ActionInputPrototype` (`input_prototype`), `ActionMapGlobals`
+  (`map_globals`, with `coverVarnodes`).
+- `fspec.rs`: the input side of `ParamListStandard` (`find_entry`, `fillin_map_input` with
+  `buildTrialMap`, `forceExclusionGroup`, `forceNoUse`, `forceInactiveChain`), `ScoreProtoModel`
+  and `Models::select_model` (a merged model keeps its `members`).
+- `scope.rs`, wired as `Funcdata::symtab` (a global and a local scope per function): symbols,
+  map entries, categories, `print map`; the default variable names (`build_variable_name`) are
+  there and unit tested but only `mapglobals` uses them, `namevars` is not ported.
+- `finalstructure.rs`: `ActionFinalStructure` (`orderBlocks`, `finalizePrinting` for while-do and
+  switch blocks, `scopeBreak`, `markUnstructured`, `markLabelBumpUp`), `moveRespectingCover`,
+  `markExpression`, the switch's `CaseOrder` list (`structure.rs` calls `grab_cases` in
+  `new_switch`); `SBlock` has `goto_type` and `cases`. A switch with cases fails loudly: its
+  labels need `switchnorm` (`recoverLabels`), not ported.
+- Console: `print map` (the local scope of the current function).
+- Check devices (same in `decomp-ref.patch`): `DECOMP_TREE_EXTRA=1` (`print tree block` also
+  shows the final-structure flags, goto types, switch cases and for-loop ops) and
+  `DECOMP_MAP_EXTRA=1` (`print map` also shows the prototype and the global data symbols).
+- Tools: `decomp-diff.sh` takes `DECOMP` and `GHIDRA_RS` from the environment, `decomp-ref.sh`
+  takes `DECOMP_BUILD` and `JOBS`; `r1-options.sh` also writes `s8-t-options.txt`,
+  `tail-r-options.txt` and `tail-t-options.txt`.
+- The unported leaves `restructure_varnode` and `mapped_local_sync` carry their C++ names
+  (superseded: `restructurevarnode`, `mappedlocalsync`).
+
+Checks and commands: docs/plans/m3-decompiler.md, "Tail". Results (M8; M500 of the functions the
+reference finishes): prototypes and globals 8 / 8, 498 / 499 (99.8 %) (rules on) and 8 / 8, 493 / 499 (98.8 %) (types
+on); `latedonothing` 8 / 8, 498 / 499 (99.8 %) and 8 / 8, 493 / 499 (98.8 %); `finalstructure` 7 / 7, 494 / 495 (99.8 %) and
+7 / 7, 489 / 495 (98.8 %) (switch functions do not finish on the reference with `switchnorm` off).
+Existing bars on the final binary: R1/R3, subvar and R4 checks 498 / 499, R5 typed 497 / 498, S7 rules on 498 / 499 and types on 493 / 499, S8 rules off 499 / 499 and rule stage 498 / 499, S3 paramdouble 500 / 500, S4 and S6 499 / 500, switch corpus 1,947 / 2,050: all unchanged.
+Open before S9: `namevars`, the case labels (`switchnorm`), `setcasts`.
 
 ## Speed
 
