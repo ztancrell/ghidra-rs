@@ -675,7 +675,7 @@ detection let through.
 
 Not ported, left for part two:
 
-- `prefercomplement` and `structuretransform`: they need `opFlipInPlaceTest/Execute`,
+- Superseded (part two, below): `prefercomplement` and `structuretransform`: they need `opFlipInPlaceTest/Execute`,
   `opNormalizeFlip`, `replaceLessequal` and the boolean-flip table, which R2 ports
   (`rules/boolean.rs`, `rules/compare.rs` on `m3-r2`). Superseded: "blocked until R2 merges"; R2 is on master now, so they are next. The for-loop part
   of `BlockWhileDo::finalTransform` (`findLoopVariable`, `findInitializer`,
@@ -861,6 +861,70 @@ functions (0x402c20, 0x405990, 0x4c0070, 0x62f0d0, 0x757810, 0x7586e0; with the 
 rules remove those overlaps); with R5, 0x6b21e0 (R5's unported `assignPropagatedType`).
 Existing bars on the merged binary: R3, subvar and R4 checks 498 / 499, R5 typed 497 / 498,
 S3 500 / 500, S4 and S6 499 / 500, S8 rules off 499 / 499 and rule stage 498 / 499.
+### S8 part two: in part on branch `m3-s8b` (2026-11-13)
+
+Ported (`decomp/blocktransform.rs`): `ActionPreferComplement` and `ActionStructureTransform`
+with `getSplitPoint`, the blocks' `flipInPlaceTest`/`flipInPlaceExecute`,
+`BlockIfElse`/`BlockIfNoExit::preferComplement` (with `leafCount`, `structureDepth` and
+`getHaltType` on the hierarchy), `finalTransform` (the basic block's `opNormalizeFlip`, R2's,
+and `BlockWhileDo`'s for-loop recovery: `findLoopVariable`, `findInitializer`,
+`PcodeOp::isMoveable`), and `Funcdata::opFlipInPlaceTest`/`opFlipInPlaceExecute` (with R2's
+boolean-flip table and `replaceLessequal`). Superseded: part one's "`prefercomplement` and
+`structuretransform` ... not ported" and the two names in the S8 checks' skip list.
+
+Check (from `rust/`), as part one's with the two actions running on both engines:
+
+```sh
+PRINT=$'print tree block\nprint raw' BREAK=assignhigh DECOMP_SKIP_ACTIONS= \
+  OPTIONS=tools/corpus/s8-options.txt tools/decomp-diff.sh m500
+PRINT=$'print tree block\nprint raw' BREAK=assignhigh DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst \
+  OPTIONS=tools/corpus/s8-r-options.txt tools/decomp-diff.sh m500
+```
+
+| check | M8 | M500 |
+|---|---|---|
+| rule groups off | 8 / 8 | 499 / 499 the reference finishes (0x4c48d0 times out) |
+| rule-stage options | 8 / 8 | 498 / 499 (miss 0x47a6b0, `ActionConditionalExe`) |
+
+Under the rule-stage options `prefercomplement` changes the reference output of 137 M500
+functions and `structuretransform` of 10 (reference runs with and without each skipped);
+all are identical. Unit tests: a for loop (flip normalization, loop variable, iterate op
+moved, initializer), an if/else complemented in place, and a goto chosen by `TraceDAG`
+(`structure.rs`; that expected tree is pinned from this port, not derived by hand).
+
+`ActionReturnSplit` (`decomp/returnsplit.rs`: `gatherReturnGotos`, `isSplittable`, `gotoPrints`,
+`nextFlowAfter` per kind with the switch's cases in `grabCaseBasic` order, `Funcdata::nodeSplit`
+and `CloneBlockOps`) is ported with a unit test (a goto into a RETURN block split off); superseded: "its group is off in the S8 option files". Group `returnsplit` is now on in both S8
+option files (`tools/r1-options.sh`); with it running on both sides: rules off M8 8 / 8, M500
+499 / 499; rule-stage options M8 8 / 8, M500 498 / 499; it changes 52 reference outputs, all
+identical. Fixed with it: `DECOMP_SKIP_ACTIONS` was ignored for the `fullloop` actions on the
+ghidra-rs side (`action.rs`). The rule check stays 498 / 499. The case data of `BlockSwitch`
+(`grabCaseBasic` labels, `compareCase`) is not needed by these actions (`nextFlowAfter` reads only
+the case order, which is the components' and the goto edges'), so it waits for printing.
+Review follow-ups: the C++ runs `ActionPreferComplement` and `ActionStructureTransform` a second
+time after the second `ActionBlockStructure` without op modifications (coreaction.cc 6138-6139);
+their entry points are `prefer_complement_no_mods` and `structure_transform_no_mods`. Superseded:
+"they get their rows with S7"; after the merge with S7 the rows after `copymarker` are wired to them,
+and the second `blockstructure` row to `block_structure` (the same action: nothing to do once
+structured). None of these reads high variables or `isExplicit` (only `finalizePrinting` does). CAST is moveable (its eval type is unary). Left for
+later stages: the `f_flip_path` toggle of `swapEdges` (read by jumptable.cc's guard folding:
+`switchnorm`), `f_duplicate_block` and `f_joined_block` (read by printc.cc's labels), the data type
+of the code reference `CloneBlockOps` makes for an annotation (printing), and the `nonprinting` and
+`special_print` bits `buildOpClone` keeps (superseded: now kept, with S7's flags).
+Part three (`ActionFinalStructure`, structured `printRaw`) waits for S7: the actions between
+`structuretransform` and `finalstructure` are the merge, prototype, naming and cast actions, and
+`finalizePrinting` reads what they set (`isExplicit`, high variables), so a check that skips them
+would only compare a state the C++ never prints.
+After the merge with S7 the leaves between `copymarker` and `finalstructure` still block a fair
+check: `latedonothing` (needs the delayed do-nothing mark of `ActionDoNothing` and
+`removingCreatesRedundancy`; it changes the CFG, so it cannot be skipped fairly), `outputprototype`,
+`inputprototype`, `mapglobals`, `namevars`, `setcasts` (S9: CAST ops `print raw` shows), and
+`BlockSwitch::finalizePrinting` needs the case labels of `switchnorm` (`recoverLabels`, not ported).
+Bars after the S7 merge: S8 rules off M500 499 / 499, rule-stage 498 / 499 (prefercomplement,
+structuretransform, returnsplit and nodejoin on both sides); S7 checks (their own options,
+`blockrecovery` off) rules on 498 / 499, types on 493 / 499, unchanged. Part three stays open until those land. The S7 checks keep `blockrecovery` off (their option files
+are S4's); with it on they would reach `latedonothing`, which ghidra-rs does not port, so
+none of the S8 actions runs inside them.
 
 ## Running stages in parallel
 

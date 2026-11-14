@@ -65,7 +65,7 @@ fn join_all(fd: &mut Funcdata) -> Result<i32> {
                 continue;
             }
             let bb2 = fd.blocks.block(leastout).ins[j].point;
-            if let Some(join) = Join::matches(fd, bb, bb2) {
+            if let Some(join) = Join::matches(fd, bb, bb2)? {
                 count += 1;
                 join.execute(fd)?;
                 break;
@@ -77,15 +77,15 @@ fn join_all(fd: &mut Funcdata) -> Result<i32> {
 
 impl Join {
     /// `ConditionalJoin::match`: the pattern, `findDups`, and `checkExitBlock` on both exits.
-    fn matches(fd: &Funcdata, block1: BlockId, block2: BlockId) -> Option<Join> {
+    fn matches(fd: &Funcdata, block1: BlockId, block2: BlockId) -> Result<Option<Join>> {
         let g = &fd.blocks;
         if block1 == block2 || g.block(block1).outs.len() != 2 || g.block(block2).outs.len() != 2 {
-            return None;
+            return Ok(None);
         }
         let (o1, o2) = (&g.block(block1).outs, &g.block(block2).outs);
         let (exita, exitb) = (o1[0].point, o1[1].point);
         if exita == exitb || o2[0].point != exita || o2[1].point != exitb {
-            return None;
+            return Ok(None);
         }
         let cbranch = |b: BlockId| g.block(b).ops.last().copied().filter(|&op| fd.op(op).opc == Opcode::Cbranch);
         let mut join = Join {
@@ -97,16 +97,22 @@ impl Join {
             a_in2: o2[0].reverse,
             b_in1: o1[1].reverse,
             b_in2: o2[1].reverse,
-            cbranch1: cbranch(block1)?,
-            cbranch2: cbranch(block2)?,
+            cbranch1: match cbranch(block1) {
+                Some(c) => c,
+                None => return Ok(None),
+            },
+            cbranch2: match cbranch(block2) {
+                Some(c) => c,
+                None => return Ok(None),
+            },
             mergeneed: BTreeMap::new(),
         };
         if !join.find_dups(fd) {
-            return None;
+            return Ok(None);
         }
-        join.check_exit_block(fd, exita, join.a_in1, join.a_in2);
-        join.check_exit_block(fd, exitb, join.b_in1, join.b_in2);
-        Some(join)
+        join.check_exit_block(fd, exita, join.a_in1, join.a_in2)?;
+        join.check_exit_block(fd, exitb, join.b_in1, join.b_in2)?;
+        Ok(Some(join))
     }
 
     fn need(&mut self, a: VarnodeId, b: VarnodeId) {
@@ -150,13 +156,19 @@ impl Join {
     }
 
     /// `ConditionalJoin::checkExitBlock`.
-    fn check_exit_block(&mut self, fd: &Funcdata, exit: BlockId, in1: usize, in2: usize) {
+    fn check_exit_block(&mut self, fd: &Funcdata, exit: BlockId, in1: usize, in2: usize) -> Result<()> {
         for op in Self::head_ops(fd, exit) {
             let o = fd.op(op);
-            if o.opc == Opcode::Multiequal && o.ins[in1] != o.ins[in2] {
-                self.need(o.ins[in1], o.ins[in2]);
+            if o.opc == Opcode::Multiequal {
+                let (Some(&v1), Some(&v2)) = (o.ins.get(in1), o.ins.get(in2)) else {
+                    return err("exit MULTIEQUAL lacks an input of a joined edge");
+                };
+                if v1 != v2 {
+                    self.need(v1, v2);
+                }
             }
         }
+        Ok(())
     }
 
     /// `ConditionalJoin::execute`.
@@ -214,7 +226,9 @@ impl Join {
             if fd.op(op).opc != Opcode::Multiequal {
                 continue;
             }
-            let (vn1, vn2) = (fd.op(op).ins[in1], fd.op(op).ins[in2]);
+            let (Some(&vn1), Some(&vn2)) = (fd.op(op).ins.get(in1), fd.op(op).ins.get(in2)) else {
+                return err("exit MULTIEQUAL lacks an input of a joined edge");
+            };
             fd.op_remove_input(op, hi);
             if vn1 != vn2 {
                 let subvn = self.merged(vn1, vn2)?;

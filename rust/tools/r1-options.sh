@@ -6,8 +6,8 @@
 #   rust/tools/corpus/r1-options.txt      groups `analysis`, `cleanup` on (the R1/R2/R3 check)
 #   rust/tools/corpus/subvar-options.txt  also `subvar` on (the R3 subvar check)
 #   rust/tools/corpus/r4-options.txt      also `floatprecision` on (the R4 check)
-#   rust/tools/corpus/s8-options.txt      s4-options.txt with `blockrecovery` on (the S8 check)
-#   rust/tools/corpus/s8-r-options.txt    r1-options.txt with `blockrecovery` on (S8, rule stages)
+#   rust/tools/corpus/s8-options.txt      s4-options.txt with `blockrecovery`, `returnsplit` on (S8)
+#   rust/tools/corpus/s8-r-options.txt    r1-options.txt with them on (S8, rule stages)
 #   rust/tools/corpus/r5-options.txt      also `typerecovery` on (the R5 check: pointer rules)
 set -e
 rust=$(cd "$(dirname "$0")/.." && pwd)
@@ -48,7 +48,7 @@ write r1-options.txt "analysis cleanup"
 write subvar-options.txt "analysis cleanup subvar"
 write r4-options.txt "analysis cleanup floatprecision"
 write r5-options.txt "analysis cleanup typerecovery"
-# stage S8's checks: the S4 and rule-stage options with group `blockrecovery` on
-grep -v "decompile blockrecovery off" "$rust/tools/corpus/s4-options.txt" > "$rust/tools/corpus/s8-options.txt"
-grep -v "decompile blockrecovery off" "$rust/tools/corpus/r1-options.txt" > "$rust/tools/corpus/s8-r-options.txt"
-echo "s8-options.txt, s8-r-options.txt: blockrecovery on"
+# stage S8's checks: the S4 and rule-stage options with groups `blockrecovery` and `returnsplit` on
+grep -v "decompile blockrecovery off\|decompile returnsplit off" "$rust/tools/corpus/s4-options.txt" > "$rust/tools/corpus/s8-options.txt"
+grep -v "decompile blockrecovery off\|decompile returnsplit off" "$rust/tools/corpus/r1-options.txt" > "$rust/tools/corpus/s8-r-options.txt"
+echo "s8-options.txt, s8-r-options.txt: blockrecovery and returnsplit on"

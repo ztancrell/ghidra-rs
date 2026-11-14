@@ -1573,6 +1573,17 @@ column is 498 / 499 with `nodejoin` on (it changes 35 M500 outputs; all match). 
 
 New flag bit: `OpFlags::FALLTHRU_TRUE` (`1 << 16`).
 
+Part two (branch `m3-s8b`): `ActionPreferComplement` and `ActionStructureTransform`
+(`decomp/blocktransform.rs`, with the for-loop recovery of `BlockWhileDo::finalTransform` and
+`opFlipInPlaceTest`/`Execute`) run in both S8 checks now (no longer in `DECOMP_SKIP_ACTIONS`):
+rules off M8 8 / 8, M500 499 / 499; rule-stage options M8 8 / 8, M500 498 / 499. They change 137
+and 10 reference outputs; all match. `ActionReturnSplit` (`decomp/returnsplit.rs`) runs in both
+checks too (group `returnsplit` now on in the S8 option files; it changes 52 reference outputs, all
+match). `ActionFinalStructure` and structured `printRaw` are not ported: after the S7 merge they still
+need `latedonothing`, the prototype and cast actions and switch labels before a fair check exists
+(plan, "S8 part two"). The second `prefercomplement`/`structuretransform` instances (without op
+modifications) are wired to the rows after `copymarker` since the S7 merge. Superseded: "Not ported yet: `prefercomplement` and `structuretransform`" above.
+
 Review round: `ActionNodeJoin` skips a CBRANCH with `boolean_flip` set (`findDups`), the switch
 leaf check of `newBlockSwitch`, no recursion in `printTree`, `negateCondition`, `isComplex`, and
 unit tests on hand-built graphs (`structure.rs`). Details in the plan, "S8".
