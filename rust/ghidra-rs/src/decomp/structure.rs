@@ -328,16 +328,6 @@ impl Structure {
         Ok(())
     }
 
-    /// `FlowBlock::setDefaultSwitch`.
-    fn set_default_switch(&mut self, b: SId, pos: usize) {
-        for i in 0..self.size_out(b) {
-            if self.is_default_branch(b, i) {
-                self.clear_out_edge_flag(b, i, E_DEFAULTSWITCH);
-            }
-        }
-        self.set_out_edge_flag(b, pos, E_DEFAULTSWITCH);
-    }
-
     /// `FlowBlock::dedup` (`findDups`, `eliminateInDups`, `eliminateOutDups`).
     fn dedup(&mut self, b: SId) {
         for out in [false, true] {
@@ -654,12 +644,6 @@ impl Structure {
             }
             self.add_block(root, id);
         }
-        for (pos, bb) in switch_defaults(fd) {
-            if pos >= self.size_out(copy(bb)) {
-                return err("switch default edge no longer exists");
-            }
-            self.set_default_switch(copy(bb), pos);
-        }
         Ok(())
     }
 
@@ -755,42 +739,21 @@ impl Structure {
     }
 }
 
-/// `Funcdata::installSwitchDefaults`: for each jump table with a default, the switch block and
-/// the out-edge position of its default. The default is `JumpTable::switchOver`'s: the
-/// destination most table entries go to, if more than one entry does (the lowest position on
-/// a tie). Like the C++ `defaultBlock` it is an out-edge position as of `switchOver`: the flow
-/// (`flow.rs`) gives the BRANCHIND one out edge per distinct table address, in table order, so
-/// the position is the address's rank among the distinct addresses, whatever edits came since.
-/// When `switchnorm` is ported (`foldInGuards`, `setLastAsDefault` change the default after
-/// flow), the default must be stored on the `JumpTable` at switch-over time instead.
-pub(crate) fn switch_defaults(fd: &Funcdata) -> Vec<(usize, BlockId)> {
-    let mut res = Vec::new();
-    for jt in &fd.jumptables {
-        let Some(bb) = fd.op(jt.op).parent else { continue };
-        let mut distinct: Vec<u64> = Vec::new();
-        let mut counts: Vec<usize> = Vec::new();
-        for &t in &jt.targets {
-            match distinct.iter().position(|&d| d == t) {
-                Some(pos) => counts[pos] += 1,
-                None => {
-                    distinct.push(t);
-                    counts.push(1);
-                }
-            }
+/// Port of `Funcdata::installSwitchDefaults`: the switch block of each jump table with a
+/// default gets its default edge (`JumpTable::defaultBlock`: set by `switchOver` to the
+/// destination most table entries go to, then by the folded guards of `switchnorm`; a
+/// position as of the time it was set, whatever edits came since). A table without a default
+/// leaves the block's edges as they are, so an earlier default stays, as in the C++.
+fn install_switch_defaults(fd: &mut Funcdata) -> Result<()> {
+    for i in 0..fd.jumptables.len() {
+        let jt = &fd.jumptables[i];
+        let (Some(pos), Some(bb)) = (jt.default_block, fd.op(jt.op).parent) else { continue };
+        if pos >= fd.blocks.block(bb).outs.len() {
+            return err("switch default edge no longer exists");
         }
-        let mut best = None;
-        let mut maxcount = 1;
-        for (pos, &c) in counts.iter().enumerate() {
-            if c > maxcount {
-                maxcount = c;
-                best = Some(pos);
-            }
-        }
-        if let Some(pos) = best {
-            res.push((pos, bb));
-        }
+        fd.blocks.set_default_switch(bb, pos);
     }
-    res
+    Ok(())
 }
 
 /// `BlockBasic::isComplex`: more than two statements (the branch of a 2-way block counts; an
@@ -849,6 +812,7 @@ pub(crate) fn block_structure(fd: &mut Funcdata, _: &super::Arch) -> Result<i32>
     if !fd.structure.is_empty() {
         return Ok(0);
     }
+    install_switch_defaults(fd)?;
     let mut s = std::mem::take(&mut fd.structure);
     s.build_copy(fd)?;
     let res = super::collapse::collapse_all(&mut s, fd);
@@ -859,6 +823,7 @@ pub(crate) fn block_structure(fd: &mut Funcdata, _: &super::Arch) -> Result<i32>
 /// `ActionBlockStructure` without the architecture, for unit tests.
 #[cfg(test)]
 pub(crate) fn build_and_collapse(fd: &mut Funcdata) -> Result<i32> {
+    install_switch_defaults(fd)?;
     let mut s = std::mem::take(&mut fd.structure);
     s.build_copy(fd)?;
     let n = super::collapse::collapse_all(&mut s, fd);
@@ -983,8 +948,10 @@ mod tests {
     fn switch_with_skip() {
         let (mut fd, b) = graph(4, &[(0, 1), (0, 2), (0, 3), (1, 3), (2, 3)]);
         let op = last_op(&fd, b[0]);
-        fd.jumptables.push(JumpTable { op, targets: vec![0x1010, 0x1020, 0x1010, 0x1030] });
-        assert_eq!(switch_defaults(&fd), vec![(0, b[0])]);
+        let mut jt = JumpTable::new(op, vec![0x1010, 0x1020, 0x1010, 0x1030], None);
+        jt.switch_over(&[0, 1, 0, 2]);
+        fd.jumptables.push(jt);
+
         let (_, tree) = structure(&mut fd);
         assert_eq!(
             tree,

@@ -1305,6 +1305,49 @@ finishes): prototypes and globals 498 / 499 and 493 / 499, names with rules on 4
 unchanged. The other five M500 checks (names with types on, `latedonothing`, `finalstructure`)
 were still running when this was written; their numbers are with the switch work below.
 
+Switch case labels: work in progress, paused on 2026-11-14 (superseded: "Not started" below,
+kept for the list of what the port needed). Ported: `ActionSwitchNorm` (`jumptable.rs`:
+`JumpTable::matchModel`, `recoverLabels` with `findUnnormalized`, `buildLabels` and
+`backup2Switch`, `foldInNormalization`, `foldInGuards` with `foldInOneGuard`, `pushBranch`,
+`addBlockToSwitch`, `noInterveningStatement`, `JumpModelTrivial`; `checkUnrolledGuard` and
+`markFoldableGuards` in the guard analysis; `findSmallestNormal` against the earlier range);
+`JumpTable` keeps the values of the flow-time model and its `switchOver` state
+(`funcdata.rs`, `flow.rs`); `switchVarConsume` is read by dead code; `f_flip_path` flips with
+`swapEdges`; the default edge of a switch block is a flag on the basic-block edge that stays
+until the block gets another default (`installSwitchDefaults`); `structureReset` drops jump
+tables whose BRANCHIND is dead; `ActionRedundBranch` no longer splices a single-exit switch
+block; `BlockSwitch::finalizePrinting` labels and sorts the cases (`finalstructure.rs`) and
+`nextFlowAfter` of a switch follows the sorted case order. `decomp-ref.patch`
+(`BlockSwitch::printCaseExtra`) and `print tree block` add to each case of a labelled switch
+`:<d><x>:<chain>:<depth>:<labels in hex>` (default, exit, chain, depth); compared after
+`finalstructure` only. `r1-options.sh` also writes `sw-r-options.txt` and `sw-t-options.txt`
+(`s8-r`/`s8-t` with group `switchnorm` on).
+
+Checks, with the `sw-*` option files and the reference built from the new patch
+(`rust/target/decomp-build2`): `finalstructure` as before (`BREAK=prototypewarnings`,
+`print tree block` and `print raw`), `switchnorm` as `print raw` at `BREAK=returnsplit` (the
+first break after the action). Run on the tree of this commit: M8 8 / 8 in all four
+(`finalstructure` and `switchnorm`, rules on and types on; 0x4042e0 is now compared for real).
+Switch corpus (2,050 functions, the reference finishes 2,004): `finalstructure` rules on
+1,937 / 2,004 (96.7 %), types on 1,929 / 2,004 (96.3 %); `switchnorm` rules on 1,943 / 2,004
+(97.0 %); `switchnorm` types on was stopped before it finished. Misses by cause: 57 in each
+check already differ at flow time (the S3 switch-corpus misses, jump tables into garbage code);
+`mergeAddrTied` needing `VariablePiece` 7 (rules on) and 15 (types on) in `finalstructure`; 2
+functions (0x1cdee32, 0x1cdf675) whose flow-time table has 128 entries where the reference has
+8 (the guard's constant is kept on the stack and the partial function does not fold it), so
+their labels differ; 1 function (0x5a3c30) that already differs before `switchnorm`
+(conditional execution); 3 more `switchnorm` misses with rules on were not looked at.
+On an earlier binary of this work (before the last three fixes: the sorted case order in
+`nextFlowAfter`, `structureReset`, `ActionRedundBranch`): the four M500 switch functions 4 / 4
+in all four checks, and `finalstructure` rules on over M500 498 / 499 (the miss is 0x47a6b0).
+Not run on this tree: M500 in any check, `switchnorm` types on over the switch corpus, the S3
+switch-corpus bar (the guard analysis changed: `checkUnrolledGuard`), and every other bar; the
+full pass of all bars is still to do. Of the second review's tail checks on M500, names with
+types on, `latedonothing` and `finalstructure` were stopped before they finished.
+Next: rerun the four switch checks on M500 and the switch corpus on this tree, then every bar
+(`rust/target/chk/final.sh` is the driver, if the target folder is kept), then the README and
+DESIGN.md numbers.
+
 Not started: the case labels. `switchnorm` needs, beyond `matchModel`/`recoverLabels`/
 `foldInNormalization`/`foldInGuards` themselves: the flow-time model's value range kept on the
 `JumpTable` (`buildLabels` walks the range of the model the addresses were recovered with),

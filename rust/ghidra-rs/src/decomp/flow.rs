@@ -79,6 +79,9 @@ pub(crate) fn follow_flow(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
     flow.generate_blocks()
 }
 
+/// What `stageJumpTable` recovers: the table's addresses and the values of its model, or why not.
+type Staged = std::result::Result<(Vec<u64>, Option<jumptable::ValueRange>), Fail>;
+
 fn ram_addr(a: u64) -> String {
     format!("(ram,0x{a:08x})")
 }
@@ -489,7 +492,7 @@ impl Flow<'_> {
                 None => self.stage_jump_table(&mut partial, op)?,
             };
             match res {
-                Ok(targets) => {
+                Ok((targets, values)) => {
                     if std::env::var_os("GHIDRA_RS_JT_DEBUG").is_some() {
                         eprintln!(
                             "jumptable in 0x{:x} at 0x{:x}: {} targets {:x?}",
@@ -500,7 +503,7 @@ impl Flow<'_> {
                         );
                     }
                     tables.push(self.fd.jumptables.len());
-                    self.fd.jumptables.push(JumpTable { op, targets });
+                    self.fd.jumptables.push(JumpTable::new(op, targets, values));
                 }
                 Err(f @ (Fail::Normal(_) | Fail::Thunk)) => {
                     if std::env::var_os("GHIDRA_RS_JT_DEBUG").is_some() {
@@ -520,11 +523,7 @@ impl Flow<'_> {
     /// Port of `Funcdata::stageJumpTable`: build the partial function on first use
     /// (`truncatedFlow`, then the `jumptable` root action) and recover the table from it.
     /// The outer `Result` is an error that ends the decompile, the inner one the recovery.
-    fn stage_jump_table(
-        &mut self,
-        partial: &mut Option<Funcdata>,
-        op: OpId,
-    ) -> Result<std::result::Result<Vec<u64>, Fail>> {
+    fn stage_jump_table(&mut self, partial: &mut Option<Funcdata>, op: OpId) -> Result<Staged> {
         if partial.is_none() {
             let mut p = self.fd.clone();
             p.jumptablerecovery_on = true;
@@ -568,11 +567,11 @@ impl Flow<'_> {
             return err("Error recovering jumptable: Bad partial clone");
         }
         if partop.is_dead() {
-            return Ok(Ok(Vec::new()));
+            return Ok(Ok((Vec::new(), None)));
         }
         // `testForReturnAddress` (fail_return) is left out: x86's return address is on the
         // stack, which the ported heritage pass leaves as LOADs, so it cannot match yet.
-        Ok(jumptable::recover_addresses(p, self.arch, op).map(|(t, _partial)| t))
+        Ok(jumptable::recover_addresses(p, self.arch, op).map(|(t, _partial, values)| (t, Some(values))))
     }
 
     /// Port of `FlowInfo::truncateIndirectJump` for a failed recovery (`fail_normal`,
@@ -636,6 +635,25 @@ impl Flow<'_> {
             let front = self.fd.blocks.new_block(self.fd.entry);
             self.fd.blocks.add_edge(front, start);
             self.fd.blocks.set_start_block(front);
+        }
+        self.switch_over_jump_tables()
+    }
+
+    /// Port of `Funcdata::switchOverJumpTables` (`JumpTable::switchOver`): each table entry's
+    /// out edge of its switch block. A table without addresses (its BRANCHIND was dead in the
+    /// partial function) has none.
+    fn switch_over_jump_tables(&mut self) -> Result<()> {
+        for i in 0..self.fd.jumptables.len() {
+            let jt = &self.fd.jumptables[i];
+            let Some(parent) = self.fd.op(jt.op).parent else { continue };
+            let mut positions = Vec::with_capacity(jt.targets.len());
+            for &addr in &jt.targets {
+                let bl = self.fd.op(self.target(addr)?).parent;
+                let outs = &self.fd.blocks.block(parent).outs;
+                let pos = outs.iter().position(|e| Some(e.point) == bl);
+                positions.push(pos.ok_or_else(|| LowlevelError("Jumptable destination not linked".into()))?);
+            }
+            self.fd.jumptables[i].switch_over(&positions);
         }
         Ok(())
     }

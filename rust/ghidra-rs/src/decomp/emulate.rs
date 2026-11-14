@@ -44,6 +44,38 @@ pub(crate) fn eval_unary(opc: Opcode, sizeout: u32, sizein: u32, in1: u64) -> Re
     })
 }
 
+/// `OpBehavior::recoverInputUnary` for `opc`: the input an output came from. `Ok(None)` is the
+/// C++ `EvaluationError` (no input gives the output); an op that loses information fails.
+pub(crate) fn recover_input_unary(opc: Opcode, sizeout: u32, out: u64, sizein: u32) -> super::Result<Option<u64>> {
+    let (masklong, maskshort) = (calc_mask(sizeout), calc_mask(sizein));
+    Ok(match opc {
+        Opcode::Copy => Some(out),
+        Opcode::IntZext => (maskshort & out == out).then_some(out),
+        Opcode::IntSext => {
+            let high = masklong ^ maskshort;
+            let fits =
+                if out & (maskshort ^ (maskshort >> 1)) == 0 { out & maskshort == out } else { out & high == high };
+            fits.then_some(out & maskshort)
+        }
+        Opcode::Int2comp => Some(!out.wrapping_sub(1) & maskshort),
+        Opcode::IntNegate => Some(!out & maskshort),
+        _ => return super::err("Cannot recover input parameter without loss of information"),
+    })
+}
+
+/// `OpBehavior::recoverInputBinary` for `opc`: input `slot` from the output and the other
+/// input. Only addition and subtraction: the shifts, which the C++ also reverses, are not
+/// reached (`JumpBasic::findUnnormalized` steps over ADD, SUB and extensions only).
+pub(crate) fn recover_input_binary(opc: Opcode, slot: usize, sizeout: u32, out: u64, other: u64) -> super::Result<u64> {
+    let m = calc_mask(sizeout);
+    match opc {
+        Opcode::IntAdd => Ok(out.wrapping_sub(other) & m),
+        Opcode::IntSub if slot == 0 => Ok(other.wrapping_add(out) & m),
+        Opcode::IntSub => Ok(other.wrapping_sub(out) & m),
+        _ => super::err("Cannot recover input parameter without loss of information"),
+    }
+}
+
 /// `OpBehavior::evaluateBinary` for `opc`.
 pub(crate) fn eval_binary(opc: Opcode, sizeout: u32, sizein: u32, in1: u64, in2: u64) -> Result<u64, EmuError> {
     let m = calc_mask(sizeout);

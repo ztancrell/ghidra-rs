@@ -785,7 +785,7 @@ fn covering_mask(val: u64) -> u64 {
 }
 
 /// `minimalmask`.
-fn minimal_mask(val: u64) -> u64 {
+pub(crate) fn minimal_mask(val: u64) -> u64 {
     if val > 0xffff_ffff {
         u64::MAX
     } else if val > 0xffff {
@@ -1064,7 +1064,11 @@ pub(crate) fn dead_code(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
                         push_consumed(fd, return_consume, vn, &mut worklist);
                     }
                 }
-                // a jump table's switch variable consume: S3 (jumptable.cc) computes it
+                Opcode::Branchind => {
+                    // the bits of the switch variable its table reads (`getSwitchVarConsume`)
+                    let mask = fd.jumptables.iter().find(|jt| jt.op == op).map_or(u64::MAX, |jt| jt.switch_var_consume);
+                    push_consumed(fd, mask, ins[0], &mut worklist);
+                }
                 _ => {
                     for &vn in &ins {
                         push_consumed(fd, u64::MAX, vn, &mut worklist);
@@ -1614,9 +1618,19 @@ pub(crate) fn deindirect(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
 // ---------------------------------------------------------------------------------------
 // Block edits: ActionRedundBranch, ActionDeterminedBranch, ActionUnreachable, ActionDoNothing
 
-/// Port of `Funcdata::structureReset`.
+/// Port of `Funcdata::structureReset`: the loop structure and dominators again, the jump tables
+/// whose BRANCHIND is dead dropped, the structure cleared.
 pub(crate) fn structure_reset(fd: &mut Funcdata) -> Result<()> {
     fd.blocks.structure_loops()?;
+    let dead = fd.jumptables.iter().filter(|jt| fd.op(jt.op).is_dead()).count();
+    if dead != 0 {
+        let mut tables = std::mem::take(&mut fd.jumptables);
+        tables.retain(|jt| !fd.op(jt.op).is_dead());
+        fd.jumptables = tables;
+        for _ in 0..dead {
+            fd.warning_header("Recovered jumptable eliminated as dead code");
+        }
+    }
     fd.heritage.force_restructure();
     fd.structure.clear();
     Ok(())
@@ -1699,8 +1713,8 @@ pub(crate) fn redund_branch(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         let outs: Vec<BlockId> = fd.blocks.block(bb).outs.iter().map(|e| e.point).collect();
         let Some(&bl) = outs.first() else { continue };
         if outs.len() == 1 {
-            // a switch's block has several outs, so isSwitchOut never holds here
-            if fd.blocks.block(bl).ins.len() == 1 && !fd.blocks.is_entry_point(bl) {
+            // a block leaving a switch through its single exit is not spliced
+            if fd.blocks.block(bl).ins.len() == 1 && !fd.blocks.is_entry_point(bl) && !is_basic_switch_out(fd, bb) {
                 splice_block_basic(fd, bb)?;
                 count += 1;
                 i = 0;

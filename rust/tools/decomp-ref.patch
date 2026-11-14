@@ -102,7 +102,7 @@
      switch(status) {
 --- a/block.cc
 +++ b/block.cc
-@@ -17,8 +17,38 @@
+@@ -17,8 +17,41 @@
  #include "block.hh"
  #include "funcdata.hh"
  
@@ -113,7 +113,8 @@
 +// ghidra-rs (rust/tools/decomp-ref.patch): with DECOMP_TREE_EXTRA set, `print tree block` also
 +// shows what ActionFinalStructure sets: the f_unstructured_targ and f_label_bumpup flags, the
 +// goto type of goto blocks, the case blocks of a switch in their final order with their goto
-+// types, and the for-loop iterate and initialize ops of a while-do (their sequence times)
++// types (and, once the jump table has labels, printCaseExtra), and the for-loop iterate and
++// initialize ops of a while-do (their sequence times)
 +static void printTreeExtra(const FlowBlock *b,ostream &s)
 +{
 +  static const bool extra = getenv("DECOMP_TREE_EXTRA") != (char *)0;
@@ -125,8 +126,10 @@
 +    s << " g" << ((const BlockIfGoto *)b)->getGotoType();
 +  else if (b->getType() == FlowBlock::t_switch) {
 +    const BlockSwitch *sw = (const BlockSwitch *)b;
-+    for(int4 i=0;i<sw->getNumCaseBlocks();++i)
++    for(int4 i=0;i<sw->getNumCaseBlocks();++i) {
 +      s << " c" << sw->getCaseBlock(i)->getIndex() << ':' << sw->getGotoType(i);
++      sw->printCaseExtra(s,i);
++    }
 +  }
 +  else if (b->getType() == FlowBlock::t_whiledo) {
 +    const BlockWhileDo *wd = (const BlockWhileDo *)b;
@@ -141,7 +144,7 @@
  AttributeId ATTRIB_ALTINDEX = AttributeId("altindex",75);
  AttributeId ATTRIB_DEPTH = AttributeId("depth",76);
  AttributeId ATTRIB_END = AttributeId("end",77);
-@@ -625,6 +655,7 @@
+@@ -625,6 +658,7 @@
    for(i=0;i<level;++i)
      s << "  ";
    printHeader(s);
@@ -149,7 +152,7 @@
    s << endl;
  }
  
-@@ -2904,7 +2935,12 @@
+@@ -2904,7 +2938,12 @@
  void BlockCopy::printTree(ostream &s,int4 level) const
  
  {
@@ -163,6 +166,37 @@
  }
  
  void BlockCopy::encodeHeader(Encoder &encoder) const
+@@ -3714,6 +3753,20 @@
+   stable_sort(caseblocks.begin(),caseblocks.end(),CaseOrder::compare);
+ }
+ 
++// ghidra-rs (decomp-ref.patch): for `print tree block` with DECOMP_TREE_EXTRA, once the jump
++// table has labels: `:` d (default) x (exit) `:` chain `:` depth `:` the case's labels in hex
++void BlockSwitch::printCaseExtra(ostream &s,int4 i) const
++
++{
++  if (jump == (JumpTable *)0 || !jump->isLabelled()) return;
++  const CaseOrder &c(caseblocks[i]);
++  s << ':' << (c.isdefault ? "d" : "") << (c.isexit ? "x" : "") << ':' << c.chain << ':' << c.depth << ':' << hex;
++  int4 num = getNumLabels(i);
++  for(int4 j=0;j<num;++j)
++    s << (j==0 ? "" : ",") << getLabel(i,j);
++  s << dec;
++}
++
+ /// Drill down to the variable associated with the BRANCHIND itself, and return its data-type
+ /// \return the Datatype associated with the switch variable
+ const Datatype *BlockSwitch::getSwitchType(void) const
+--- a/block.hh
++++ b/block.hh
+@@ -845,6 +845,7 @@
+   bool isDefaultCase(int4 i) const { return caseblocks[i].isdefault; }	///< Is the i-th \e case the \e default case
+   uint4 getGotoType(int4 i) const { return caseblocks[i].gototype; }	///< Get the edge type for the i-th \e case block
+   bool isExit(int4 i) const { return caseblocks[i].isexit; }		///< Does the i-th \e case block exit the switch?
++  void printCaseExtra(ostream &s,int4 i) const;	// ghidra-rs (decomp-ref.patch)
+   const Datatype *getSwitchType(void) const;				///< Get the data-type of the switch variable
+   uint4 getDisplayFormat(void) const { return jump->getDisplayFormat(); }	///< Get any integer display format for cases
+   virtual block_type getType(void) const { return t_switch; }
 --- a/ifacedecomp.cc
 +++ b/ifacedecomp.cc
 @@ -2350,6 +2350,19 @@
