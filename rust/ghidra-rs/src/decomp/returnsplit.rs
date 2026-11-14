@@ -42,9 +42,7 @@ fn find_splits(fd: &Funcdata, s: &Structure) -> Result<Vec<(BlockId, usize)>> {
         .collect();
     let copy = |bb: BlockId| copies.get(&bb).copied();
     // data.beginOp(CPUI_RETURN): the RETURN op list in its order
-    let mut returns: Vec<OpId> =
-        (0..fd.ops.len() as u32).map(OpId).filter(|&o| fd.op(o).opc == Opcode::Return).collect();
-    returns.sort_by_key(|&o| fd.op(o).list_key);
+    let returns = fd.ops_created_with(Opcode::Return);
     let mut marks: Vec<SId> = Vec::new();
     let mut res = Vec::new();
     for op in returns {
@@ -210,6 +208,10 @@ fn node_split(fd: &mut Funcdata, b: BlockId, inedge: usize) -> Result<()> {
 /// `CloneBlockOps::cloneBlock`: each op of `b` but a BRANCH is cloned (flags and output) at the
 /// end of `bprime`, then `patchInputs`.
 fn clone_block(fd: &mut Funcdata, b: BlockId, bprime: BlockId, inedge: usize) -> Result<()> {
+    // `buildOpClone` (funcdata_block.cc) also keeps `nocollapse`, `nonprinting`, `special_print` and
+    // the halt bits (`halt` is copied below); `nonprinting` (OpFlags 8192) and `special_print`
+    // (16384) arrive with S7 and must be added here then. The other bits it keeps are not
+    // modelled.
     const OP_KEEP: [OpFlags; 6] = [
         OpFlags::START_BASIC,
         OpFlags::START_INSTRUCTION,
@@ -262,7 +264,8 @@ fn patch_inputs(fd: &mut Funcdata, clones: &[(OpId, OpId)], map: &HashMap<OpId, 
         let o = fd.op(orig).clone();
         if o.opc == Opcode::Multiequal {
             fd.op_set_opcode(dup, Opcode::Copy);
-            fd.op_set_input(dup, o.ins[inedge], 0)?;
+            let Some(&vn) = o.ins.get(inedge) else { return err("MULTIEQUAL lacks the split edge's input") };
+            fd.op_set_input(dup, vn, 0)?;
             fd.op_remove_input(orig, inedge);
             if fd.op(orig).ins.len() == 1 {
                 fd.op_set_opcode(orig, Opcode::Copy);

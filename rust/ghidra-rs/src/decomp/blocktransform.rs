@@ -41,6 +41,27 @@ pub(crate) fn structure_transform(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
     res.map(|()| 0)
 }
 
+/// The second `ActionPreferComplement` (coreaction.cc, after the second `ActionBlockStructure`,
+/// "don't allow mods"). Its action row lies past `assignhigh`, which this branch's tree does not
+/// reach; S7 adds the rows through `stop` and wires it.
+#[allow(dead_code)]
+pub(crate) fn prefer_complement_no_mods(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
+    let mut s = std::mem::take(&mut fd.structure);
+    let res = s.prefer_complement_all(fd, false);
+    fd.structure = s;
+    fd.clear_dead_ops();
+    res
+}
+
+/// The second `ActionStructureTransform` ("don't allow mods"), wired with the S7 rows as above.
+#[allow(dead_code)]
+pub(crate) fn structure_transform_no_mods(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
+    let mut s = std::mem::take(&mut fd.structure);
+    let res = s.final_transform(fd, false);
+    fd.structure = s;
+    res.map(|()| 0)
+}
+
 impl Structure {
     /// `ActionPreferComplement::apply`: each graph block, breadth first, may swap its clauses.
     fn prefer_complement_all(&mut self, fd: &mut Funcdata, allow: bool) -> Result<i32> {
@@ -104,7 +125,11 @@ impl Structure {
         Ok(true)
     }
 
-    /// `FlowBlock::getHaltType` of the block's last op (the C++ flag bits).
+    /// `FlowBlock::getHaltType` of the block's last op (the C++ flag bits). [`Halt`] holds the halts
+    /// the ported flow makes (bad instruction, unimplemented; `fail_thunk` and `fail_normal` make
+    /// none). `halt` 0x200000, `noreturn` 0x1000000 (calls to non-returning functions,
+    /// `fail_callother`) and `missing` 0x2000000 (`fillinBranchStubs`) are not made yet; the match
+    /// has no wildcard, so adding them to [`Halt`] forces their values here.
     fn halt_type(&self, fd: &Funcdata, b: SId) -> u32 {
         use super::op::Halt;
         match self.last_op(fd, b).and_then(|op| fd.op(op).halt) {
@@ -466,7 +491,8 @@ fn find_initializer(fd: &Funcdata, head: BlockId, slot: usize, loop_def: OpId) -
     Some((res, last))
 }
 
-/// `getEvalType() == PcodeOp::special`: the TypeOps with the `special` flag (typeop.cc).
+/// `getEvalType() == PcodeOp::special`: the TypeOps with the `special` flag (typeop.cc), less CAST
+/// (`unary|special`: its eval type is `unary`, so it is moveable).
 fn is_special(opc: Opcode) -> bool {
     use Opcode::*;
     matches!(
@@ -481,7 +507,6 @@ fn is_special(opc: Opcode) -> bool {
             | Return
             | Multiequal
             | Indirect
-            | Cast
             | Segmentop
             | Cpoolref
             | New
@@ -537,8 +562,9 @@ fn is_moveable(fd: &Funcdata, op: OpId, point: OpId) -> bool {
             for &t in &tied_list {
                 let tv = fd.vn(t);
                 if tv.space == po.space
-                    && tv.offset < po.offset + u64::from(po.size)
-                    && po.offset < tv.offset + u64::from(tv.size)
+                    && (super::varnode::overlap(tv.space, tv.offset, po.space, po.offset, po.size, u64::MAX).is_some()
+                        || super::varnode::overlap(po.space, po.offset, tv.space, tv.offset, tv.size, u64::MAX)
+                            .is_some())
                 {
                     return false;
                 }

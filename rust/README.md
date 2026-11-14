@@ -1579,7 +1579,9 @@ Part two (branch `m3-s8b`): `ActionPreferComplement` and `ActionStructureTransfo
 rules off M8 8 / 8, M500 499 / 499; rule-stage options M8 8 / 8, M500 498 / 499. They change 137
 and 10 reference outputs; all match. `ActionReturnSplit` (`decomp/returnsplit.rs`) runs in both
 checks too (group `returnsplit` now on in the S8 option files; it changes 52 reference outputs, all
-match). `ActionFinalStructure` and structured `printRaw` wait for S7 (plan, "S8 part two"). Superseded: "Not ported yet: `prefercomplement` and `structuretransform`" above.
+match). `ActionFinalStructure` and structured `printRaw` wait for S7 (plan, "S8 part two"). The second
+`prefercomplement`/`structuretransform` instances (without op modifications) are ported and wait
+for S7's action rows past `assignhigh`. Superseded: "Not ported yet: `prefercomplement` and `structuretransform`" above.
 
 Review round: `ActionNodeJoin` skips a CBRANCH with `boolean_flip` set (`findDups`), the switch
 leaf check of `newBlockSwitch`, no recursion in `printTree`, `negateCondition`, `isComplex`, and

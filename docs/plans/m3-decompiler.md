@@ -811,6 +811,14 @@ identical. Fixed with it: `DECOMP_SKIP_ACTIONS` was ignored for the `fullloop` a
 ghidra-rs side (`action.rs`). The rule check stays 498 / 499. The case data of `BlockSwitch`
 (`grabCaseBasic` labels, `compareCase`) is not needed by these actions (`nextFlowAfter` reads only
 the case order, which is the components' and the goto edges'), so it waits for printing.
+Review follow-ups: the C++ runs `ActionPreferComplement` and `ActionStructureTransform` a second
+time after the second `ActionBlockStructure` without op modifications (coreaction.cc 6138-6139);
+their entry points (`prefer_complement_no_mods`, `structure_transform_no_mods`) are ready and get
+their rows with S7's tree past `assignhigh`. CAST is moveable (its eval type is unary). Left for
+later stages: the `f_flip_path` toggle of `swapEdges` (read by jumptable.cc's guard folding:
+`switchnorm`), `f_duplicate_block` and `f_joined_block` (read by printc.cc's labels), the data type
+of the code reference `CloneBlockOps` makes for an annotation (printing), and the `nonprinting` and
+`special_print` bits `buildOpClone` keeps (S7 adds them).
 Part three (`ActionFinalStructure`, structured `printRaw`) waits for S7: the actions between
 `structuretransform` and `finalstructure` are the merge, prototype, naming and cast actions, and
 `finalizePrinting` reads what they set (`isExplicit`, high variables), so a check that skips them
