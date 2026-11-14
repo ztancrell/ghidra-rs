@@ -254,6 +254,9 @@ const PARTIAL_SKIP: &[&str] = &[
     "condconst",
     "mappedlocalsync",
     "normalizebranches",
+    // stage S7: the last `localrecovery` action, after merging (not in the `jumptable` groups);
+    // it only sets the output prototype's types, which no recovered address reads
+    "outputprototype",
 ];
 
 /// The `jumptable` root action (`buildDefaultGroups`: groups `base`, `noproto`, `analysis`, ...)

@@ -1608,6 +1608,23 @@ resolution of trimmed COPYs, `stripType`, join padding records (`markPurePadding
 `dynamic.cc` (only `ActionDynamicSymbols` needs it, group `dynamic` is off), the STORE guards of
 `StackAffectingOps` (stack heritage). Regressions on the final binary: R3 check 495 / 499, S3 paramdouble 500 / 500, S4 check 498 / 500, S6 check 498 / 500, all unchanged (the varnode creation-order fix shows only in create indices, which those checks do not print).
 
+Merged with master (R3 part two, R4, R2; 2026-11-13). The jumptable root now runs the whole
+tree on the partial function, so `outputprototype` (group `localrecovery`, on there) joins
+`PARTIAL_SKIP`: it only sets the output prototype's types, which no recovered address reads
+(without it 4 tables failed: S3 fell to 496 / 500). `register_proto_partial_root` stays
+unused: in the C++ only `SplitDatatype::buildOutConcats` (`RuleSplitCopy/Load/Store`) and
+`RulePieceStructure` make proto-partials, neither ported; R3b's `SplitFlow` makes none. The
+paths needing `VariablePiece` (`mergeAddrTied` overlaps, `groupPartials`) still fail loudly.
+Results on the merged binary: M8 8 / 8 in all five S7 runs; M500 types on (`s6-options`)
+492 / 499; rules on (`r1-options`) 481 / 499, the same with create indices, `subvar-options`
+482 / 499, `r4-options` 481 / 499. The rules-on drop is a type difference from before merging
+that only this check prints (it is there at `break start assignhigh` with
+`DECOMP_RAW_EXTRA=1`): a mask constant of R2's rules (`X & #0x1`) carries the 1-byte type of
+the varnode it came from on the reference (`<xunknown1>`) and its own size's on ghidra-rs, in
+13 functions; 0x571cc0, 0x746320 and 0x74fae0 also differ in sequence numbers there (not
+traced). Rule bars on the merged binary: R3, subvar and R4 checks 498 / 499, S3 500 / 500,
+S4 and S6 498 / 500.
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The

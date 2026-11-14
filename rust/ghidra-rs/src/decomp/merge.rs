@@ -1418,8 +1418,7 @@ fn multiple_interaction(fd: &mut Funcdata, list: &[VarnodeId], marks: &mut HashS
     for &vn in list {
         let Some(op) = fd.vn(vn).def else { continue };
         let opc = fd.op(op).opc;
-        if !(super::opcode::is_bool_output(opc) || matches!(opc, Opcode::IntZext | Opcode::IntSext | Opcode::Ptradd))
-        {
+        if !(super::opcode::is_bool_output(opc) || matches!(opc, Opcode::IntZext | Opcode::IntSext | Opcode::Ptradd)) {
             continue;
         }
         for &top in fd.op(op).ins.iter().take(2) {
