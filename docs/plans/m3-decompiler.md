@@ -920,7 +920,9 @@ check: `latedonothing` (needs the delayed do-nothing mark of `ActionDoNothing` a
 `removingCreatesRedundancy`; it changes the CFG, so it cannot be skipped fairly), `outputprototype`,
 `inputprototype`, `mapglobals`, `namevars`, `setcasts` (S9: CAST ops `print raw` shows), and
 `BlockSwitch::finalizePrinting` needs the case labels of `switchnorm` (`recoverLabels`, not ported).
-Part three stays open until those land. The S7 checks keep `blockrecovery` off (their option files
+Bars after the S7 merge: S8 rules off M500 499 / 499, rule-stage 498 / 499 (prefercomplement,
+structuretransform, returnsplit and nodejoin on both sides); S7 checks (their own options,
+`blockrecovery` off) rules on 498 / 499, types on 493 / 499, unchanged. Part three stays open until those land. The S7 checks keep `blockrecovery` off (their option files
 are S4's); with it on they would reach `latedonothing`, which ghidra-rs does not port, so
 none of the S8 actions runs inside them.
 
