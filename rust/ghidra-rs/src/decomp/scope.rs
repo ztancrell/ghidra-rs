@@ -305,14 +305,18 @@ impl Database {
         off: u64,
         size: u32,
         usepoint: Option<(Space, u64)>,
-    ) -> Option<(SymbolId, usize)> {
+    ) -> Result<Option<(SymbolId, usize)>> {
         let end = off.wrapping_add(u64::from(size)).wrapping_sub(1);
         let mut best = None;
         let mut oldsize: Option<u32> = None;
-        let map = self.scope(scope).maps.get(&space.index())?;
+        let Some(map) = self.scope(scope).maps.get(&space.index()) else { return Ok(None) };
         let bound = usepoint.map_or(SUB_LAST, |(s, o)| (s.index(), o));
         for (sym, ei) in map.find(off, SUB_FIRST, bound).into_iter().rev() {
-            let e = &self.symbol(sym).entries[ei];
+            let e = self
+                .symbol(sym)
+                .entries
+                .get(ei)
+                .ok_or_else(|| LowlevelError("a map record without its entry".into()))?;
             if e.last() >= end && oldsize.is_none_or(|o| e.size < o) && self.in_use(sym, e, usepoint) {
                 best = Some((sym, ei));
                 if e.size == size {
@@ -321,7 +325,7 @@ impl Database {
                 oldsize = Some(e.size);
             }
         }
-        best
+        Ok(best)
     }
 
     /// Port of `ScopeInternal::buildUndefinedName`: one more than the highest `$$undef` name.
@@ -596,9 +600,23 @@ impl Database {
         s.cat_index = index as u32;
     }
 
-    /// `Scope::overrideSizeLockType`: a size-locked symbol takes a data-type of its size.
-    pub(crate) fn set_type(&mut self, sym: SymbolId, ty: super::types::TypeId) {
-        self.symbols[sym.0 as usize].ty = Some(ty);
+    /// Port of `Scope::overrideSizeLockType`: a size-locked symbol takes a data-type of its size
+    /// (`same_size`: the new type has the size of the symbol's type).
+    pub(crate) fn override_size_lock_type(
+        &mut self,
+        sym: SymbolId,
+        ty: super::types::TypeId,
+        same_size: bool,
+    ) -> Result<()> {
+        let s = &mut self.symbols[sym.0 as usize];
+        if !same_size {
+            return super::err("Overriding symbol with different type size");
+        }
+        if !s.flags.size_type_locked {
+            return super::err("Overriding symbol that is not size locked");
+        }
+        s.ty = Some(ty);
+        Ok(())
     }
 
     /// The symbols `ScopeInternal::assignDefaultNames` walks: those with an undefined name,
@@ -635,17 +653,7 @@ pub(crate) fn print_map(fd: &super::Funcdata, arch: &super::Arch, name: &str) ->
     if fd.proto.locked.is_some() {
         return super::err("print map: the symbols of a locked prototype are not ported");
     }
-    // the space's name and address size (the stack space has its container's size)
-    let space = |sp: Space| {
-        match sp {
-            Space::Sleigh(i) => arch.sleigh.spaces.get(i as usize).map(|s| (s.name.clone(), s.size)),
-            Space::Stack => {
-                arch.sleigh.spaces.get(arch.spec.stack_container as usize).map(|s| ("stack".into(), s.size))
-            }
-            _ => None,
-        }
-        .ok_or_else(|| LowlevelError("print map: a symbol in a space without a name".into()))
-    };
+    let space = |sp: Space| space_info(arch, sp);
     let space_name = |sp: Space| space(sp).map(|(n, _)| n);
     // `Address::getShortcut` and `AddrSpace::printRaw`: the offset padded to the address size
     let addr = |sp: Space, off: u64| {
@@ -812,9 +820,9 @@ mod tests {
             |offset, size, uselimit| SymbolEntry { space: REG, offset, size, uselimit, conflict: false, piece: None };
         let whole = db.add_symbol(sc, "a", None, None, Some(entry(0, 4, UseLimit(vec![(RAM, 0x10, 0x40)])))).unwrap();
         let low = db.add_symbol(sc, "b", None, None, Some(entry(0, 2, UseLimit(vec![(RAM, 0x10, 0x20)])))).unwrap();
-        assert_eq!(db.find_container(sc, REG, 0, 2, Some((RAM, 0x18))), Some((low, 0)));
-        assert_eq!(db.find_container(sc, REG, 0, 2, Some((RAM, 0x30))), Some((whole, 0)));
-        assert_eq!(db.find_container(sc, REG, 0, 4, None), None);
+        assert_eq!(db.find_container(sc, REG, 0, 2, Some((RAM, 0x18))).unwrap(), Some((low, 0)));
+        assert_eq!(db.find_container(sc, REG, 0, 2, Some((RAM, 0x30))).unwrap(), Some((whole, 0)));
+        assert_eq!(db.find_container(sc, REG, 0, 4, None).unwrap(), None);
     }
 
     /// `assignDefaultNames` walks the unnamed symbols in name order; a conflict entry prints

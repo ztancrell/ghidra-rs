@@ -146,14 +146,11 @@ fn next_flow_after(s: &Structure, mut p: SId, mut bl: SId) -> Option<SId> {
                 if pb.list.first() == Some(&bl) || !matches!(s.b(bl).kind, Kind::Goto(_)) {
                     return None;
                 }
-                // the case blocks in `grabCaseBasic` order: the components, then the goto edges
-                let mut cases: Vec<SId> = pb.list[1..].to_vec();
-                if let Kind::MultiGoto { gotos, .. } = &s.b(pb.list[0]).kind {
-                    cases.extend(gotos);
-                }
-                let i = cases.iter().position(|&c| c == bl)?;
-                if let Some(&next) = cases.get(i + 1) {
-                    return front_leaf(s, next);
+                // the case blocks in their current order (`caseblocks`: as `grabCaseBasic`
+                // found them, then as `finalizePrinting` sorts them by label)
+                let i = pb.cases.iter().position(|c| c.block == bl)?;
+                if let Some(next) = pb.cases.get(i + 1) {
+                    return front_leaf(s, next.block);
                 }
             }
             Kind::Graph | Kind::List => {

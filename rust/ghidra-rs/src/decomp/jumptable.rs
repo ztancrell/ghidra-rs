@@ -17,19 +17,27 @@
 //!   logic as one comparison (`cond_range`) and a commutative op's constant in slot 0 are gone.
 //!   The stack is not heritaged, so a switch variable kept on the stack is matched through its
 //!   two LOADs (`GuardRecord::valueMatch` code 2), as the C++ does for memory it cannot heritage.
-//! - Not ported: `JumpAssisted` (x86 has no `jumpassist` user op), `JumpBasicOverride` and
-//!   `JumpModelTrivial` (overrides; the console sets none), multistage tables, label recovery
-//!   and guard folding (`recoverLabels`, `foldInGuards`: after `paramdouble`), unrolled
-//!   guards (`checkUnrolledGuard`), LOAD collection (`record_jumploads` is off by default),
-//!   `testForReturnAddress` (x86's return address is on the stack, not heritaged yet).
+//! - The second half of the file is the action `switchnorm` on the function itself
+//!   (`ActionSwitchNorm`: `JumpTable::matchModel`, `recoverLabels` with `findUnnormalized`,
+//!   `buildLabels` and `backup2Switch`, `foldInNormalization`, `foldInGuards`, and
+//!   `JumpModelTrivial` when no model matches). A table keeps the values of the model its
+//!   addresses were recovered with ([`ValueRange`]) and its `switchOver` state on
+//!   `funcdata::JumpTable`.
+//! - Not ported: `JumpAssisted` (x86 has no `jumpassist` user op), `JumpBasicOverride`
+//!   (overrides; the console sets none), multistage tables (`matchModel` fails loudly on the
+//!   restart), LOAD collection (`record_jumploads` is off by default), `testForReturnAddress`
+//!   (x86's return address is on the stack, not heritaged yet), the reverse of a shift in
+//!   `backup2Switch` (not reachable: `findUnnormalized` steps over ADD, SUB and extensions).
 
 use super::block::BlockId;
-use super::emulate::{eval_binary, eval_unary, EmuError, EmulateFunction};
+use super::coreaction::{minimal_mask, structure_reset};
+use super::emulate::{eval_binary, eval_unary, recover_input_binary, recover_input_unary, EmuError, EmulateFunction};
+use super::funcdata::JumpTable;
 use super::op::{OpFlags, OpId};
 use super::opcode::{is_bool_output, Opcode};
 use super::rangeutil::{self, calc_mask, mostsigbit_set, pcode_left, pcode_right, CircleRange};
 use super::varnode::{Space, VarnodeId};
-use super::{Arch, Funcdata};
+use super::{err, Arch, Funcdata, LowlevelError, Result};
 use std::collections::HashSet;
 
 /// `Architecture::max_jumptable_size`
@@ -349,6 +357,14 @@ fn pull_back(
 /// Port of `GuardRecord`: a range a CBRANCH before the switch puts on a varnode.
 #[derive(Debug, Clone)]
 struct GuardRecord {
+    /// the guard's CBRANCH; `None` once the guard is cleared (not part of the model, or folded)
+    cbranch: Option<OpId>,
+    /// the op reading `vn` on the way to the CBRANCH
+    read_op: OpId,
+    /// the CBRANCH's out edge to the switch, as of the block's flip state when recorded
+    indpath: usize,
+    /// the guard is duplicated across the blocks flowing into the switch block
+    unrolled: bool,
     vn: VarnodeId,
     base_vn: VarnodeId,
     bits_preserved: i32,
@@ -356,9 +372,15 @@ struct GuardRecord {
 }
 
 impl GuardRecord {
-    fn new(fd: &Funcdata, vn: VarnodeId, range: CircleRange) -> GuardRecord {
+    fn new(
+        fd: &Funcdata,
+        (cbranch, read_op, indpath): (OpId, OpId, usize),
+        range: CircleRange,
+        vn: VarnodeId,
+        unrolled: bool,
+    ) -> GuardRecord {
         let (base_vn, bits_preserved) = quasi_copy(fd, vn);
-        GuardRecord { vn, base_vn, bits_preserved, range }
+        GuardRecord { cbranch: Some(cbranch), read_op, indpath, unrolled, vn, base_vn, bits_preserved, range }
     }
 
     /// `valueMatch`: 0 (different), 1 (same value), 2 (same value but for aliased writes)
@@ -453,6 +475,11 @@ fn quasi_copy(fd: &Funcdata, mut vn: VarnodeId) -> (VarnodeId, i32) {
         }
     }
     (vn, bits)
+}
+
+/// `CircleRange::operator==`: two empty ranges are equal whatever their fields.
+fn range_eq(a: &CircleRange, b: &CircleRange) -> bool {
+    a.isempty == b.isempty && (a.isempty || a == b)
 }
 
 /// One edge of a data-flow path: the op and the input slot (`PcodeOpNode`).
@@ -630,6 +657,11 @@ impl JumpValues {
         self.range.get_size() + u64::from(self.extra.is_some())
     }
 
+    /// What `JumpBasic::clone` keeps of the model: the values.
+    fn kept(&self) -> ValueRange {
+        ValueRange { range: self.range, extra: self.extra.map(|e| e.0) }
+    }
+
     /// The values in order, each with the varnode and op the emulation starts from
     /// (`initializeForReading`, `next`, `getStartVarnode`, `getStartOp`).
     fn values(&self) -> Vec<(u64, VarnodeId, OpId)> {
@@ -668,11 +700,29 @@ struct JumpBasic<'a> {
     guards: Vec<GuardRecord>,
     jrange: Option<JumpValues>,
     varnode_index: usize,
+    /// the range of the model recovered earlier for the same switch (`previous`)
+    expected: Option<CircleRange>,
+    /// `JumpBasic2::extravn`: where the first model stopped
+    extravn: Option<VarnodeId>,
+    normalvn: Option<VarnodeId>,
+    switchvn: Option<VarnodeId>,
 }
 
 impl<'a> JumpBasic<'a> {
     fn new(fd: &'a Funcdata, arch: &'a Arch, indop: OpId) -> JumpBasic<'a> {
-        JumpBasic { fd, arch, indop, path: PathMeld::default(), guards: Vec::new(), jrange: None, varnode_index: 0 }
+        JumpBasic {
+            fd,
+            arch,
+            indop,
+            path: PathMeld::default(),
+            guards: Vec::new(),
+            jrange: None,
+            varnode_index: 0,
+            expected: None,
+            extravn: None,
+            normalvn: None,
+            switchvn: None,
+        }
     }
 
     /// `isprune`
@@ -802,7 +852,10 @@ impl<'a> JumpBasic<'a> {
                 pathout = -1;
                 loop {
                     if blocks.block(bl).ins.len() != 1 {
-                        return; // `checkUnrolledGuard` for several ins is not ported
+                        if blocks.block(bl).ins.len() > 1 {
+                            self.check_unrolled_guard(bl, 2, true);
+                        }
+                        return;
                     }
                     let p = blocks.block(bl).ins[0].point;
                     if blocks.block(p).outs.len() != 1 {
@@ -829,14 +882,17 @@ impl<'a> JumpBasic<'a> {
             bl = prevbl;
             let mut vn = fd.op(cbranch).ins[1];
             let mut rng = CircleRange::boolean(toswitchval);
-            self.guards.push(GuardRecord::new(fd, vn, rng));
+            // the path as of an unflipped block (`getFlipPath`)
+            let indpathstore = if blocks.block(prevbl).flip_path { 1 - indpath } else { indpath };
+            self.guards.push(GuardRecord::new(fd, (cbranch, cbranch, indpathstore), rng, vn, false));
             for _ in 0..2 {
+                let Some(read_op) = def(fd, vn) else { break };
                 let Some((v, r)) = pull_back(fd, arch, vn, rng, true) else { break };
                 if r.is_empty() {
                     break;
                 }
                 (vn, rng) = (v, r);
-                self.guards.push(GuardRecord::new(fd, vn, rng));
+                self.guards.push(GuardRecord::new(fd, (cbranch, read_op, indpathstore), rng, vn, false));
             }
         }
     }
@@ -878,14 +934,20 @@ impl<'a> JumpBasic<'a> {
         self.fd.vn(self.path.common[pos]).size < self.fd.vn(self.path.common[self.varnode_index]).size
     }
 
-    /// `findSmallestNormal` (no previous model: multistage tables are not ported)
+    /// `findSmallestNormal`: with the range of an earlier model (`expected`), the search stops
+    /// at the first variable whose range is that one (the test reads the range computed last,
+    /// selected or not, as the C++ does).
     fn find_smallest_normal(&mut self) {
+        let expected = self.expected.unwrap_or_default();
         self.varnode_index = 0;
-        let rng = self.calc_range(self.path.common[0]);
+        let mut rng = self.calc_range(self.path.common[0]);
         self.set_range(rng, self.path.common[0], self.path.op(0));
         let mut maxsize = rng.get_size();
         for i in 1..self.path.common.len() {
-            let rng = self.calc_range(self.path.common[i]);
+            if range_eq(&rng, &expected) {
+                return;
+            }
+            rng = self.calc_range(self.path.common[i]);
             let sz = rng.get_size();
             if sz > maxsize || (sz == maxsize && !self.is_preferred(i, &rng)) {
                 continue;
@@ -926,13 +988,138 @@ impl<'a> JumpBasic<'a> {
         self.find_determining_varnodes(self.indop, 0);
         let bl = self.fd.op(self.indop).parent.unwrap();
         self.find_normalized(bl, -1);
-        self.jrange.as_ref().unwrap().size() <= MAX_JUMPTABLE_SIZE
+        if self.jrange.as_ref().unwrap().size() > MAX_JUMPTABLE_SIZE {
+            return false;
+        }
+        self.mark_foldable_guards();
+        true
+    }
+
+    /// `markFoldableGuards`: a guard on another variable, or an unrolled one, is not folded.
+    fn mark_foldable_guards(&mut self) {
+        let vn = self.path.common[self.varnode_index];
+        let (base, bits) = quasi_copy(self.fd, vn);
+        for i in 0..self.guards.len() {
+            if self.guards[i].value_match(self.fd, self.arch, vn, base, bits) == 0 || self.guards[i].unrolled {
+                self.guards[i].cbranch = None;
+            }
+        }
+    }
+
+    /// `findCbranch`: the CBRANCH deciding the flow into `bl` through in edge `inslot` (through
+    /// blocks with one in and one out edge), and its out edge.
+    fn find_cbranch(&self, mut bl: BlockId, mut inslot: usize) -> Option<(OpId, usize)> {
+        let (fd, blocks) = (self.fd, &self.fd.blocks);
+        loop {
+            let inb = blocks.block(bl).ins.get(inslot)?.point;
+            if let Some(&c) = blocks.block(inb).ops.last().filter(|&&c| fd.op(c).opc == Opcode::Cbranch) {
+                return Some((c, blocks.block(bl).ins[inslot].reverse));
+            }
+            if blocks.block(inb).outs.len() != 1 || blocks.block(inb).ins.len() != 1 {
+                return None;
+            }
+            (bl, inslot) = (inb, 0);
+        }
+    }
+
+    /// `checkCommonCbranch`: a CBRANCH per in edge of `bl`, all selecting `bl` the same way;
+    /// the first one, their boolean inputs and the out edge.
+    fn check_common_cbranch(&self, bl: BlockId) -> Option<(OpId, Vec<VarnodeId>, usize)> {
+        let fd = self.fd;
+        let (cbranch, path) = self.find_cbranch(bl, 0)?;
+        let flip = fd.op(cbranch).flags.has(OpFlags::BOOLEAN_FLIP);
+        let mut vars = vec![fd.op(cbranch).ins[1]];
+        for i in 1..fd.blocks.block(bl).ins.len() {
+            let (alt, altpath) = self.find_cbranch(bl, i)?;
+            if fd.op(alt).flags.has(OpFlags::BOOLEAN_FLIP) != flip || path != altpath {
+                return None;
+            }
+            vars.push(fd.op(alt).ins[1]);
+        }
+        Some((cbranch, vars, path))
+    }
+
+    /// `BlockBasic::findMultiequal`: the MULTIEQUAL of `bl` taking exactly `vars`.
+    fn find_multiequal(&self, bl: BlockId, vars: &[VarnodeId]) -> Option<OpId> {
+        let fd = self.fd;
+        let readers = fd.vn(vars[0]).descend.iter().copied();
+        let op = readers.into_iter().find(|&o| fd.op(o).opc == Opcode::Multiequal && fd.op(o).parent == Some(bl))?;
+        (fd.op(op).ins.as_slice() == vars).then_some(op)
+    }
+
+    /// `BlockBasic::liftVerifyUnroll`: every variable is made by the same op (with the same
+    /// constant, if binary); each is replaced by that op's input `slot`.
+    fn lift_verify_unroll(&self, vars: &mut [VarnodeId], slot: usize) -> bool {
+        let fd = self.fd;
+        let Some(op) = def(fd, vars[0]) else { return false };
+        let o = fd.op(op);
+        let cvn = if o.ins.len() == 2 {
+            let c = fd.vn(o.ins[1 - slot]);
+            if !c.is_constant() {
+                return false;
+            }
+            Some((c.size, c.offset))
+        } else {
+            None
+        };
+        let opc = o.opc;
+        vars[0] = o.ins[slot];
+        for v in vars.iter_mut().skip(1) {
+            let Some(op) = def(fd, *v) else { return false };
+            let o = fd.op(op);
+            if o.opc != opc {
+                return false;
+            }
+            if let Some(c) = cvn {
+                let Some(c2) = o.ins.get(1 - slot).map(|&c| fd.vn(c)) else { return false };
+                if !c2.is_constant() || (c2.size, c2.offset) != c {
+                    return false;
+                }
+            }
+            let Some(&next) = o.ins.get(slot) else { return false };
+            *v = next;
+        }
+        true
+    }
+
+    /// `checkUnrolledGuard`: a guard duplicated across the blocks flowing into `bl`, on the
+    /// MULTIEQUAL of the duplicated switch variables.
+    fn check_unrolled_guard(&mut self, bl: BlockId, maxpullback: usize, usenzmask: bool) {
+        let (fd, arch) = (self.fd, self.arch);
+        let Some((cbranch, mut vars, indpath)) = self.check_common_cbranch(bl) else { return };
+        let toswitchval = (indpath == 1) != fd.op(cbranch).flags.has(OpFlags::BOOLEAN_FLIP);
+        let mut rng = CircleRange::boolean(toswitchval);
+        let flipped = fd.op(cbranch).parent.is_some_and(|p| fd.blocks.block(p).flip_path);
+        let indpathstore = if flipped { 1 - indpath } else { indpath };
+        let mut read_op = cbranch;
+        for _ in 0..maxpullback {
+            let guarded = if vars.iter().all(|&v| v == vars[0]) {
+                Some(vars[0])
+            } else {
+                self.find_multiequal(bl, &vars).and_then(|m| fd.op(m).out)
+            };
+            if let Some(vn) = guarded {
+                self.guards.push(GuardRecord::new(fd, (cbranch, read_op, indpathstore), rng, vn, true));
+            }
+            let Some(d) = def(fd, vars[0]) else { break };
+            read_op = d;
+            let Some((v, r)) = pull_back(fd, arch, vars[0], rng, usenzmask) else { break };
+            rng = r;
+            if rng.is_empty() {
+                break;
+            }
+            let Some(slot) = fd.op(read_op).ins.iter().position(|&i| i == v) else { break };
+            if !self.lift_verify_unroll(&mut vars, slot) {
+                break;
+            }
+        }
     }
 
     /// `JumpBasic2::recoverModel`, from the paths `JumpBasic` found.
     fn recover_model2(&mut self, orig: PathMeld) -> bool {
         let fd = self.fd;
         let Some(&joinvn) = orig.common.last() else { return false };
+        self.extravn = Some(joinvn);
         let Some(multiop) = def(fd, joinvn) else { return false };
         let m = fd.op(multiop);
         if m.opc != Opcode::Multiequal || m.ins.len() != 2 {
@@ -975,7 +1162,7 @@ impl<'a> JumpBasic<'a> {
         val: u64,
         startop: OpId,
         mut startvn: VarnodeId,
-    ) -> Result<u64, String> {
+    ) -> std::result::Result<u64, String> {
         let fd = self.fd;
         let p = &self.path;
         let mut i = p.ops.iter().position(|e| e.0 == Some(startop)).unwrap_or(p.ops.len());
@@ -1007,7 +1194,7 @@ impl<'a> JumpBasic<'a> {
     }
 
     /// `buildAddresses` (`funcptr_align` is 0 for x86: no mask)
-    fn build_addresses(&self) -> Result<Vec<u64>, String> {
+    fn build_addresses(&self) -> std::result::Result<Vec<u64>, String> {
         let mut emu = EmulateFunction::new(self.fd, self.arch);
         let mut out = Vec::new();
         for (val, vn, op) in self.jrange.as_ref().unwrap().values() {
@@ -1088,7 +1275,11 @@ fn is_thunk(fd: &Funcdata, table: &[u64]) -> bool {
 /// Port of `JumpTable::recoverAddresses` (`recoverModel`, `buildAddresses`, `sanityCheck`) on
 /// the partial function `fd`: the targets in table order and whether the table is partial
 /// (its switch looks unreachable).
-pub(crate) fn recover_addresses(fd: &Funcdata, arch: &Arch, indop: OpId) -> Result<(Vec<u64>, bool), Fail> {
+pub(crate) fn recover_addresses(
+    fd: &Funcdata,
+    arch: &Arch,
+    indop: OpId,
+) -> std::result::Result<(Vec<u64>, bool, ValueRange), Fail> {
     let addr = fd.op(indop).seq.addr;
     let mut basic = JumpBasic::new(fd, arch, indop);
     let ok = basic.recover_model();
@@ -1119,7 +1310,8 @@ pub(crate) fn recover_addresses(fd: &Funcdata, arch: &Arch, indop: OpId) -> Resu
     if !model.sanity_check(&mut table) {
         return Err(Fail::Normal(format!("Jumptable at 0x{addr:08x} did not pass sanity check.")));
     }
-    Ok((table, partial))
+    let kept = model.jrange.as_ref().map(JumpValues::kept).unwrap_or_default();
+    Ok((table, partial, kept))
 }
 
 /// Port of `Funcdata::earlyJumpTableFail`: walking back from the BRANCHIND over at most 8 ops
@@ -1177,4 +1369,570 @@ pub(crate) fn early_fail(fd: &Funcdata, op: OpId) -> Option<Fail> {
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------------------------
+// Labels: ActionSwitchNorm with JumpTable::matchModel, recoverLabels, foldInNormalization and
+// foldInGuards, on the function itself
+
+/// `JumpValues::NO_LABEL`: a table entry without a case label (the default, an exit).
+pub(crate) const NO_LABEL: u64 = 0xBAD1_ABE1_BAD1_ABE1;
+
+/// The values of a model as `JumpBasic::clone` keeps them (`JumpValuesRange`, and
+/// `JumpValuesRangeDefault` with its extra value): what a table keeps of the model its
+/// addresses were recovered with on the partial function.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ValueRange {
+    range: CircleRange,
+    extra: Option<u64>,
+}
+
+impl ValueRange {
+    /// `getSize`
+    fn size(&self) -> u64 {
+        self.range.get_size() + u64::from(self.extra.is_some())
+    }
+
+    /// `contains`
+    fn contains(&self, val: u64) -> bool {
+        self.extra == Some(val) || self.range.contains(val)
+    }
+
+    /// The values in order, each with `isReversible` (false for the extra value).
+    fn values(&self) -> Vec<(u64, bool)> {
+        let mut v = Vec::new();
+        if self.range.get_size() != 0 {
+            let mut cur = self.range.left;
+            loop {
+                v.push((cur, true));
+                if !self.range.get_next(&mut cur) {
+                    break;
+                }
+            }
+        }
+        v.extend(self.extra.map(|e| (e, false)));
+        v
+    }
+}
+
+/// The model of a table on its function after `matchModel`, as far as `foldInGuards` reads it:
+/// the guards still to fold (CBRANCH and stored path to the switch). `JumpModelTrivial` has no
+/// guards.
+#[derive(Debug, Clone)]
+pub(crate) struct Model {
+    /// `JumpBasic2`: its guard only makes the last block the default
+    basic2: bool,
+    guards: Vec<(Option<OpId>, usize)>,
+}
+
+/// `std::lower_bound` / `std::upper_bound` over `block2addr` by position, as libstdc++ walks
+/// them (the vector is not sorted once `addBlockToSwitch` appends to it).
+fn bound(v: &[(usize, usize)], pos: usize, upper: bool) -> usize {
+    let (mut first, mut len) = (0, v.len());
+    while len > 0 {
+        let half = len >> 1;
+        let right = if upper { pos >= v[first + half].0 } else { v[first + half].0 < pos };
+        if right {
+            first += half + 1;
+            len -= half + 1;
+        } else {
+            len = half;
+        }
+    }
+    first
+}
+
+impl JumpTable {
+    pub(crate) fn new(op: OpId, targets: Vec<u64>, orig: Option<ValueRange>) -> JumpTable {
+        JumpTable {
+            op,
+            targets,
+            labels: Vec::new(),
+            block2addr: Vec::new(),
+            default_block: None,
+            last_block: 0,
+            default_is_folded: false,
+            switch_var_consume: u64::MAX,
+            orig,
+            model: None,
+        }
+    }
+
+    /// Port of `JumpTable::switchOver`, given the out-edge position of the switch block each
+    /// table entry goes to: the sorted map from positions to entries, and the default (the
+    /// position most entries go to, if more than one does).
+    pub(crate) fn switch_over(&mut self, positions: &[usize]) {
+        self.block2addr = positions.iter().copied().zip(0..).collect();
+        let Some(&(last, _)) = self.block2addr.last() else { return };
+        self.last_block = last;
+        self.block2addr.sort_unstable();
+        self.default_block = None;
+        let mut maxcount = 1;
+        for group in self.block2addr.chunk_by(|a, b| a.0 == b.0) {
+            if group.len() > maxcount {
+                maxcount = group.len();
+                self.default_block = Some(group[0].0);
+            }
+        }
+    }
+
+    /// `block2Position`: the out edge of the switch block that reaches `bl`.
+    fn block2position(&self, fd: &Funcdata, bl: BlockId) -> Result<usize> {
+        let parent = fd.op(self.op).parent;
+        let edge = fd.blocks.block(bl).ins.iter().find(|e| Some(e.point) == parent);
+        edge.map(|e| e.reverse).ok_or_else(|| LowlevelError("Requested block, not in jumptable".into()))
+    }
+
+    /// `numIndicesByBlock`: how many table entries go to `bl` (`std::equal_range`).
+    pub(crate) fn num_indices_by_block(&self, fd: &Funcdata, bl: BlockId) -> Result<usize> {
+        let pos = self.block2position(fd, bl)?;
+        let v = &self.block2addr;
+        let (mut first, mut len) = (0, v.len());
+        while len > 0 {
+            let half = len >> 1;
+            let mid = first + half;
+            if v[mid].0 < pos {
+                first = mid + 1;
+                len -= half + 1;
+            } else if pos < v[mid].0 {
+                len = half;
+            } else {
+                let left = first + bound(&v[first..mid], pos, false);
+                let right = mid + 1 + bound(&v[mid + 1..first + len], pos, true);
+                return Ok(right - left);
+            }
+        }
+        Ok(0)
+    }
+
+    /// `getIndexByBlock`: the table index of the `i`-th entry going to `bl`.
+    pub(crate) fn index_by_block(&self, fd: &Funcdata, bl: BlockId, i: usize) -> Result<usize> {
+        let pos = self.block2position(fd, bl)?;
+        let from = bound(&self.block2addr, pos, false);
+        let mut hits = self.block2addr[from..].iter().filter(|e| e.0 == pos);
+        hits.nth(i).map(|e| e.1).ok_or_else(|| LowlevelError("Could not get jumptable index for block".into()))
+    }
+}
+
+impl JumpBasic<'_> {
+    /// `markModel(true)`: the ops of the paths from the normalized variable to the BRANCHIND
+    /// (`PathMeld::markPaths`) and the ops reading the guards' variables.
+    fn model_ops(&self) -> HashSet<OpId> {
+        let mut marks = HashSet::new();
+        if let Some(start) = self.path.ops.iter().rposition(|e| e.1 == self.varnode_index as i32) {
+            marks.extend(self.path.ops[..=start].iter().filter_map(|e| e.0));
+        }
+        marks.extend(self.guards.iter().filter(|g| g.cbranch.is_some()).map(|g| g.read_op));
+        marks
+    }
+
+    /// Port of `JumpBasic::findUnnormalized` (`maxaddsub` and `maxext` are 1): from the
+    /// normalized variable back through at most one addition or subtraction of a constant and
+    /// one extension, as long as the variable only flows into the model.
+    fn find_unnormalized(&mut self) {
+        let fd = self.fd;
+        let mut i = self.varnode_index;
+        let normalvn = self.path.common[i];
+        i += 1;
+        let mut switchvn = normalvn;
+        let marks = self.model_ops();
+        let (mut countaddsub, mut countext) = (0, 0);
+        let mut normop: Option<OpId> = None;
+        while i < self.path.common.len() {
+            // flowsOnlyToModel
+            if !fd.vn(switchvn).descend.iter().all(|&op| Some(op) == normop || marks.contains(&op)) {
+                break;
+            }
+            let testvn = self.path.common[i];
+            let Some(d) = def(fd, switchvn) else { break };
+            normop = Some(d);
+            let o = fd.op(d);
+            let Some(j) = o.ins.iter().position(|&v| v == testvn) else { break };
+            match o.opc {
+                Opcode::IntAdd | Opcode::IntSub => {
+                    countaddsub += 1;
+                    if countaddsub <= 1 && fd.vn(o.ins[1 - j]).is_constant() {
+                        switchvn = testvn;
+                    }
+                }
+                Opcode::IntZext | Opcode::IntSext => {
+                    countext += 1;
+                    if countext <= 1 {
+                        switchvn = testvn;
+                    }
+                }
+                _ => {}
+            }
+            if switchvn != testvn {
+                break;
+            }
+            i += 1;
+        }
+        (self.normalvn, self.switchvn) = (Some(normalvn), Some(switchvn));
+    }
+
+    /// Port of `JumpBasic2::findUnnormalized`: the basic form when the normalized variable's
+    /// block dominates the switch (`checkNormalDominance`); else the MULTIEQUAL where the first
+    /// model stopped is both variables.
+    fn find_unnormalized2(&mut self) -> Result<()> {
+        let fd = self.fd;
+        let normalvn = self.path.common[self.varnode_index];
+        let dominates = match def(fd, normalvn) {
+            None if fd.vn(normalvn).is_input() => true,
+            None => return err("JumpBasic2: a normalized switch variable that is neither written nor an input"),
+            Some(d) => {
+                let defblock = fd.op(d).parent;
+                let mut bl = fd.op(self.path.op(0)).parent;
+                while bl.is_some() && bl != defblock {
+                    bl = bl.and_then(|b| fd.blocks.block(b).idom);
+                }
+                bl.is_some()
+            }
+        };
+        if dominates {
+            self.find_unnormalized();
+            return Ok(());
+        }
+        let extravn = self.extravn.ok_or_else(|| LowlevelError("JumpBasic2 without its join varnode".into()))?;
+        if !def(fd, extravn).is_some_and(|m| fd.op(m).ins.iter().take(2).any(|&v| v == normalvn)) {
+            return err("Backward normalization not implemented");
+        }
+        (self.normalvn, self.switchvn) = (Some(extravn), Some(extravn));
+        Ok(())
+    }
+
+    /// Port of `JumpBasic::backup2Switch`: the value of `invn` for which `outvn` is `output`.
+    /// `None` is the C++ `EvaluationError` (the value is outside what an extension gives).
+    fn backup2switch(&self, mut output: u64, outvn: VarnodeId, invn: VarnodeId) -> Result<Option<u64>> {
+        let fd = self.fd;
+        let mut cur = outvn;
+        while cur != invn {
+            let op = def(fd, cur).ok_or_else(|| LowlevelError("Bad switch normalization op".into()))?;
+            let o = fd.op(op);
+            let sizeout = fd.vn(cur).size;
+            let slot = o.ins.iter().position(|&v| !fd.vn(v).is_constant());
+            let slot = slot.ok_or_else(|| LowlevelError("Bad switch normalization op".into()))?;
+            let sizein = fd.vn(o.ins[slot]).size;
+            match o.ins.len() {
+                2 => {
+                    let other = fd.vn(o.ins[1 - slot]);
+                    if !other.is_constant() {
+                        return err("backup2Switch: an operand read from memory is not ported");
+                    }
+                    output = recover_input_binary(o.opc, slot, sizeout, output, other.offset)?;
+                }
+                1 => match recover_input_unary(o.opc, sizeout, output, sizein)? {
+                    Some(v) => output = v,
+                    None => return Ok(None),
+                },
+                _ => return err("Bad switch normalization op"),
+            }
+            cur = o.ins[slot];
+        }
+        Ok(Some(output))
+    }
+
+    /// Port of `JumpBasic::buildLabels`: the label of each table entry, walking the values of
+    /// the model the addresses were recovered with (`orig`); the warnings by table index.
+    fn build_labels(&self, orig: &ValueRange, ntargets: usize) -> Result<(Vec<u64>, LabelWarnings)> {
+        let own = self.jrange.as_ref().map(JumpValues::kept).unwrap_or_default();
+        let no_vn = || LowlevelError("buildLabels before findUnnormalized".into());
+        let (normalvn, switchvn) = (self.normalvn.ok_or_else(no_vn)?, self.switchvn.ok_or_else(no_vn)?);
+        let (mut labels, mut warnings) = (Vec::new(), Vec::new());
+        for (val, reversible) in orig.values() {
+            let mut switchval = NO_LABEL; // not reversible: the default or an exit, hopefully
+            if reversible {
+                match self.backup2switch(val, normalvn, switchvn)? {
+                    Some(v) => {
+                        switchval = v;
+                        if !own.contains(val) {
+                            warnings.push(("This code block may not be properly labeled as switch case", labels.len()));
+                        }
+                    }
+                    None => warnings.push(("Calculation of case label failed", labels.len())),
+                }
+            }
+            labels.push(switchval);
+            // the table may have been truncated by the sanity check
+            if labels.len() >= ntargets {
+                break;
+            }
+        }
+        while labels.len() < ntargets {
+            warnings.push(("Bad switch case", labels.len()));
+            labels.push(NO_LABEL);
+        }
+        Ok((labels, warnings))
+    }
+}
+
+/// The warnings of `buildLabels`, each with the index of the table entry it is about.
+type LabelWarnings = Vec<(&'static str, usize)>;
+
+/// What `matchModel` and `recoverLabels` find for one table.
+struct Labelled {
+    model: Model,
+    labels: Vec<u64>,
+    warnings: LabelWarnings,
+    /// the unnormalized switch variable (none for the trivial model)
+    switchvn: Option<VarnodeId>,
+    /// the model's table size is not the address table's
+    mismatch: bool,
+}
+
+/// Port of `JumpTable::matchModel` (`recoverModel` on the function itself, against the range
+/// recovered on the partial function) and `JumpTable::recoverLabels`. `None`: no model matches
+/// (`JumpModelTrivial`).
+fn match_model(fd: &Funcdata, arch: &Arch, jt: &JumpTable) -> Result<Option<Labelled>> {
+    let expected = jt.orig.map(|o| o.range);
+    let mut basic = JumpBasic::new(fd, arch, jt.op);
+    basic.expected = expected;
+    let mut basic2 = false;
+    if !basic.recover_model() {
+        let path = std::mem::take(&mut basic.path);
+        basic = JumpBasic::new(fd, arch, jt.op);
+        basic.expected = expected;
+        basic2 = true;
+        if !basic.recover_model2(path) {
+            return Ok(None);
+        }
+    }
+    let size = basic.jrange.as_ref().map_or(0, JumpValues::size);
+    let mismatch = size != jt.targets.len() as u64;
+    if mismatch && jt.targets.len() == 1 && size > 1 {
+        return err("switchnorm: a multistage jump table (insertMultistageJump, restart) is not ported");
+    }
+    if basic2 {
+        basic.find_unnormalized2()?;
+    } else {
+        basic.find_unnormalized();
+    }
+    let own = basic.jrange.as_ref().map(JumpValues::kept).unwrap_or_default();
+    let orig = jt.orig.filter(|o| o.size() != 0).unwrap_or(own);
+    let (labels, warnings) = basic.build_labels(&orig, jt.targets.len())?;
+    let guards = basic.guards.iter().map(|g| (g.cbranch, g.indpath)).collect();
+    Ok(Some(Labelled { model: Model { basic2, guards }, labels, warnings, switchvn: basic.switchvn, mismatch }))
+}
+
+/// `matchModel`, `recoverLabels` and `foldInNormalization` for table `i`.
+fn recover_labels(fd: &mut Funcdata, arch: &Arch, i: usize) -> Result<()> {
+    let indop = fd.jumptables[i].op;
+    if fd.jumptables[i].targets.is_empty() {
+        return err("Trying to recover jumptable labels without addresses");
+    }
+    let Some(parent) = fd.op(indop).parent else { return err("switchnorm: a jump table whose BRANCHIND is dead") };
+    let Some(found) = match_model(fd, arch, &fd.jumptables[i])? else {
+        // JumpModelTrivial: one entry per out edge of the switch block, labelled by its address
+        let targets: Vec<u64> = fd.blocks.block(parent).outs.iter().map(|e| fd.blocks.block(e.point).start).collect();
+        let jt = &mut fd.jumptables[i];
+        jt.block2addr = (0..targets.len()).map(|p| (p, p)).collect();
+        jt.last_block = targets.len().checked_sub(1).ok_or_else(|| LowlevelError("switch without out edges".into()))?;
+        jt.default_block = None;
+        jt.labels = targets.clone();
+        jt.targets = targets;
+        jt.model = Some(Model { basic2: false, guards: Vec::new() });
+        jt.orig = None;
+        return Ok(());
+    };
+    let addr = fd.op(indop).seq.addr;
+    if found.mismatch {
+        fd.warning("Could not find normalized switch variable to match jumptable", addr);
+    }
+    for (msg, index) in found.warnings {
+        let target = fd.jumptables[i].targets[index];
+        fd.warning(msg, target);
+    }
+    let jt = &mut fd.jumptables[i];
+    jt.labels = found.labels;
+    jt.model = Some(found.model);
+    jt.orig = None; // clearSavedModel
+    if let Some(switchvn) = found.switchvn {
+        // JumpTable::foldInNormalization: the BRANCHIND reads the unnormalized variable, so the
+        // address calculation dies; the variable's unused high bits may be truncated
+        fd.op_set_input(indop, switchvn, 0)?;
+        let v = fd.vn(switchvn);
+        let mut consume = minimal_mask(fd.nzmask(switchvn));
+        if consume >= calc_mask(v.size) {
+            if let Some(d) = v.def.filter(|&d| fd.op(d).opc == Opcode::IntSext) {
+                consume = calc_mask(fd.vn(fd.op(d).ins[0]).size);
+            }
+        }
+        fd.jumptables[i].switch_var_consume = consume;
+    }
+    Ok(())
+}
+
+/// Port of `BlockBasic::noInterveningStatement`: nothing in the switch block but the switch
+/// (a call, a store, or a value used outside the block or kept in memory is a statement).
+fn no_intervening_statement(fd: &Funcdata, bl: BlockId) -> Result<bool> {
+    for &op in &fd.blocks.block(bl).ops {
+        let o = fd.op(op);
+        if o.is_marker() || o.is_branch() {
+            continue;
+        }
+        if o.is_call() || o.opc == Opcode::Store {
+            return Ok(false);
+        }
+        if matches!(o.opc, Opcode::Copy | Opcode::Subpiece) {
+            continue;
+        }
+        let out = fd.vn(o.out.ok_or_else(|| LowlevelError("noInterveningStatement: an op without output".into()))?);
+        if out.has(super::varnode::VnFlags::ADDRTIED) || out.descend.iter().any(|&r| fd.op(r).parent != Some(bl)) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Port of `Funcdata::pushBranch`: the conditional branch of `bb` becomes a branch, and its
+/// out edge `slot` leaves the switch block `bbnew` instead.
+fn push_branch(fd: &mut Funcdata, bb: BlockId, slot: usize, bbnew: BlockId) -> Result<()> {
+    let last = |fd: &Funcdata, b: BlockId| fd.blocks.block(b).ops.last().copied();
+    let cbranch = last(fd, bb).filter(|&c| fd.op(c).opc == Opcode::Cbranch && fd.blocks.block(bb).outs.len() == 2);
+    let Some(cbranch) = cbranch else { return err("Cannot push non-conditional edge") };
+    if !last(fd, bbnew).is_some_and(|i| fd.op(i).opc == Opcode::Branchind) {
+        return err("Can only push branch into indirect jump");
+    }
+    fd.op_remove_input(cbranch, 1);
+    fd.op_set_opcode(cbranch, Opcode::Branch);
+    fd.blocks.move_out_edge(bb, slot, bbnew);
+    structure_reset(fd)
+}
+
+/// Port of `JumpBasic::foldInOneGuard`: the guard's other target becomes the switch's default,
+/// as a new out edge of the switch block or, when the switch already goes there, by fixing the
+/// CBRANCH's condition.
+fn fold_in_one_guard(fd: &mut Funcdata, i: usize, cbranch: OpId, stored: usize) -> Result<bool> {
+    let Some(cbl) = fd.op(cbranch).parent else { return Ok(false) };
+    let cb = fd.blocks.block(cbl);
+    if cb.outs.len() != 2 {
+        return Ok(false); // the branch was converted since the recovery
+    }
+    let indpath = if cb.flip_path { 1 - stored } else { stored };
+    let Some(switchbl) = fd.op(fd.jumptables[i].op).parent else { return Ok(false) };
+    if cb.outs[indpath].point != switchbl {
+        return Ok(false); // the guard must go straight into the switch block
+    }
+    let guardtarget = cb.outs[1 - indpath].point;
+    let outs = &fd.blocks.block(switchbl).outs;
+    let nout = outs.len();
+    let pos = outs.iter().position(|e| e.point == guardtarget).unwrap_or(nout);
+    let jt = &fd.jumptables[i];
+    if jt.default_is_folded && jt.default_block != Some(pos) {
+        return Ok(false); // only one folded target
+    }
+    if !no_intervening_statement(fd, switchbl)? {
+        return Ok(false);
+    }
+    if pos == nout {
+        // addBlockToSwitch without a label, setLastAsDefault
+        let start = fd.blocks.block(guardtarget).start;
+        let jt = &mut fd.jumptables[i];
+        jt.targets.push(start);
+        jt.last_block = nout;
+        jt.block2addr.push((nout, jt.targets.len() - 1));
+        jt.labels.push(NO_LABEL);
+        jt.default_block = Some(nout);
+        push_branch(fd, cbl, 1 - indpath, switchbl)?;
+    } else {
+        let val = u64::from((indpath == 0) == fd.op(cbranch).flags.has(OpFlags::BOOLEAN_FLIP));
+        let size = fd.vn(fd.op(cbranch).ins[0]).size;
+        let c = fd.new_constant(size, val);
+        fd.op_set_input(cbranch, c, 1)?;
+        fd.jumptables[i].default_block = Some(pos);
+    }
+    fd.jumptables[i].default_is_folded = true;
+    Ok(true)
+}
+
+/// Port of `JumpBasic::foldInGuards` (with `JumpBasic2::foldInOneGuard`) for table `i`.
+fn fold_in_guards(fd: &mut Funcdata, i: usize) -> Result<bool> {
+    let Some(mut model) = fd.jumptables[i].model.take() else { return Ok(false) };
+    let mut change = false;
+    for g in &mut model.guards {
+        let Some(cbranch) = g.0 else { continue };
+        if fd.op(cbranch).is_dead() {
+            g.0 = None;
+            continue;
+        }
+        let folded = if model.basic2 {
+            // the last block of the table is the value the guard's other path gives
+            fd.jumptables[i].default_block = Some(fd.jumptables[i].last_block);
+            true
+        } else {
+            fold_in_one_guard(fd, i, cbranch, g.1)?
+        };
+        if folded {
+            g.0 = None;
+            change = true;
+        }
+    }
+    fd.jumptables[i].model = Some(model);
+    Ok(change)
+}
+
+/// Port of `ActionSwitchNorm::apply`: each table gets its case labels once (the model matched
+/// on the function, the labels, the BRANCHIND reading the unnormalized switch variable), and
+/// its guards are folded into the switch as they become foldable.
+pub(crate) fn switch_norm(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
+    let mut count = 0;
+    for i in 0..fd.jumptables.len() {
+        if fd.jumptables[i].labels.is_empty() {
+            recover_labels(fd, arch, i)?;
+            count += 1;
+        }
+        if fold_in_guards(fd, i)? {
+            fd.structure.clear(); // the structure is redone
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Table entries 0..5 go to out edges 2, 0, 2, 1, 2: the map sorts by edge then entry, the
+    /// default is the edge most entries take, the last block is the last entry's.
+    #[test]
+    fn switch_over_sorts_and_picks_the_default() {
+        let mut jt = JumpTable::new(OpId(0), vec![0x30, 0x10, 0x30, 0x20, 0x30], None);
+        jt.switch_over(&[2, 0, 2, 1, 2]);
+        assert_eq!(jt.block2addr, [(0, 1), (1, 3), (2, 0), (2, 2), (2, 4)]);
+        assert_eq!((jt.default_block, jt.last_block), (Some(2), 2));
+        assert_eq!((bound(&jt.block2addr, 2, false), bound(&jt.block2addr, 2, true)), (2, 5));
+        assert_eq!((bound(&jt.block2addr, 3, false), bound(&jt.block2addr, 0, true)), (5, 1));
+        // one entry per edge: no default
+        jt.switch_over(&[1, 0]);
+        assert_eq!((jt.default_block, jt.last_block), (None, 0));
+    }
+
+    /// The values of a range with an extra value: the extra one comes last and is not reversible.
+    #[test]
+    fn value_range_walks_range_then_extra() {
+        let v = ValueRange { range: CircleRange::new(3, 6, 4, 1), extra: Some(9) };
+        assert_eq!(v.values(), [(3, true), (4, true), (5, true), (9, false)]);
+        assert_eq!(v.size(), 4);
+        assert!(v.contains(9) && v.contains(4) && !v.contains(6));
+        let empty = ValueRange::default();
+        assert_eq!((empty.size(), empty.values()), (0, vec![]));
+        assert!(range_eq(&CircleRange::default(), &CircleRange { left: 5, ..CircleRange::default() }));
+    }
+
+    /// Reverse evaluation as `OpBehavior::recoverInput*`: `x + 5 == 7`, `9 - x == 2`,
+    /// `x - 9 == 2`; an extension's output outside its image is an evaluation error.
+    #[test]
+    fn reverse_evaluation() {
+        assert_eq!(recover_input_binary(Opcode::IntAdd, 0, 4, 7, 5).unwrap(), 2);
+        assert_eq!(recover_input_binary(Opcode::IntSub, 1, 4, 2, 9).unwrap(), 7);
+        assert_eq!(recover_input_binary(Opcode::IntSub, 0, 4, 2, 9).unwrap(), 11);
+        assert_eq!(recover_input_binary(Opcode::IntAdd, 0, 1, 1, 2).unwrap(), 0xff);
+        assert!(recover_input_binary(Opcode::IntMult, 0, 4, 8, 2).is_err());
+        assert_eq!(recover_input_unary(Opcode::IntZext, 4, 0x7f, 1).unwrap(), Some(0x7f));
+        assert_eq!(recover_input_unary(Opcode::IntZext, 4, 0x100, 1).unwrap(), None);
+        assert_eq!(recover_input_unary(Opcode::IntSext, 4, 0xffff_ff80, 1).unwrap(), Some(0x80));
+        assert_eq!(recover_input_unary(Opcode::IntSext, 4, 0x80, 1).unwrap(), None);
+        assert_eq!(recover_input_unary(Opcode::IntSext, 4, 0x17f, 1).unwrap(), None);
+    }
 }

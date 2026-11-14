@@ -12,7 +12,7 @@ pub(crate) struct BlockId(pub(crate) u32);
 
 /// `FlowBlock` edge flags (block.hh), kept on both ends of an edge.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct EdgeFlags(u8);
+struct EdgeFlags(u16);
 
 impl EdgeFlags {
     const IRREDUCIBLE: EdgeFlags = EdgeFlags(1);
@@ -23,6 +23,9 @@ impl EdgeFlags {
     const LOOP: EdgeFlags = EdgeFlags(32);
     /// `f_immed_copy`: a COPY has been propagated across the edge (`RulePropagateCopy`)
     const IMMED_COPY: EdgeFlags = EdgeFlags(128);
+    /// `f_defaultswitch_edge`: the default edge of a switch block (`setDefaultSwitch`); it
+    /// stays on the edge until the block gets another default
+    const DEFAULT_SWITCH: EdgeFlags = EdgeFlags(256);
     /// every spanning-tree label, `f_loop_exit_edge` (64) included
     const SPANNING: EdgeFlags = EdgeFlags(127);
     /// the labels `structureLoops` clears before rebuilding the tree
@@ -48,12 +51,12 @@ pub(crate) struct Edge {
 impl Edge {
     /// The label with the C++ `FlowBlock::edge_flags` bit values (`f_irreducible` 8, `f_tree_edge`
     /// 0x10, `f_forward_edge` 0x20, `f_cross_edge` 0x40, `f_back_edge` 0x80, `f_loop_edge` 2,
-    /// `f_immed_copy` 0x200), for the structured copy (stage S8). Bit 64 maps to `f_loop_exit_edge`
+    /// `f_immed_copy` 0x200, `f_defaultswitch_edge` 4), for the structured copy (stage S8). Bit 64 maps to `f_loop_exit_edge`
     /// 0x100: it has no constant here and the basic graph never sets it (`findSpanningTree` clears
     /// it with the other labels; only the hierarchy's `LoopBody` sets and clears it).
     pub(crate) fn cpp_label(&self) -> u32 {
-        const MAP: [u32; 8] = [8, 0x10, 0x20, 0x40, 0x80, 2, 0x100, 0x200];
-        (0..8).filter(|&i| self.label.0 & (1 << i) != 0).map(|i| MAP[i]).fold(0, |a, b| a | b)
+        const MAP: [u32; 9] = [8, 0x10, 0x20, 0x40, 0x80, 2, 0x100, 0x200, 4];
+        (0..9).filter(|&i| self.label.0 & (1 << i) != 0).map(|i| MAP[i]).fold(0, |a, b| a | b)
     }
 }
 
@@ -78,6 +81,8 @@ pub(crate) struct BlockBasic {
     pub(crate) delayed_donothing: bool,
     /// `f_donothing_loop`: the do-nothing infinite-loop warning was given
     pub(crate) donothing_loop: bool,
+    /// `f_flip_path`: the two out edges were swapped an odd number of times (`swapEdges`)
+    pub(crate) flip_path: bool,
     /// the immediate dominator (`immed_dom`), none for the entry
     pub(crate) idom: Option<BlockId>,
 }
@@ -119,6 +124,7 @@ impl BlockGraph {
             copymap: id,
             delayed_donothing: false,
             donothing_loop: false,
+            flip_path: false,
             mark: false,
             entry_point: false,
             idom: None,
@@ -310,15 +316,28 @@ impl BlockGraph {
         self.block_mut(bl).entry_point = entry;
     }
 
-    /// Port of `FlowBlock::swapEdges` on a two-way block (stage S8). `f_flip_path` is not kept:
-    /// its only reader is `JumpBasic::foldInGuards` (jumptable.cc, group `switchnorm`), which is
-    /// not ported; it must be kept when `switchnorm` is.
+    /// Port of `FlowBlock::swapEdges` on a two-way block (stage S8); `f_flip_path` flips with
+    /// the edges (the guards of a jump table read it, jumptable.rs).
     pub(crate) fn swap_edges(&mut self, bl: BlockId) {
         self.block_mut(bl).outs.swap(0, 1);
+        self.block_mut(bl).flip_path ^= true;
         for i in 0..2 {
             let Edge { point, reverse, .. } = self.block(bl).outs[i];
             self.block_mut(point).ins[reverse].reverse = i;
         }
+    }
+
+    /// Port of `FlowBlock::setDefaultSwitch`: out edge `pos` of `bl` is its only default edge.
+    pub(crate) fn set_default_switch(&mut self, bl: BlockId, pos: usize) {
+        for i in 0..self.block(bl).outs.len() {
+            self.clear_out_edge_flag(bl, i, EdgeFlags::DEFAULT_SWITCH);
+        }
+        self.set_out_edge_flag(bl, pos, EdgeFlags::DEFAULT_SWITCH);
+    }
+
+    /// `FlowBlock::isDefaultBranch`.
+    pub(crate) fn is_default_branch(&self, bl: BlockId, i: usize) -> bool {
+        self.block(bl).outs.get(i).is_some_and(|e| e.label.has(EdgeFlags::DEFAULT_SWITCH))
     }
 
     fn set_out_edge_flag(&mut self, bl: BlockId, i: usize, f: EdgeFlags) {

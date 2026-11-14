@@ -6,18 +6,18 @@
 //! `markLabelBumpUp`, each per block kind.
 //!
 //! The C++ recursions over the hierarchy are work lists here (deep nesting is input-reachable).
-//! Not ported: the case labels. They come from `JumpTable::recoverLabels`, which the action
-//! `switchnorm` runs (with `matchModel`, `foldInNormalization` and `foldInGuards`, none ported),
-//! so a switch with cases fails loudly in `finalizePrinting`. (The reference with `switchnorm`
-//! off reads an empty label table there.)
+//! The case labels come from the jump table (`JumpTable::recoverLabels`, action `switchnorm`,
+//! jumptable.rs). With `switchnorm` off a switch with cases fails loudly in `finalizePrinting`
+//! (the reference reads an empty label table there).
 
 use std::collections::HashSet;
 
 use super::block::BlockId;
+use super::funcdata::JumpTable;
 use super::op::{OpFlags, OpId};
 use super::opcode::Opcode;
 use super::returnsplit::{front_leaf, goto_prints};
-use super::structure::{switch_defaults, Kind, SId, Structure, ROOT};
+use super::structure::{Kind, SId, Structure, ROOT};
 use super::variable::{high, HighId};
 use super::varnode::{VarnodeId, VnFlags};
 use super::{err, Arch, Funcdata, LowlevelError, Result};
@@ -349,14 +349,10 @@ fn move_respecting_cover(fd: &mut Funcdata, op: OpId, last: OpId) -> Result<bool
 
 /// Port of `BlockSwitch::finalizePrinting`: the basic-block part of `grabCaseBasic` (each case's
 /// first basic block, out edge, default flag and fall-through chain), then the labels and the
-/// final order. The labels are not ported (see the module doc), so any case fails here.
+/// final order.
 fn finalize_switch(s: &mut Structure, fd: &Funcdata, b: SId) -> Result<()> {
-    let switch_comp = *s.b(b).list.first().ok_or_else(|| LowlevelError("switch without components".into()))?;
-    let switchbl = match s.exit_leaf(switch_comp).map(|l| &s.b(l).kind) {
-        Some(Kind::Copy(bb)) => *bb,
-        _ => return err("Could not get switch leaf"),
-    };
-    let defaults = switch_defaults(fd);
+    let switchbl = switch_leaf(s, b)?;
+
     let mut cases = std::mem::take(&mut s.bm(b).cases);
     let mut casemap = vec![None; fd.blocks.block(switchbl).outs.len()];
     for (i, case) in cases.iter_mut().enumerate() {
@@ -364,7 +360,7 @@ fn finalize_switch(s: &mut Structure, fd: &Funcdata, b: SId) -> Result<()> {
         case.outindex = in_rev_index(fd, basic, switchbl)
             .ok_or_else(|| LowlevelError("Case block has become detached from switch".into()))?;
         case.basicblock = Some(basic);
-        case.isdefault = defaults.contains(&(case.outindex, switchbl));
+        case.isdefault = fd.blocks.is_default_branch(switchbl, case.outindex);
         if case.gototype == 0 {
             if let Some(slot) = casemap.get_mut(case.outindex) {
                 *slot = Some(i);
@@ -382,13 +378,48 @@ fn finalize_switch(s: &mut Structure, fd: &Funcdata, b: SId) -> Result<()> {
             }
         }
     }
-    let res = if cases.is_empty() {
-        Ok(())
-    } else {
-        err("switch case labels: not implemented in ghidra-rs yet (JumpTable::recoverLabels, action switchnorm)")
-    };
+    let res = case_labels(fd, switchbl, &cases).map(|labels| label_cases(&mut cases, &labels));
     s.bm(b).cases = cases;
     res
+}
+
+/// The basic block of a switch block's switch component (the block ending in the BRANCHIND).
+fn switch_leaf(s: &Structure, b: SId) -> Result<BlockId> {
+    let switch_comp = *s.b(b).list.first().ok_or_else(|| LowlevelError("switch without components".into()))?;
+    match s.exit_leaf(switch_comp).map(|l| &s.b(l).kind) {
+        Some(Kind::Copy(bb)) => Ok(*bb),
+        _ => err("Could not get switch leaf"),
+    }
+}
+
+/// The jump table of the switch block `switchbl` (`BlockSwitch::jump`).
+fn switch_table(fd: &Funcdata, switchbl: BlockId) -> Result<&JumpTable> {
+    let table = fd.jumptables.iter().find(|jt| fd.op(jt.op).parent == Some(switchbl));
+    table.ok_or_else(|| LowlevelError("switch block without a jump table".into()))
+}
+
+/// For each case, the label of the first table entry going to its first basic block
+/// (`getIndexByBlock(basicblock, 0)`, `getLabelByIndex`); none when no entry does.
+fn case_labels(fd: &Funcdata, switchbl: BlockId, cases: &[CaseOrder]) -> Result<Vec<Option<u64>>> {
+    if cases.is_empty() {
+        return Ok(Vec::new());
+    }
+    let jt = switch_table(fd, switchbl)?;
+    cases.iter().map(|c| Ok(case_label_list(fd, jt, c, 1)?.first().copied())).collect()
+}
+
+/// The first `max` labels of a case (`BlockSwitch::getNumLabels`, `getLabel`).
+fn case_label_list(fd: &Funcdata, jt: &JumpTable, case: &CaseOrder, max: usize) -> Result<Vec<u64>> {
+    let basic = case.basicblock.ok_or_else(|| LowlevelError("switch case without its basic block".into()))?;
+    let num = jt.num_indices_by_block(fd, basic)?.min(max);
+    let label = |j| {
+        let index = jt.index_by_block(fd, basic, j)?;
+        // the C++ reads past an empty label table here (the reference's assertion)
+        jt.labels.get(index).copied().ok_or_else(|| {
+            LowlevelError("switch case labels: the jump table has none (action switchnorm has not run)".into())
+        })
+    };
+    (0..num).map(label).collect()
 }
 
 /// The basic block of `getFrontLeaf()->subBlock(0)`.
@@ -405,11 +436,10 @@ fn in_rev_index(fd: &Funcdata, bl: BlockId, from: BlockId) -> Option<usize> {
 }
 
 /// The label part of `BlockSwitch::finalizePrinting`: each fall-through chain root takes the
-/// label of its first basic block (`label_of`: none when the jump table has no entry for it,
-/// label 0), its chain the same label at increasing depth; then the stable sort by label and
-/// depth (`CaseOrder::compare`).
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn label_cases(cases: &mut [CaseOrder], label_of: impl Fn(BlockId) -> Option<u64>) {
+/// label of its first basic block (`labels`, by case: none when the jump table has no entry
+/// for it, label 0), its chain the same label at increasing depth; then the stable sort by
+/// label and depth (`CaseOrder::compare`).
+fn label_cases(cases: &mut [CaseOrder], labels: &[Option<u64>]) {
     for i in 0..cases.len() {
         let mut j = cases[i].chain;
         while let Some(k) = j {
@@ -421,7 +451,7 @@ pub(crate) fn label_cases(cases: &mut [CaseOrder], label_of: impl Fn(BlockId) ->
         }
     }
     for i in 0..cases.len() {
-        let Some(label) = cases[i].basicblock.and_then(&label_of) else {
+        let Some(label) = labels.get(i).copied().flatten() else {
             cases[i].label = 0;
             continue;
         };
@@ -553,8 +583,17 @@ pub(crate) fn tree_extra(s: &Structure, fd: &Funcdata, b: SId) -> String {
             let _ = write!(out, " g{}", bl.goto_type);
         }
         Kind::Switch => {
+            // once the jump table has labels: the default and exit flags, the chain, the depth
+            // and the labels of each case (`printCaseExtra` of the patch)
+            let table = switch_leaf(s, b).and_then(|bb| switch_table(fd, bb)).ok().filter(|jt| !jt.labels.is_empty());
             for c in &bl.cases {
                 let _ = write!(out, " c{}:{}", s.b(c.block).index, c.gototype);
+                let Some(jt) = table else { continue };
+                let (d, x) = (if c.isdefault { "d" } else { "" }, if c.isexit { "x" } else { "" });
+                let chain = c.chain.map_or(-1, |k| k as i64);
+                let labels = case_label_list(fd, jt, c, usize::MAX).unwrap_or_default();
+                let labels: Vec<String> = labels.iter().map(|l| format!("{l:x}")).collect();
+                let _ = write!(out, ":{d}{x}:{chain}:{}:{}", c.depth, labels.join(","));
             }
         }
         Kind::WhileDo => {
@@ -585,12 +624,7 @@ mod tests {
     #[test]
     fn case_labels_order_chains() {
         let mut cases = vec![case(10, 1, Some(2)), case(11, 2, None), case(12, 3, None)];
-        label_cases(&mut cases, |bb| match bb.0 {
-            1 => Some(7),
-            2 => Some(3),
-            3 => Some(1),
-            _ => None,
-        });
+        label_cases(&mut cases, &[Some(7), Some(3), Some(1)]);
         let order: Vec<(u32, u64, i32)> = cases.iter().map(|c| (c.block.0, c.label, c.depth)).collect();
         assert_eq!(order, vec![(11, 3, 0), (10, 7, 0), (12, 7, 1)]);
     }
@@ -599,7 +633,7 @@ mod tests {
     #[test]
     fn case_without_entry_is_label_zero() {
         let mut cases = vec![case(10, 1, None), case(11, 2, None)];
-        label_cases(&mut cases, |bb| (bb.0 == 1).then_some(5));
+        label_cases(&mut cases, &[Some(5), None]);
         assert_eq!(cases.iter().map(|c| (c.block.0, c.label)).collect::<Vec<_>>(), vec![(11, 0), (10, 5)]);
     }
 }

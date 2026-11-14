@@ -15,7 +15,8 @@ use super::{err, heritage, Arch, Funcdata, Result};
 /// `universalAction` as the `decompile` root has it, with the groups in `disabled` switched
 /// off (`option currentaction decompile <group> off`): the root `universal` (restart group,
 /// once per function), its first actions, the repeating groups `fullloop`, `mainloop` and
-/// `stackstall`, and the root's actions after `fullloop` to `stop` (ported through `mapglobals` and `finalstructure`, the tail; `namevars`, `setcasts` and `switchnorm` are not). `oppool1` holds the
+/// `stackstall`, and the root's actions after `fullloop` to `stop` (ported through `mapglobals`, `namevars` and
+/// `finalstructure`, the tail; `setcasts` is not). `oppool1` holds the
 /// ported rules (`rules::OPPOOL1`) less those `togglerule` switched off (`rule:<name>` in
 /// `disabled`); the actions named `action:<name>` there (`DECOMP_SKIP_ACTIONS`) are left out. An
 /// action that is not ported fails when it runs with its group on.
@@ -176,7 +177,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
         ("directwrite", "protorecovery_b", not_ported),
         ("deadcode", "deadcode", c::dead_code),
         ("donothing", "deadcontrolflow", c::do_nothing),
-        ("switchnorm", "switchnorm", not_ported),
+        ("switchnorm", "switchnorm", super::jumptable::switch_norm),
         ("returnsplit", "returnsplit", super::returnsplit::return_split),
         ("unjustifiedparams", "protorecovery", c::unjustified_params),
         ("starttypes", "typerecovery", super::infertypes::start_types),

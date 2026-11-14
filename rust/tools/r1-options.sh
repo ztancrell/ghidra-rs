@@ -2,7 +2,7 @@
 # Writes the options of the rule-stage checks: S4's options (s4-options.txt) with more groups on,
 # and `option togglerule <rule> off` for every rule of `oppool1` and of the `cleanup` pool whose
 # group is on and which ghidra-rs does not port yet, and of `oppool2` (the tables in
-# ghidra-rs/src/decomp/rules/mod.rs). Rerun it when rules land. It writes nine files:
+# ghidra-rs/src/decomp/rules/mod.rs). Rerun it when rules land. It writes eleven files:
 #   rust/tools/corpus/r1-options.txt      groups `analysis`, `cleanup` on (the R1/R2/R3 check)
 #   rust/tools/corpus/subvar-options.txt  also `subvar` on (the R3 subvar check)
 #   rust/tools/corpus/r4-options.txt      also `floatprecision` on (the R4 check)
@@ -12,6 +12,8 @@
 #   rust/tools/corpus/s8-t-options.txt    s6-options.txt with `blockrecovery`, `returnsplit` on (tail)
 #   rust/tools/corpus/tail-r-options.txt  s8-r-options.txt with `localrecovery` on (tail, prototypes)
 #   rust/tools/corpus/tail-t-options.txt  s8-t-options.txt with `localrecovery` on (tail, prototypes)
+#   rust/tools/corpus/sw-r-options.txt    s8-r-options.txt with `switchnorm` on (switchnorm, finalstructure)
+#   rust/tools/corpus/sw-t-options.txt    s8-t-options.txt with `switchnorm` on (switchnorm, finalstructure)
 set -e
 rust=$(cd "$(dirname "$0")/.." && pwd)
 cpp=$rust/../Ghidra/Features/Decompiler/src/decompile/cpp
@@ -65,3 +67,8 @@ echo "s8-t-options.txt: s6-options.txt with blockrecovery and returnsplit on"
 grep -v "decompile localrecovery off" "$rust/tools/corpus/s8-r-options.txt" > "$rust/tools/corpus/tail-r-options.txt"
 grep -v "decompile localrecovery off" "$rust/tools/corpus/s8-t-options.txt" > "$rust/tools/corpus/tail-t-options.txt"
 echo "tail-r-options.txt, tail-t-options.txt: s8-r/s8-t with localrecovery on"
+# the switch checks (switchnorm, and finalstructure with case labels): s8-r/s8-t with group
+# `switchnorm` on
+grep -v "decompile switchnorm off" "$rust/tools/corpus/s8-r-options.txt" > "$rust/tools/corpus/sw-r-options.txt"
+grep -v "decompile switchnorm off" "$rust/tools/corpus/s8-t-options.txt" > "$rust/tools/corpus/sw-t-options.txt"
+echo "sw-r-options.txt, sw-t-options.txt: s8-r/s8-t with switchnorm on"

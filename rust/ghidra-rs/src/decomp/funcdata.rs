@@ -25,11 +25,30 @@ const UNIQUE_ANALYSIS: u64 = 0x1000_0000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CallId(pub(crate) u32);
 
-/// Port of the S1a part of `JumpTable`: the indirect jump and its targets in table order.
+/// Port of `JumpTable` as a function keeps it (its methods are in jumptable.rs): the indirect
+/// jump, its targets in table order (`addresstable`), and what `switchOver`, `recoverLabels`
+/// and `foldInGuards` (action `switchnorm`) keep.
 #[derive(Debug, Clone)]
 pub(crate) struct JumpTable {
     pub(crate) op: OpId,
     pub(crate) targets: Vec<u64>,
+    /// `label`: the case label of each table entry, once `switchnorm` has run
+    pub(crate) labels: Vec<u64>,
+    /// `block2addr`: (out-edge position of the switch block, table index), sorted by `switchOver`
+    pub(crate) block2addr: Vec<(usize, usize)>,
+    /// `defaultBlock`: the out-edge position of the default case, if there is one
+    pub(crate) default_block: Option<usize>,
+    /// `lastBlock`: the out-edge position of the last table entry
+    pub(crate) last_block: usize,
+    /// `defaultIsFolded`: the default is the target of a folded guard
+    pub(crate) default_is_folded: bool,
+    /// `switchVarConsume`: the bits of the switch variable the table reads
+    pub(crate) switch_var_consume: u64,
+    /// the values of the model the addresses were recovered with on the partial function
+    /// (`origmodel`), until the labels are built
+    pub(crate) orig: Option<super::jumptable::ValueRange>,
+    /// `jmodel` on this function, after `matchModel`
+    pub(crate) model: Option<super::jumptable::Model>,
 }
 
 /// One function being decompiled. Jump-table recovery clones it as the partial function
