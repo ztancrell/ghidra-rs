@@ -7,13 +7,16 @@
 //!
 //! Scopes and symbols live in one arena ([`Database`]) addressed by [`ScopeId`] and
 //! [`SymbolId`]. A scope's name tree is the C++ `SymbolNameTree` (by name, then `nameDedup`).
-//! Its map is a list of entries per space; [`Database::find_container`] walks the entries
-//! containing the point in the order of the C++ `rangemap` (first offset, then the use-point
-//! subsort, then insertion) from the last, with `findContainer`'s conditions. The local
-//! scope's stack ranges are `Funcdata::localmap` (`LocalMap`, varmap.rs).
+//! Its map is one [`RangeMap`] per space (`maptable`, rangemap.rs), so `printEntries` and
+//! [`Database::find_container`] meet the entries in the order the C++ does. The local scope's
+//! stack ranges are `Funcdata::localmap` (`LocalMap`, varmap.rs).
+//!
+//! Known limit: one [`Database`] belongs to one function, where the C++ has one global scope
+//! per process, so global symbols of an earlier decompilation in the same process are not seen.
 
 use std::collections::BTreeMap;
 
+use super::rangemap::{RangeMap, Subsort, SUB_FIRST, SUB_LAST};
 use super::varnode::Space;
 use super::{LowlevelError, Result};
 
@@ -61,8 +64,6 @@ pub(crate) struct SymbolEntry {
     pub(crate) space: Space,
     pub(crate) offset: u64,
     pub(crate) size: u32,
-    /// the first use point (the rangemap subsort); `None` for an entry valid everywhere
-    pub(crate) first_use: Option<u64>,
     pub(crate) uselimit: UseLimit,
 }
 
@@ -70,6 +71,16 @@ impl SymbolEntry {
     /// `getLast`
     fn last(&self) -> u64 {
         self.offset.wrapping_add(u64::from(self.size)).wrapping_sub(1)
+    }
+
+    /// `SymbolRange::getSubsort`: the first range of the use limit, unless the symbol is
+    /// address-tied.
+    fn subsort(&self, addr_tied: bool) -> Result<Subsort> {
+        if addr_tied {
+            return Ok(SUB_FIRST);
+        }
+        let first = self.uselimit.0.iter().map(|&(s, first, _)| (s.index(), first)).min();
+        first.ok_or_else(|| LowlevelError("Map entry with empty uselimit".into()))
     }
 }
 
@@ -90,6 +101,7 @@ pub(crate) struct Symbol {
 
 impl Symbol {
     /// `Symbol::isNameUndefined`: a `$$undefXXXXXXXX` placeholder.
+    #[allow(dead_code)] // for ActionNameVars, not ported yet
     pub(crate) fn is_name_undefined(&self) -> bool {
         self.name.len() == 15 && self.name.starts_with("$$undef")
     }
@@ -98,12 +110,10 @@ impl Symbol {
 /// Port of `ScopeInternal` (with `ScopeLocal`'s stack naming data).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Scope {
-    pub(crate) name: String,
-    pub(crate) parent: Option<ScopeId>,
     /// `nametree`
     names: BTreeMap<(String, u32), SymbolId>,
-    /// `maptable`: (symbol, entry index) per space, in insertion order
-    map: Vec<(Space, SymbolId, usize)>,
+    /// `maptable`: the entries (symbol, entry index) of each space, by space index
+    maps: BTreeMap<u32, RangeMap<(SymbolId, usize)>>,
     /// `category`
     categories: Vec<Vec<Option<SymbolId>>>,
     /// `ScopeLocal`: the stack space, whether it grows down, the parameter range
@@ -171,9 +181,9 @@ impl Database {
     }
 
     /// A new empty scope.
-    pub(crate) fn new_scope(&mut self, name: &str, parent: Option<ScopeId>, stack: Option<StackNaming>) -> ScopeId {
+    pub(crate) fn new_scope(&mut self, stack: Option<StackNaming>) -> ScopeId {
         let id = ScopeId(self.scopes.len() as u32);
-        self.scopes.push(Scope { name: name.into(), parent, stack, ..Scope::default() });
+        self.scopes.push(Scope { stack, ..Scope::default() });
         id
     }
 
@@ -234,41 +244,31 @@ impl Database {
         });
         self.insert_name(id);
         if let Some(e) = entry {
-            let space = e.space;
-            self.symbols[id.0 as usize].entries.push(e);
-            self.scopes[scope.0 as usize].map.push((space, id, 0));
+            let s = &mut self.symbols[id.0 as usize];
+            // Scope::addMap: an entry without a use limit holds everywhere
+            if e.uselimit.0.is_empty() {
+                s.flags.addr_tied = true;
+            }
+            // ScopeInternal::addMapInternal
+            if e.last() < e.offset {
+                return Err(LowlevelError(format!("Symbol {} extends beyond the end of the address space", s.name)));
+            }
+            let sub = e.subsort(s.flags.addr_tied)?;
+            let map = self.scopes[scope.0 as usize].maps.entry(e.space.index()).or_default();
+            map.insert((id, 0), e.offset, e.last(), sub);
+            s.entries.push(e);
         }
         Ok(id)
     }
 
     /// `ScopeInternal::renameSymbol`.
+    #[allow(dead_code)] // for ActionNameVars, not ported yet
     pub(crate) fn rename_symbol(&mut self, sym: SymbolId, name: &str) {
         let s = &self.symbols[sym.0 as usize];
         let key = (s.name.clone(), s.dedup);
         self.scopes[s.scope.0 as usize].names.remove(&key);
         self.symbols[sym.0 as usize].name = name.to_string();
         self.insert_name(sym);
-    }
-
-    /// The entries of `scope` in `space` containing `off`, in rangemap order (first offset,
-    /// first use, insertion).
-    fn entries_at(&self, scope: ScopeId, space: Space, off: u64) -> Vec<(SymbolId, usize)> {
-        let mut v: Vec<(usize, SymbolId, usize)> = self
-            .scope(scope)
-            .map
-            .iter()
-            .enumerate()
-            .filter(|&(_, &(s, sym, e))| {
-                let en = &self.symbol(sym).entries[e];
-                s == space && en.offset <= off && off <= en.last()
-            })
-            .map(|(i, &(_, sym, e))| (i, sym, e))
-            .collect();
-        v.sort_by_key(|&(i, sym, e)| {
-            let en = &self.symbol(sym).entries[e];
-            (en.offset, en.first_use.is_some(), en.first_use, i)
-        });
-        v.into_iter().map(|(_, sym, e)| (sym, e)).collect()
     }
 
     /// `SymbolEntry::inUse`.
@@ -280,7 +280,8 @@ impl Database {
     }
 
     /// Port of `ScopeInternal::findContainer`: the smallest entry in use at `usepoint` holding
-    /// the whole range, preferring the last in map order; an exact size stops the search.
+    /// the whole range, walking the pieces at the point from the last (those sub-sorted after
+    /// the use point are left out); an exact size stops the search.
     pub(crate) fn find_container(
         &self,
         scope: ScopeId,
@@ -292,11 +293,10 @@ impl Database {
         let end = off.wrapping_add(u64::from(size)).wrapping_sub(1);
         let mut best = None;
         let mut oldsize: Option<u32> = None;
-        for (sym, ei) in self.entries_at(scope, space, off).into_iter().rev() {
+        let map = self.scope(scope).maps.get(&space.index())?;
+        let bound = usepoint.map_or(SUB_LAST, |(s, o)| (s.index(), o));
+        for (sym, ei) in map.find(off, SUB_FIRST, bound).into_iter().rev() {
             let e = &self.symbol(sym).entries[ei];
-            if usepoint.is_some_and(|(_, u)| e.first_use.is_some_and(|f| f > u)) {
-                continue; // after the use point in the subsort
-            }
             if e.last() >= end && oldsize.is_none_or(|o| e.size < o) && self.in_use(sym, e, usepoint) {
                 best = Some((sym, ei));
                 if e.size == size {
@@ -306,15 +306,6 @@ impl Database {
             }
         }
         best
-    }
-
-    /// Port of `ScopeInternal::findOverlap`: some entry intersecting the range.
-    pub(crate) fn find_overlap(&self, scope: ScopeId, space: Space, off: u64, size: u32) -> Option<(SymbolId, usize)> {
-        let last = off.wrapping_add(u64::from(size)).wrapping_sub(1);
-        self.scope(scope).map.iter().find_map(|&(s, sym, e)| {
-            let en = &self.symbol(sym).entries[e];
-            (s == space && en.offset <= last && off <= en.last()).then_some((sym, e))
-        })
     }
 
     /// Port of `ScopeInternal::buildUndefinedName`: one more than the highest `$$undef` name.
@@ -458,8 +449,8 @@ impl Database {
     /// scope ([`GLOBAL`], [`LOCAL`]).
     pub(crate) fn for_function() -> Database {
         let mut db = Database::default();
-        db.new_scope("", None, None);
-        db.new_scope("", Some(GLOBAL), None);
+        db.new_scope(None);
+        db.new_scope(None);
         db
     }
 
@@ -475,7 +466,11 @@ impl Database {
         let (scope, key, cat, idx) = (s.scope, (s.name.clone(), s.dedup), s.category, s.cat_index as usize);
         let sc = &mut self.scopes[scope.0 as usize];
         sc.names.remove(&key);
-        sc.map.retain(|&(_, id, _)| id != sym);
+        for (i, e) in self.symbols[sym.0 as usize].entries.iter().enumerate() {
+            if let Some(map) = sc.maps.get_mut(&e.space.index()) {
+                map.erase((sym, i), e.offset, e.last());
+            }
+        }
         if let Some(list) = cat.and_then(|c| sc.categories.get_mut(c as usize)) {
             if list.get(idx) == Some(&Some(sym)) {
                 list[idx] = None;
@@ -494,46 +489,66 @@ impl Database {
         }
     }
 
-    /// `ScopeInternal::printEntries` after the `Scope <name>` line: one line per map entry, the
-    /// spaces in index order and each space's entries in rangemap order (first offset, first
-    /// use, insertion). `addr` prints an address (`Address::printRaw` after its shortcut),
-    /// `ty` a type (`Datatype::printRaw`, its size first) and `space` names a space.
-    pub(crate) fn print_entries(
-        &self,
-        scope: ScopeId,
-        addr: &dyn Fn(Space, u64) -> String,
-        ty: &dyn Fn(Option<super::types::TypeId>) -> (u32, String),
-        space: &dyn Fn(Space) -> String,
-    ) -> String {
-        let mut rows: Vec<(usize, &SymbolEntry, &Symbol)> = self
-            .scope(scope)
-            .map
-            .iter()
-            .enumerate()
-            .map(|(i, &(_, sym, e))| (i, &self.symbol(sym).entries[e], self.symbol(sym)))
-            .collect();
-        rows.sort_by_key(|&(i, e, _)| (e.space.index(), e.offset, e.first_use.is_some(), e.first_use, i));
+    /// `ScopeInternal::printEntries` after the `Scope <name>` line: one line per map entry
+    /// (`MapEntry::printEntry`), the spaces in index order and each space's records in list
+    /// order. `addr` prints an address (its shortcut, then `Address::printRaw`), `ty` a type
+    /// (its size and `Datatype::printRaw`) and `space` names a space. With `attributes`
+    /// (`DECOMP_MAP_EXTRA`, rust/tools/decomp-ref.patch) an `attributes` line follows each entry.
+    pub(crate) fn print_entries(&self, scope: ScopeId, p: &EntryPrinter, attributes: bool) -> Result<String> {
         let mut s = String::new();
-        for (_, e, sym) in rows {
-            let (size, tname) = ty(sym.ty);
-            s += &format!("{} : {}:{} {} : ", sym.name, addr(e.space, e.offset), size, tname);
+        let records = || self.scope(scope).maps.values().flat_map(|m| m.records());
+        for &(id, e) in records() {
+            let sym = self.symbol(id);
+            let e = &sym.entries[e];
+            let (size, tname) = (p.ty)(sym.ty);
+            s += &format!("{} : {}:{} {} : ", sym.name, (p.addr)(e.space, e.offset)?, size, tname);
             if e.uselimit.0.is_empty() {
                 s += "all\n";
             }
             for &(sp, first, last) in &e.uselimit.0 {
-                s += &format!("{}: {:x}-{:x}\n", space(sp), first, last);
+                s += &format!("{}: {:x}-{:x}\n", (p.space)(sp)?, first, last);
+            }
+            if attributes && scope == GLOBAL {
+                s += &self.attributes(id);
             }
         }
-        s
+        if attributes && scope != GLOBAL {
+            for &(id, _) in records() {
+                s += &self.attributes(id);
+            }
+        }
+        Ok(s)
+    }
+
+    /// The `attributes` line of the reference patch (`printSymbolAttributes`).
+    fn attributes(&self, id: SymbolId) -> String {
+        let sym = self.symbol(id);
+        let mut s = format!("attributes {} :", sym.name);
+        for (on, name) in [
+            (sym.flags.addr_tied, " addrtied"),
+            (sym.flags.type_locked, " typelock"),
+            (sym.flags.name_locked, " namelock"),
+            (sym.this_ptr, " this"),
+        ] {
+            if on {
+                s += name;
+            }
+        }
+        if let Some(c) = sym.category {
+            s += &format!(" category {c}:{}", sym.cat_index);
+        }
+        s + "\n"
     }
 }
 
-impl Database {
-    /// A symbol valid everywhere (`Varnode::addrtied`, what an entry without a use limit gets).
-    pub(crate) fn set_addr_tied(&mut self, sym: SymbolId) {
-        self.symbols[sym.0 as usize].flags.addr_tied = true;
-    }
+/// How `print map` writes addresses, types and space names.
+pub(crate) struct EntryPrinter<'a> {
+    pub(crate) addr: &'a dyn Fn(Space, u64) -> Result<String>,
+    pub(crate) ty: &'a dyn Fn(Option<super::types::TypeId>) -> (u32, String),
+    pub(crate) space: &'a dyn Fn(Space) -> Result<String>,
+}
 
+impl Database {
     /// Port of `ScopeInternal::setCategory`: the symbol leaves its category list and joins
     /// `cat` at `index` (a category above 0 appends instead).
     pub(crate) fn set_category(&mut self, sym: SymbolId, cat: u32, index: u32) {
@@ -570,50 +585,78 @@ impl Database {
 
 /// `print map` of the function's local scope (`IfcPrintMap`, `Scope::printBounds`,
 /// `ScopeInternal::printEntries`). With `DECOMP_MAP_EXTRA` set (rust/tools/decomp-ref.patch) the
-/// prototype comes first, as `FuncProto::printRaw` writes it.
+/// prototype comes first (`FuncProto::printRaw`, then each parameter with its name, storage
+/// and attributes and the return storage), each symbol gets an `attributes` line, and the data
+/// symbols of the global scope follow.
 pub(crate) fn print_map(fd: &super::Funcdata, arch: &super::Arch, name: &str) -> Result<String> {
     if fd.proto.locked.is_some() {
         return super::err("print map: the symbols of a locked prototype are not ported");
     }
-    let space_name = |sp: Space| match sp {
-        Space::Sleigh(i) => arch.sleigh.spaces.get(i as usize).map_or("?", |s| s.name.as_str()).to_string(),
-        Space::Stack => "stack".to_string(),
-        _ => "?".to_string(),
+    // the space's name and address size (the stack space has its container's size)
+    let space = |sp: Space| {
+        match sp {
+            Space::Sleigh(i) => arch.sleigh.spaces.get(i as usize).map(|s| (s.name.clone(), s.size)),
+            Space::Stack => {
+                arch.sleigh.spaces.get(arch.spec.stack_container as usize).map(|s| ("stack".into(), s.size))
+            }
+            _ => None,
+        }
+        .ok_or_else(|| LowlevelError("print map: a symbol in a space without a name".into()))
     };
+    let space_name = |sp: Space| space(sp).map(|(n, _)| n);
+    // `Address::getShortcut` and `AddrSpace::printRaw`: the offset padded to the address size
     let addr = |sp: Space, off: u64| {
-        let shortcut = match space_name(sp).as_str() {
-            "register" => '%',
-            "unique" => 'u',
-            n => n.chars().next().unwrap_or('x').to_ascii_lowercase(),
-        };
-        format!("{shortcut}0x{off:08x}")
+        let (n, size) = space(sp)?;
+        Ok(format!("{}0x{off:0w$x}", super::print::shortcut(&n), w = 2 * size as usize))
     };
     let ty =
         |t: Option<super::types::TypeId>| t.map_or((0, "?".to_string()), |t| (fd.types.size(t), fd.types.print_raw(t)));
+    let p = EntryPrinter { addr: &addr, ty: &ty, space: &space_name };
+    let extra = std::env::var_os("DECOMP_MAP_EXTRA").is_some();
     let mut s = String::new();
-    if std::env::var_os("DECOMP_MAP_EXTRA").is_some() {
+    if extra {
         let model = fd.proto.model.map_or("(no model)", |m| arch.spec.models.get(m).name.as_str());
         let out = fd.proto.out_param.map_or("void".to_string(), |(_, _, t)| fd.types.print_raw(t));
-        let params: Vec<String> = fd.symtab.category(LOCAL, 0).iter().map(|&p| ty(fd.symtab.symbol(p).ty).1).collect();
+        let params = fd.symtab.category(LOCAL, 0);
+        let types: Vec<String> = params.iter().map(|&p| ty(fd.symtab.symbol(p).ty).1).collect();
         let pop = match fd.proto.extrapop {
             super::fspec::ExtraPop::Unknown => 0x8000,
             super::fspec::ExtraPop::Known(n) => n,
         };
-        s += &format!("{model} {out} {name}({}) extrapop={pop}\n", params.join(","));
+        s += &format!("{model} {out} {name}({}) extrapop={pop}\n", types.join(","));
+        for (i, &id) in params.iter().enumerate() {
+            let sym = fd.symtab.symbol(id);
+            let e =
+                sym.entries.first().ok_or_else(|| LowlevelError("print map: a parameter without storage".into()))?;
+            s += &format!("param {i}: {} : {}:{}", sym.name, addr(e.space, e.offset)?, ty(sym.ty).0);
+            for (on, name) in
+                [(sym.flags.type_locked, " typelock"), (sym.flags.name_locked, " namelock"), (sym.this_ptr, " this")]
+            {
+                if on {
+                    s += name;
+                }
+            }
+            s += "\n";
+        }
+        s += &match fd.proto.out_param {
+            None => "output: none\n".to_string(),
+            Some((sp, off, t)) => format!("output: {}:{}\n", addr(sp, off)?, fd.types.size(t)),
+        };
     }
     s += &format!("{name}\n");
     for &(first, last) in fd.localmap.ranges() {
         s += &format!("stack: {first:x}-{last:x}\n");
     }
     s += &format!("Scope {name}\n");
-    s += &fd.symtab.print_entries(LOCAL, &addr, &ty, &space_name);
-    if std::env::var_os("DECOMP_MAP_EXTRA").is_some() {
+    s += &fd.symtab.print_entries(LOCAL, &p, extra)?;
+    if extra {
         // the data symbols of the global scope (functions and external references live in `Arch`)
         s += "Global data\n";
-        s += &fd.symtab.print_entries(GLOBAL, &addr, &ty, &space_name);
+        s += &fd.symtab.print_entries(GLOBAL, &p, true)?;
     }
     Ok(s)
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -628,7 +671,7 @@ mod tests {
     #[test]
     fn undefined_names_count_up() {
         let mut db = Database::default();
-        let sc = db.new_scope("f", None, None);
+        let sc = db.new_scope(None);
         assert_eq!(db.build_undefined_name(sc).unwrap(), "$$undef00000000");
         let a = db.add_symbol(sc, "", None, None, None).unwrap();
         assert!(db.symbol(a).is_name_undefined());
@@ -641,7 +684,7 @@ mod tests {
     #[test]
     fn var_names_and_uniqueness() {
         let mut db = Database::default();
-        let sc = db.new_scope("f", None, None);
+        let sc = db.new_scope(None);
         let mut index = 1;
         let r = req(Some((REG, 0)), "i", "EAX", NameFlags::default());
         assert_eq!(db.build_variable_name(sc, &r, &mut index).unwrap(), "iVar1");
@@ -664,7 +707,7 @@ mod tests {
     fn register_and_param_names() {
         let db = {
             let mut db = Database::default();
-            db.new_scope("f", None, None);
+            db.new_scope(None);
             db
         };
         let sc = ScopeId(0);
@@ -694,7 +737,7 @@ mod tests {
     fn stack_names() {
         let mut db = Database::default();
         let st = StackNaming { space: Space::Stack, grows_negative: true, min_param: 4, max_param: 0x40, addr_size: 4 };
-        let sc = db.new_scope("f", None, Some(st));
+        let sc = db.new_scope(Some(st));
         let tied = NameFlags { addr_tied: true, ..NameFlags::default() };
         let mut r = req(Some((Space::Stack, 0xffff_ffec)), "i", "", tied);
         r.space_name = "stack";
@@ -708,17 +751,12 @@ mod tests {
     #[test]
     fn container_prefers_smallest_in_use() {
         let mut db = Database::default();
-        let sc = db.new_scope("f", None, None);
-        let entry = |offset, size, first_use, uselimit| SymbolEntry { space: REG, offset, size, first_use, uselimit };
-        let whole = db
-            .add_symbol(sc, "a", None, None, Some(entry(0, 4, Some(0x10), UseLimit(vec![(RAM, 0x10, 0x40)]))))
-            .unwrap();
-        let low = db
-            .add_symbol(sc, "b", None, None, Some(entry(0, 2, Some(0x10), UseLimit(vec![(RAM, 0x10, 0x20)]))))
-            .unwrap();
+        let sc = db.new_scope(None);
+        let entry = |offset, size, uselimit| SymbolEntry { space: REG, offset, size, uselimit };
+        let whole = db.add_symbol(sc, "a", None, None, Some(entry(0, 4, UseLimit(vec![(RAM, 0x10, 0x40)])))).unwrap();
+        let low = db.add_symbol(sc, "b", None, None, Some(entry(0, 2, UseLimit(vec![(RAM, 0x10, 0x20)])))).unwrap();
         assert_eq!(db.find_container(sc, REG, 0, 2, Some((RAM, 0x18))), Some((low, 0)));
         assert_eq!(db.find_container(sc, REG, 0, 2, Some((RAM, 0x30))), Some((whole, 0)));
         assert_eq!(db.find_container(sc, REG, 0, 4, None), None);
-        assert_eq!(db.find_overlap(sc, REG, 3, 2), Some((whole, 0)));
     }
 }

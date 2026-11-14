@@ -1,4 +1,4 @@
-//! S        for (count, t) in active.trials.iter().filter(|t| t.is_used()).enumerate() {age S4: the main-loop actions of `universalAction` that run with the rule groups off
+//! Stage S4: the main-loop actions of `universalAction` that run with the rule groups off
 //! (coreaction.cc, condexe.cc, the block edits of funcdata_block.cc, and the parameter and
 //! return-value recovery of fspec.cc and funcdata_varnode.cc).
 //!
@@ -1856,7 +1856,7 @@ pub(crate) fn do_nothing(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             continue;
         }
         if fd.blocks.block(bb).outs[0].point == bb {
-            fd.blocks.block_mut(bb).donothing_loop = true; // the warning only
+            warn_do_nothing_loop(fd, bb);
             continue;
         }
         if !unblocked_multi(fd, bb) {
@@ -1873,16 +1873,30 @@ pub(crate) fn do_nothing(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     Ok(0)
 }
 
+/// The infinite-loop case of both do-nothing actions: one warning per block (`f_donothing_loop`).
+fn warn_do_nothing_loop(fd: &mut Funcdata, bb: BlockId) {
+    if !fd.blocks.block(bb).donothing_loop {
+        fd.blocks.block_mut(bb).donothing_loop = true;
+        let start = fd.blocks.block(bb).start;
+        fd.warning("Do nothing block with infinite loop", start);
+    }
+}
+
 /// Port of `ActionLateDoNothing::apply`: the do-nothing blocks [`do_nothing`] delayed go now,
 /// unless removing one would leave a predecessor whose out edges all reach the same block.
 pub(crate) fn late_do_nothing(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     let mut remove = Vec::new();
-    for &bb in &fd.blocks.list {
+    for i in 0..fd.blocks.list.len() {
+        let bb = fd.blocks.list[i];
         if !fd.blocks.block(bb).delayed_donothing || !is_do_nothing(fd, bb) {
             continue;
         }
-        if removing_creates_redundancy(fd, bb) || fd.blocks.block(bb).outs[0].point == bb {
-            continue; // the infinite loop: the warning `do_nothing` already marks
+        if removing_creates_redundancy(fd, bb) {
+            continue;
+        }
+        if fd.blocks.block(bb).outs[0].point == bb {
+            warn_do_nothing_loop(fd, bb);
+            continue;
         }
         if unblocked_multi(fd, bb) {
             remove.push(bb);
@@ -1923,7 +1937,7 @@ fn is_do_nothing(fd: &Funcdata, bb: BlockId) -> bool {
     }
     b.ops.iter().all(|&o| {
         let op = fd.op(o);
-        op.is_marker() || op.opc == Opcode::Branch
+        op.is_marker() || op.is_branch()
     })
 }
 
@@ -2251,29 +2265,56 @@ pub(crate) fn conditional_exe(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
     Ok(0)
 }
 
-/// The data-type a prototype takes from `vn`: its high variable's once highs exist
-/// (`isHighOn`), else the varnode's own.
-fn proto_type(fd: &mut Funcdata, vn: VarnodeId) -> super::types::TypeId {
-    match fd.highs.of(vn) {
-        Some(h) => super::variable::h_type(fd, h).0,
-        None => super::infertypes::vn_type(fd, vn),
+/// `vn->getHigh()->getType()`: fails without high variables, as `Varnode::getHigh` does.
+fn high_type(fd: &mut Funcdata, vn: VarnodeId) -> Result<super::types::TypeId> {
+    if !fd.highs.on {
+        return err("Requesting non-existent high-level");
     }
+    let h = super::variable::high(fd, vn)?;
+    Ok(super::variable::h_type(fd, h).0)
 }
 
-/// Port of `ActionOutputPrototype::apply` for an unlocked output (`updateOutputTypes`,
-/// `updateOutputNoTypes`): the return value is the first input of the first RETURN that is not
-/// a special halt, with its data-type; none makes the function `void`.
+/// Port of `ActionOutputPrototype::apply` (`updateOutputTypes`, `updateOutputNoTypes`): the
+/// return value is the first input of the first RETURN that is not a special halt, with its
+/// high variable's data-type (an unknown of its size while highs are off); none makes the
+/// function `void`. A locked output stays, except that a size-locked one (locked with an
+/// unknown type, `ParameterBasic::setTypeLock`) takes the type of a return value at its storage
+/// (`overrideSizeLockType`).
 pub(crate) fn output_prototype(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
-    if fd.proto.locked.is_some() {
-        // ponytail: a locked output keeps its type; a size-locked one (`undefined4 f()`) would take
-        // the varnode's (`overrideSizeLockType`), to add when a check locks prototypes this far
+    use super::fspec::Storage;
+    use super::types::Meta;
+    let ret = fd.ops_created_with(Opcode::Return).into_iter().find(|&o| !fd.op(o).is_dead() && fd.op(o).halt.is_none());
+    let trial = ret.and_then(|o| fd.op(o).ins.get(1).copied());
+    if let Some(l) = &fd.proto.locked {
+        let (storage, ty) = (l.output.storage.clone(), l.output.ty);
+        let Some(vn) = trial else { return Ok(0) };
+        if !fd.highs.on || fd.types.meta(ty) != Meta::Unknown {
+            return Ok(0); // updateOutputNoTypes leaves a locked output; so does a full type lock
+        }
+        let v = fd.vn(vn);
+        let same = match storage {
+            Some(Storage::Space { space, offset, size }) => {
+                (v.space, v.offset, v.size) == (Space::Sleigh(space), offset, size)
+            }
+            Some(Storage::Stack { offset, size }) => (v.space, v.offset, v.size) == (Space::Stack, offset, size),
+            Some(Storage::Join(_)) => return err("ActionOutputPrototype: a size-locked join output is not ported"),
+            None => false,
+        };
+        if same {
+            let ct = high_type(fd, vn)?;
+            if fd.types.size(ct) != fd.types.size(ty) {
+                return err("Overriding parameter with different type size");
+            }
+            if let Some(l) = &mut fd.proto.locked {
+                l.output.ty = ct;
+            }
+        }
         return Ok(0);
     }
-    let ret = fd.ops_created_with(Opcode::Return).into_iter().find(|&o| !fd.op(o).is_dead() && fd.op(o).halt.is_none());
-    fd.proto.out_param = match ret.and_then(|o| fd.op(o).ins.get(1).copied()) {
+    fd.proto.out_param = match trial {
         None => None,
         Some(vn) => {
-            let ty = proto_type(fd, vn);
+            let ty = if fd.highs.on { high_type(fd, vn)? } else { fd.types.base(fd.vn(vn).size, Meta::Unknown) };
             let v = fd.vn(vn);
             Some((v.space, v.offset, ty))
         }
@@ -2306,15 +2347,25 @@ pub(crate) fn input_prototype(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             }
             let read = !v.descend.is_empty();
             active.register_trial(space, off, size);
-            types.push(proto_type(fd, vn));
+            // the high variable's type once highs exist (`isHighOn`), else the varnode's own
+            types.push(match fd.highs.of(vn) {
+                Some(h) => super::variable::h_type(fd, h).0,
+                None => super::infertypes::vn_type(fd, vn),
+            });
             if read {
                 if let Some(t) = active.trials.last_mut() {
                     t.mark_active();
                 }
             }
         }
-        let model = models.select_model(model, &active)?; // resolveModel
-        fd.proto.set_model(models, model);
+        // resolveModel: only a merged model is replaced (by its best member)
+        let model = if models.get(model).members.is_empty() {
+            model
+        } else {
+            let pick = models.select_model(model, &active)?;
+            fd.proto.set_model(models, pick);
+            pick
+        };
         models.get(model).input.fillin_map_input(&mut active)?; // deriveInputMap
         for t in &mut active.trials {
             if t.has(ParamTrial::UNREF) && t.is_used() {
@@ -2335,14 +2386,14 @@ pub(crate) fn input_prototype(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             // discoverScope: storage the local scope owns is valid everywhere; any other only at
             // the restricted use point, just before the entry
             let local = t.space == Space::Stack && fd.localmap.in_scope(t.off, size);
-            let (first_use, uselimit) = if local {
-                (None, UseLimit::default())
+            let uselimit = if local {
+                UseLimit::default()
             } else {
                 let code = Space::Sleigh(arch.sleigh.code_space());
                 let at = fd.entry.wrapping_sub(1);
-                (Some(at), UseLimit(vec![(code, at, at)]))
+                UseLimit(vec![(code, at, at)])
             };
-            let entry = SymbolEntry { space: t.space, offset: t.off, size, first_use, uselimit };
+            let entry = SymbolEntry { space: t.space, offset: t.off, size, uselimit };
             let sym = fd.symtab.add_symbol(LOCAL, "", Some(ty), None, Some(entry))?;
             fd.symtab.set_category(sym, 0, count as u32);
         }
@@ -2372,7 +2423,10 @@ pub(crate) fn map_globals(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     let span = |e: &super::infertypes::Entry| if e.externref { ptr } else { 1 };
     let linked = |fd: &Funcdata, vn: VarnodeId| {
         let v = fd.vn(vn);
-        query_global(arch, v.offset).is_some_and(|e| v.offset + u64::from(v.size) <= e.addr + span(&e))
+        query_global(arch, v.offset).is_some_and(|e| {
+            v.space == Space::Sleigh(arch.spec.stack_container)
+                && v.offset.wrapping_add(u64::from(v.size)) <= e.addr.wrapping_add(span(&e))
+        })
     };
     let all = fd.loc_all();
     let mut inconsistent = false;
@@ -2385,7 +2439,7 @@ pub(crate) fn map_globals(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             continue;
         }
         let (space, addr) = (v.space, v.offset);
-        let mut end = addr + u64::from(v.size);
+        let mut end = addr.wrapping_add(u64::from(v.size));
         let mut maxvn = vn;
         let mut uncovered = Vec::new();
         while let Some(&next) = all.get(i) {
@@ -2396,15 +2450,15 @@ pub(crate) fn map_globals(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             if w.offset != addr && !linked(fd, next) {
                 uncovered.push(next);
             }
-            end = w.offset + u64::from(w.size); // as the C++: the last varnode's end, not the furthest
+            end = w.offset.wrapping_add(u64::from(w.size)); // as the C++: the last varnode's end, not the furthest
             if w.size > fd.vn(maxvn).size {
                 maxvn = next;
             }
             i += 1;
         }
         let m = fd.vn(maxvn);
-        let ct = if m.offset == addr && addr + u64::from(m.size) == end {
-            proto_type(fd, maxvn)
+        let ct = if m.offset == addr && addr.wrapping_add(u64::from(m.size)) == end {
+            high_type(fd, maxvn)?
         } else {
             fd.types.base(end.wrapping_sub(addr) as u32, super::types::Meta::Unknown)
         };
@@ -2418,7 +2472,7 @@ pub(crate) fn map_globals(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
                 (s.entries[e].offset, u64::from(s.entries[e].size), Some(s.name.clone()))
             })
             .or_else(|| {
-                query_global(arch, addr).map(|e| {
+                query_global(arch, addr).filter(|_| space == Space::Sleigh(arch.spec.stack_container)).map(|e| {
                     let name = (!e.externref).then(|| arch.functions.get(&e.addr).map(|f| f.name.clone())).flatten();
                     (e.addr, span(&e), name)
                 })
@@ -2432,19 +2486,18 @@ pub(crate) fn map_globals(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
                 space_name: arch.sleigh.spaces.get(sp as usize).map_or("", |s| s.name.as_str()),
                 addr_size: ptr as u32, // ponytail: the pointer size stands in for the space's address size
                 name_base: &base,
-                reg: "",
+                reg: arch.register_name(sp, addr, size).map_or("", |r| r.0),
                 flags: NameFlags { persist: true, addr_tied: true, ..NameFlags::default() },
                 in_local_range: false,
             };
             // ponytail: uniqueness is against the data symbols only; a function named like a
             // default data name (`uRam...`) would need the functions in the name tree
             let name = fd.symtab.build_variable_name(GLOBAL, &req, &mut 0)?;
-            let entry = SymbolEntry { space, offset: addr, size, first_use: None, uselimit: UseLimit::default() };
-            let sym = fd.symtab.add_symbol(GLOBAL, &name, Some(ct), None, Some(entry))?;
-            fd.symtab.set_addr_tied(sym);
+            let entry = SymbolEntry { space, offset: addr, size, uselimit: UseLimit::default() };
+            fd.symtab.add_symbol(GLOBAL, &name, Some(ct), None, Some(entry))?;
             continue;
         };
-        if addr + u64::from(size) - 1 > eoff + esize - 1 {
+        if addr.wrapping_add(u64::from(size)).wrapping_sub(1) > eoff.wrapping_add(esize).wrapping_sub(1) {
             inconsistent = true;
             // coverVarnodes: the biggest varnode at each inner address, unless a symbol holds it
             for (k, &u) in uncovered.iter().enumerate() {
@@ -2459,16 +2512,9 @@ pub(crate) fn map_globals(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
                     return err("mapGlobals: covering varnodes inside an external reference is not ported");
                 };
                 let name = format!("{ename}_{}", uoff.wrapping_sub(eoff) as i32);
-                let ty = proto_type(fd, u);
-                let entry = SymbolEntry {
-                    space,
-                    offset: uoff,
-                    size: fd.types.size(ty),
-                    first_use: None,
-                    uselimit: UseLimit::default(),
-                };
-                let sym = fd.symtab.add_symbol(GLOBAL, &name, Some(ty), None, Some(entry))?;
-                fd.symtab.set_addr_tied(sym);
+                let ty = high_type(fd, u)?;
+                let entry = SymbolEntry { space, offset: uoff, size: fd.types.size(ty), uselimit: UseLimit::default() };
+                fd.symtab.add_symbol(GLOBAL, &name, Some(ty), None, Some(entry))?;
             }
         }
     }

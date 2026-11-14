@@ -472,7 +472,7 @@ pub(crate) fn find_initializer(fd: &Funcdata, head: BlockId, slot: usize, loop_d
     if h.ins.len() != 2 {
         return None;
     }
-    let slot = 1 - slot;
+    let slot = 1usize.checked_sub(slot)?; // a loop head has two in edges
     let res = fd.vn(*fd.op(loop_def).ins.get(slot)?).def?;
     if fd.op(res).is_marker() {
         return None;

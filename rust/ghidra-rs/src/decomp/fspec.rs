@@ -220,6 +220,10 @@ impl ParamList {
     /// Port of `ParamListStandard::decode`: the `<pentry>`s of `<input>`/`<output>`; with
     /// `killedbycall="true"` each entry is also a killed-by-call effect.
     fn decode(el: &Element, regs: &SleighNames, effects: &mut Vec<Effect>) -> Result<ParamList> {
+        // `separatefloat="false"` puts every entry in one resource section; not ported
+        if el.attr("separatefloat").is_some() && !el.flag("separatefloat") {
+            return err(format!("<{}>: separatefloat=\"false\" is not supported", el.name));
+        }
         let entries = el
             .kids
             .iter()
@@ -228,6 +232,14 @@ impl ParamList {
                 n => err(format!("<{}>: <{n}> is not supported", el.name)),
             })
             .collect::<Result<Vec<_>>>()?;
+        // parsePentry: the storage classes only go down, each change starting a resource section
+        let mut last = TypeClass::Class(4);
+        for e in &entries {
+            if last.rank() < e.class.rank() {
+                return err("parameter list entries must be ordered by storage class");
+            }
+            last = e.class;
+        }
         if el.flag("killedbycall") {
             effects
                 .extend(entries.iter().map(|e| Effect { storage: e.storage.clone(), kind: EffectKind::KilledByCall }));
@@ -987,13 +999,24 @@ impl ParamList {
         }
     }
 
-    /// Port of `ParamEntry::justifiedContain` for a register or stack entry (little endian):
-    /// the range's offset in the entry, modulo the alignment of a multi-slot entry.
+    /// Port of `ParamEntry::justifiedContain` (little endian): the range's offset in the entry,
+    /// modulo the alignment of a multi-slot entry; for a join entry, its offset from the least
+    /// significant piece on.
     fn justified_in(&self, i: usize, space: Space, off: u64, size: u32) -> Option<i32> {
         let e = &self.entries[i];
-        let base = self.base_in(i, space)?;
         let end = off.checked_add(u64::from(size))?.checked_sub(1)?;
-        if off < base || end > base + e.size as u64 - 1 {
+        if let Storage::Join(pieces) = &e.storage {
+            let mut res = 0u32;
+            for &(s, o, z) in pieces.iter().rev() {
+                if space == Space::Sleigh(s) && off >= o && end <= o.wrapping_add(u64::from(z)).wrapping_sub(1) {
+                    return i32::try_from(u64::from(res) + (off - o)).ok();
+                }
+                res = res.wrapping_add(z);
+            }
+            return None;
+        }
+        let base = self.base_in(i, space)?;
+        if off < base || end > base.wrapping_add(e.size as u64).wrapping_sub(1) {
             return None;
         }
         let rel = off - base;
@@ -1001,7 +1024,8 @@ impl ParamList {
     }
 
     /// Port of `ParamListStandard::findEntry` with `just` true: the first entry holding the
-    /// range justified. (The C++ walks a range map; x86's input entries do not overlap.)
+    /// range justified. The C++ walks the resolver's pieces at the offset, which sort by the
+    /// entry's position (`ParamEntryRange::getSubsort`), so list order is its order.
     pub(crate) fn find_entry(&self, space: Space, off: u64, size: u32) -> Option<usize> {
         (0..self.entries.len())
             .find(|&i| self.entries[i].minsize <= size as i32 && self.justified_in(i, space, off, size) == Some(0))
@@ -1037,19 +1061,19 @@ impl ParamList {
                 last = Some(e.class);
             }
         }
-        res.push(self.entries.len());
+        res.push((0..self.entries.len()).map(|i| self.group(i) + 1).max().unwrap_or(0)); // numgroup
         res
     }
 
     /// The address and size of slot `slot` of entry `i`, as `buildTrialMap` asks
     /// `ParamEntry::getAddrBySlot` for an unreferenced trial (little endian, no reverse stack).
-    fn slot_address(&self, i: usize, slot: u64) -> Option<(Space, u64, u32)> {
+    fn slot_address(&self, i: usize, slot: u64) -> Result<(Space, u64, u32)> {
         let e = &self.entries[i];
-        let (sz, step) = if e.align == 0 { (e.size, 0) } else { (e.align, e.align as u64 * slot) };
+        let (sz, step) = if e.align == 0 { (e.size, 0) } else { (e.align, (e.align as u64).wrapping_mul(slot)) };
         match &e.storage {
-            Storage::Space { space, offset, .. } => Some((Space::Sleigh(*space), offset + step, sz as u32)),
-            Storage::Stack { offset, .. } => Some((Space::Stack, offset + step, sz as u32)),
-            Storage::Join(_) => None,
+            Storage::Space { space, offset, .. } => Ok((Space::Sleigh(*space), offset.wrapping_add(step), sz as u32)),
+            Storage::Stack { offset, .. } => Ok((Space::Stack, offset.wrapping_add(step), sz as u32)),
+            Storage::Join(_) => err("buildTrialMap: an unreferenced parameter in a join entry is not ported"),
         }
     }
 
@@ -1075,7 +1099,7 @@ impl ParamList {
 
     /// Port of `ParamListStandard::buildTrialMap`: each trial gets its entry (none: not used),
     /// groups and slots before a seen one get unreferenced trials, and the trials are sorted.
-    fn build_trial_map(&self, active: &mut ParamActive) {
+    fn build_trial_map(&self, active: &mut ParamActive) -> Result<()> {
         let mut hitlist: Vec<Option<usize>> = Vec::new();
         let (mut float_count, mut int_count) = (0, 0);
         for t in &mut active.trials {
@@ -1103,9 +1127,8 @@ impl ParamList {
             let Some(cur) = hit else {
                 let pref = if float_count > int_count { TypeClass::Float } else { TypeClass::General };
                 let Some(cur) = self.select_unreference_entry(grp, pref) else { continue };
-                if let Some((space, off, size)) = self.slot_address(cur, 0) {
-                    active.register_unref(space, off, size, cur);
-                }
+                let (space, off, size) = self.slot_address(cur, 0)?;
+                active.register_unref(space, off, size, cur);
                 continue;
             };
             if self.entries[cur].align == 0 {
@@ -1116,7 +1139,7 @@ impl ParamList {
             for t in active.trials.iter().filter(|t| t.entry == Some(cur)) {
                 let grp = self.group(cur) as i32;
                 let a = self.get_slot(cur, t.space, t.off, 0) - grp;
-                let b = self.get_slot(cur, t.space, t.off, t.size - 1) - grp;
+                let b = self.get_slot(cur, t.space, t.off, t.size.wrapping_sub(1)) - grp;
                 let (lo, hi) = (a.min(b).max(0) as usize, a.max(b).max(0) as usize);
                 if slots.len() <= hi {
                     slots.resize(hi + 1, false);
@@ -1124,12 +1147,12 @@ impl ParamList {
                 slots[lo..=hi].iter_mut().for_each(|s| *s = true);
             }
             for (j, _) in slots.iter().enumerate().filter(|(_, &s)| !s) {
-                if let Some((space, off, size)) = self.slot_address(cur, j as u64) {
-                    active.register_unref(space, off, size, cur);
-                }
+                let (space, off, size) = self.slot_address(cur, j as u64)?;
+                active.register_unref(space, off, size, cur);
             }
         }
         active.sort_trials(self);
+        Ok(())
     }
 
     /// Port of `ParamListStandard::separateSections`.
@@ -1261,7 +1284,8 @@ impl ParamList {
         stop: usize,
         group_start: i32,
     ) {
-        let slot_group = |t: &ParamTrial| t.entry.map_or(0, |e| self.get_slot(e, t.space, t.off, t.size - 1));
+        let slot_group =
+            |t: &ParamTrial| t.entry.map_or(0, |e| self.get_slot(e, t.space, t.off, t.size.wrapping_sub(1)));
         let (mut seen, mut chain) = (false, 0);
         let mut max = None;
         for i in start..stop {
@@ -1304,7 +1328,7 @@ impl ParamList {
         if self.entries.is_empty() {
             return err("Cannot derive parameter storage for prototype model without parameter entries");
         }
-        self.build_trial_map(active);
+        self.build_trial_map(active)?;
         self.force_exclusion_group(active);
         let starts = self.resource_start();
         let sections = self.separate_sections(active, &starts)?;

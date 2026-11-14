@@ -74,9 +74,13 @@ pub struct Funcdata {
     next_unique: u64,
     /// header warnings (`Funcdata::warningHeader`), for `print C`
     pub(crate) warnings: Vec<String>,
+    /// warnings at an address (`Funcdata::warning`), for `print C`
+    pub(crate) comments: Vec<(u64, String)>,
     /// the space the global scope owns (ram): its varnodes are `persist` and `addrtied`
     /// (`setVarnodeProperties` through `Scope::queryProperties`)
     pub(crate) ram: Option<u32>,
+    /// the ranges the global scope owns (`CompilerSpec::global`)
+    global: Vec<(u32, u64, u64)>,
     /// the unique space (`IPTR_INTERNAL`)
     pub(crate) uniq: Option<u32>,
     /// the join records (pieces, most significant first) of `Space::Join` varnodes
@@ -146,7 +150,9 @@ impl Funcdata {
             localmap: super::varmap::LocalMap::empty(),
             next_unique: UNIQUE_ANALYSIS,
             warnings: Vec::new(),
+            comments: Vec::new(),
             ram: None,
+            global: Vec::new(),
             uniq: None,
             incidental: Vec::new(),
             joins: Vec::new(),
@@ -291,11 +297,19 @@ impl Funcdata {
         }
     }
 
+    /// `Scope::inScope` of the global scope: one of its ranges (the compiler spec's `<global>`:
+    /// ram, and on x86 the MXCSR register) holds the whole storage.
+    pub(crate) fn in_global_scope(&self, space: Space, off: u64, size: u32) -> bool {
+        let Space::Sleigh(s) = space else { return false };
+        let last = off.wrapping_add(u64::from(size.max(1)) - 1);
+        self.global.iter().any(|&(gs, first, glast)| gs == s && first <= off && off <= last && last <= glast)
+    }
+
     /// The scope's properties of a new varnode (`Scope::queryProperties`): the global scope
-    /// owns ram, so its varnodes are `persist` and `addrtied`; the local scope (the stack) holds
-    /// no symbols the console could give.
+    /// owns its ranges, so varnodes there are `persist` and `addrtied`; the local scope (the
+    /// stack) holds no symbols the console could give.
     fn scoped(&self, mut v: Varnode) -> Varnode {
-        if self.ram.is_some_and(|r| v.space == Space::Sleigh(r)) {
+        if self.in_global_scope(v.space, v.offset, v.size) {
             v.flags.set(VnFlags::PERSIST);
             v.flags.set(VnFlags::ADDRTIED);
         }
@@ -859,6 +873,7 @@ impl Funcdata {
     /// at once for `blocks_generated`).
     pub(crate) fn start_processing(&mut self, arch: &Arch) -> Result<()> {
         self.ram = Some(arch.spec.stack_container);
+        self.global = arch.spec.global.clone();
         self.uniq = Some(arch.sleigh.uniq_space());
         self.incidental = arch.incidental.clone();
         self.laned = arch.laned.clone();
@@ -1095,6 +1110,14 @@ impl Funcdata {
     /// or for a varnode made since) [`Varnode::nzmask`].
     pub(crate) fn nzmask(&self, vn: VarnodeId) -> u64 {
         self.nzm.get(vn.0 as usize).copied().unwrap_or_else(|| self.vn(vn).nzmask())
+    }
+
+    /// Port of `Funcdata::warning`: a warning comment at an address (`Comment::warning`, kept
+    /// for `print C`), not stored twice (`addCommentNoDuplicate`).
+    pub(crate) fn warning(&mut self, msg: &str, addr: u64) {
+        if !self.comments.iter().any(|(a, m)| *a == addr && m == msg) {
+            self.comments.push((addr, msg.to_string()));
+        }
     }
 
     /// Port of `Funcdata::warningHeader`.

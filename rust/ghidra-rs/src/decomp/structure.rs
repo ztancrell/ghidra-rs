@@ -939,8 +939,6 @@ mod tests {
         );
     }
 
-    /// A->B, A->C, B->C, C->B, B->X: a loop with two entries. `findIrreducible` marks A->C,
-    /// which becomes an if-goto; B (negated) and C make the while loop.
     #[test]
     fn irreducible_loop_final_structure() {
         // the tree of `irreducible_loop`: List [IfGoto(A -> C), WhileDo(B, C), X]. Expected by hand
@@ -962,6 +960,8 @@ mod tests {
         assert_eq!(whiledo.flags & F_LABEL_BUMPUP, 0);
     }
 
+    /// A->B, A->C, B->C, C->B, B->X: a loop with two entries. `findIrreducible` marks A->C,
+    /// which becomes an if-goto; B (negated) and C make the while loop.
     #[test]
     fn irreducible_loop() {
         let (mut fd, b) = graph(4, &[(0, 1), (0, 2), (1, 2), (2, 1), (1, 3)]);

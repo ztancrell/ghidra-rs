@@ -98,27 +98,32 @@ pub(crate) fn finalize_hierarchy(s: &mut Structure, fd: &mut Funcdata) -> Result
     Ok(())
 }
 
-/// The sort key of `FlowBlock::compareFinalOrder`: the entry block first, RETURN blocks last,
-/// the rest by index. Two RETURN blocks compare equal, as in the C++.
-fn final_order_key(s: &Structure, fd: &Funcdata, b: SId) -> (u8, u8, i32) {
-    let index = s.b(b).index;
-    if index == 0 {
-        return (0, 0, 0);
+/// Port of `FlowBlock::compareFinalOrder`: the entry block first, RETURN blocks last, the rest
+/// by index. Not a strict order (the entry block is below itself, two RETURN blocks are
+/// equal), so the result depends on the sort algorithm.
+fn compare_final_order(s: &Structure, fd: &Funcdata, bl1: SId, bl2: SId) -> bool {
+    if s.b(bl1).index == 0 {
+        return true;
     }
-    match s.last_op(fd, b) {
-        Some(op) if fd.op(op).opc == Opcode::Return => (1, 1, 0),
-        _ => (1, 0, index),
+    if s.b(bl2).index == 0 {
+        return false;
     }
+    let is_return = |b| s.last_op(fd, b).map(|op| fd.op(op).opc == Opcode::Return);
+    match (is_return(bl1), is_return(bl2)) {
+        (Some(true), _) => return false,
+        (Some(false) | None, Some(true)) => return true,
+        _ => {}
+    }
+    s.b(bl1).index < s.b(bl2).index
 }
 
-/// `BlockGraph::orderBlocks` on the root. A stable sort: the C++ `std::sort` keeps the order of
-/// equal (RETURN) blocks too as long as libstdc++ sorts by insertion (at most 16 blocks).
+/// `BlockGraph::orderBlocks` on the root, with the C++ `std::sort`.
 fn order_blocks(s: &mut Structure, fd: &Funcdata) {
     if s.b(ROOT).list.len() == 1 {
         return;
     }
     let mut list = std::mem::take(&mut s.bm(ROOT).list);
-    list.sort_by_key(|&b| final_order_key(s, fd, b));
+    super::stdsort::sort(&mut list, |&a, &b| compare_final_order(s, fd, a, b));
     s.bm(ROOT).list = list;
 }
 
@@ -193,7 +198,10 @@ fn finalize_while_do(s: &mut Structure, fd: &mut Funcdata, b: SId) -> Result<()>
         initialize = super::blocktransform::find_initializer(fd, head, slot, loop_def).map(|(res, _)| res);
     }
     if initialize.is_some() {
-        initialize = test_terminal(fd, loop_def, 1 - slot)?;
+        let other = 1usize
+            .checked_sub(slot)
+            .ok_or_else(|| LowlevelError("for-loop head with more than two in edges".into()))?;
+        initialize = test_terminal(fd, loop_def, other)?;
     }
     s.bm(b).for_loop.initialize = initialize;
     fd.op_mut(iterate).flags.set(OpFlags::NONPRINTING); // opMarkNonPrinting

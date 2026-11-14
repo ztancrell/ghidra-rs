@@ -1073,7 +1073,7 @@ loudly on a switch with cases. The reference with `switchnorm` off fails there t
 on the empty label table), so switch functions count as "the reference does not finish" in the
 `finalstructure` checks. Known gaps in what is ported, each failing loudly or marked in the code:
 a persistent input as a parameter (`findDisjointCover`), the open parameter references and fake
-inputs of `restructure_varnode`, a size-locked output, `print map` of a locked prototype,
+inputs of `restructure_varnode`, `print map` of a locked prototype,
 `coverVarnodes` inside an external reference.
 
 Check design. `decomp-ref.patch` gains two devices. `DECOMP_TREE_EXTRA=1` (`FlowBlock::printTree`,
@@ -1082,8 +1082,11 @@ Check design. `decomp-ref.patch` gains two devices. `DECOMP_TREE_EXTRA=1` (`Flow
 ` g<gototype>` for goto and if-goto blocks, ` c<index>:<gototype>` for each switch case in order,
 ` it<time>`/` in<time>` for a while-do's for-loop ops, `}`. `DECOMP_MAP_EXTRA=1` (`IfcPrintMap`)
 makes `print map` of the current function start with its prototype (`FuncProto::printRaw`: model,
-return type, parameter types, extrapop) and end with the data symbols of the global scope
-(`Global data`; functions, labels and external references left out). Option files, all from
+return type, parameter types, extrapop; since the review also one `param <i>: <name> : <storage>:<size>`
+line per parameter with `typelock`, `namelock`, `this`, and an `output:` line with the return
+storage) and end with the data symbols of the global scope (`Global data`; functions, labels and
+external references left out); each mapped symbol also gets an `attributes <name> :` line
+(`addrtied`, `typelock`, `namelock`, `this`, `category <n>:<index>`). Option files, all from
 `tools/r1-options.sh`: `s8-r-options.txt` (rules on), the new `s8-t-options.txt` (types on:
 `s6-options` with `blockrecovery`, `returnsplit` on), and the new `tail-r-options.txt` /
 `tail-t-options.txt` (the same two with `localrecovery` on, so that `outputprototype` runs; the
@@ -1144,6 +1147,52 @@ the reference agrees; `L` below no longer names it. Tail checks on the merged bi
 M500: prototypes and globals 8 / 8, 498 / 499 (rules on) and 8 / 8, 493 / 499 (types on);
 `latedonothing` 8 / 8, 498 / 499 and 8 / 8, 493 / 499; `finalstructure` 7 / 7, 494 / 495 and
 7 / 7, 489 / 495: unchanged.
+
+Review fixes (2026-11-14, after an independent review reading the Rust against the C++):
+
+- `rangemap.rs` ports the `rangemap` template (the sub-range multiset with libstdc++'s placement
+  of equal keys, `insert` with `unzip`, `erase` with `zip`, `find`). A scope's map is one per
+  space, so `printEntries` and `findContainer` meet entries in the C++ order: a record sorts by
+  its last offset and goes before an equal one (a symbol inside an earlier one is listed first).
+  Superseded: the list sorted by first offset, sub-sort and insertion.
+- `Scope::addMap`: a symbol whose entry has no use limit is address-tied (stack parameters too,
+  not only the globals); the rangemap sub-sort is the first range of the use limit.
+- `ActionOutputPrototype`: a size-locked output (locked with an unknown type) takes the type of
+  a return value at its storage (`overrideSizeLockType`); with high variables off the output is
+  an unknown of the varnode's size (`updateOutputNoTypes`). `mapGlobals` fails without high
+  variables, as `Varnode::getHigh` does.
+- `ActionInputPrototype` replaces the model only when it is merged (`resolveModel`).
+- `orderBlocks` sorts with the port of `std::sort` (`stdsort.rs`) and the literal
+  `compareFinalOrder`, which is not a strict order.
+- `mapGlobals` names a persistent register by its register name (`getRegisterName` first).
+- `ActionDoNothing` and `ActionLateDoNothing` give the warning "Do nothing block with infinite
+  loop" once per block (`Funcdata::warning`, kept in `Funcdata::comments` for the printer; no
+  compared output shows warnings yet); `isDoNothing` accepts any branch op (`hasOnlyMarkers`).
+- The compiler spec's `<global>` is read: its ranges belong to the global scope
+  (`CompilerSpec::global`, `Funcdata::in_global_scope`), so a varnode on x86's `MXCSR` register is
+  persistent and address-tied as in the C++. Superseded: "the global scope owns ram" only.
+- `fspec.rs`: `justifiedContain` handles a join entry; `resourceStart` ends with the group count;
+  loud errors for `separatefloat="false"`, entries not ordered by storage class, an
+  unreferenced parameter in a join entry, a stack growing up or `reversejustify`.
+  `findEntry` in list order is the C++ order (the resolver sub-sorts by entry position).
+- Arithmetic on untrusted input wraps where the C++ wraps (`mapGlobals`, `justifiedContain`,
+  slot addresses) and is checked elsewhere (the for-loop head's other in edge).
+- `print map` prints an address as `AddrSpace::printRaw` does (padded to the space's address
+  size; `print::shortcut` is shared with `print raw`).
+- An unported action's error names the action. `action::PARTIAL_SKIP` no longer names
+  `restrictlocal` (ported on the stack branch; the entry had no effect).
+- Dead code removed: `Scope::name`/`parent`, `find_overlap`; the blanket `allow(dead_code)` on
+  `scope.rs` is gone.
+- Known limit, not changed: the symbol database is per function (`Database::for_function`),
+  the C++ has one global scope per process. The checks run one process per function, so a
+  global symbol made by an earlier decompilation is never seen.
+
+Check coverage: with the extended `DECOMP_MAP_EXTRA` print the prototype checks also compare the
+order of the parameters, their names and storage, the return storage and the symbol attributes.
+Tail checks after these fixes (reference rebuilt with the new patch), M8 then M500: prototypes
+and globals 8 / 8, 498 / 499 (rules on) and 8 / 8, 493 / 499 (types on); `latedonothing` 8 / 8,
+498 / 499 and 8 / 8, 493 / 499; `finalstructure` 7 / 7, 494 / 495 and 7 / 7, 489 / 495: unchanged.
+The 24 other bars on M8: 8 / 8 each.
 
 ## Running stages in parallel
 

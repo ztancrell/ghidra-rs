@@ -51,7 +51,8 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   call-fixup injection), `block.rs` (basic blocks, spanning tree, dominators), `actiontree.rs`
   (the action framework: groups, repeat, breakpoints, `continue`), `heritage.rs` (SSA: phi
   placement and renaming), `action.rs` (the universal
-  action up to `paramdouble`), `print.rs` (`print raw`), `stdsort.rs` (libstdc++'s `std::sort`).
+  action up to `paramdouble`), `print.rs` (`print raw`), `stdsort.rs` (libstdc++'s `std::sort`), `rangemap.rs` (the
+  `rangemap` template the scopes' maps use).
   See "Decompiler (Milestone 3)" below.
 - `ghidra-rs/tests/decomp.rs`, `tests/data/raw-funclink-*.txt`, `tests/data/raw-heritage-40a110.txt`,
   `tests/data/raw-paramdouble-40ad80.txt` (S2: a loop at `paramdouble`):
@@ -1309,9 +1310,9 @@ The partial function of jump-table recovery now runs the real `jumptable` root a
 (`action::jumptable_partial`): the tree of `universal` with the `jumptable` groups (`base`,
 `noproto`, `localrecovery`, `deadcode`, `stackptrflow`, `stackvars`, `analysis`, `segment`,
 `subvar`, `normalizebranches`, `conditionalexe`), every ported rule on (`togglerule` and
-`option currentaction` reach only the `decompile` root, on the reference too). Eight actions of
+`option currentaction` reach only the `decompile` root, on the reference too). Seven actions of
 those groups are not ported and are left out of the partial's tree while they are
-(`action::PARTIAL_SKIP`: `funclinkoutonly`, `restrictlocal`, `restructure_varnode`, `multicse`,
+(`action::PARTIAL_SKIP`: `funclinkoutonly`, `restructure_varnode`, `multicse`,
 `shadowvar`, `condconst`, `mapped_local_sync`, `normalizebranches`); an entry is skipped only as
 long as its leaf is `not_ported`, so a later port runs in the partial too. Three of them can
 change which tables are recovered: `restructure_varnode` (in the partial it also runs
@@ -1793,7 +1794,7 @@ bar fell; the table is in `docs/plans/m3-decompiler.md`, "Stack heritage".
   `buildTrialMap`, `forceExclusionGroup`, `forceNoUse`, `forceInactiveChain`), `ScoreProtoModel`
   and `Models::select_model` (a merged model keeps its `members`).
 - `scope.rs`, wired as `Funcdata::symtab` (a global and a local scope per function): symbols,
-  map entries, categories, `print map`; the default variable names (`build_variable_name`) are
+  map entries (one `rangemap.rs` map per space, in the C++ order), categories, `print map`; the default variable names (`build_variable_name`) are
   there and unit tested but only `mapglobals` uses them, `namevars` is not ported.
 - `finalstructure.rs`: `ActionFinalStructure` (`orderBlocks`, `finalizePrinting` for while-do and
   switch blocks, `scopeBreak`, `markUnstructured`, `markLabelBumpUp`), `moveRespectingCover`,
@@ -1803,7 +1804,8 @@ bar fell; the table is in `docs/plans/m3-decompiler.md`, "Stack heritage".
 - Console: `print map` (the local scope of the current function).
 - Check devices (same in `decomp-ref.patch`): `DECOMP_TREE_EXTRA=1` (`print tree block` also
   shows the final-structure flags, goto types, switch cases and for-loop ops) and
-  `DECOMP_MAP_EXTRA=1` (`print map` also shows the prototype and the global data symbols).
+  `DECOMP_MAP_EXTRA=1` (`print map` also shows the prototype, each parameter's name and storage,
+  the return storage, the attributes of each symbol and the global data symbols).
 - Tools: `decomp-diff.sh` takes `DECOMP` and `GHIDRA_RS` from the environment, `decomp-ref.sh`
   takes `DECOMP_BUILD` and `JOBS`; `r1-options.sh` also writes `s8-t-options.txt`,
   `tail-r-options.txt` and `tail-t-options.txt`.
@@ -1821,6 +1823,13 @@ Merged with master 836d04baee (stack heritage): `print map` and the use-limit te
 `inputprototype` read the local scope's real ranges (`Funcdata::localmap`), and `restrictlocal`
 runs in the prototype checks on both engines. The six tail checks are unchanged on the merged
 binary (numbers above); details in docs/plans/m3-decompiler.md, "Tail".
+
+Review fixes (same section of the plan): the scopes' maps are a port of `rangemap`, a symbol
+without a use limit is address-tied, a size-locked output is ported, the compiler spec's
+`<global>` ranges are read (x86's `MXCSR` is a global), `orderBlocks` uses the `std::sort` port,
+the do-nothing loop warning is recorded, unsupported parameter-list forms fail loudly, and the
+prototype checks compare parameter names, storage and symbol attributes. The six tail checks
+are unchanged after them, and the 24 other bars are 8 / 8 on M8.
 
 ## Speed
 

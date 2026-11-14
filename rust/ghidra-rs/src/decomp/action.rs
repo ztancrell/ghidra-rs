@@ -241,9 +241,10 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
     t
 }
 
-/// An action not ported yet: it fails when it runs (with its group on).
-fn not_ported(_: &mut Funcdata, _: &Arch) -> Result<i32> {
-    err("action not implemented in ghidra-rs yet (milestone 3: of the leaves after copymarker, dynamicsymbols, namevars, setcasts and prototypewarnings are not ported; see the action table)")
+/// An action not ported yet: it fails when it runs (with its group on); `ActionTree::apply`
+/// reports it by the name of the action it stands for.
+pub(crate) fn not_ported(_: &mut Funcdata, _: &Arch) -> Result<i32> {
+    err("action not implemented in ghidra-rs yet (milestone 3)")
 }
 
 /// The actions of the `jumptable` root's groups the partial function is simplified without while
@@ -254,7 +255,6 @@ fn not_ported(_: &mut Funcdata, _: &Arch) -> Result<i32> {
 /// `normalizebranches` (flips the CBRANCHs the guards are read from).
 const PARTIAL_SKIP: &[&str] = &[
     "funclinkoutonly",
-    "restrictlocal",
     "restructure_varnode",
     "multicse",
     "shadowvar",

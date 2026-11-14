@@ -185,6 +185,10 @@ impl ActionTree {
     fn apply(&mut self, id: ActionId, fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         let restart = match &self.nodes[id.0].kind {
             Kind::Leaf(f) => {
+                if std::ptr::fn_addr_eq(*f, super::action::not_ported as ApplyFn) {
+                    let name = self.nodes[id.0].name;
+                    return super::err(format!("action {name} is not implemented in ghidra-rs yet (milestone 3)"));
+                }
                 let changes = f(fd, arch)?;
                 self.nodes[id.0].count += changes;
                 return Ok(0);

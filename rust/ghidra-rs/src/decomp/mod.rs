@@ -35,11 +35,11 @@ mod nodejoin;
 mod op;
 mod opcode;
 mod print;
+mod rangemap;
 mod rangeutil;
 mod readers;
 mod returnsplit;
 mod rules;
-#[allow(dead_code)] // the naming half waits for ActionNameVars
 mod scope;
 mod splitflow;
 mod stdsort;

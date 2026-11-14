@@ -224,12 +224,7 @@ impl<'a> Printer<'a> {
             let _ = write!(self.out.s, "0x{off:x}");
             return 4;
         }
-        let shortcut = match sp.name.as_str() {
-            "register" => '%',
-            "unique" => 'u',
-            n => n.chars().next().unwrap_or('x').to_ascii_lowercase(),
-        };
-        self.out.s.push(shortcut);
+        self.out.s.push(shortcut(&sp.name));
         self.out.addr(off);
         4
     }
@@ -436,4 +431,14 @@ fn raw_extra() -> bool {
 fn raw_index() -> bool {
     static INDEX: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *INDEX.get_or_init(|| std::env::var("DECOMP_RAW_EXTRA").is_ok_and(|v| v.starts_with('2')))
+}
+
+/// `AddrSpace::getShortcut` of the space called `name`: the shortcuts the architecture assigns
+/// (`%` register, `u` unique, else the first letter).
+pub(crate) fn shortcut(name: &str) -> char {
+    match name {
+        "register" => '%',
+        "unique" => 'u',
+        n => n.chars().next().unwrap_or('x').to_ascii_lowercase(),
+    }
 }

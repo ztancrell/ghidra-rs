@@ -3,7 +3,7 @@
 @@ -16,6 +16,21 @@
  #include "varnode.hh"
  #include "funcdata.hh"
-
+ 
 +#include <cstdlib>
 +
 +namespace ghidra {
@@ -20,7 +20,7 @@
 +}
 +
  namespace ghidra {
-
+ 
  AttributeId ATTRIB_ADDRTIED = AttributeId("addrtied",30);
 @@ -750,6 +765,22 @@
      s << "(i)";
@@ -49,7 +49,7 @@
 +++ b/funcdata.cc
 @@ -207,6 +207,8 @@
  void Funcdata::printRaw(ostream &s) const
-
+ 
  {
 +  extern void rawHighReset(void);	// ghidra-rs: decomp-ref.patch, stage S7
 +  rawHighReset();
@@ -68,7 +68,7 @@
  #include "flow.hh"
  
  namespace ghidra {
-@@ -529,6 +531,10 @@
+@@ -529,6 +532,10 @@
        }
  #endif
        glb->allacts.setCurrent(oldactname); // Restore old action
@@ -79,7 +79,7 @@
      }
      catch(LowlevelError &err) {
        glb->allacts.setCurrent(oldactname);
-@@ -559,6 +565,8 @@
+@@ -559,6 +566,8 @@
      return JumpTable::fail_thunk;
    }
    catch(LowlevelError &err) {
@@ -165,7 +165,27 @@
  void BlockCopy::encodeHeader(Encoder &encoder) const
 --- a/ifacedecomp.cc
 +++ b/ifacedecomp.cc
-@@ -2375,9 +2375,30 @@
+@@ -2350,6 +2350,19 @@
+   dcp->fd->printLocalRange( *status->optr );
+ }
+ 
++// ghidra-rs (decomp-ref.patch): one line of symbol attributes for `print map` with DECOMP_MAP_EXTRA
++static void printSymbolAttributes(const Symbol *sym,ostream &s)
++
++{
++  s << "attributes " << sym->getName() << " :";
++  if ((sym->getFlags() & Varnode::addrtied)!=0) s << " addrtied";
++  if (sym->isTypeLocked()) s << " typelock";
++  if (sym->isNameLocked()) s << " namelock";
++  if (sym->isThisPointer()) s << " this";
++  if (sym->getCategory() >= 0) s << " category " << dec << sym->getCategory() << ':' << sym->getCategoryIndex();
++  s << endl;
++}
++
+ /// \class IfcPrintMap
+ /// \brief Print info about a scope/namespace: `print map <name>`
+ ///
+@@ -2375,9 +2388,60 @@
    if (scope == (Scope *)0)
      throw IfaceExecutionError("No map named: "+name);
  
@@ -174,10 +194,39 @@
 +  if (name.size() == 0 && dcp->fd != (Funcdata *)0 && getenv("DECOMP_MAP_EXTRA") != (char *)0) {
 +    dcp->fd->getFuncProto().printRaw(dcp->fd->getName(),*status->fileoptr);
 +    *status->fileoptr << endl;
++    // and each parameter with its name, storage and attributes, then the return storage
++    FuncProto &fp(dcp->fd->getFuncProto());
++    for(int4 i=0;i<fp.numParams();++i) {
++      ProtoParameter *p = fp.getParam(i);
++      *status->fileoptr << "param " << dec << i << ": " << p->getName() << " : " << p->getAddress().getShortcut();
++      p->getAddress().printRaw(*status->fileoptr);
++      *status->fileoptr << ':' << dec << p->getSize();
++      if (p->isTypeLocked()) *status->fileoptr << " typelock";
++      if (p->isNameLocked()) *status->fileoptr << " namelock";
++      if (p->isThisPointer()) *status->fileoptr << " this";
++      *status->fileoptr << endl;
++    }
++    ProtoParameter *outp = fp.getOutput();
++    *status->fileoptr << "output: ";
++    if (outp->getAddress().isInvalid())
++      *status->fileoptr << "none";
++    else {
++      *status->fileoptr << outp->getAddress().getShortcut();
++      outp->getAddress().printRaw(*status->fileoptr);
++      *status->fileoptr << ':' << dec << outp->getSize();
++    }
++    *status->fileoptr << endl;
 +  }
    *status->fileoptr << scope->getFullName() << endl;
    scope->printBounds(*status->fileoptr);
    scope->printEntries(*status->fileoptr);
++  // ghidra-rs (decomp-ref.patch): with DECOMP_MAP_EXTRA, the attributes of each mapped symbol
++  if (name.size() == 0 && dcp->fd != (Funcdata *)0 && getenv("DECOMP_MAP_EXTRA") != (char *)0) {
++    MapIterator liter = scope->begin();
++    MapIterator lend = scope->end();
++    for(;liter!=lend;++liter)
++      printSymbolAttributes((*liter)->getSymbol(),*status->fileoptr);
++  }
 +  // ghidra-rs (decomp-ref.patch): and, after the local scope, the data symbols of the global scope
 +  // (what ActionMapGlobals adds; functions, labels and external references left out)
 +  if (name.size() == 0 && dcp->fd != (Funcdata *)0 && getenv("DECOMP_MAP_EXTRA") != (char *)0) {
@@ -191,6 +240,7 @@
 +      if (dynamic_cast<ExternRefSymbol *>(sym) != (ExternRefSymbol *)0) continue;
 +      if (dynamic_cast<LabSymbol *>(sym) != (LabSymbol *)0) continue;
 +      (*giter)->printEntry(*status->fileoptr);
++      printSymbolAttributes(sym,*status->fileoptr);
 +    }
 +  }
  }
