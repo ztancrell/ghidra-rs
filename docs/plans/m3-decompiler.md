@@ -846,6 +846,22 @@ the stack heritage pass, not ported; the constant-pointer path also needs `filli
 the ram pass to replace `fold_constants` in the jump-table partial function, where `stackvars` is
 on), double.cc, constseq.cc, bitfield.cc, and the `cleanup` rules that read types.
 
+Merged with S8 part one and R5 slice one (2026-11-13). Superseded: the rules-on 481 / 499 above.
+The `X & #0x1` constant-type misses were `copySymbol` on an untyped source: every C++ varnode
+has a type, so `RuleAndCompare`'s wider mask constant keeps the 1-byte constant's `xunknown1`;
+here `ty: None` means "the unknown type of my size", so copying it gave `xunknown4`.
+`Funcdata::copy_symbol` now gives the copy the source's own-size type. R5's
+`unshared_constant` fix alone did not change them (tested on a scratch copy). The three
+sequence-number differences (0x571cc0, 0x746320, 0x74fae0) had the same cause and match now.
+Results on the merged binary: M8 8 / 8 in all six S7 runs; M500 rules on (`r1-options`)
+498 / 499, the same with create indices, `subvar-options` 498 / 499, `r4-options` 498 / 499,
+`r5-options` 497 / 498; types on (`s6-options`, the five pointer rules now on) 493 / 499.
+Misses: 0x47a6b0 (the rule-stage miss of every check); with types on, 6 `VariablePiece`
+functions (0x402c20, 0x405990, 0x4c0070, 0x62f0d0, 0x757810, 0x7586e0; with the rules on, the
+rules remove those overlaps); with R5, 0x6b21e0 (R5's unported `assignPropagatedType`).
+Existing bars on the merged binary: R3, subvar and R4 checks 498 / 499, R5 typed 497 / 498,
+S3 500 / 500, S4 and S6 499 / 500, S8 rules off 499 / 499 and rule stage 498 / 499.
+
 ## Running stages in parallel
 
 Strict chain first: S0 → S1a → S1b → S2. After S2 the work fans out. Under the cap of two
