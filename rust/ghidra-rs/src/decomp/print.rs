@@ -392,6 +392,16 @@ impl<'a> Printer<'a> {
                     self.vn(v);
                 }
             }
+            // TypeOpPtradd::printRaw (RulePtrArith, stage R5)
+            Opcode::Ptradd => {
+                self.assign(id);
+                self.vn(ins[0]);
+                self.out.str(" + ");
+                self.vn(ins[1]);
+                self.out.str("(*");
+                self.vn(ins[2]);
+                self.out.str(")");
+            }
             opc => return err(format!("print raw: {opc:?} is made by later stages, not ported yet")),
         }
         Ok(())

@@ -40,6 +40,9 @@ impl OpFlags {
     pub(crate) const CALCULATED_BOOL: OpFlags = OpFlags(1024);
     /// `immed_copy` (an additional flag in C++): a COPY was propagated into a MULTIEQUAL slot
     pub(crate) const IMMED_COPY: OpFlags = OpFlags(2048);
+    /// `stop_type_propagation` (an additional flag in C++): data-types do not propagate from
+    /// below into the output (`RulePtrArith`, `RuleStructOffset0`, stage R5)
+    pub(crate) const STOP_TYPE_PROPAGATION: OpFlags = OpFlags(1 << 17);
     /// `fallthru_true`: the fall-through out edge is the true branch (`BlockBasic::negateCondition`)
     pub(crate) const FALLTHRU_TRUE: OpFlags = OpFlags(1 << 16);
 
