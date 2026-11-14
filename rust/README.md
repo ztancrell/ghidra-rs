@@ -1820,6 +1820,8 @@ reference finishes): prototypes and globals 8 / 8, 498 / 499 (99.8 %) (rules on)
 on); `latedonothing` 8 / 8, 498 / 499 (99.8 %) and 8 / 8, 493 / 499 (98.8 %); `finalstructure` 7 / 7, 494 / 495 (99.8 %) and
 7 / 7, 489 / 495 (98.8 %) (switch functions do not finish on the reference with `switchnorm` off).
 Existing bars on the final binary: R1/R3, subvar and R4 checks 498 / 499, R5 typed 497 / 498, S7 rules on 498 / 499 and types on 493 / 499, S8 rules off 499 / 499 and rule stage 498 / 499, S3 paramdouble 500 / 500, S4 and S6 499 / 500, switch corpus 1,947 / 2,050: all unchanged.
+Every bar was rerun on the final binary, M8 and M500 (stack check, S1 to S8, R1 to R5, the switch
+corpus, the tail and names checks): none fell. The table is in docs/plans/m3-decompiler.md, "Tail".
 Open before S9: the case labels (`switchnorm`, not started; its needs are listed in the plan),
 `setcasts`. Superseded: `namevars` in this list (ported: names check, `print map` after
 `namevars`, M8 8 / 8 and 8 / 8, M500 498 / 499 (99.8 %) rules on and 493 / 499 (98.8 %) types on).

@@ -1239,6 +1239,34 @@ Not exercised by these checks: `lookForFuncParamNames` (no callee has a locked, 
 prototype in the tail option files) and `updateThisPointer` (no M500 function resolves to
 `__thiscall`).
 
+Every bar on the final binary of this branch (2026-11-14, the tree of the `namevars` commit;
+reference rebuilt with the new `decomp-ref.patch`). M8: 8 / 8 in the 24 checks of the table,
+the prototype, `latedonothing` and names checks, 7 / 7 in `finalstructure`. M500:
+
+| check | before | now |
+|---|---|---|
+| stack check (`stack-lock.txt` at `assignhigh`) | 498 / 499 | 498 / 499 |
+| S7 print with `stack-lock.txt` (`inputprototype`) | 492 / 499 | 492 / 499 |
+| `funclink`, `heritage` (S1a, S1b) | 500 / 500 | 500 / 500, 500 / 500 |
+| S3 `paramdouble` | 500 / 500 | 500 / 500 |
+| S3 switch corpus | 1,947 / 2,050 | 1,947 / 2,050 |
+| S4 | 499 / 500 | 499 / 500 |
+| S6 unlocked | 499 / 500 | 499 / 500 |
+| S6 locked `void`, locked `int4`, callees with a stack parameter | 499 / 500 each | 499 / 500 each |
+| R1/R2/R3 (`r1-options`), subvar, R4 | 498 / 499 each | 498 / 499 each |
+| R5, with and without types | 497 / 498 | 497 / 498 |
+| S7 `r1-options` (also with create indices), `subvar-options`, `r4-options` | 498 / 499 | 498 / 499 |
+| S7 `r5-options` | 497 / 498 | 497 / 498 |
+| S7 `s6-options` (also with create indices) | 493 / 499 | 493 / 499 |
+| S8 rules off, rule stage | 499 / 499, 498 / 499 | 499 / 499, 498 / 499 |
+| prototypes and globals, rules on, types on | 498 / 499, 493 / 499 | 498 / 499, 493 / 499 |
+| `latedonothing`, rules on, types on | 498 / 499, 493 / 499 | 498 / 499, 493 / 499 |
+| `finalstructure`, rules on, types on | 494 / 495, 489 / 495 | 494 / 495, 489 / 495 |
+| names (`print map` after `namevars`), rules on, types on | new | 498 / 499, 493 / 499 |
+
+No bar fell. The switch functions were not compared for real in `finalstructure` and the switch
+corpus got no `finalstructure` run: both wait for `switchnorm`.
+
 Not started: the case labels. `switchnorm` needs, beyond `matchModel`/`recoverLabels`/
 `foldInNormalization`/`foldInGuards` themselves: the flow-time model's value range kept on the
 `JumpTable` (`buildLabels` walks the range of the model the addresses were recovered with),
