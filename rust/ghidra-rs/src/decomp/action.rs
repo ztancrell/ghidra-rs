@@ -182,7 +182,8 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
         ("starttypes", "typerecovery", super::infertypes::start_types),
         ("activereturn", "protorecovery", c::active_return),
     ] {
-        if on(g) {
+        // `DECOMP_SKIP_ACTIONS` (`action:<name>`) applies here too, as `leaves` does
+        if on(g) && !disabled.contains(&format!("action:{name}")) {
             // ActionDoNothing is rule_repeatapply
             fullloop.push(if name == "donothing" { t.leaf_repeat(name, f) } else { t.leaf(name, f) });
         }

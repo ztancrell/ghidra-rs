@@ -1577,8 +1577,9 @@ Part two (branch `m3-s8b`): `ActionPreferComplement` and `ActionStructureTransfo
 (`decomp/blocktransform.rs`, with the for-loop recovery of `BlockWhileDo::finalTransform` and
 `opFlipInPlaceTest`/`Execute`) run in both S8 checks now (no longer in `DECOMP_SKIP_ACTIONS`):
 rules off M8 8 / 8, M500 499 / 499; rule-stage options M8 8 / 8, M500 498 / 499. They change 137
-and 10 reference outputs; all match. `ActionReturnSplit` (`decomp/returnsplit.rs`) is ported with
-a unit test. Superseded: "Not ported yet: `prefercomplement` and `structuretransform`" above.
+and 10 reference outputs; all match. `ActionReturnSplit` (`decomp/returnsplit.rs`) runs in both
+checks too (group `returnsplit` now on in the S8 option files; it changes 52 reference outputs, all
+match). `ActionFinalStructure` and structured `printRaw` wait for S7 (plan, "S8 part two"). Superseded: "Not ported yet: `prefercomplement` and `structuretransform`" above.
 
 Review round: `ActionNodeJoin` skips a CBRANCH with `boolean_flip` set (`findDups`), the switch
 leaf check of `newBlockSwitch`, no recursion in `printTree`, `negateCondition`, `isComplex`, and

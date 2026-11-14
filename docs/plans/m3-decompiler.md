@@ -804,8 +804,17 @@ moved, initializer), an if/else complemented in place, and a goto chosen by `Tra
 
 `ActionReturnSplit` (`decomp/returnsplit.rs`: `gatherReturnGotos`, `isSplittable`, `gotoPrints`,
 `nextFlowAfter` per kind with the switch's cases in `grabCaseBasic` order, `Funcdata::nodeSplit`
-and `CloneBlockOps`) is ported with a unit test (a goto into a RETURN block split off); its group
-is off in the S8 option files so far, so no corpus check covers it yet.
+and `CloneBlockOps`) is ported with a unit test (a goto into a RETURN block split off); superseded: "its group is off in the S8 option files". Group `returnsplit` is now on in both S8
+option files (`tools/r1-options.sh`); with it running on both sides: rules off M8 8 / 8, M500
+499 / 499; rule-stage options M8 8 / 8, M500 498 / 499; it changes 52 reference outputs, all
+identical. Fixed with it: `DECOMP_SKIP_ACTIONS` was ignored for the `fullloop` actions on the
+ghidra-rs side (`action.rs`). The rule check stays 498 / 499. The case data of `BlockSwitch`
+(`grabCaseBasic` labels, `compareCase`) is not needed by these actions (`nextFlowAfter` reads only
+the case order, which is the components' and the goto edges'), so it waits for printing.
+Part three (`ActionFinalStructure`, structured `printRaw`) waits for S7: the actions between
+`structuretransform` and `finalstructure` are the merge, prototype, naming and cast actions, and
+`finalizePrinting` reads what they set (`isExplicit`, high variables), so a check that skips them
+would only compare a state the C++ never prints.
 
 ## Running stages in parallel
 
