@@ -42,9 +42,7 @@ pub(crate) fn structure_transform(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
 }
 
 /// The second `ActionPreferComplement` (coreaction.cc, after the second `ActionBlockStructure`,
-/// "don't allow mods"). Its action row lies past `assignhigh`, which this branch's tree does not
-/// reach; S7 adds the rows through `stop` and wires it.
-#[allow(dead_code)]
+/// "don't allow mods"), the row after `copymarker`.
 pub(crate) fn prefer_complement_no_mods(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
     let mut s = std::mem::take(&mut fd.structure);
     let res = s.prefer_complement_all(fd, false);
@@ -53,8 +51,7 @@ pub(crate) fn prefer_complement_no_mods(fd: &mut Funcdata, _: &Arch) -> Result<i
     res
 }
 
-/// The second `ActionStructureTransform` ("don't allow mods"), wired with the S7 rows as above.
-#[allow(dead_code)]
+/// The second `ActionStructureTransform` ("don't allow mods").
 pub(crate) fn structure_transform_no_mods(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
     let mut s = std::mem::take(&mut fd.structure);
     let res = s.final_transform(fd, false);

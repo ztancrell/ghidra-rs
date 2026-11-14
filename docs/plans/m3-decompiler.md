@@ -698,6 +698,81 @@ irreducible two-entry loop, a switch with a duplicated table target and a skip e
 exit; expected trees derived by hand from the C++). Bars after the round, unchanged: S8 M8 8 / 8,
 M500 499 / 499 (rules off) and 496 / 499 (rule-stage options); R3 check 495 / 499; S4 and S6
 checks 498 / 500.
+### S7: in part on branch `m3-s7` (2026-11-13)
+
+Ported: the merge range `assignhigh` .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`;
+list in `rust/README.md`, "Stage S7"). Check: `print raw` with types and high variables at
+`break start inputprototype` (the first action after `copymarker` whose group is on and that is
+not ported), `DECOMP_RAW_EXTRA=1`:
+
+```sh
+cd rust
+DECOMP_RAW_EXTRA=1 DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst BREAK=inputprototype \
+  OPTIONS=tools/corpus/r1-options.txt tools/decomp-diff.sh m500
+DECOMP_RAW_EXTRA=1 BREAK=inputprototype OPTIONS=tools/corpus/s6-options.txt tools/decomp-diff.sh m500
+```
+
+- High-variable ids: `rust/tools/decomp-ref.patch` now numbers each high by its first appearance
+  in one `print raw` (`{hN}`, reset by `Funcdata::printRaw`), and `print.rs` does the same.
+  Superseded: the first scheme, the create index of the high's name representative, which also
+  compared varnode create indices from before merging (it found one real bug, the RETURN order
+  of `ActionPrototypeTypes`, fixed; and one left, below).
+- Nothing extra is skipped: between `assignhigh` and `inputprototype` the actions not ported are
+  in groups the options switch off on both sides (`blockrecovery`: `latedonothing`,
+  `blockstructure`, `prefercomplement`, `structuretransform`; `localrecovery`:
+  `outputprototype`; `dynamic`: `dynamicsymbols`).
+- Results: M8 8 / 8 with both option files; M500 (of the 499 the reference finishes)
+  `r1-options` 489 / 499 (98.0 %), `s6-options` 492 / 499 (98.6 %). Bar (95 %): reached with both.
+- Misses by cause: misses with `r1-options`: 3 need `VariablePiece` (0x402c20, 0x405990, 0x62f0d0: overlapping address-tied varnodes of different sizes, fail loudly); 4 are the R1/R3 misses (0x47a6b0, 0x4891e0, 0x4919f0, 0x6fa6e0); 3 print `<code() *>` on the reference for a global INDIRECT output where ghidra-rs keeps `xunknown4` (0x48a430, 0x5c5940, 0x6b3730: a type set before merging that only this check shows, as the R1/R3 check prints no types). With `s6-options`: 6 need `VariablePiece` (0x402c20, 0x405990, 0x4c0070, 0x62f0d0, 0x757810, 0x7586e0) and 0x4919f0 (as in S4).
+- Left for S7b: `VariablePiece`/`VariableGroup` (`groupWith`; needed by overlapping
+  address-tied varnodes of different sizes, the main miss), `dynamic.cc` and
+  `ActionDynamicSymbols`, symbols and `mergeMultiEntry` (needs the local scope of `database.cc`),
+  union resolution of trimmed COPYs, `stripType`, `markPurePaddingCopies`, the STORE guards of
+  `StackAffectingOps` (stack heritage). A varnode create-index difference before merging
+  (an `ESP = ESP(i) + c` output created one varnode earlier than the reference in 0x401080 and
+  0x9eec5e) is not visible with the first-appearance ids; its cause is not found yet.
+- Regressions on the final binary: R3 check 495 / 499, S3 paramdouble 500 / 500, S4 498 / 500, S6
+  498 / 500.
+
+Review round (same branch, 2026-11-13), after an independent line-by-line review:
+
+- `Cover::intersect(PcodeOpSet)` ported with its exact walk (sorted set, block starts, the
+  skipped set block after a tested one); the first round answered "any call strictly inside
+  the cover", which refused merges the C++ allows. Superseded: "the C++ sort by block is left
+  out".
+- The create-index difference above was `ActionExtraPopSetup` making the unknown-extrapop
+  INDIRECT's iop varnode last (the C++ `newIndirect` makes it first); fixed. Superseded: "its
+  cause is not found yet".
+- The `<code() *>` misses were global symbol types: the C++ gives them when a varnode is made,
+  ghidra-rs before each inference pass, and with `typerecovery` off none runs; `assignhigh` now
+  applies them too. Superseded: the 3 type misses above.
+- Also: dead RETURNs skipped in `ActionPrototypeTypes`; `groupPartials` fails loudly on a
+  registered proto-partial root; no common dominator is an error; wrapping end offsets; cover
+  dirtying as the C++ (`totalReplace` only through `opSetInput`).
+- New check mode `DECOMP_RAW_EXTRA=2`: also each varnode's create index (`{cN}`), since `{hN}`
+  only labels the merge partition of printed varnodes (no create indices, representatives,
+  covers or unprinted highs).
+- Results: M8 8 / 8 in all four runs; M500 `r1-options` 492 / 499, `s6-options` 492 / 499, the
+  same with create indices (no extra difference). Misses: `VariablePiece` (3 rules on, 6 types
+  on), and the R1/R3 misses (0x47a6b0, 0x4891e0, 0x4919f0, 0x6fa6e0; only 0x4919f0 with
+  types on). Superseded: 489 / 499 above. Regressions: R3 check 495 / 499, S3 paramdouble 500 / 500, S4 check 498 / 500, S6 check 498 / 500, all unchanged (the varnode creation-order fix shows only in create indices, which those checks do not print).
+
+Merged with master (R3 part two, R4, R2; 2026-11-13). The jumptable root now runs the whole
+tree on the partial function, so `outputprototype` (group `localrecovery`, on there) joins
+`PARTIAL_SKIP`: it only sets the output prototype's types, which no recovered address reads
+(without it 4 tables failed: S3 fell to 496 / 500). `register_proto_partial_root` stays
+unused: in the C++ only `SplitDatatype::buildOutConcats` (`RuleSplitCopy/Load/Store`) and
+`RulePieceStructure` make proto-partials, neither ported; R3b's `SplitFlow` makes none. The
+paths needing `VariablePiece` (`mergeAddrTied` overlaps, `groupPartials`) still fail loudly.
+Results on the merged binary: M8 8 / 8 in all five S7 runs; M500 types on (`s6-options`)
+492 / 499; rules on (`r1-options`) 481 / 499, the same with create indices, `subvar-options`
+482 / 499, `r4-options` 481 / 499. The rules-on drop is a type difference from before merging
+that only this check prints (it is there at `break start assignhigh` with
+`DECOMP_RAW_EXTRA=1`): a mask constant of R2's rules (`X & #0x1`) carries the 1-byte type of
+the varnode it came from on the reference (`<xunknown1>`) and its own size's on ghidra-rs, in
+13 functions; 0x571cc0, 0x746320 and 0x74fae0 also differ in sequence numbers there (not
+traced). Rule bars on the merged binary: R3, subvar and R4 checks 498 / 499, S3 500 / 500,
+S4 and S6 498 / 500.
 
 ### R5: in part on branch `m3-r5` (2026-11-13)
 
@@ -771,6 +846,21 @@ the stack heritage pass, not ported; the constant-pointer path also needs `filli
 the ram pass to replace `fold_constants` in the jump-table partial function, where `stackvars` is
 on), double.cc, constseq.cc, bitfield.cc, and the `cleanup` rules that read types.
 
+Merged with S8 part one and R5 slice one (2026-11-13). Superseded: the rules-on 481 / 499 above.
+The `X & #0x1` constant-type misses were `copySymbol` on an untyped source: every C++ varnode
+has a type, so `RuleAndCompare`'s wider mask constant keeps the 1-byte constant's `xunknown1`;
+here `ty: None` means "the unknown type of my size", so copying it gave `xunknown4`.
+`Funcdata::copy_symbol` now gives the copy the source's own-size type. R5's
+`unshared_constant` fix alone did not change them (tested on a scratch copy). The three
+sequence-number differences (0x571cc0, 0x746320, 0x74fae0) had the same cause and match now.
+Results on the merged binary: M8 8 / 8 in all six S7 runs; M500 rules on (`r1-options`)
+498 / 499, the same with create indices, `subvar-options` 498 / 499, `r4-options` 498 / 499,
+`r5-options` 497 / 498; types on (`s6-options`, the five pointer rules now on) 493 / 499.
+Misses: 0x47a6b0 (the rule-stage miss of every check); with types on, 6 `VariablePiece`
+functions (0x402c20, 0x405990, 0x4c0070, 0x62f0d0, 0x757810, 0x7586e0; with the rules on, the
+rules remove those overlaps); with R5, 0x6b21e0 (R5's unported `assignPropagatedType`).
+Existing bars on the merged binary: R3, subvar and R4 checks 498 / 499, R5 typed 497 / 498,
+S3 500 / 500, S4 and S6 499 / 500, S8 rules off 499 / 499 and rule stage 498 / 499.
 ### S8 part two: in part on branch `m3-s8b` (2026-11-13)
 
 Ported (`decomp/blocktransform.rs`): `ActionPreferComplement` and `ActionStructureTransform`
@@ -813,16 +903,26 @@ ghidra-rs side (`action.rs`). The rule check stays 498 / 499. The case data of `
 the case order, which is the components' and the goto edges'), so it waits for printing.
 Review follow-ups: the C++ runs `ActionPreferComplement` and `ActionStructureTransform` a second
 time after the second `ActionBlockStructure` without op modifications (coreaction.cc 6138-6139);
-their entry points (`prefer_complement_no_mods`, `structure_transform_no_mods`) are ready and get
-their rows with S7's tree past `assignhigh`. CAST is moveable (its eval type is unary). Left for
+their entry points are `prefer_complement_no_mods` and `structure_transform_no_mods`. Superseded:
+"they get their rows with S7"; after the merge with S7 the rows after `copymarker` are wired to them,
+and the second `blockstructure` row to `block_structure` (the same action: nothing to do once
+structured). None of these reads high variables or `isExplicit` (only `finalizePrinting` does). CAST is moveable (its eval type is unary). Left for
 later stages: the `f_flip_path` toggle of `swapEdges` (read by jumptable.cc's guard folding:
 `switchnorm`), `f_duplicate_block` and `f_joined_block` (read by printc.cc's labels), the data type
 of the code reference `CloneBlockOps` makes for an annotation (printing), and the `nonprinting` and
-`special_print` bits `buildOpClone` keeps (S7 adds them).
+`special_print` bits `buildOpClone` keeps (superseded: now kept, with S7's flags).
 Part three (`ActionFinalStructure`, structured `printRaw`) waits for S7: the actions between
 `structuretransform` and `finalstructure` are the merge, prototype, naming and cast actions, and
 `finalizePrinting` reads what they set (`isExplicit`, high variables), so a check that skips them
 would only compare a state the C++ never prints.
+After the merge with S7 the leaves between `copymarker` and `finalstructure` still block a fair
+check: `latedonothing` (needs the delayed do-nothing mark of `ActionDoNothing` and
+`removingCreatesRedundancy`; it changes the CFG, so it cannot be skipped fairly), `outputprototype`,
+`inputprototype`, `mapglobals`, `namevars`, `setcasts` (S9: CAST ops `print raw` shows), and
+`BlockSwitch::finalizePrinting` needs the case labels of `switchnorm` (`recoverLabels`, not ported).
+Part three stays open until those land. The S7 checks keep `blockrecovery` off (their option files
+are S4's); with it on they would reach `latedonothing`, which ghidra-rs does not port, so
+none of the S8 actions runs inside them.
 
 ## Running stages in parallel
 

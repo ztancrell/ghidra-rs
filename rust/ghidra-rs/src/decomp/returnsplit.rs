@@ -208,17 +208,18 @@ fn node_split(fd: &mut Funcdata, b: BlockId, inedge: usize) -> Result<()> {
 /// `CloneBlockOps::cloneBlock`: each op of `b` but a BRANCH is cloned (flags and output) at the
 /// end of `bprime`, then `patchInputs`.
 fn clone_block(fd: &mut Funcdata, b: BlockId, bprime: BlockId, inedge: usize) -> Result<()> {
-    // `buildOpClone` (funcdata_block.cc) also keeps `nocollapse`, `nonprinting`, `special_print` and
-    // the halt bits (`halt` is copied below); `nonprinting` (OpFlags 8192) and `special_print`
-    // (16384) arrive with S7 and must be added here then. The other bits it keeps are not
-    // modelled.
-    const OP_KEEP: [OpFlags; 6] = [
+    // the bits `buildOpClone` (funcdata_block.cc) keeps that ghidra-rs models (the halt kind is
+    // copied below; `nocollapse`, `no_indirect_collapse`, `ptrflow` and the additional flags
+    // other than `special_print` are not modelled)
+    const OP_KEEP: [OpFlags; 8] = [
         OpFlags::START_BASIC,
         OpFlags::START_INSTRUCTION,
         OpFlags::INDIRECT_CREATION,
         OpFlags::INDIRECT_STORE,
         OpFlags::CALCULATED_BOOL,
         OpFlags::STOP_TYPE_PROPAGATION,
+        OpFlags::NONPRINTING,
+        OpFlags::SPECIAL_PRINT,
     ];
     const VN_KEEP: [VnFlags; 7] = [
         VnFlags::INCIDENTAL_COPY,

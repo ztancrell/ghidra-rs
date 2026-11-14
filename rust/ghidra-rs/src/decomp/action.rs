@@ -15,7 +15,7 @@ use super::{err, heritage, Arch, Funcdata, Result};
 /// `universalAction` as the `decompile` root has it, with the groups in `disabled` switched
 /// off (`option currentaction decompile <group> off`): the root `universal` (restart group,
 /// once per function), its first actions, the repeating groups `fullloop`, `mainloop` and
-/// `stackstall`, and the root's actions after `fullloop` up to `assignhigh`. `oppool1` holds the
+/// `stackstall`, and the root's actions after `fullloop` to `stop` (ported through `copymarker`, stage S7). `oppool1` holds the
 /// ported rules (`rules::OPPOOL1`) less those `togglerule` switched off (`rule:<name>` in
 /// `disabled`); the actions named `action:<name>` there (`DECOMP_SKIP_ACTIONS`) are left out. An
 /// action that is not ported fails when it runs with its group on.
@@ -206,7 +206,35 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("prefercomplement", "blockrecovery", super::blocktransform::prefer_complement),
             ("structuretransform", "blockrecovery", super::blocktransform::structure_transform),
             ("normalizebranches", "normalizebranches", not_ported),
-            ("assignhigh", "merge", not_ported),
+            // stage S7 (`merge.rs`)
+            ("assignhigh", "merge", super::merge::assign_high_action),
+            ("mergerequired", "merge", super::merge::merge_required),
+            ("markexplicit", "merge", super::merge::mark_explicit),
+            ("markimplied", "merge", super::merge::mark_implied_action),
+            ("mergemultientry", "merge", super::merge::merge_multi_entry),
+            ("mergecopy", "merge", super::merge::merge_copy),
+            ("dominantcopy", "merge", super::merge::dominant_copy),
+            ("dynamicsymbols", "dynamic", not_ported),
+            ("markindirectonly", "merge", super::merge::mark_indirect_only),
+            ("mergeadjacent", "merge", super::merge::merge_adjacent_action),
+            ("mergetype", "merge", super::merge::merge_type),
+            ("hideshadow", "merge", super::merge::hide_shadow),
+            ("copymarker", "merge", super::merge::copy_marker),
+            ("latedonothing", "blockrecovery", not_ported),
+            // the second instances: the same ActionBlockStructure (nothing to do once structured),
+            // then the two transforms without op modifications
+            ("blockstructure", "blockrecovery", super::structure::block_structure),
+            ("prefercomplement", "blockrecovery", super::blocktransform::prefer_complement_no_mods),
+            ("structuretransform", "blockrecovery", super::blocktransform::structure_transform_no_mods),
+            ("outputprototype", "localrecovery", not_ported),
+            ("inputprototype", "fixateproto", not_ported),
+            ("mapglobals", "fixateglobals", not_ported),
+            ("dynamicsymbols", "dynamic", not_ported),
+            ("namevars", "merge", not_ported),
+            ("setcasts", "casts", not_ported),
+            ("finalstructure", "blockrecovery", not_ported),
+            ("prototypewarnings", "protorecovery", not_ported),
+            ("stop", "base", c::nothing),
         ],
     ));
     t.restart_group("universal", root);
@@ -215,7 +243,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
 
 /// An action not ported yet: it fails when it runs (with its group on).
 fn not_ported(_: &mut Funcdata, _: &Arch) -> Result<i32> {
-    err("action not implemented in ghidra-rs yet (milestone 3: stage S4 ends before assignhigh, with the rule groups off)")
+    err("action not implemented in ghidra-rs yet (milestone 3: stage S7 ends after copymarker; see the action table)")
 }
 
 /// The actions of the `jumptable` root's groups the partial function is simplified without while
@@ -233,6 +261,9 @@ const PARTIAL_SKIP: &[&str] = &[
     "condconst",
     "mappedlocalsync",
     "normalizebranches",
+    // stage S7: the last `localrecovery` action, after merging (not in the `jumptable` groups);
+    // it only sets the output prototype's types, which no recovered address reads
+    "outputprototype",
 ];
 
 /// The `jumptable` root action (`buildDefaultGroups`: groups `base`, `noproto`, `analysis`, ...)
@@ -324,11 +355,11 @@ fn extrapop_setup(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
                 fd.op_insert_after(op, call)?;
             }
             ExtraPop::Unknown => {
-                let op = fd.new_op(Opcode::Indirect, addr);
+                // newIndirect makes the iop varnode first, then the output and the base
+                let op = fd.new_indirect(call)?;
                 fd.new_varnode_out(size, sp, off, op);
                 let base = fd.new_varnode(size, sp, off);
-                let iop = fd.new_varnode_iop(call);
-                fd.op_set_all_input(op, &[base, iop])?;
+                fd.set_indirect_input(op, base)?;
                 fd.op_insert_before(op, call)?;
             }
         }
@@ -347,7 +378,12 @@ fn prototype_types(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     if !fd.proto.model_locked && !fd.proto.has_matching_model(evalfp) {
         fd.proto.set_model(models, evalfp);
     }
-    for op in fd.ops_with(Opcode::Return) {
+    // the C++ walks the per-opcode RETURN list (creation order), which decides the constants'
+    // create indices (high-variable ids, stage S7)
+    for op in fd.ops_created_with(Opcode::Return) {
+        if fd.op(op).is_dead() {
+            continue;
+        }
         let Some(&in0) = fd.op(op).ins.first() else { continue };
         if !fd.vn(in0).is_constant() {
             let size = fd.vn(in0).size;

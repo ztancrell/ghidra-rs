@@ -105,6 +105,10 @@ pub struct Funcdata {
     pub(crate) constptr_passes: u32,
     /// `typerecovery_exceeded`: inference gave up after 7 passes
     pub(crate) typerecovery_exceeded: bool,
+    /// the high variables (stage S7, `variable.rs`)
+    pub(crate) highs: super::variable::Highs,
+    /// the next [`PcodeOp::alive_key`]
+    next_alive: u32,
     /// `typerecovery_on` (`ActionStartTypes::reset`): the running action has group `typerecovery`
     pub(crate) typerecovery_on: bool,
     /// `jumptablerecovery_on`: this is the partial function of jump-table recovery
@@ -150,6 +154,8 @@ impl Funcdata {
             infer_passes: 0,
             constptr_passes: 0,
             typerecovery_exceeded: false,
+            highs: super::variable::Highs::default(),
+            next_alive: 0,
             typerecovery_on: false,
             jumptablerecovery_on: false,
         }
@@ -248,6 +254,7 @@ impl Funcdata {
             flags: OpFlags::default(),
             halt: None,
             list_key: self.next_list_key,
+            alive_key: 0,
         });
         self.next_list_key += 1;
         self.seqs.insert((addr, seq.time), id);
@@ -405,9 +412,13 @@ impl Funcdata {
 
     /// Port of `Varnode::copySymbol` as far as varnodes carry it here: the data-type and the type
     /// lock (symbol entries and the name lock are not modelled yet).
+    /// An untyped source has the unknown type of its own size (`ty: None` means that), which the
+    /// copy keeps: a 1-byte constant's `xunknown1` stays on a wider clone, as in the C++
+    /// (`RuleAndCompare`; stage S7 found it, the high-variable check prints types).
     pub(crate) fn copy_symbol(&mut self, to: VarnodeId, from: VarnodeId) {
-        let (ty, lock) = (self.vn(from).ty, self.vn(from).has(VnFlags::TYPELOCK));
-        self.vn_mut(to).ty = ty;
+        let ty = super::infertypes::vn_type(self, from);
+        let lock = self.vn(from).has(VnFlags::TYPELOCK);
+        self.vn_mut(to).ty = Some(ty);
         if lock {
             self.vn_set(to, VnFlags::TYPELOCK);
         } else {
@@ -787,6 +798,8 @@ impl Funcdata {
         }
         self.blocks.block_mut(bl).ops.insert(at, op);
         self.op_mut(op).parent = Some(bl);
+        self.op_mut(op).alive_key = self.next_alive;
+        self.next_alive += 1;
         let ops = &self.blocks.block(bl).ops;
         let before = if at == 0 { 2 } else { self.op(ops[at - 1]).order };
         let after = match ops.get(at + 1) {
@@ -798,11 +811,6 @@ impl Funcdata {
         } else {
             self.op_mut(op).order = after / 2 + before / 2;
         }
-    }
-
-    /// The live ops with opcode `opc` (`Funcdata::beginOp(opc)`), in block order.
-    pub(crate) fn ops_with(&self, opc: Opcode) -> Vec<OpId> {
-        self.blocks.ops().filter(|&o| self.op(o).opc == opc).collect()
     }
 
     /// The ops with opcode `opc` in the order the C++ keeps its per-opcode lists (`returnlist`,
@@ -1085,7 +1093,7 @@ impl Funcdata {
     }
 
     /// Port of `FlowBlock::findCommonBlock`: the nearest block dominating both.
-    fn find_common_block(&self, b1: BlockId, b2: BlockId) -> Option<BlockId> {
+    pub(crate) fn find_common_block(&self, b1: BlockId, b2: BlockId) -> Option<BlockId> {
         let mut up = std::collections::HashSet::new();
         let mut b = Some(b1);
         while let Some(x) = b {
