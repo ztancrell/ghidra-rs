@@ -920,6 +920,112 @@ rules remove those overlaps); with R5, 0x6b21e0 (R5's unported `assignPropagated
 Existing bars on the merged binary: R3, subvar and R4 checks 498 / 499, R5 typed 497 / 498,
 S3 500 / 500, S4 and S6 499 / 500, S8 rules off 499 / 499 and rule stage 498 / 499.
 
+**R5 slice 2 (in part) and the merge with stack heritage** (branch `m3-r5b`, 2026-11-14).
+Superseded: "Left for R5 (slices 2 to 5, not started): `RuleLoadVarnode`/`RuleStoreVarnode`"
+above, and in "Stack heritage" below "Invisible to the check until R5: every LOAD/STORE through
+the stack pointer" and "`resolveSpacebaseRelative` is R5's".
+
+`master` 836d04baee (S8 part two, stack heritage) is merged into `m3-r5b`. One conflict,
+`rust/tools/r1-options.sh`: both sides kept (this branch's `r5c-options.txt` and
+`r5d-options.txt` lines, master's S8 lines that also switch `returnsplit` on).
+
+Ported (`rules/stackvars.rs`, group `stackvars`, the last two rules of `OPPOOL2` as in
+`universalAction`): `RuleLoadVarnode` and `RuleStoreVarnode` with `correctSpacebase`,
+`vnSpacebase`, `checkSpacebase`, `FuncCallSpecs::resolveSpacebaseRelative` (a call's stack
+offset from its placeholder, or from the first stack parameter of a locked prototype) and
+`Funcdata::opCollapseIndirectsForCopy`; the `stack_store` mark (`VnFlags::STACK_STORE`,
+1 << 29) and its reader in `ActionDirectWrite`; `ActionInferTypes::propagateSpacebaseRef` and
+`propagateRef` with `TypeFactory::getExactPiece` (until now a loud error once an unlocked stack
+varnode existed); `ParamListStandard::characterizeAsParam` for stack entries
+(`ParamList::characterize_stack`), so a call whose stack offset is known registers stack trials
+in `guardCalls`.
+
+Open, failing loudly:
+
+- Stack parameter trials of a call that has no locked prototype: `ActionActiveParam` with
+  trials (`checkInputTrialUse` with `AliasChecker`, `finalInputCheck`, `fillinMap`,
+  `buildInputFromTrials`) is not ported. With the rules on, almost every function that pushes
+  arguments reaches it, so the unlocked check below is far from its bar. This is the next piece.
+- An INDIRECT of the old STORE that overlaps the new COPY in part (the PIECE/SUBPIECE rebuild
+  of `opCollapseIndirectsForCopy`); partial structs, arrays and unions in `getExactPiece`.
+- Not modelled: `PcodeOp::isStoreUnmapped` (set only by `ActionRestructureVarnode`, not
+  ported), word sizes other than 1.
+- The jump-table partial function still runs without the two rules and with
+  `jumptable::fold_constants` (the C++ has `stackvars` on there and `fillinReadOnly`); the tree
+  builder leaves them out of the `jumptable` root (`action.rs`).
+
+Checks, at `break start assignhigh` with types printed (`DECOMP_RAW_EXTRA=1`).
+`r1-options.sh` now also writes `rust/tools/corpus/r5s-options.txt` (`r5-options.txt` with
+`stackvars` on):
+
+    rust/tools/decomp-locked-options.sh void rust/target/stack-lock.txt "int4 a, int4 b"
+    grep -v 'decompile stackvars off' rust/target/stack-lock.txt > rust/target/lock-sv.txt
+    grep -v 'decompile stackvars off' rust/tools/corpus/s6-options.txt > rust/target/s6-sv.txt
+    { cat rust/tools/corpus/r5s-options.txt; grep '^parse line' rust/target/stack-lock.txt; } > rust/target/r5s-lock.txt
+    DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=rust/target/lock-sv.txt rust/tools/decomp-diff.sh m500
+    DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=rust/target/s6-sv.txt rust/tools/decomp-diff.sh m500
+    export DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst
+    DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=rust/target/r5s-lock.txt rust/tools/decomp-diff.sh m500
+    DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=rust/tools/corpus/r5s-options.txt rust/tools/decomp-diff.sh m500
+
+| slice 2 check (`stackvars` on) | M8 | M500 |
+|---|---|---|
+| stack-lock options (every prototype locked, rules off) | 8 / 8 | 473 / 499 |
+| S6 options (unlocked, rules off) | 8 / 8 | 499 / 499 |
+| R5 options plus the locks (rules and types on, every prototype locked) | 6 / 8 | 323 / 498 |
+| R5 options (`r5s-options.txt`: rules and types on, unlocked) | 3 / 8 | 132 / 498 |
+
+Every miss that is not listed is a loud "not implemented" error. Stack-lock options: 26 misses
+(16 parameter trials of a call that stays unlocked, mostly indirect calls; 9 "a piece of a locked
+stack parameter"; 1 the load-guard value-set error). S6 options: no miss among the 499 the
+reference finishes. R5 options plus the locks: 171 loud (125 parameter trials, 32 pieces of a
+locked stack parameter, 14 heritage errors), 0x47a6b0 (the rule-stage miss of every check), and
+5 silent differences with one cause, not traced: at a call, the INDIRECT for the stack slot
+`s0xfffffffc` is an indirect creation (`= [create]`) on the reference and an ordinary INDIRECT
+of `ECX(i)` here (0x5cc020, 0x5cee30, 0x5d1dd0, 0x5da930, 0x5db590). R5 options unlocked: 350
+parameter trials, 17 heritage errors, 0x47a6b0; M8 fails on the trials in 5 of 8, and with the
+locks in 2 of 8 (0x4042e0, 0x73a340). The reference does not finish 0x4c48d0 (nor 0x6b21e0 with
+the R5 options). Found by these checks and fixed: `ParamEntry::justifiedContain` had no stack
+entries, so `possibleInputParam` was false for a stack parameter of the function, its INDIRECT
+at a call lost `addrforce` in `ActionDeadCode` and was removed (26 functions of the S6-options
+check).
+
+Bars on the merged tree (M500; M8 is 8 / 8 in every check). "Merged" is the binary of the
+merge alone, "final" the binary of this commit (merge plus slice 2):
+
+| check | before | merged | final |
+|---|---|---|---|
+| R5 untyped (`r5-options`) | 497 / 498 | 497 / 498 | not rerun |
+| R5 typed | 497 / 498 | 497 / 498 | 497 / 498 |
+| R5c (`r5c-options`) | 494 / 498 | 494 / 498 | not rerun |
+| R5d (`r5d-options`), `r5d-adc.txt` | 498 / 499, 215 / 215 | 498 / 499, 215 / 215 | not rerun |
+| stack check (`stack-lock.txt` at `assignhigh`) | 498 / 499 | 498 / 499 | 498 / 499 |
+| S7 print with `stack-lock.txt` | 492 / 499 | 492 / 499 | 492 / 499 |
+| `funclink`, `heritage` | 500 / 500 | 500 / 500 | not rerun |
+| S3 `paramdouble` | 500 / 500 | 500 / 500 | not rerun |
+| S3 switch corpus | 1,947 / 2,050 | 1,947 / 2,050 | not rerun |
+| S4 | 499 / 500 | 499 / 500 | 499 / 500 |
+| S6 unlocked | 499 / 500 | 499 / 500 | 499 / 500 |
+| S6 locked `void`, locked `int4` | 499 / 500 each | 499 / 500 each | not rerun |
+| S6 callees with a stack parameter | 499 / 500 | 499 / 500 | 499 / 500 |
+| R1/R2/R3 (`r1-options`) | 498 / 499 | 498 / 499 | 498 / 499 |
+| subvar, R4 | 498 / 499 each | 498 / 499 each | not rerun |
+| S7 `r1-options` (also with create indices), `subvar-options`, `r4-options` | 498 / 499 | 498 / 499 | not rerun |
+| S7 `r5-options` | 497 / 498 | 497 / 498 | not rerun |
+| S7 `s6-options` | 493 / 499 | 493 / 499 | 493 / 499 |
+| S7 `s6-options` with create indices | 493 / 499 | 493 / 499 | not rerun |
+| S8 rules off | 499 / 499 | 499 / 499 | not rerun |
+| S8 rule stage | 498 / 499 | 498 / 499 | 498 / 499 |
+
+No bar fell, and the misses are the known ones (0x4c48d0 in every "/ 500"; 0x47a6b0 in the
+rule stages; 0x40ad80 in the stack check; the 6 `VariablePiece` functions in S7 with types;
+the three `HeapSequence` functions in R5c). M8 is 8 / 8 in all 26 checks on the merged binary.
+"Not rerun" on the final binary: the options of those checks leave `stackvars` off, and the
+jump-table partial function runs without the two rules, so the slice 2 code they can reach is
+`propagateRef` (typed checks only) and the stack case of `justifiedContain`; they were measured
+on the merged binary only. `cargo test --release` 89 tests, `cargo clippy --release
+--all-targets -- -D warnings` and `cargo fmt --check` clean.
+
 ### Stack heritage: slice one on branch `m3-stack` (2026-11-13)
 
 Check: `print raw` with types at `break start assignhigh`, every function and callee locked

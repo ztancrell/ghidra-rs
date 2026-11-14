@@ -1817,6 +1817,66 @@ rules remove those overlaps); with R5, 0x6b21e0 (R5's unported `assignPropagated
 Existing bars on the merged binary: R3, subvar and R4 checks 498 / 499, R5 typed 497 / 498,
 S3 500 / 500, S4 and S6 499 / 500, S8 rules off 499 / 499 and rule stage 498 / 499.
 
+**R5 slice 2 (in part) and the merge with stack heritage** (branch `m3-r5b`, 2026-11-14).
+Superseded: "Left for R5: `RuleLoadVarnode`/`RuleStoreVarnode`" above, and "LOADs and STOREs
+through the stack pointer stay unconverted until R5's `RuleLoadVarnode`/`RuleStoreVarnode`" in
+"Stack heritage" below. `master` 836d04baee is merged in (one conflict, `tools/r1-options.sh`,
+both sides kept).
+
+- `ghidra-rs/src/decomp/rules/stackvars.rs`: the rules `loadvarnode` and `storevarnode` (group
+  `stackvars`, the end of `OPPOOL2`): a LOAD or STORE at a constant address, or at the stack
+  pointer plus a constant, becomes a COPY from or to a varnode of that space. With them:
+  `resolveSpacebaseRelative` (a call's stack offset), `opCollapseIndirectsForCopy`, the
+  `stack_store` mark (`VnFlags::STACK_STORE`) read by `ActionDirectWrite`,
+  `propagateSpacebaseRef`/`propagateRef` with `getExactPiece` in `infertypes.rs`, and stack
+  entries in `characterizeAsParam` (`ParamList::characterize_stack` in `fspec.rs`).
+- Open, failing loudly: stack parameter trials of a call without a locked prototype
+  (`ActionActiveParam` with trials: `checkInputTrialUse`, `fillinMap`,
+  `buildInputFromTrials`), which nearly every unlocked function with the rules on reaches; a
+  partly overlapping INDIRECT in `opCollapseIndirectsForCopy`; partial structs, arrays and
+  unions in `getExactPiece`. The jump-table partial function runs without the two rules and
+  keeps `jumptable::fold_constants`.
+- `tools/r1-options.sh` also writes `tools/corpus/r5s-options.txt` (`r5-options.txt` with
+  `stackvars` on).
+
+Checks (from the repository root, types printed, `break start assignhigh`):
+
+```sh
+rust/tools/decomp-locked-options.sh void rust/target/stack-lock.txt "int4 a, int4 b"
+grep -v 'decompile stackvars off' rust/target/stack-lock.txt > rust/target/lock-sv.txt
+grep -v 'decompile stackvars off' rust/tools/corpus/s6-options.txt > rust/target/s6-sv.txt
+{ cat rust/tools/corpus/r5s-options.txt; grep '^parse line' rust/target/stack-lock.txt; } > rust/target/r5s-lock.txt
+DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=rust/target/lock-sv.txt rust/tools/decomp-diff.sh m500
+DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=rust/target/s6-sv.txt rust/tools/decomp-diff.sh m500
+export DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst
+DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=rust/target/r5s-lock.txt rust/tools/decomp-diff.sh m500
+DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=rust/tools/corpus/r5s-options.txt rust/tools/decomp-diff.sh m500
+```
+
+| slice 2 check (`stackvars` on) | M8 | M500 |
+|---|---|---|
+| stack-lock options (every prototype locked, rules off) | 8 / 8 | 473 / 499 |
+| S6 options (unlocked, rules off) | 8 / 8 | 499 / 499 |
+| R5 options plus the locks (rules and types on, every prototype locked) | 6 / 8 | 323 / 498 |
+| R5 options (`r5s-options.txt`: rules and types on, unlocked) | 3 / 8 | 132 / 498 |
+
+Every miss that is not listed is a loud "not implemented" error. Stack-lock options: 26 misses
+(16 parameter trials of a call that stays unlocked, mostly indirect calls; 9 "a piece of a locked
+stack parameter"; 1 the load-guard value-set error). S6 options: no miss among the 499 the
+reference finishes. R5 options plus the locks: 171 loud (125 parameter trials, 32 pieces of a
+locked stack parameter, 14 heritage errors), 0x47a6b0 (the rule-stage miss of every check), and
+5 silent differences with one cause, not traced: at a call, the INDIRECT for the stack slot
+`s0xfffffffc` is an indirect creation (`= [create]`) on the reference and an ordinary INDIRECT
+of `ECX(i)` here (0x5cc020, 0x5cee30, 0x5d1dd0, 0x5da930, 0x5db590). R5 options unlocked: 350
+parameter trials, 17 heritage errors, 0x47a6b0; M8 fails on the trials in 5 of 8, and with the
+locks in 2 of 8 (0x4042e0, 0x73a340). The reference does not finish 0x4c48d0 (nor 0x6b21e0 with
+the R5 options). Found by these checks and fixed: `ParamEntry::justifiedContain` had no stack
+entries, so `possibleInputParam` was false for a stack parameter of the function, its INDIRECT
+at a call lost `addrforce` in `ActionDeadCode` and was removed (26 functions of the S6-options
+check).
+
+Every older bar was rerun on the merged binary (M8 8 / 8 in all 26 checks, M500 unchanged in all 28: no bar fell), and the stack check, S4, S6 unlocked and callees, `r1-options`, R5 typed, S7 with `s6-options` and the S8 rule stage again on the final binary, unchanged. The table of every bar is in `docs/plans/m3-decompiler.md`, "R5 slice 2".
+
 ### Stack heritage (slice one, branch `m3-stack`)
 
 The stack space is heritaged from pass 1 on (`heritage.rs`, `heritage_guard.rs`, `varmap.rs`).

@@ -593,6 +593,42 @@ impl ParamList {
             Containment::None
         }
     }
+
+    /// `ParamListStandard::characterizeAsParam` for a range of the stack space (`mask`: the
+    /// space's offset mask; a wrapped range is no parameter).
+    pub(crate) fn characterize_stack(&self, off: u64, size: u32, mask: u64) -> Containment {
+        let end = off + u64::from(size) - 1;
+        if end > mask {
+            return Containment::None;
+        }
+        let (mut contains, mut contained_by) = (false, false);
+        for e in &self.entries {
+            let Storage::Stack { offset: base, .. } = e.storage else { continue };
+            let eend = base + e.size as u64 - 1;
+            if eend < off || base > end {
+                continue;
+            }
+            // justifiedContain, little endian: an aligned entry holds a slot at each multiple
+            // of its alignment
+            if base <= off && end <= eend {
+                if (off - base).is_multiple_of(e.align.max(1) as u64) {
+                    return Containment::ContainsJustified;
+                }
+                contains = true;
+            }
+            // isExclusion && containedBy
+            if e.align == 0 && base >= off && eend <= end {
+                contained_by = true;
+            }
+        }
+        if contains {
+            Containment::ContainsUnjustified
+        } else if contained_by {
+            Containment::ContainedBy
+        } else {
+            Containment::None
+        }
+    }
 }
 
 impl ProtoModel {
@@ -795,9 +831,19 @@ impl ParamList {
         (low, high)
     }
 
-    /// Port of `ParamEntry::justifiedContain` for register and join entries (little endian,
-    /// no alignment): the offset of the range within the entry, or `None`.
+    /// Port of `ParamEntry::justifiedContain` (little endian): for a register or join entry
+    /// the offset of the range within the entry, for an aligned stack entry its offset within
+    /// the slot, or `None`.
     pub(crate) fn justified_contain(&self, i: usize, space: Space, off: u64, size: u32) -> Option<i32> {
+        if space == Space::Stack {
+            let e = &self.entries[i];
+            let Storage::Stack { offset: base, .. } = e.storage else { return None };
+            let end = off.checked_add(u64::from(size).saturating_sub(1))?;
+            if off < base || end > base + e.size as u64 - 1 {
+                return None;
+            }
+            return Some(((off - base) % (e.align.max(1) as u64)) as i32);
+        }
         let Space::Sleigh(sp) = space else { return None };
         let contain = |s: u32, base: u64, esize: u64| -> Option<i32> {
             (s == sp && base <= off && off + u64::from(size) <= base + esize).then(|| (off - base) as i32)
@@ -938,6 +984,7 @@ impl FuncProto {
         }
         match (self.model_of(arch), space) {
             (Some(m), Space::Sleigh(s)) => m.output.characterize(s, off, size),
+            (Some(m), Space::Stack) => m.output.characterize_stack(off, size, super::heritage_guard::stack_mask(arch)),
             _ => Containment::None,
         }
     }
@@ -949,6 +996,7 @@ impl FuncProto {
         }
         match (self.model_of(arch), space) {
             (Some(m), Space::Sleigh(s)) => m.input.characterize(s, off, size),
+            (Some(m), Space::Stack) => m.input.characterize_stack(off, size, super::heritage_guard::stack_mask(arch)),
             _ => Containment::None,
         }
     }

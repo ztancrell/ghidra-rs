@@ -52,9 +52,18 @@ pub(crate) fn direct_write(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             let op = fd.op(def);
             if op.is_marker() {
                 false
+            } else if v.has(VnFlags::PERSIST) {
+                true
+            } else if op.opc == Opcode::Copy {
+                // a COPY is no direct write, unless it was a STORE (`isStackStore`) whose
+                // source, through at most one more COPY, comes from a marker
+                let mut invn = op.ins.first().copied();
+                if let Some(cur) = invn.and_then(|i| fd.vn(i).def).filter(|&d| fd.op(d).opc == Opcode::Copy) {
+                    invn = fd.op(cur).ins.first().copied();
+                }
+                v.has(VnFlags::STACK_STORE) && invn.and_then(|i| fd.vn(i).def).is_some_and(|d| fd.op(d).is_marker())
             } else {
-                // a COPY is no direct write unless it was a stack STORE (none before stackvars)
-                v.has(VnFlags::PERSIST) || !matches!(op.opc, Opcode::Copy | Opcode::Piece | Opcode::Subpiece)
+                !matches!(op.opc, Opcode::Piece | Opcode::Subpiece)
             }
         } else {
             v.is_constant() && !is_indirect_zero(fd, vn)
@@ -127,9 +136,10 @@ fn alternate_path_valid(fd: &Funcdata, vn: VarnodeId, flags: u32) -> bool {
     }
 }
 
-/// Port of `Funcdata::checkCallDoubleUse`: no call has parameter trials of its own (calls take
-/// `__stdcall`, whose parameters live on the stack, and no stack varnode exists before the
-/// `stackvars` rules), so a value reaching a call is a use unless it is the called address.
+/// Port of `Funcdata::checkCallDoubleUse` for a call without parameter trials of its own (calls take
+/// `__stdcall`, whose parameters live on the stack; a call gets stack trials only once the
+/// `stackvars` rules resolve its stack offset, and those fail in [`active_param`]): a value
+/// reaching a call is a use unless it is the called address.
 fn check_call_double_use(fd: &Funcdata, op: OpId, vn: VarnodeId) -> Result<bool> {
     let j = fd.slot_of(op, vn).unwrap_or(0);
     if j == 0 {
@@ -546,7 +556,7 @@ fn upon_pop(
     res
 }
 
-/// Port of `ActionActiveParam::apply`. Calls have no parameter trials (see
+/// Port of `ActionActiveParam::apply` for calls without parameter trials (see
 /// [`check_call_double_use`]), so each call's analysis only counts its passes and then
 /// rebuilds the inputs from the (no) used trials.
 pub(crate) fn active_param(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
@@ -558,7 +568,7 @@ pub(crate) fn active_param(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
         let Some(active) = &mut fd.call_mut(c).active_input else { continue };
         let trimmable = active.numpasses > 0 || !callind;
         if !active.trials.is_empty() {
-            return err("parameter trials of a call: not implemented in ghidra-rs yet (stack varnodes, stage R5)");
+            return err("parameter trials of a call (checkInputTrialUse, fillinMap, buildInputFromTrials): not implemented in ghidra-rs yet");
         }
         // checkInputTrialUse: no trials to check
         active.numpasses += 1;

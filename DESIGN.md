@@ -198,6 +198,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    R5 slices 4 and 5 on branch `m3-r5b`: eight `cleanup` rules that read types (`ptrsubcharconstant`
    waits for string detection, S9) and the `constsequence`/`bitfields` entry tests; R1 check 498 / 499,
    R5 typed 497 / 498, new `r5c` check 494 / 498. Superseded: "constseq, bitfield, typed `cleanup` rules" above.
+   R5 slice 2 in part on `m3-r5b` (2026-11-14, merged with stack heritage): `RuleLoadVarnode` and
+   `RuleStoreVarnode` (`rules/stackvars.rs`), the call's stack offset, `propagateRef`; with
+   `stackvars` on: M500 499 / 499 unlocked without rules, 473 / 499 with every prototype locked, 323 / 498 locked with rules and types, 132 / 498 unlocked with rules (the rest fail loudly, 5 silent differences not traced); every older bar held. Open: stack parameter trials of
+   unlocked calls (`ActionActiveParam` with trials), `stackvars` in the jump-table partial function.
+   Superseded: "Open: stack loads/stores" above.
    S8 (structuring, in part) on branch `m3-s8`: `ActionBlockStructure` (`CollapseStructure`,
    `LoopBody`, `TraceDAG`; `structure.rs`, `collapse.rs`) and `print tree block`; `print tree
    block` plus `print raw` at `assignhigh` with `blockrecovery` on: M8 8 / 8, M500 499 / 499 the

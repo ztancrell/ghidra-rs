@@ -31,6 +31,7 @@ mod modulo;
 mod piece;
 mod pool;
 mod ptrarith;
+mod stackvars;
 mod subpiece;
 mod subvar;
 mod typecleanup;
@@ -59,6 +60,7 @@ use floatrules::*;
 use modulo::*;
 use piece::*;
 use ptrarith::*;
+use stackvars::*;
 use subpiece::*;
 use subvar::*;
 use typecleanup::*;
@@ -252,6 +254,8 @@ pub(crate) const OPPOOL2: &[Rule] = &[
     r("pushptr", "typerecovery", &[IntAdd], push_ptr),
     r("structoffset0", "typerecovery", &[Load, Store], struct_offset0),
     r("ptrarith", "typerecovery", &[IntAdd], ptr_arith),
+    r("loadvarnode", "stackvars", &[Load], load_varnode),
+    r("storevarnode", "stackvars", &[Store], store_varnode),
 ];
 
 /// The ported rules of the `cleanup` pool, in `universalAction`'s order.

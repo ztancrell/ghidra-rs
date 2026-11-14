@@ -156,8 +156,12 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("constantptr", "typerecovery", super::infertypes::constant_ptr),
         ],
     ));
-    // oppool2 (stage R5: the `typerecovery` pointer rules; `stackvars` is not ported)
-    let pool2 = super::rules::select(super::rules::OPPOOL2, rule_on);
+    // oppool2 (stage R5): the `typerecovery` pointer rules and the `stackvars` rules.
+    // ponytail: the jump-table partial function still folds its constant loads itself
+    // (`jumptable::fold_constants`) and runs without the `stackvars` rules, which the C++ has
+    // on there; switch them on with `fillinReadOnly` when `fold_constants` goes.
+    let pool2 =
+        super::rules::select(super::rules::OPPOOL2, |rl| rule_on(rl) && !(jumptable && rl.group == "stackvars"));
     mainloop.push(t.pool("oppool2", pool2));
     mainloop.extend(leaves(
         &mut t,

@@ -2,7 +2,7 @@
 # Writes the options of the rule-stage checks: S4's options (s4-options.txt) with more groups on,
 # and `option togglerule <rule> off` for every rule of `oppool1` and of the `cleanup` pool whose
 # group is on and which ghidra-rs does not port yet, and of `oppool2` (the tables in
-# ghidra-rs/src/decomp/rules/mod.rs). Rerun it when rules land. It writes eight files:
+# ghidra-rs/src/decomp/rules/mod.rs). Rerun it when rules land. It writes nine files:
 #   rust/tools/corpus/r1-options.txt      groups `analysis`, `cleanup` on (the R1/R2/R3 check)
 #   rust/tools/corpus/subvar-options.txt  also `subvar` on (the R3 subvar check)
 #   rust/tools/corpus/r4-options.txt      also `floatprecision` on (the R4 check)
@@ -11,6 +11,7 @@
 #   rust/tools/corpus/r5-options.txt      also `typerecovery` on (the R5 check: pointer rules)
 #   rust/tools/corpus/r5c-options.txt     also `constsequence`, `bitfields` on (the R5 slice 5 check)
 #   rust/tools/corpus/r5d-options.txt     also `doubleload`, `doubleprecis` on (R5 slice 3: double.cc)
+#   rust/tools/corpus/r5s-options.txt     r5-options.txt with `stackvars` on (R5 slice 2: stack loads/stores)
 set -e
 rust=$(cd "$(dirname "$0")/.." && pwd)
 cpp=$rust/../Ghidra/Features/Decompiler/src/decompile/cpp
@@ -52,6 +53,7 @@ write r4-options.txt "analysis cleanup floatprecision"
 write r5-options.txt "analysis cleanup typerecovery"
 write r5c-options.txt "analysis cleanup typerecovery constsequence bitfields"
 write r5d-options.txt "analysis cleanup doubleload doubleprecis"
+write r5s-options.txt "analysis cleanup typerecovery stackvars"
 # stage S8's checks: the S4 and rule-stage options with groups `blockrecovery` and `returnsplit` on
 grep -v "decompile blockrecovery off\|decompile returnsplit off" "$rust/tools/corpus/s4-options.txt" > "$rust/tools/corpus/s8-options.txt"
 grep -v "decompile blockrecovery off\|decompile returnsplit off" "$rust/tools/corpus/r1-options.txt" > "$rust/tools/corpus/s8-r-options.txt"
