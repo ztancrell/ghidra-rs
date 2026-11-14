@@ -2466,7 +2466,7 @@ pub(crate) fn map_globals(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         // queryProperties(addr, 1): a symbol over the first byte
         let old = fd
             .symtab
-            .find_container(GLOBAL, space, addr, 1, None)
+            .find_container(GLOBAL, space, addr, 1, None)?
             .map(|(sym, e)| {
                 let s = fd.symtab.symbol(sym);
                 (s.entries[e].offset, u64::from(s.entries[e].size), Some(s.name.clone()))
@@ -2507,7 +2507,7 @@ pub(crate) fn map_globals(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
                 if uncovered.get(k + 1).is_some_and(|&n| fd.vn(n).offset == uoff) {
                     continue;
                 }
-                if fd.symtab.find_container(GLOBAL, space, uoff, usize_, None).is_some() {
+                if fd.symtab.find_container(GLOBAL, space, uoff, usize_, None)?.is_some() {
                     continue;
                 }
                 let Some(ename) = &ename else {

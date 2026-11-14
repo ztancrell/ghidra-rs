@@ -148,7 +148,7 @@ impl<K: Copy + PartialEq> RangeMap<K> {
                         low += 1;
                     }
                     if last == b {
-                        return;
+                        break; // `f` stays: the C++ then inserts `[f, b]` once more below
                     }
                     f = last + 1;
                 } else {
@@ -244,7 +244,9 @@ mod tests {
     }
 
     /// Records over one range order by sub-sort; a new one goes before an equal one, and a
-    /// use-point bound cuts the later ones off.
+    /// use-point bound cuts the later ones off. A record whose last piece ends on an existing
+    /// sub-range is in the multiset twice (`insert` breaks with `f` unchanged and inserts
+    /// `[f, b]` again). The expected values are the output of tools/rangemap_ref.cc.
     #[test]
     fn equal_ranges_order_by_subsort() {
         let mut m = RangeMap::default();
@@ -252,9 +254,12 @@ mod tests {
         m.insert(2, 0, 3, (2, 0x30));
         m.insert(3, 0, 3, (2, 0x10));
         assert_eq!(m.records(), [3, 1, 2]);
-        assert_eq!(m.find(1, SUB_FIRST, SUB_LAST), [3, 1, 2]);
-        assert_eq!(m.find(1, SUB_FIRST, (2, 0x20)), [3, 1]);
+        assert_eq!(m.find(1, SUB_FIRST, SUB_LAST), [3, 1, 3, 2, 2]);
+        assert_eq!(m.find(1, SUB_FIRST, (2, 0x20)), [3, 1, 3]);
         m.insert(4, 8, 11, SUB_FIRST);
         assert_eq!(m.records(), [3, 1, 2, 4]);
+        assert_eq!(m.tree.iter().map(|p| p.key).collect::<Vec<_>>(), [3, 1, 3, 2, 2, 4]);
+        m.erase(3, 0, 3);
+        assert_eq!(m.find(1, SUB_FIRST, SUB_LAST), [1, 2, 2]);
     }
 }

@@ -62,6 +62,8 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   instruction). Unit tests in `decomp/action.rs` (`tests/data/raw-heritage-onexit.txt`: mercs2's
   `__onexit` with two call fixups, external references and read-only propagation; read-only
   reads becoming constants) and `decomp/inject.rs` (the snippet parser).
+- `tools/rangemap_ref.cc`: the C++ `rangemap` template on the data of the unit tests of
+  `decomp/rangemap.rs` (multiset order, record order, `find`).
 - `tools/stdsort_ref.cc`, `ghidra-rs/tests/data/stdsort-gxx.txt`: libstdc++ `std::sort` tie orders
   that `decomp/stdsort.rs` must reproduce.
 - `tools/decomp-ref.sh`, `tools/decomp-ref.patch`: build the reference decompiler `decomp_dbg`.
@@ -1837,6 +1839,16 @@ without a use limit is address-tied, a size-locked output is ported, the compile
 the do-nothing loop warning is recorded, unsupported parameter-list forms fail loudly, and the
 prototype checks compare parameter names, storage and symbol attributes. The six tail checks
 are unchanged after them, and the 24 other bars are 8 / 8 on M8.
+
+Second review (seven findings, listed in the plan): `RangeMap::insert` keeps the C++ quirk of a
+record that is in the multiset twice (`tools/rangemap_ref.cc` prints the C++ template's order),
+`namevars` fails loudly on a function with locked parameters (their symbols are not in the
+local scope), the symbol offset wraps to the space, `overrideSizeLockType` has its errors, an
+indirect jump made a call is warned about. One finding was not real: a named parameter of a
+locked callee is name-locked in the C++ (`ParameterSymbol::setTypeLock`), and the reference
+renames the arguments as ghidra-rs does (M8 with locked `__fastcall` callees: 5 / 8 identical,
+three fail loudly in `deindirect`). The eight tail checks are unchanged on M8; on M500 the
+three finished so far are unchanged (prototypes and globals, names with rules on).
 
 ## Speed
 

@@ -1267,6 +1267,44 @@ the prototype, `latedonothing` and names checks, 7 / 7 in `finalstructure`. M500
 No bar fell. The switch functions were not compared for real in `finalstructure` and the switch
 corpus got no `finalstructure` run: both wait for `switchnorm`.
 
+Second review (2026-11-14), seven findings read against the C++:
+
+1. Not real: `lookForFuncParamNames` treating a named parameter of a locked callee as
+   name-locked. `FuncProto::setPieces` ends with `setInputLock(true)`, and
+   `ParameterSymbol::setTypeLock` (fspec.cc) sets `namelock` with `typelock` on every parameter
+   whose symbol has a name, so the reference does rename. Shown on M8 with every callee declared
+   `parse line extern __fastcall void f(int4 count);` (the names check with `OPTIONS_SKIP_SELF=1`):
+   the reference names 6 variables of 0x401080, 57 of 0x73a340 and 2 of 0x9eec5e `count`,
+   `count_00`, ...; ghidra-rs is identical on 5 / 8, with the same names in 0x401080 and
+   0x73a340, and fails loudly on the other three (0x4042e0, 0x40a110, 0x9eec5e: "deindirect:
+   restarting for a locked prototype the call cannot take", a known gap of S6). Only the comment
+   in `namevars.rs` changed. Superseded: "Not exercised by these checks: `lookForFuncParamNames`".
+2. `RangeMap::insert` returned when the record's last piece ended on an existing sub-range;
+   the C++ breaks with `f` unchanged and inserts `[f, b]` once more, so such a record is in the
+   multiset twice. Ported; the unit test's expected values are the output of the C++ template
+   on the same data (`tools/rangemap_ref.cc`: tree `3 1 3 2 2`). `findContainer` is unchanged by
+   it (an entry seen twice passes the strict size test once).
+3. `namevars` on a function with locked parameters now fails loudly ("the parameter symbols of
+   a locked prototype are not ported"): the C++ keeps them as symbols of the local scope
+   (type-locked, name-locked when named), which `linkSymbol` and `compareName` read. Putting
+   them in the scope is not small (`print map`, `merge.rs` and `varmap.rs` each stand in for
+   them in their own way). A locked prototype without parameters still runs.
+4. `truncateIndirectJump` records "Treating indirect jump as call" (`Funcdata::warning`) and
+   reuses `setup_callind_specs`.
+5. `HighVariable::getSymbolOffset`: the distance to the entry wraps to the space
+   (`AddrSpace::overlapJoin`, `wrapOffset`), not to 64 bits.
+6. `Scope::overrideSizeLockType` has its two errors ("not size locked", "different type size").
+   No symbol is size-locked yet (no locked parameter is in the scope), so it cannot run.
+7. The comment of `action.rs` names `namevars` as ported; `print_map` reuses `space_info`;
+   `find_container` returns an error for a map record without its entry, and
+   `name_representative` and `symbol_offset` no longer index unchecked.
+
+Tail checks after these. M8: prototypes and globals, names and `latedonothing` 8 / 8 each (rules
+on and types on), `finalstructure` 7 / 7 and 7 / 7. M500 (of the functions the reference
+finishes): prototypes and globals 498 / 499 and 493 / 499, names with rules on 498 / 499:
+unchanged. The other five M500 checks (names with types on, `latedonothing`, `finalstructure`)
+were still running when this was written; their numbers are with the switch work below.
+
 Not started: the case labels. `switchnorm` needs, beyond `matchModel`/`recoverLabels`/
 `foldInNormalization`/`foldInGuards` themselves: the flow-time model's value range kept on the
 `JumpTable` (`buildLabels` walks the range of the model the addresses were recovered with),

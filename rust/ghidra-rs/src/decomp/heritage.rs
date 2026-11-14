@@ -33,7 +33,7 @@ struct NodeMarks {
 }
 
 /// The offset mask of a SLEIGH space (`AddrSpace::wrapOffset`), from its address size.
-fn space_mask(arch: &Arch, space: Space) -> u64 {
+pub(crate) fn space_mask(arch: &Arch, space: Space) -> u64 {
     let size = match space {
         Space::Sleigh(i) => arch.sleigh.spaces.get(i as usize).map_or(8, |s| s.size),
         Space::Stack => return super::heritage_guard::stack_mask(arch),

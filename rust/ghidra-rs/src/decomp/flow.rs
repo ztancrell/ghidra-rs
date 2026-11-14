@@ -463,8 +463,8 @@ impl Flow<'_> {
     }
 
     /// Port of `FlowInfo::setupCallindSpecs` (without overrides, an indirect call stays one).
-    fn setup_callind_specs(&mut self, op: OpId) {
-        self.new_call(CallSpec::new(op, None, false));
+    fn setup_callind_specs(&mut self, op: OpId) -> CallId {
+        self.new_call(CallSpec::new(op, None, false))
     }
 
     fn new_call(&mut self, spec: CallSpec) -> CallId {
@@ -580,8 +580,12 @@ impl Flow<'_> {
     /// the call as a bad jump table (`setBadJumpTable`).
     fn truncate_indirect_jump(&mut self, op: OpId, bad: bool) -> Result<()> {
         self.fd.op_set_opcode(op, Opcode::Callind);
-        let call = self.new_call(CallSpec::new(op, None, false)); // setupCallindSpecs
-        self.fd.call_mut(call).bad_jump_table = bad;
+        let call = self.setup_callind_specs(op);
+        if bad {
+            self.fd.call_mut(call).bad_jump_table = true;
+            let addr = self.fd.op(op).seq.addr;
+            self.fd.warning("Treating indirect jump as call", addr);
+        }
         let halt = self.artificial_halt(self.fd.op(op).seq.addr, None)?;
         self.fd.op_dead_insert_after(halt, op);
         Ok(())

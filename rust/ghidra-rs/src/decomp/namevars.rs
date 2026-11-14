@@ -36,6 +36,11 @@ enum Rec {
 
 /// Port of `ActionNameVars::apply`.
 pub(crate) fn name_vars(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
+    // The C++ keeps locked parameters as symbols of the local scope (`ProtoStoreSymbol`,
+    // type-locked, name-locked when named); `linkSymbol` and `compareName` read them.
+    if fd.proto.locked.as_ref().is_some_and(|l| !l.inputs.is_empty()) {
+        return err("namevars: the parameter symbols of a locked prototype are not ported");
+    }
     let mut namerec = Vec::new();
     link_symbols(fd, arch, &mut namerec)?;
     look_for_bad_jump_tables(fd)?;
@@ -73,10 +78,11 @@ fn high_symbol(fd: &Funcdata, h: HighId) -> Option<(SymbolId, usize, VarnodeId)>
 /// `HighVariable::getSymbolOffset` (`setSymbol`): -1 when the linked member is the whole symbol,
 /// else its offset into it (`Address::overlapJoin` from the entry, plus the entry's own offset
 /// when it maps a piece of a join).
-fn symbol_offset(fd: &Funcdata, h: HighId) -> Result<i32> {
+fn symbol_offset(fd: &Funcdata, arch: &Arch, h: HighId) -> Result<i32> {
     let Some((sym, e, vn)) = high_symbol(fd, h) else { return Ok(-1) };
     let (s, v) = (fd.symtab.symbol(sym), fd.vn(vn));
-    let entry = &s.entries[e];
+    let entry =
+        s.entries.get(e).ok_or_else(|| LowlevelError("namevars: a varnode mapped to a missing entry".into()))?;
     let size = s.ty.map_or(0, |t| fd.types.size(t));
     if size == v.size && entry.space == v.space && entry.offset == v.offset && entry.piece.is_none() {
         return Ok(-1);
@@ -84,8 +90,9 @@ fn symbol_offset(fd: &Funcdata, h: HighId) -> Result<i32> {
     if entry.space == Space::Join {
         return err("namevars: a variable overlapping a join symbol (JoinSpace::overlapJoin) is not ported");
     }
-    // AddrSpace::overlapJoin: the distance from the entry's start, within the symbol's size
-    let dist = v.offset.wrapping_sub(entry.offset);
+    // AddrSpace::overlapJoin: the distance from the entry's start wrapped to the space
+    // (`wrapOffset`), within the symbol's size
+    let dist = v.offset.wrapping_sub(entry.offset) & super::heritage::space_mask(arch, entry.space);
     let overlap = if entry.space != v.space || dist >= u64::from(size) { -1 } else { dist as i32 };
     Ok(overlap.wrapping_add(entry.piece.unwrap_or(0) as i32))
 }
@@ -121,9 +128,10 @@ fn compare_name(fd: &Funcdata, vn1: VarnodeId, vn2: VarnodeId) -> bool {
 }
 
 /// Port of `HighVariable::getNameRepresentative`.
-fn name_representative(fd: &Funcdata, h: HighId) -> VarnodeId {
-    let inst = &fd.highs.get(h).inst;
-    inst[1..].iter().fold(inst[0], |rep, &vn| if compare_name(fd, rep, vn) { vn } else { rep })
+fn name_representative(fd: &Funcdata, h: HighId) -> Result<VarnodeId> {
+    let mut inst = fd.highs.get(h).inst.iter().copied();
+    let first = inst.next().ok_or_else(|| LowlevelError("namevars: a high variable without members".into()))?;
+    Ok(inst.fold(first, |rep, vn| if compare_name(fd, rep, vn) { vn } else { rep }))
 }
 
 /// Port of `HighVariable::hasName`.
@@ -213,7 +221,7 @@ fn link_symbol(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId) -> Result<Option<S
     let usepoint = use_point(fd, arch, vn);
     // queryProperties(addr, 1, usepoint): the local scope, then (for storage it does not own)
     // the global one, which holds nothing outside its ranges
-    if let Some((sym, e)) = fd.symtab.find_container(LOCAL, space, offset, 1, Some(usepoint)) {
+    if let Some((sym, e)) = fd.symtab.find_container(LOCAL, space, offset, 1, Some(usepoint))? {
         if !fd.symtab.symbol(sym).entries[e].conflict {
             fd.mapentry.insert(vn, (sym, e));
             return Ok(Some(sym));
@@ -282,7 +290,7 @@ fn link_symbol_reference(fd: &mut Funcdata, in0: VarnodeId, off: VarnodeId) -> R
     }
     // TypeSpacebase::getAddress: the offset wrapped to the stack space
     let addr = fd.vn(off).offset & fd.localmap.highest();
-    Ok(fd.symtab.find_container(LOCAL, Space::Stack, addr, 1, None).map(|(sym, _)| sym))
+    Ok(fd.symtab.find_container(LOCAL, Space::Stack, addr, 1, None)?.map(|(sym, _)| sym))
 }
 
 /// Port of `ActionNameVars::linkSpacebaseSymbol`.
@@ -309,10 +317,10 @@ fn link_spacebase_symbol(fd: &mut Funcdata, vn: VarnodeId, namerec: &mut Vec<Rec
 /// Port of `HighVariable::finalizeDatatype` for a high holding a whole symbol: the symbol's
 /// data-type becomes the variable's. Nothing ported reads `type_finalized`, so a type that
 /// would change, or a piece of the symbol, fails.
-fn finalize_datatype(fd: &mut Funcdata, h: HighId, sym: SymbolId) -> Result<()> {
+fn finalize_datatype(fd: &mut Funcdata, arch: &Arch, h: HighId, sym: SymbolId) -> Result<()> {
     let Some(cur) = fd.symtab.symbol(sym).ty else { return Ok(()) };
     let sz = fd.vn(fd.highs.get(h).inst[0]).size;
-    if symbol_offset(fd, h)? > 0 || fd.types.size(cur) != sz {
+    if symbol_offset(fd, arch, h)? > 0 || fd.types.size(cur) != sz {
         return err("namevars: finalizeDatatype of a piece of a symbol (getExactPiece) is not ported");
     }
     if fd.types.meta(cur) != Meta::Unknown && cur != h_type(fd, h).0 {
@@ -339,20 +347,22 @@ fn link_symbols(fd: &mut Funcdata, arch: &Arch, namerec: &mut Vec<Rec>) -> Resul
             link_spacebase_symbol(fd, vn, namerec)?;
         }
         let h = high(fd, vn)?;
-        if name_representative(fd, h) != vn || !has_name(fd, h)? {
+        if name_representative(fd, h)? != vn || !has_name(fd, h)? {
             continue; // each high once
         }
         let Some(sym) = link_symbol(fd, arch, vn)? else { continue };
         let s = fd.symtab.symbol(sym);
-        if s.is_name_undefined() && symbol_offset(fd, h)? < 0 {
+        if s.is_name_undefined() && symbol_offset(fd, arch, h)? < 0 {
             namerec.push(Rec::Vn(vn));
         }
         if s.flags.size_type_locked && s.ty.is_some_and(|t| fd.types.size(t) == fd.vn(vn).size) {
+            let old = s.ty;
             let ty = h_type(fd, h).0;
-            fd.symtab.set_type(sym, ty); // overrideSizeLockType
+            let same = old.is_some_and(|t| fd.types.size(t) == fd.types.size(ty));
+            fd.symtab.override_size_lock_type(sym, ty, same)?;
         }
         if fd.vn(vn).has(VnFlags::ADDRTIED) {
-            finalize_datatype(fd, h, sym)?; // the symbol is local
+            finalize_datatype(fd, arch, h, sym)?; // the symbol is local
         }
     }
     Ok(())
@@ -392,7 +402,9 @@ fn look_for_func_param_names(fd: &mut Funcdata, namerec: &[Rec]) -> Result<()> {
         let params: Vec<(String, TypeId)> = locked.inputs.iter().map(|p| (p.name.clone(), p.ty)).collect();
         let numparam = params.len().min(fd.op(op).ins.len().saturating_sub(1));
         for (j, (name, ct)) in params.into_iter().take(numparam).enumerate() {
-            // makeRec: a name-locked parameter (declared with a name) of the varnode's size
+            // makeRec: a name-locked parameter of the varnode's size. `FuncProto::setPieces` locks
+            // the inputs (`setInputLock`), and `ParameterSymbol::setTypeLock` name-locks every
+            // parameter declared with a name
             let vn = fd.op(op).ins[j + 1];
             if name.is_empty() || fd.vn(vn).size != fd.types.size(ct) {
                 continue;
