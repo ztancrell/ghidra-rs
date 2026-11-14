@@ -176,6 +176,9 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `RulePtrsubUndo`) and the stop-propagation flags; R5 check M8 8 / 8, M500 497 / 498 without
    types, 487 / 498 with types (bar 95 %; 497 / 498 after the `opSetInput` fix); S6 check 498 / 500 with the rules on. Open: stack
    loads/stores, double.cc, constseq, bitfield, typed `cleanup` rules.
+   R5 slices 4 and 5 on branch `m3-r5b`: eight `cleanup` rules that read types (`ptrsubcharconstant`
+   waits for string detection, S9) and the `constsequence`/`bitfields` entry tests; R1 check 498 / 499,
+   R5 typed 497 / 498, new `r5c` check 494 / 498. Superseded: "constseq, bitfield, typed `cleanup` rules" above.
    S8 (structuring, in part) on branch `m3-s8`: `ActionBlockStructure` (`CollapseStructure`,
    `LoopBody`, `TraceDAG`; `structure.rs`, `collapse.rs`) and `print tree block`; `print tree
    block` plus `print raw` at `assignhigh` with `blockrecovery` on: M8 8 / 8, M500 499 / 499 the

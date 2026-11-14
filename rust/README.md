@@ -1717,6 +1717,47 @@ Left for R5: `RuleLoadVarnode`/`RuleStoreVarnode` and removing `jumptable::fold_
 (stack loads need the stack heritage pass), double.cc, constseq.cc, bitfield.cc and the
 `cleanup` rules that read types (see the plan, "R5").
 
+R5 slices 4 and 5 (branch `m3-r5b`, 2026-11-13). Superseded: "constseq.cc, bitfield.cc and the
+`cleanup` rules that read types" in the list above (slice 3, double.cc, is on its own branch).
+
+- Slice 4, `rules/typecleanup.rs`: the `cleanup` rules `addunsigned`, `dumptyhumplate`
+  (subflow.cc), `subright`, `floatsigncleanup`, `expandload`, `extensionpush`, `piecestructure`,
+  `andstructure`, in the `CLEANUP` table in the C++ order, with `Funcdata::opDestroyRecursive`,
+  `opUnlink`, `Datatype::findSmallestContainer` and `TypeFactory::is_char_print`
+  (`isCharPrint`). Symbols are not modelled: no equate stops `addunsigned`, `getStructuredType`
+  is the varnode's type, `isNameLock` is false. Failing loudly where reached: the CONCAT tree
+  rewrite of `piecestructure` (`PieceNode::gatherPieces` onward; proto-partials need
+  `VariablePiece`, so `registerProtoPartialRoot` has no caller yet), join addresses in
+  `andstructure`, struct sub-types, unions. Not ported: `ptrsubcharconstant` (string detection,
+  `StringManager::isString`, S9: three M500 functions reach it, 0x4bff10, 0x74d520, 0x766350),
+  so the check still switches it off. `threewaycomp`, `conditionalmove`, `orpredicate` (oppool1)
+  are not in the plan's R5 row and stay off.
+- Slice 5, `rules/constseq.rs`, `rules/bitfield.rs`: the groups `constsequence` and `bitfields`
+  as far as they run without scopes and bit-field types. `stringcopy` never matches (no local
+  symbols), `stringstore` fails at `HeapSequence` (not ported); no type has bit-fields, so the four
+  `bitfield_*` transforms never start, and `pull_absorb`/`insert_absorb` fail on their ops (made
+  only by those transforms).
+- Checks: `r1-options.sh` regenerated (9 `togglerule`s in `r1-options.txt`) and writes
+  `r5c-options.txt` (`r5-options.txt` plus `constsequence`, `bitfields`).
+
+```sh
+export DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst
+BREAK=assignhigh OPTIONS=$PWD/rust/tools/corpus/r1-options.txt TIMEOUT=120 rust/tools/decomp-diff.sh m500
+DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=$PWD/rust/tools/corpus/r5-options.txt TIMEOUT=120 rust/tools/decomp-diff.sh m500
+DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=$PWD/rust/tools/corpus/r5c-options.txt TIMEOUT=120 rust/tools/decomp-diff.sh m500
+```
+
+| check (M500, at `assignhigh`) | identical |
+|---|---|
+| R1 check (`r1-options.txt`), M8 / M500 | 8 / 8; 498 / 499 the reference finishes (0x47a6b0) |
+| R5 typed (`r5-options.txt`, types printed), M8 / M500 | 8 / 8; 497 / 498 (0x47a6b0) |
+| R5c (`r5c-options.txt`, types printed) | 494 / 498 (99.2 %, bar 95 %): 0x47a6b0 and three functions where `stringstore` reaches `HeapSequence` (0x41f7f0, 0x4c1230, 0x766350) |
+
+Exercise: with the slice 4 rules switched off on both sides as the control, they change 23 M500
+reference outputs under the R1 options and 66 under the R5 (typed) options; all 23 and 63 of the
+66 are identical, the other three were `ptrsubcharconstant`'s, which is off again. The reference
+does not finish 0x4c48d0 (and 0x6b21e0 in the typed runs).
+
 Merged with S8 part one and R5 slice one (2026-11-13). Superseded: the rules-on 481 / 499 above.
 The `X & #0x1` constant-type misses were `copySymbol` on an untyped source: every C++ varnode
 has a type, so `RuleAndCompare`'s wider mask constant keeps the 1-byte constant's `xunknown1`;
