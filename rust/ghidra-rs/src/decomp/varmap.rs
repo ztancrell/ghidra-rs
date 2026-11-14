@@ -1,0 +1,231 @@
+//! The stack part of the local scope (varmap.cc) the stack heritage pass needs: which stack
+//! offsets the local scope owns (`ScopeLocal` and its range tree), `ScopeLocal::markNotMapped`,
+//! and `ActionRestrictLocal`.
+//!
+//! Local symbols (database.cc) are not ported: the scope holds only the locked parameters of the
+//! function's own prototype. `ScopeLocal::restructureVarnode` (MapState, RangeHint, the alias
+//! checker) builds symbols, so `ActionRestructureVarnode` stays unported.
+
+use super::fspec::{EffectKind, Storage};
+use super::funcdata::Funcdata;
+use super::opcode::Opcode;
+use super::varnode::{Space, VnFlags};
+use super::{Arch, Result};
+
+/// The stack ranges of `ScopeLocal`: sorted, disjoint, inclusive offset pairs, and the
+/// parameter extent `markNotMapped` records (`minParamOffset`, `maxParamOffset`).
+#[derive(Debug, Clone)]
+pub(crate) struct LocalMap {
+    ranges: Vec<(u64, u64)>,
+    /// the stack space's highest offset (`AddrSpace::getHighest`)
+    highest: u64,
+    min_param: u64,
+    max_param: u64,
+}
+
+impl LocalMap {
+    /// Port of `ScopeLocal::resetLocalWindow` for a stack that grows down: the model's local
+    /// range (`ProtoModel::defaultLocalRange`, the upper half of the space; x86 declares none)
+    /// and its parameter range, the stack `<pentry>` ranges of its input list
+    /// (`ParamListStandard::getRangeList`; `params`, inclusive). `highest` is the stack space's
+    /// highest offset (its offset mask, [`super::heritage_guard::stack_mask`]).
+    pub(crate) fn new(highest: u64, params: &[(u64, u64)]) -> LocalMap {
+        let mut m = LocalMap::empty();
+        m.highest = highest;
+        m.insert(highest - (highest >> 1).min(0x7fff_ffff), highest);
+        for &(a, b) in params {
+            m.insert(a, b);
+        }
+        m
+    }
+
+    /// A scope owning nothing, before `Funcdata::start_processing` knows the architecture.
+    pub(crate) fn empty() -> LocalMap {
+        LocalMap { ranges: Vec::new(), highest: u64::MAX, min_param: u64::MAX, max_param: 0 }
+    }
+
+    /// Port of `RangeList::insertRange`: overlapping ranges merge (touching ones do not).
+    fn insert(&mut self, mut first: u64, mut last: u64) {
+        let mut out = Vec::with_capacity(self.ranges.len() + 1);
+        for &(a, b) in &self.ranges {
+            if b < first || last < a {
+                out.push((a, b));
+            } else {
+                first = first.min(a);
+                last = last.max(b);
+            }
+        }
+        out.push((first, last));
+        out.sort_unstable();
+        self.ranges = out;
+    }
+
+    /// The locked-parameter "symbol" of the local scope holding stack offset `addr`
+    /// (`Scope::queryContainer`): its offset and type.
+    pub(crate) fn locked_param_at(fd: &Funcdata, addr: u64) -> Option<(u64, super::types::TypeId)> {
+        let l = fd.proto.locked.as_ref()?;
+        l.inputs.iter().find_map(|p| match p.storage {
+            Some(Storage::Stack { offset, size }) if offset <= addr && addr < offset + u64::from(size) => {
+                Some((offset, p.ty))
+            }
+            _ => None,
+        })
+    }
+
+    /// Port of `RangeList::inRange` on the scope's ranges: whether one range holds
+    /// `[off, off + size)` (`Scope::inScope`, the test `queryProperties` makes for an address
+    /// without a symbol).
+    pub(crate) fn in_scope(&self, off: u64, size: u32) -> bool {
+        let at = self.ranges.partition_point(|&(first, _)| first <= off);
+        let Some(&(_, last)) = at.checked_sub(1).and_then(|i| self.ranges.get(i)) else { return false };
+        u128::from(off) + u128::from(size.max(1)) - 1 <= u128::from(last)
+    }
+
+    /// The range part of `ScopeLocal::markNotMapped`: `[first, first + sz)`, clipped to the
+    /// top of the space, leaves the scope; a parameter range widens the parameter extent.
+    fn remove(&mut self, first: u64, sz: u32, parameter: bool) {
+        let last = match first.checked_add(u64::from(sz.max(1)) - 1) {
+            Some(l) if l <= self.highest => l,
+            _ => self.highest,
+        };
+        if parameter {
+            self.min_param = self.min_param.min(first);
+            self.max_param = self.max_param.max(last);
+        }
+        let mut out = Vec::with_capacity(self.ranges.len() + 1);
+        for &(a, b) in &self.ranges {
+            if b < first || a > last {
+                out.push((a, b));
+                continue;
+            }
+            if a < first {
+                out.push((a, first - 1));
+            }
+            if b > last {
+                out.push((last + 1, b));
+            }
+        }
+        self.ranges = out;
+    }
+}
+
+/// The locked stack parameters of `fd`'s own prototype: `(offset, size, name)`, the only local
+/// symbols ghidra-rs has.
+fn locked_stack_params(fd: &Funcdata) -> Vec<(u64, u32, String)> {
+    let Some(l) = &fd.proto.locked else { return Vec::new() };
+    l.inputs
+        .iter()
+        .filter_map(|p| match p.storage {
+            Some(Storage::Stack { offset, size }) => Some((offset, size, p.name.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Port of `ScopeLocal::markNotMapped`: the stack range is no longer mapped by the local
+/// scope. A typelocked symbol under it (a locked parameter) keeps it, with a warning unless both
+/// are parameters.
+pub(crate) fn mark_not_mapped(fd: &mut Funcdata, space: Space, first: u64, sz: u32, parameter: bool) {
+    if space != Space::Stack {
+        return;
+    }
+    let end = u128::from(first) + u128::from(sz);
+    let hit = locked_stack_params(fd)
+        .into_iter()
+        .find(|&(off, size, _)| u128::from(off) < end && u128::from(first) < u128::from(off) + u128::from(size));
+    if let Some((_, _, name)) = hit {
+        // every symbol here is a typelocked function parameter
+        if !parameter {
+            fd.warning_header(format!("Variable defined which should be unmapped: {name}"));
+        }
+        return;
+    }
+    fd.localmap.remove(first, sz, parameter);
+}
+
+/// Port of `ActionRestrictLocal::apply`: the stack parameters of calls with a locked prototype
+/// and the stack slots saved registers are copied to are not local variables.
+pub(crate) fn restrict_local(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
+    for i in 0..fd.qlst.len() {
+        let call = fd.call(fd.qlst[i]);
+        let (Some(locked), Some(base)) = (&call.proto.locked, call.stack_offset) else { continue };
+        let mut marks = Vec::new();
+        for p in &locked.inputs {
+            match p.storage {
+                Some(Storage::Stack { offset, size }) => marks.push((base.wrapping_add(offset), size)),
+                // a join's stack pieces would be un-mapped, its register pieces are left alone;
+                // ghidra-rs joins hold SLEIGH-space (register) pieces only
+                Some(Storage::Join(_)) => {}
+                _ => {}
+            }
+        }
+        let mask = fd.localmap.highest;
+        for (off, size) in marks {
+            mark_not_mapped(fd, Space::Stack, off & mask, size, true);
+        }
+    }
+    let Some(model) = fd.proto.model.map(|m| arch.spec.models.get(m)) else { return Ok(0) };
+    for e in &model.effects {
+        if e.kind == EffectKind::KilledByCall {
+            continue;
+        }
+        let (space, off, size) = match e.storage {
+            Storage::Space { space, offset, size } => (Space::Sleigh(space), offset, size),
+            Storage::Stack { offset, size } => (Space::Stack, offset, size),
+            Storage::Join(_) => continue,
+        };
+        let Some(vn) = fd.loc_at(space, off, size).into_iter().find(|&v| fd.vn(v).is_input()) else { continue };
+        if !fd.vn(vn).has(VnFlags::UNAFFECTED) {
+            continue;
+        }
+        let saves: Vec<_> = fd
+            .vn(vn)
+            .descend
+            .iter()
+            .filter(|&&op| fd.op(op).opc == Opcode::Copy)
+            .filter_map(|&op| fd.op(op).out)
+            .filter(|&out| fd.vn(out).space == Space::Stack) // isUnaffectedStorage
+            .map(|out| (fd.vn(out).offset, fd.vn(out).size))
+            .collect();
+        for (off, size) in saves {
+            mark_not_mapped(fd, Space::Stack, off, size, false);
+        }
+    }
+    Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LocalMap;
+
+    #[test]
+    fn default_window_is_params_and_locals() {
+        // x86win: one stack <pentry> at offset 4, 500 bytes
+        let m = LocalMap::new(0xffff_ffff, &[(4, 503)]);
+        assert_eq!(m.ranges, vec![(4, 503), (0x8000_0000, 0xffff_ffff)]);
+        assert!(m.in_scope(4, 4) && m.in_scope(500, 4));
+        assert!(!m.in_scope(0, 4) && !m.in_scope(502, 4) && !m.in_scope(0x1000, 4));
+        assert!(m.in_scope(0xffff_fffc, 4) && !m.in_scope(0xffff_fffe, 4));
+        // touching ranges stay apart, so no varnode spans two of them; overlapping ones merge
+        let m = LocalMap::new(0xffff_ffff, &[(0x7fff_fff0, 0x7fff_ffff), (4, 7), (8, 11), (6, 9)]);
+        assert_eq!(m.ranges, vec![(4, 11), (0x7fff_fff0, 0x7fff_ffff), (0x8000_0000, 0xffff_ffff)]);
+        assert!(!m.in_scope(0x7fff_fffc, 8));
+        let m = LocalMap::new(0xffff_ffff, &[(4, 7), (8, 11)]);
+        assert!(m.in_scope(4, 4) && !m.in_scope(4, 8));
+    }
+
+    #[test]
+    fn removing_splits_and_records_the_parameter_extent() {
+        let mut m = LocalMap::new(0xffff_ffff, &[(0, 511)]);
+        m.remove(8, 4, true);
+        assert_eq!(m.ranges[..2], [(0, 7), (12, 511)]);
+        assert!(!m.in_scope(8, 1) && m.in_scope(4, 4) && !m.in_scope(4, 8));
+        assert_eq!((m.min_param, m.max_param), (8, 11));
+        // clipped at the top of the space
+        m.remove(0xffff_fff0, 0x40, false);
+        assert_eq!(m.ranges.last(), Some(&(0x8000_0000, 0xffff_ffef)));
+        // a range covering a whole piece removes it
+        m.remove(0, 8, false);
+        assert_eq!(m.ranges[0], (12, 511));
+    }
+}

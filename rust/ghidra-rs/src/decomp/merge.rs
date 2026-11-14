@@ -9,8 +9,9 @@
 //! `Varnode::setFlags(coverdirty)` does (descendants and definitions changing).
 //!
 //! Not ported (each fails loudly or cannot arise): `VariablePiece` groups (`groupWith`, from
-//! address-tied overlaps of different sizes and proto-partial PIECEs), symbols (multi-entry
-//! symbols, `mergeMultiEntry` has none), union data-types needing resolution, join padding
+//! address-tied overlaps of different sizes and proto-partial PIECEs), symbols other than the
+//! locked parameters of the function (`high_symbol`; multi-entry symbols, `mergeMultiEntry` has
+//! none), union data-types needing resolution, join padding
 //! records (`markPurePaddingCopies` has none).
 
 use std::collections::HashSet;
@@ -175,7 +176,37 @@ fn test_required(fd: &mut Funcdata, hout: HighId, hin: HighId) -> Result<bool> {
             return Ok(false);
         }
     }
+    // the symbols (`HighVariable::getSymbol`; the symbol offsets are equal: a piece of a locked
+    // parameter fails in heritage)
+    if let (Some((a, _)), Some((b, _))) = (high_symbol(fd, hin), high_symbol(fd, hout)) {
+        if a != b {
+            return Ok(false);
+        }
+    }
     Ok(true)
+}
+
+/// The local symbol a high maps to (`HighVariable::setSymbol`), as the index of a locked
+/// parameter of the function, the only local symbols, and whether it is name-locked
+/// (`ParameterSymbol::setTypeLock`: a parameter declared with a name). A stack parameter's
+/// entry is address-tied, so every varnode exactly at it maps to it; a register parameter's
+/// holds at the entry only, so its input varnode does (`SymbolEntry::inUse`). A `join`
+/// parameter is not looked for.
+fn high_symbol(fd: &Funcdata, h: HighId) -> Option<(usize, bool)> {
+    use super::fspec::Storage;
+    let l = fd.proto.locked.as_ref()?;
+    let at = |vn: &VarnodeId| {
+        let v = fd.vn(*vn);
+        l.inputs.iter().position(|p| match p.storage {
+            Some(Storage::Stack { offset, size }) => v.space == Space::Stack && v.offset == offset && v.size == size,
+            Some(Storage::Space { space, offset, size }) => {
+                v.has(VnFlags::LOCKED_INPUT) && v.space == Space::Sleigh(space) && v.offset == offset && v.size == size
+            }
+            _ => false,
+        })
+    };
+    let i = fd.highs.get(h).inst.iter().find_map(at)?;
+    Some((i, !l.inputs[i].name.is_empty()))
 }
 
 /// `Varnode::isIllegalInput() && !isIndirectOnly()` of the high's input.
@@ -189,7 +220,15 @@ fn illegal_input(fd: &Funcdata, h: HighId) -> Result<bool> {
 
 /// Port of `Merge::mergeTestAdjacent`.
 fn test_adjacent(fd: &mut Funcdata, hout: HighId, hin: HighId) -> Result<bool> {
-    if !test_required(fd, hout, hin)? || h_type(fd, hout).0 != h_type(fd, hin).0 {
+    if !test_required(fd, hout, hin)? {
+        return Ok(false);
+    }
+    // `isNameLock` on both: the name lock comes from the symbols (nothing sets
+    // `Symbol::isIsolated`, tested below in the C++)
+    if matches!((high_symbol(fd, hin), high_symbol(fd, hout)), (Some((_, true)), Some((_, true)))) {
+        return Ok(false);
+    }
+    if h_type(fd, hout).0 != h_type(fd, hin).0 {
         return Ok(false);
     }
     Ok(!illegal_input(fd, hout)? && !illegal_input(fd, hin)?)

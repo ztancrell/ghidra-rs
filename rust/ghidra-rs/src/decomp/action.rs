@@ -137,7 +137,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("directwrite", "protorecovery_b", not_ported),
             ("activeparam", "protorecovery", c::active_param),
             ("returnrecovery", "protorecovery", c::return_recovery),
-            ("restrictlocal", "localrecovery", not_ported),
+            ("restrictlocal", "localrecovery", super::varmap::restrict_local),
             ("deadcode", "deadcode", c::dead_code),
             ("dynamicmapping", "dynamic", c::nothing),
             ("spacebase", "base", c::spacebase),

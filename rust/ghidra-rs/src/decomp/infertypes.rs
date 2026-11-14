@@ -226,15 +226,15 @@ pub(crate) fn sub_type(fd: &mut Funcdata, arch: &Arch, t: TypeId, off: i64) -> R
                 return Ok(Some((ty, (addr - e.addr) as i64)));
             }
         }
-        // the local scope holds no symbols before `localrecovery`; its range
-        // (`ScopeLocal::resetLocalWindow`) is the prototype's local range, the default
-        // `ProtoModel::defaultLocalRange` (the upper half of the stack), and its parameter
-        // range. ponytail: the parameter range is x86win.cspec's stack `<pentry>` (offset 4,
-        // maxsize 500); read it from the model when another `.cspec` is used.
-        let highest = calc_mask(arch.spec.stack_pointer.2);
-        let local_first = highest - (highest >> 1).min(0x7fff_ffff);
-        if scope != GLOBAL_SCOPE && addr < local_first && !(4..504).contains(&addr) {
-            return Ok(None);
+        if scope != GLOBAL_SCOPE {
+            // the local scope's only symbols are the locked stack parameters of the function
+            // (localrecovery maps none); its range is `ScopeLocal`'s (varmap.rs)
+            if let Some((poff, ty)) = super::varmap::LocalMap::locked_param_at(fd, addr) {
+                return Ok(Some((ty, (addr - poff) as i64)));
+            }
+            if !fd.localmap.in_scope(addr, 1) {
+                return Ok(None);
+            }
         }
         return Ok(Some((fd.types.base(1, Meta::Unknown), 0)));
     }
@@ -673,10 +673,17 @@ fn propagate_across_returns(fd: &mut Funcdata, arch: &Arch, st: &mut Infer) -> R
 }
 
 /// Port of `ActionInferTypes::propagateSpacebaseRef`/`propagateRef`: types of stack varnodes
-/// reached through the stack pointer. No stack-space varnode exists before the `stackvars`
-/// rules (stage R5), so there is nothing to reach yet.
+/// reached through the stack pointer. Before the `stackvars` rules (stage R5) the only stack
+/// varnodes are those of locked parameters, typelocked, which `propagateRef` skips. Its other
+/// skip, a varnode with a symbol entry (`getSymbolEntry() != 0`), adds nothing: the only local
+/// symbols are those parameters, and a varnode exactly at one is typelocked
+/// (`Funcdata::scoped_stack`) while a piece of one fails in heritage.
 fn propagate_spacebase_ref(fd: &Funcdata) -> Result<()> {
-    if fd.loc_space(Space::Stack).is_empty() {
+    let skipped = |vn| {
+        let v = fd.vn(vn);
+        v.has(VnFlags::TYPELOCK) || v.is_annotation() || (v.def.is_none() && v.descend.is_empty())
+    };
+    if fd.loc_space(Space::Stack).into_iter().all(skipped) {
         return Ok(());
     }
     err("type propagation into stack varnodes (propagateRef): not implemented in ghidra-rs yet")

@@ -185,6 +185,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    (`SubfloatFlow`) included; the R1 check with `floatprecision` on: M8 8 / 8, M500 495 / 499
    (99.2 %, bar 98 %); 90 M500 functions exercise the rules, 89 of them identical. Merged with R3 part two:
    R4 check M500 497 / 499; subvar, R3, S3, S4 and S6 bars all held.
+   Stack heritage slice one on branch `m3-stack`: the stack heritage pass, stack-pointer
+   tracing, the local scope's stack ranges, `ActionRestrictLocal`, locked stack parameters of
+   the function; check with every function locked with two stack parameters, M8 8 / 8,
+   M500 496 / 499 (498 / 499 after the review fixes and the merge with S7 and S8 part two,
+   2026-11-14; the merge tests read the symbols of locked parameters); every older bar held.
    R5 (in part) on branch `m3-r5`: the five `typerecovery` pointer rules (`RulePtrArith` with
    `AddTreeState`, `RuleStructOffset0`, `RulePushPtr` in `oppool2`, `RulePtraddUndo`,
    `RulePtrsubUndo`) and the stop-propagation flags; R5 check M8 8 / 8, M500 497 / 498 without

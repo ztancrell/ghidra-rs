@@ -1744,6 +1744,45 @@ rules remove those overlaps); with R5, 0x6b21e0 (R5's unported `assignPropagated
 Existing bars on the merged binary: R3, subvar and R4 checks 498 / 499, R5 typed 497 / 498,
 S3 500 / 500, S4 and S6 499 / 500, S8 rules off 499 / 499 and rule stage 498 / 499.
 
+### Stack heritage (slice one, branch `m3-stack`)
+
+The stack space is heritaged from pass 1 on (`heritage.rs`, `heritage_guard.rs`, `varmap.rs`).
+Locked stack parameters of the decompiled function are now supported (S6 failed on them).
+Check, with every function and callee locked:
+`tools/decomp-locked-options.sh void target/stack-lock.txt "int4 a, int4 b"`, then
+`DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=target/stack-lock.txt tools/decomp-diff.sh m8`
+(M8 8 / 8; M500 496 / 499, 319 reference outputs with stack SSA varnodes; misses 0x4919f0,
+shared by every M500 check, 0x4098c0, sequence numbers, and 0x40ad80, the load-guard error).
+Bars held: S4 and the four S6 checks 498 / 500, paramdouble 500 / 500, switch corpus
+1,947 / 2,050, r1 / subvar / r4 498 / 499. LOADs and STOREs through the stack pointer stay unconverted until R5's
+`RuleLoadVarnode`/`RuleStoreVarnode`. Not ported, fails loudly: the load-guard value-set
+analysis, revisited markers, the dead-code restart, `ActionRestructureVarnode`. Details and
+the M500 numbers in `docs/plans/m3-decompiler.md`, "Stack heritage".
+
+
+Review fixes and merges (2026-11-14). 0x4098c0 is fixed: the heritage location map rebuilt a
+stored stack index as a SLEIGH space, so stack ranges counted as new at every pass. Also:
+`split_uses` leaves the original op as the C++ does, touching ranges of the local scope stay
+apart, and three more unported cases fail loudly (a call's locked stack return value,
+`RulePtrArith` into a locked struct/union/array stack parameter, `StackAffectingOps` while a
+STORE guard exists). The merge tests of S7 read the symbols of locked parameters
+(`high_symbol` in `decomp/merge.rs`: different symbols never merge, two name-locked highs do
+not merge speculatively); the S7 print with `target/stack-lock.txt`
+(`BREAK=inputprototype`) is M8 8 / 8, M500 492 / 499 (6 `VariablePiece` functions and
+0x40ad80), the same count as before those tests, so M500 has no case where they decide.
+Superseded: "symbols" in stage S7's not-ported list (for locked parameters only) and
+"the STORE guards of `StackAffectingOps`" there (now a loud error).
+
+Merged with master 9272a2f7d4 (S7 part one, S8 part two) and every bar rerun on the merged
+binary: M8 8 / 8 in all 24 checks; M500 stack check 498 / 499 (miss 0x40ad80; superseded:
+496 / 499 above), `funclink` and `heritage` 500 / 500, S3 paramdouble 500 / 500, switch corpus
+1,947 / 2,050, S4 and the four S6 checks 499 / 500 each (0x4c48d0, which the reference does not
+finish; superseded: 498 / 500 above, measured before `nodejoin`), `r1-options`, subvar and R4
+498 / 499 each, R5 497 / 498 with and without types, S7 498 / 499 with `r1-options` (also with
+create indices), `subvar-options` and `r4-options`, 497 / 498 with `r5-options`, 493 / 499 with
+`s6-options` (also with create indices), S8 499 / 499 rules off and 498 / 499 rule stage. No
+bar fell; the table is in `docs/plans/m3-decompiler.md`, "Stack heritage".
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The
