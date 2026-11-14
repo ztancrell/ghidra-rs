@@ -79,6 +79,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
     ];
     let groups = if jumptable { JUMPTABLE } else { DECOMPILE };
     let on = |g: &str| groups.contains(&g) && !disabled.contains(g);
+    let rule_on = |rl: &super::rules::Rule| on(rl.group) && !disabled.contains(&format!("rule:{}", rl.name));
     let leaves = |t: &mut ActionTree, list: &[(&'static str, &str, super::actiontree::ApplyFn)]| -> Vec<_> {
         list.iter()
             .filter(|&&(name, g, f)| {
@@ -93,9 +94,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             .collect()
     };
     // the rules of the groups that are on, less those `togglerule` switched off ("rule:<name>")
-    let pool1 = super::rules::select(super::rules::OPPOOL1, |rl| {
-        on(rl.group) && !disabled.contains(&format!("rule:{}", rl.name))
-    });
+    let pool1 = super::rules::select(super::rules::OPPOOL1, rule_on);
     let pool1 = t.pool("oppool1", pool1);
     let mut root = leaves(
         &mut t,
@@ -152,9 +151,16 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
         &mut t,
         &[
             ("redundbranch", "deadcontrolflow", c::redund_branch),
-            ("blockstructure", "blockrecovery", not_ported),
+            ("blockstructure", "blockrecovery", super::structure::block_structure),
             ("constantptr", "typerecovery", super::infertypes::constant_ptr),
-            ("oppool2", "base", c::nothing),
+        ],
+    ));
+    // oppool2 (stage R5: the `typerecovery` pointer rules; `stackvars` is not ported)
+    let pool2 = super::rules::select(super::rules::OPPOOL2, rule_on);
+    mainloop.push(t.pool("oppool2", pool2));
+    mainloop.extend(leaves(
+        &mut t,
+        &[
             ("determinedbranch", "unreachable", c::determined_branch),
             ("unreachable", "unreachable", c::unreachable),
             ("nodejoin", "nodejoin", c::node_join),
@@ -191,9 +197,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("startcleanup", "cleanup", c::nothing),
         ],
     ));
-    let cleanup = super::rules::select(super::rules::CLEANUP, |rl| {
-        on(rl.group) && !disabled.contains(&format!("rule:{}", rl.name))
-    });
+    let cleanup = super::rules::select(super::rules::CLEANUP, rule_on);
     root.push(t.pool("cleanup", cleanup));
     root.extend(leaves(
         &mut t,

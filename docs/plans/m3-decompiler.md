@@ -370,7 +370,7 @@ differs from the table row:
 
 `print raw` with types at `break start assignhigh` (`DECOMP_RAW_EXTRA=1`,
 `rust/tools/corpus/s6-options.txt`: the S4 options with `typerecovery` on and its five R5 rules
-toggled off): M8 8 / 8, M500 446 / 500: identical on every function the reference finishes (499) except the 53 that use whole SSE registers and wait for `ActionLaneDivide` (R3), as in S4. Superseded: with R3 merged, 498 / 499 (0x4919f0 differs), see "R3". Details in `rust/README.md`, "Stage S6". Where it differs
+toggled off; superseded (R5): they are on now): M8 8 / 8, M500 446 / 500: identical on every function the reference finishes (499) except the 53 that use whole SSE registers and wait for `ActionLaneDivide` (R3), as in S4. Superseded: with R3 merged, 498 / 499 (0x4919f0 differs), see "R3". Details in `rust/README.md`, "Stage S6". Where it differs
 from the table row:
 
 - Ported: the type store (`types.rs`, the kinds inference reaches with the rules off, plus
@@ -476,7 +476,7 @@ the tree; `ActionInferTypes` reads R1's computed non-zero masks (`Funcdata::nzma
 `getNZMask`) for its boolean guards. `PcodeOp::stopsTypePropagation` and
 `Varnode::stopsUpPropagation` stay unported: only `RulePtrArith`, `RuleStructOffset0` and
 `RulePushPtr` (R5) set the flag, and no R1 rule sets it or makes a PTRSUB/PTRADD; both checks
-come with R5. Every bar rerun on the merged binary: S6 unlocked, locked `void`, locked `int4`
+come with R5. Superseded (R5): ported, see "R5". Every bar rerun on the merged binary: S6 unlocked, locked `void`, locked `int4`
 and callees with a stack parameter each M8 8 / 8, M500 446 / 446 non-SSE (446 / 500; the misses
 are the 53 SSE functions and 0x4c48d0, which the reference does not finish); S4 regression
 M8 8 / 8; R1 check M8 8 / 8, M500 451 / 453.
@@ -609,6 +609,169 @@ not finish); subvar check and R3 check 497 / 499 each; paramdouble 500 / 500; S4
 four S6 checks (unlocked, `void`, `int4`, callees) 498 / 500 each (0x4919f0; 0x4c48d0).
 Superseded: the 495 / 499 above (0x4891e0 and 0x6fa6e0 are fixed by part two's non-zero masks)
 and the callee check's 497 (the reference ran 0x5b59c0 this time).
+### S8: in part on branch `m3-s8` (2026-11-13)
+
+Ported: `ActionBlockStructure` end to end. `decomp/structure.rs` holds the structured hierarchy
+(`Funcdata::sblocks`) as an arena of blocks with an enum for the `FlowBlock` subclass (graph,
+copy, goto, multi-goto, list, condition, if, if/else, if-no-exit, if-goto, while-do, do-while,
+infinite loop, switch), the edge edits of `FlowBlock`/`BlockGraph`, every `newBlock*`,
+`buildCopy` with `installSwitchDefaults`, `isComplex`, `negateCondition` (which flips the basic
+block's CBRANCH: `boolean_flip`, `fallthru_true` and the basic out edges) and `printTree`.
+`decomp/collapse.rs` ports `CollapseStructure` (every rule, in the C++ order), `LoopBody`,
+`TraceDAG` and `FloatingEdge`. `structureReset` clears the structure, as the C++ does.
+
+Check (from `rust/`):
+
+```sh
+PRINT=$'print tree block\nprint raw' BREAK=assignhigh \
+  DECOMP_SKIP_ACTIONS=prefercomplement,structuretransform \
+  OPTIONS=tools/corpus/s8-options.txt tools/decomp-diff.sh m500
+PRINT=$'print tree block\nprint raw' BREAK=assignhigh \
+  DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst,prefercomplement,structuretransform \
+  OPTIONS=tools/corpus/s8-r-options.txt tools/decomp-diff.sh m500
+```
+
+`s8-options.txt` is `s4-options.txt` and `s8-r-options.txt` is `r1-options.txt`, each without
+the `blockrecovery off` line (`tools/r1-options.sh` writes both). Where it
+breaks and why that is fair: `blockstructure` runs in the main loop, so `break start assignhigh`
+stops after it and after the later main-loop passes that read the flipped branches. The two
+`blockrecovery` actions between `cleanup` and `assignhigh`, `prefercomplement` and
+`structuretransform`, are skipped on both sides: they only rework the finished structure
+(swap if/else clauses, normalize flipped conditions, move for-loop ops), so both engines
+compare the structure `blockstructure` built. `finalstructure` comes after the merge and cast
+actions (S7, S9), so no break can reach it yet. Printing `print raw` too checks the CBRANCH flips
+and edge swaps of the collapse rules on the basic blocks.
+
+| check | M8 | M500 |
+|---|---|---|
+| rule groups off (`s8-options.txt`) | 8 / 8 | 499 / 500; 499 / 499 of the functions the reference finishes |
+| rule-stage options (`s8-r-options.txt`) | 8 / 8 | 496 / 500; 496 / 499 of the functions the reference finishes (99.4 %) |
+
+The miss in both is 0x4c48d0, which neither engine finishes within the timeout. The other
+misses with the rule-stage options are R3's, unchanged: 0x47a6b0 (`ActionConditionalExe`), 0x4891e0
+and 0x6fa6e0 (a zero replacement one main-loop pass apart). R3's fourth miss, 0x4919f0, is identical
+here: it differs only with `blockrecovery` off. Existing bars on this branch: the R3 check M500 495 / 500 (495 / 499),
+paramdouble 500 / 500, the S4 check 498 / 500, the S6 check (unlocked) 498 / 500: unchanged. Those
+checks keep `blockrecovery` off, so `blockstructure` never runs in them.
+
+After merging R2 (2026-11-13; `cleanup` on, `condnegate` ported): rules off M8 8 / 8, M500 499 / 499;
+rule-stage options M8 8 / 8, M500 463 / 499. Superseded by the `ConditionalJoin` port below. The 35
+new misses came from `ActionNodeJoin`:
+`RuleCondNegate` now turns the flips `blockstructure` sets into BOOL_NEGATE ops, so two branches
+get functionally equal conditions in different varnodes and the reference joins them
+(`ConditionalJoin`), which ghidra-rs does not port (its detection only sees one shared varnode,
+so it misses them silently). With `nodejoin` skipped on both sides the rule-stage check is
+498 / 499 (miss 0x47a6b0, `ActionConditionalExe`). Ported since (below):
+(`functionalEqualityLevel`, `nodeJoinCreateBlock`).
+
+`ActionNodeJoin` is now ported (`decomp/nodejoin.rs`: `ConditionalJoin` with `findDups`,
+`checkExitBlock`, `setupMultiequals`, `moveCbranch`, `cutDownMultiequals`, and
+`Funcdata::nodeJoinCreateBlock`; it reuses R2's `functionalEqualityLevel`), replacing S4's
+detection. With `nodejoin` running on both sides: rules off M8 8 / 8, M500 499 / 499; rule-stage
+options M8 8 / 8, M500 498 / 499 (miss 0x47a6b0, `ActionConditionalExe`). The action changes the
+reference output of 35 M500 functions under the rule-stage options; all 35 are identical.
+Other bars on the same binary: R3 check 498 / 499, subvar and R4 checks 498 / 499, paramdouble
+500 / 500; the S4 and S6 (unlocked) checks rise to 499 / 500 (499 / 499 the reference finishes):
+0x4919f0, the miss R3 left "not traced", is a join of two branches on one condition, which S4's
+detection let through.
+
+Not ported, left for part two:
+
+- `prefercomplement` and `structuretransform`: they need `opFlipInPlaceTest/Execute`,
+  `opNormalizeFlip`, `replaceLessequal` and the boolean-flip table, which R2 ports
+  (`rules/boolean.rs`, `rules/compare.rs` on `m3-r2`). Superseded: "blocked until R2 merges"; R2 is on master now, so they are next. The for-loop part
+  of `BlockWhileDo::finalTransform` (`findLoopVariable`, `findInitializer`,
+  `PcodeOp::isMoveable`) also comes with it.
+- `finalstructure` (`orderBlocks`, `finalizePrinting`, `scopeBreak`, `markUnstructured`,
+  `markLabelBumpUp`), `nextFlowAfter`, the case data of `BlockSwitch` (`grabCaseBasic`) and
+  structured `printRaw`: needed by S9 only.
+- `returnsplit` (group off in the check; needs `Funcdata::nodeSplit` and `gotoPrints`).
+- `normalizebranches` needs nothing: its group is not in the `decompile` root's groups, so the
+  console never runs it.
+
+Review round (independent review of `collapse.rs` and `structure.rs` against the C++):
+`ActionNodeJoin`'s detection skips a pair when either CBRANCH has `boolean_flip` set, as
+`ConditionalJoin::findDups` does (`blockstructure` sets the flag earlier in the same main-loop
+pass; before, ghidra-rs failed where the C++ skips); `newBlockSwitch` fails with "Could not get
+switch leaf" when the switch's exit leaf (`getExitLeaf`) is not a copy; `printTree`,
+`negateCondition` and `isComplex` use a work stack or a loop instead of recursion (deep nesting
+is input-reachable); unit tests on hand-built graphs (if/else, a negated proper if, an
+irreducible two-entry loop, a switch with a duplicated table target and a skip edge to the
+exit; expected trees derived by hand from the C++). Bars after the round, unchanged: S8 M8 8 / 8,
+M500 499 / 499 (rules off) and 496 / 499 (rule-stage options); R3 check 495 / 499; S4 and S6
+checks 498 / 500.
+
+### R5: in part on branch `m3-r5` (2026-11-13)
+
+Slice 1 of five (the plan's suggested slices: pointer rules; `RuleLoadVarnode`/`RuleStoreVarnode`
+and removing `jumptable::fold_constants`; double.cc; the `cleanup` leftovers; constseq and
+bitfield). Ported: the `typerecovery` pointer rules `RulePtrArith` (with `AddTreeState`),
+`RuleStructOffset0`, `RulePushPtr` (pool `oppool2`, until now an empty leaf) and `RulePtraddUndo`,
+`RulePtrsubUndo` (`oppool1`), in `rules/ptrarith.rs`; `PcodeOp::stopsTypePropagation` in
+`getLocalType` and `Varnode::stopsUpPropagation` in `propagateTypeEdge` (they land with the rules
+that set them); `TypeOpPtradd::propagateType` (S6 failed on it) and `print raw` of PTRADD.
+Superseded: the S6 notes "`stopsTypePropagation`/`stopsUpPropagation` stay unported" and "five
+R5 rules toggled off" (`s6-options.txt` no longer switches them off).
+
+Not ported, failing loudly where reached: `TypePointerRel` (the type store never makes one, so
+`isFormalPointerRel` is false), struct sub-types inside the rules (`TypeStruct::getSubType`,
+`isOffsetValid`, `nearestArrayedComponent`), unions (`needsResolution`), and
+`AddTreeState::assignPropagatedType` (only after type recovery gives up). Documented difference: the add-tree and
+local-add recursions, unbounded in the C++, fail with an error past depth 1,000 (`MAX_DEPTH`). Space-base types answer
+`nearestArrayedComponent` with false: their scopes hold only functions and external references,
+neither arrayed.
+
+Check: `rust/tools/corpus/r5-options.txt` from `r1-options.sh` (groups `analysis`, `cleanup`,
+`typerecovery` on; the script now also reads `oppool2`), with and without types:
+
+```sh
+export DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst
+DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=$PWD/rust/tools/corpus/r5-options.txt rust/tools/decomp-diff.sh m8
+DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=$PWD/rust/tools/corpus/r5-options.txt TIMEOUT=60 rust/tools/decomp-diff.sh m500
+BREAK=assignhigh OPTIONS=$PWD/rust/tools/corpus/r5-options.txt TIMEOUT=60 rust/tools/decomp-diff.sh m500
+```
+
+| check (`r5-options.txt`) | identical |
+|---|---|
+| M8, types printed | 8 / 8 |
+| M500, `print raw` without types | 497 / 500; 497 / 498 of the functions the reference finishes (99.8 %) |
+| M500, types printed (`DECOMP_RAW_EXTRA=1`) | 487 / 500; 487 / 498 (97.8 %, bar 95 %: reached) |
+| S6 check (`s6-options.txt`, the five rules now on), M500 | 498 / 500 (as before: 0x4919f0; 0x4c48d0 the reference does not finish) |
+
+The reference does not finish 0x4c48d0 and 0x6b21e0 (on 0x6b21e0 ghidra-rs stops at
+`assignPropagatedType`: type recovery gave up). Misses: 0x47a6b0 (`ActionConditionalExe`, as in
+R1); with types, ten more, all one cause: the constant of an INT_SUB that the `cleanup` pool's
+`2comp2sub` builds after the last inference pass (`#0x1 - x`) is `int4` on the reference and
+`xunknown4` here (0x40ff50, 0x442c90, 0x479ac0, 0x494400, 0x4ea3ba, 0x5dec80, 0x5ffba0, 0x6b0260,
+0x74c9b0, 0x75e5a9). Not caused by R5: the same ten differ with the five rules switched off on
+both sides (488 / 499); no earlier check ran `analysis`, `cleanup` and `typerecovery` together
+with types printed. Not traced further.
+Superseded (fix round, 2026-11-13): traced and fixed. `Funcdata::opSetInput` clones a constant
+that already has a reader with `copySymbol` (type and type lock) unless it is a space base;
+`unshared_constant` made a bare constant. After the fix: R5 check M500 typed 497 / 498 and
+untyped 497 / 498 (miss 0x47a6b0; 0x4c48d0 and 0x6b21e0 the reference does not finish), M8
+8 / 8, the ten functions 10 / 10; S6 unlocked 498 / 500 (0x4919f0; 0x4c48d0); R1 check
+(`r1-options.txt`) 498 / 499 (0x47a6b0). S3 paramdouble 500 / 500; S4 498 / 500 and the locked S6
+checks (`void`, `int4`, callees `int4(int4 a)`) 498 / 500 each (0x4919f0; 0x4c48d0). Switch
+corpus not rerun (`typerecovery` is off in the jump-table partial function).
+Merged with S8 part one (`master` into `m3-r5`, 2026-11-13); every bar rerun on the merged binary:
+R5 check M8 8 / 8, M500 497 / 498 with and without types (0x47a6b0); R1 check 498 / 499;
+S8 rules-off 499 / 499 and S8 rule-stage 498 / 499 (neither S8 options file turns
+`typerecovery` on, so the pointer rules do not run there); S3 paramdouble 500 / 500; S4 and S6
+unlocked 499 / 500 each (0x4c48d0, which the reference does not finish); switch corpus
+1,947 / 2,050, the same misses as before. Superseded: "Switch corpus not rerun" above.
+The bar is meaningful: 326 of the M500 reference outputs (with types) change when the five rules
+are switched off. Not rerun at
+the commit (bars whose options leave the new code off: `typerecovery` is off in the R1, subvar,
+R4, S3 and S4 options and in the jump-table partial function): r1/subvar/r4 498 / 499,
+paramdouble 500 / 500, switch corpus 1,947 / 2,050, S4 498 / 500. The locked S6 checks (`void`,
+`int4`, callees) were still running at the commit.
+
+Left for R5 (slices 2 to 5, not started): `RuleLoadVarnode`/`RuleStoreVarnode` (group
+`stackvars`; a load or store through the stack pointer makes a stack-space varnode, which needs
+the stack heritage pass, not ported; the constant-pointer path also needs `fillinReadOnly` after
+the ram pass to replace `fold_constants` in the jump-table partial function, where `stackvars` is
+on), double.cc, constseq.cc, bitfield.cc, and the `cleanup` rules that read types.
 
 ### Stack heritage: slice one on branch `m3-stack` (2026-11-13)
 

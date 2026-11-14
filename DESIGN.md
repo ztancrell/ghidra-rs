@@ -175,6 +175,16 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    tracing, the local scope's stack ranges, `ActionRestrictLocal`, locked stack parameters of
    the function; check with every function locked with two stack parameters, M8 8 / 8,
    M500 496 / 499; S4, S6, rule, paramdouble and switch bars held.
+   R5 (in part) on branch `m3-r5`: the five `typerecovery` pointer rules (`RulePtrArith` with
+   `AddTreeState`, `RuleStructOffset0`, `RulePushPtr` in `oppool2`, `RulePtraddUndo`,
+   `RulePtrsubUndo`) and the stop-propagation flags; R5 check M8 8 / 8, M500 497 / 498 without
+   types, 487 / 498 with types (bar 95 %; 497 / 498 after the `opSetInput` fix); S6 check 498 / 500 with the rules on. Open: stack
+   loads/stores, double.cc, constseq, bitfield, typed `cleanup` rules.
+   S8 (structuring, in part) on branch `m3-s8`: `ActionBlockStructure` (`CollapseStructure`,
+   `LoopBody`, `TraceDAG`; `structure.rs`, `collapse.rs`) and `print tree block`; `print tree
+   block` plus `print raw` at `assignhigh` with `blockrecovery` on: M8 8 / 8, M500 499 / 499 the
+   reference finishes (bar 98 %); with the rule-stage options M8 8 / 8, M500 496 / 499 before R2, 463 / 499 after R2 until `ConditionalJoin` was ported, 498 / 499 now (`ActionNodeJoin` ported, `nodejoin.rs`). Open: `prefercomplement` and
+   `structuretransform` (R2's flip helpers they need are now on master), `finalstructure`, `returnsplit`.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.

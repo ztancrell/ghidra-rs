@@ -23,7 +23,7 @@ pub(super) fn func_eq0(fd: &Funcdata, a: VarnodeId, b: VarnodeId) -> i32 {
 
 /// Port of `functionalEqualityLevel`: 0 equal, 1 or 2 equal up to that many pairs of inputs
 /// (returned), -1 different.
-pub(super) fn func_eq_level(
+pub(crate) fn func_eq_level(
     fd: &Funcdata,
     a: VarnodeId,
     b: VarnodeId,

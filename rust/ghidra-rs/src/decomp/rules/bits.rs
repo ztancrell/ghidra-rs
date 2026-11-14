@@ -473,7 +473,7 @@ pub(super) fn and_compare(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> 
     let bsz = sz(fd, base);
     let c = fd.new_constant(bsz, andconst);
     if baseconst == andconst {
-        copy_symbol(fd, c, maskvn); // no change but the size: keep the old constant's type
+        fd.copy_symbol(c, maskvn); // no change but the size: keep the old constant's type
     }
     let newout = insert_new(fd, IntAnd, op_addr(fd, andop), bsz, &[base, c], andop)?;
     fd.op_set_input(op, newout, 0)?;

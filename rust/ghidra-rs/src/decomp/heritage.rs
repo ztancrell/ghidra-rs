@@ -881,9 +881,11 @@ fn guard_calls(
         }
         let call = fd.call(c);
         // `else if (fc->isStackOutputLock() && tryregister)`: tryOutputStackGuard
-        let stack_output_lock = call.proto.locked.as_ref().is_some_and(|l| {
-            matches!(l.output.storage, Some(super::fspec::Storage::Stack { .. }))
-        });
+        let stack_output_lock = call
+            .proto
+            .locked
+            .as_ref()
+            .is_some_and(|l| matches!(l.output.storage, Some(super::fspec::Storage::Stack { .. })));
         if call.active_output.is_none()
             && tryregister
             && stack_output_lock

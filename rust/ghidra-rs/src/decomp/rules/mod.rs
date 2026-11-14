@@ -27,9 +27,11 @@ mod floatrules;
 mod modulo;
 mod piece;
 mod pool;
+mod ptrarith;
 mod subpiece;
 mod subvar;
 
+pub(crate) use cse::func_eq_level;
 pub(crate) use pool::{nonzero_mask, pool_apply, select, Pool};
 
 use arith::*;
@@ -45,6 +47,7 @@ use float::*;
 use floatrules::*;
 use modulo::*;
 use piece::*;
+use ptrarith::*;
 use subpiece::*;
 use subvar::*;
 
@@ -222,7 +225,17 @@ pub(crate) const OPPOOL1: &[Rule] = &[
     r("ignorenan", "floatprecision", &[FloatNan], ignore_nan),
     r("unsigned2float", "analysis", &[FloatInt2float], unsigned_2_float),
     r("int2floatcollapse", "analysis", &[FloatInt2float], int2float_collapse),
+    r("ptraddundo", "typerecovery", &[Ptradd], ptradd_undo),
+    r("ptrsubundo", "typerecovery", &[Ptrsub], ptrsub_undo),
     r("piecepathology", "protorecovery", &[Piece], piece_pathology),
+];
+
+/// The ported rules of `oppool2`, in `universalAction`'s order (stage R5).
+#[rustfmt::skip]
+pub(crate) const OPPOOL2: &[Rule] = &[
+    r("pushptr", "typerecovery", &[IntAdd], push_ptr),
+    r("structoffset0", "typerecovery", &[Load, Store], struct_offset0),
+    r("ptrarith", "typerecovery", &[IntAdd], ptr_arith),
 ];
 
 /// The ported rules of the `cleanup` pool, in `universalAction`'s order.
@@ -340,18 +353,6 @@ fn shl(v: u64, sa: i32) -> u64 {
 /// `uintb >> int4` as x86-64 computes it.
 fn shr(v: u64, sa: i32) -> u64 {
     v.wrapping_shr(sa as u32)
-}
-
-/// Port of `Varnode::copySymbol` for a new constant, as far as constants carry it here: the
-/// data-type and the type lock (symbols and the name lock are not modelled yet).
-fn copy_symbol(fd: &mut Funcdata, to: VarnodeId, from: VarnodeId) {
-    let (ty, lock) = (fd.vn(from).ty, fd.vn(from).has(VnFlags::TYPELOCK));
-    fd.vn_mut(to).ty = ty;
-    if lock {
-        fd.vn_set(to, VnFlags::TYPELOCK);
-    } else {
-        fd.vn_clear(to, VnFlags::TYPELOCK);
-    }
 }
 
 #[cfg(test)]

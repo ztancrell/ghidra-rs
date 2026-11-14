@@ -55,7 +55,7 @@ pub(crate) fn replace_lessequal(fd: &mut Funcdata, op: OpId) -> Result<bool> {
     fd.op_set_opcode(op, opc);
     let res = if down { val.wrapping_sub(1) } else { val.wrapping_add(1) } & mask;
     let newvn = fd.new_constant(size, res);
-    copy_symbol(fd, newvn, vn);
+    fd.copy_symbol(newvn, vn);
     fd.op_set_input(op, newvn, i)?;
     Ok(true)
 }

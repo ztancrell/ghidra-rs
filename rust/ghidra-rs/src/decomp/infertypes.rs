@@ -5,7 +5,7 @@
 //! Propagation order and conditions follow the C++ exactly.
 
 use super::funcdata::Funcdata;
-use super::op::OpId;
+use super::op::{OpFlags, OpId};
 use super::opcode::Opcode;
 use super::rangeutil::{bit_transitions, calc_mask};
 use super::types::{Kind, Meta, TypeId, GLOBAL_SCOPE, LOCAL_SCOPE};
@@ -138,15 +138,20 @@ fn input_local(fd: &mut Funcdata, op: OpId, slot: usize) -> TypeId {
     }
 }
 
-/// Port of `Varnode::getLocalType`. No `stopsTypePropagation`/`stopsUpPropagation` check: the
-/// flag is set only by `RulePtrArith`, `RuleStructOffset0` and `RulePushPtr` (stage R5, toggled off
-/// in every check); none of R1's rules sets it or makes a PTRSUB/PTRADD. Port both checks with R5.
-fn local_type(fd: &mut Funcdata, vn: VarnodeId) -> Result<TypeId> {
+/// Port of `Varnode::getLocalType`: the type and `blockup`, set when the defining op stops
+/// propagation from below (`PcodeOp::stopsTypePropagation`, set by the stage R5 rules).
+fn local_type(fd: &mut Funcdata, vn: VarnodeId) -> Result<(TypeId, bool)> {
     if fd.vn(vn).has(VnFlags::TYPELOCK) {
-        return Ok(vn_type(fd, vn));
+        return Ok((vn_type(fd, vn), false));
     }
     let mut ct = match fd.vn(vn).def {
-        Some(def) => Some(output_local(fd, def)?),
+        Some(def) => {
+            let t = output_local(fd, def)?;
+            if fd.op(def).flags.has(OpFlags::STOP_TYPE_PROPAGATION) {
+                return Ok((t, true));
+            }
+            Some(t)
+        }
         None => None,
     };
     let readers = fd.vn(vn).descend.to_vec();
@@ -158,7 +163,7 @@ fn local_type(fd: &mut Funcdata, vn: VarnodeId) -> Result<TypeId> {
             _ => Some(newct),
         };
     }
-    ct.map_or_else(|| err("NULL local type"), Ok)
+    ct.map_or_else(|| err("NULL local type"), |t| Ok((t, false)))
 }
 
 /// The temporary types and marks of one `ActionInferTypes` pass (`Varnode::temp`, `mark`).
@@ -209,7 +214,7 @@ fn from_pointer(fd: &Funcdata, dt: TypeId, size: u32) -> Result<Option<TypeId>> 
 }
 
 /// Port of `Datatype::getSubType`, with `TypeSpacebase::getSubType` answered from the scopes.
-fn sub_type(fd: &mut Funcdata, arch: &Arch, t: TypeId, off: i64) -> Result<Option<(TypeId, i64)>> {
+pub(crate) fn sub_type(fd: &mut Funcdata, arch: &Arch, t: TypeId, off: i64) -> Result<Option<(TypeId, i64)>> {
     if matches!(fd.types.get(t).kind, Kind::Fields(_) | Kind::Enum(_)) {
         return err("type propagation into a struct, union or enum: not implemented in ghidra-rs yet");
     }
@@ -485,7 +490,13 @@ fn propagate_type(
             let off = fd.vn(fd.op(op).ins[1]).offset as i64;
             narrow(fd, arch, alt, off, fd.vn(outvn).size)?
         }
-        Opcode::Ptradd => return err("type propagation through PTRADD: not implemented in ghidra-rs yet"),
+        // TypeOpPtradd::propagateType (stage R5)
+        Opcode::Ptradd => {
+            if inslot == 2 || outslot == 2 || (inslot != -1 && outslot != -1) || alt_meta != Meta::Ptr || inslot == -1 {
+                return Ok(None);
+            }
+            add_in2out(fd, arch, st, alt, op, inslot as usize)?
+        }
         _ => None,
     })
 }
@@ -530,6 +541,9 @@ fn propagate_edge(fd: &mut Funcdata, arch: &Arch, st: &mut Infer, op: OpId, insl
     let alt = st.temp(fd, invn);
     let ov = fd.vn(outvn);
     if (outslot >= 0 && ov.is_annotation()) || ov.has(VnFlags::TYPELOCK) {
+        return Ok(false);
+    }
+    if ov.has(VnFlags::STOP_UPPROPAGATION) && outslot >= 0 {
         return Ok(false);
     }
     if fd.types.meta(alt) == Meta::Bool && fd.nzmask(outvn) > 1 {
@@ -704,7 +718,10 @@ pub(crate) fn infer_types(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     // buildLocaltypes (no symbol entries before `localrecovery`)
     for &vn in &locs {
         if !skipped(fd, vn) {
-            let ct = local_type(fd, vn)?;
+            let (ct, blockup) = local_type(fd, vn)?;
+            if blockup {
+                fd.vn_set(vn, VnFlags::STOP_UPPROPAGATION);
+            }
             st.set_temp(vn, ct);
         }
     }
@@ -733,7 +750,9 @@ pub(crate) fn infer_types(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     Ok(0)
 }
 
-/// A symbol of the global scope a pointer constant can name (`MapEntry`).
+/// A symbol of the global scope a pointer constant can name (`MapEntry`): a function or an
+/// external reference. `rules/ptrarith.rs` (`AddTree::calc_subtype`) relies on no other kind
+/// existing; adding data symbols means porting `TypeSpacebase::nearestArrayedComponent*` there.
 struct Entry {
     addr: u64,
     externref: bool,

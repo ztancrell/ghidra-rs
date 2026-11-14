@@ -320,7 +320,8 @@ impl<'a> Printer<'a> {
             }
             Opcode::Cbranch => {
                 self.out.str("goto ");
-                // out 0 is the fall-through (false) edge, out 1 the branch (true) edge
+                // out 0 is the false edge, out 1 the true edge (which one falls through is the
+                // CBRANCH's `fallthru_true`, `OpFlags::FALLTHRU_TRUE`)
                 let outs = parent.and_then(|b| <[_; 2]>::try_from(&b.outs[..]).ok());
                 match outs {
                     Some([_, t]) => self.short_header(t.point),
@@ -328,7 +329,8 @@ impl<'a> Printer<'a> {
                 }
                 self.out.str(" if (");
                 self.vn(ins[1]);
-                self.out.str(" != 0)");
+                let flip = op.flags.has(super::op::OpFlags::BOOLEAN_FLIP);
+                self.out.str(if flip { " == 0)" } else { " != 0)" });
                 if let Some([f, _]) = outs {
                     self.out.str(" else ");
                     self.short_header(f.point);
@@ -389,6 +391,16 @@ impl<'a> Printer<'a> {
                     self.out.str(" ? ");
                     self.vn(v);
                 }
+            }
+            // TypeOpPtradd::printRaw (RulePtrArith, stage R5)
+            Opcode::Ptradd => {
+                self.assign(id);
+                self.vn(ins[0]);
+                self.out.str(" + ");
+                self.vn(ins[1]);
+                self.out.str("(*");
+                self.vn(ins[2]);
+                self.out.str(")");
             }
             opc => return err(format!("print raw: {opc:?} is made by later stages, not ported yet")),
         }
