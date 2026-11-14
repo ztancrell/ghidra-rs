@@ -20,8 +20,3 @@ option togglerule push_multi off
 option togglerule conditionalmove off
 option togglerule orpredicate off
 option togglerule piecepathology off
-option togglerule ptraddundo off
-option togglerule ptrsubundo off
-option togglerule pushptr off
-option togglerule structoffset0 off
-option togglerule ptrarith off
