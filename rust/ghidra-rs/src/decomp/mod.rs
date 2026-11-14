@@ -11,6 +11,7 @@
 pub mod action;
 pub mod actiontree;
 mod block;
+mod collapse;
 mod coreaction;
 mod cparse;
 mod cspec;
@@ -25,6 +26,7 @@ mod jumptable;
 mod lanedivide;
 mod lateres;
 mod locked;
+mod nodejoin;
 mod op;
 mod opcode;
 mod print;
@@ -33,6 +35,7 @@ mod readers;
 mod rules;
 mod splitflow;
 mod stdsort;
+mod structure;
 mod subfloat;
 mod subflow;
 mod transform;
@@ -47,6 +50,12 @@ use std::collections::{BTreeMap, HashMap};
 
 pub use funcdata::Funcdata;
 pub use print::print_raw;
+
+/// `Funcdata::printBlockTree` (`print tree block`): the structured hierarchy, empty before
+/// `ActionBlockStructure` ran.
+pub fn print_block_tree(fd: &Funcdata) -> String {
+    fd.structure.print_tree(fd)
+}
 
 /// Port of `LowlevelError` (error.hh): a decompilation that cannot go on.
 #[derive(Debug, Clone, PartialEq, Eq)]

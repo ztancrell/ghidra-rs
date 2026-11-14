@@ -31,6 +31,7 @@ mod ptrarith;
 mod subpiece;
 mod subvar;
 
+pub(crate) use cse::func_eq_level;
 pub(crate) use pool::{nonzero_mask, pool_apply, select, Pool};
 
 use arith::*;
