@@ -123,8 +123,8 @@ fn sub_right_op(fd: &mut Funcdata, mut op: OpId) -> Result<i32> {
     let mut d = c * 8;
     if let Some(lone) = lone_descend(fd, outvn) {
         let opc2 = code(fd, lone);
-        let sa = inp(fd, lone, 1)?;
-        if matches!(opc2, IntRight | IntSright) && is_const(fd, sa) && sz(fd, outvn) + c as u32 == asize {
+        let sa = if matches!(opc2, IntRight | IntSright) { Some(inp(fd, lone, 1)?) } else { None };
+        if let Some(sa) = sa.filter(|&sa| is_const(fd, sa) && sz(fd, outvn) + c as u32 == asize) {
             d = d.wrapping_add(off(fd, sa) as i32);
             if d >= (asize * 8) as i32 {
                 if opc2 == IntRight {
