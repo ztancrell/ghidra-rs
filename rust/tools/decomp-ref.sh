@@ -1,7 +1,7 @@
 #!/bin/sh
 # Build the milestone 3 reference: Ghidra's console decompiler decomp_dbg and its datatest runner
 # decomp_test_dbg, from the upstream C++ sources copied into rust/target/decomp-build, with
-# rust/tools/decomp-ref.patch applied (print raw also shows types and high variables when
+# rust/tools/decomp-ref.patch applied (print raw also shows types and high variables, numbered by first appearance, when
 # DECOMP_RAW_EXTRA is set). The upstream tree is not modified. Builds x86.sla first when it is
 # missing: decomp_dbg finds it through SLEIGHHOME (the repository root).
 set -e

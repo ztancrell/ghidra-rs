@@ -111,7 +111,7 @@ pub(crate) fn func_eq_level(
 }
 
 /// `functionalEquality`.
-pub(super) fn func_equal(fd: &Funcdata, a: VarnodeId, b: VarnodeId) -> bool {
+pub(crate) fn func_equal(fd: &Funcdata, a: VarnodeId, b: VarnodeId) -> bool {
     func_eq_level(fd, a, b).0 == 0
 }
 

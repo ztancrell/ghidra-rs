@@ -196,13 +196,12 @@ pub(crate) fn reprocess_free_stores(fd: &mut Funcdata, arch: &Arch, free: &[OpId
     Ok(())
 }
 
-/// Whether any load or store guard is still valid (`LoadGuard::isValid`: its op is alive and
-/// still a LOAD or STORE): a reader of the unanalysed guard ranges must then fail.
-#[allow(dead_code)] // for StackAffectingOps (stage S7, branch m3-s7), not merged yet
-pub(crate) fn has_valid_guards(fd: &Funcdata) -> bool {
-    let valid = |g: &LoadGuard, opc| !fd.op(g.op).is_dead() && fd.op(g.op).opc == opc;
-    fd.heritage.load_guards.iter().any(|g| valid(g, Opcode::Load))
-        || fd.heritage.store_guards.iter().any(|g| valid(g, Opcode::Store))
+/// Whether a store guard (`store`) or a load guard is still valid (`LoadGuard::isValid`: its op
+/// is alive and still a STORE or LOAD): a reader of the unanalysed guard ranges must then fail.
+pub(crate) fn has_valid_guards(fd: &Funcdata, store: bool) -> bool {
+    let (list, opc) =
+        if store { (&fd.heritage.store_guards, Opcode::Store) } else { (&fd.heritage.load_guards, Opcode::Load) };
+    list.iter().any(|g| !fd.op(g.op).is_dead() && fd.op(g.op).opc == opc)
 }
 
 /// Port of `Heritage::guardLoads`: an address-tied stack range would get a COPY guard at each
