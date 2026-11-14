@@ -46,6 +46,17 @@ fn space_mask(arch: &Arch, space: Space) -> u64 {
     }
 }
 
+/// The space a [`LocationMap`] entry's index names, given the space of the range it is compared
+/// with: the map keeps indices, and only a SLEIGH space's index rebuilds as `Space::Sleigh`
+/// (the stack's would not, and no stack range would ever be found again).
+fn same_index(index: u32, like: Space) -> Space {
+    if index == like.index() {
+        like
+    } else {
+        Space::Sleigh(index)
+    }
+}
+
 /// Port of `MemRange`: one range of storage to link this pass.
 #[derive(Debug, Clone, Copy)]
 struct MemRange {
@@ -89,12 +100,12 @@ impl LocationMap {
         let s = space.index();
         let lower = self.map.partition_point(|e| (e.0, e.1) < (s, off));
         let mut at = lower.saturating_sub(1);
-        if self.map.get(at).is_some_and(|e| overlap(space, off, Space::Sleigh(e.0), e.1, e.2, mask).is_none()) {
+        if self.map.get(at).is_some_and(|e| overlap(space, off, same_index(e.0, space), e.1, e.2, mask).is_none()) {
             at += 1;
         }
         let mut intersect = Intersect::New;
         if let Some(&(es, eoff, esize, epass)) = self.map.get(at) {
-            if let Some(w) = overlap(space, off, Space::Sleigh(es), eoff, esize, mask) {
+            if let Some(w) = overlap(space, off, same_index(es, space), eoff, esize, mask) {
                 if w + size <= esize {
                     let i = if epass < pass { Intersect::Old } else { Intersect::New };
                     return (eoff, esize, i);
@@ -109,7 +120,7 @@ impl LocationMap {
             }
         }
         while let Some(&(es, eoff, esize, epass)) = self.map.get(at) {
-            let Some(w) = overlap(Space::Sleigh(es), eoff, space, off, size, mask) else { break };
+            let Some(w) = overlap(same_index(es, space), eoff, space, off, size, mask) else { break };
             size = size.max(w + esize);
             if epass < pass {
                 intersect = Intersect::Partial;
@@ -129,7 +140,7 @@ impl LocationMap {
         let s = space.index();
         let at = self.map.partition_point(|e| (e.0, e.1) <= (s, off)).checked_sub(1)?;
         let e = self.map[at];
-        overlap(space, off, Space::Sleigh(e.0), e.1, e.2, mask).map(|_| at)
+        overlap(space, off, same_index(e.0, space), e.1, e.2, mask).map(|_| at)
     }
 }
 
@@ -869,6 +880,17 @@ fn guard_calls(
             }
         }
         let call = fd.call(c);
+        // `else if (fc->isStackOutputLock() && tryregister)`: tryOutputStackGuard
+        let stack_output_lock = call.proto.locked.as_ref().is_some_and(|l| {
+            matches!(l.output.storage, Some(super::fspec::Storage::Stack { .. }))
+        });
+        if call.active_output.is_none()
+            && tryregister
+            && stack_output_lock
+            && call.proto.characterize_as_output(arch, space, toff, size) != Containment::None
+        {
+            return err("heritage: guarding a call's locked stack return value (tryOutputStackGuard): not implemented in ghidra-rs yet");
+        }
         if call.active_input.is_some() && tryregister {
             match call.proto.characterize_as_input(arch, space, toff, size) {
                 Containment::ContainsJustified => {

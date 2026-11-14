@@ -10,7 +10,7 @@ use super::fspec::{EffectKind, Storage};
 use super::funcdata::Funcdata;
 use super::opcode::Opcode;
 use super::varnode::{Space, VnFlags};
-use super::{err, Arch, Result};
+use super::{Arch, Result};
 
 /// The stack ranges of `ScopeLocal`: sorted, disjoint, inclusive offset pairs, and the
 /// parameter extent `markNotMapped` records (`minParamOffset`, `maxParamOffset`).
@@ -27,11 +27,11 @@ impl LocalMap {
     /// Port of `ScopeLocal::resetLocalWindow` for a stack that grows down: the model's local
     /// range (`ProtoModel::defaultLocalRange`, the upper half of the space; x86 declares none)
     /// and its parameter range, the stack `<pentry>` ranges of its input list
-    /// (`ParamListStandard::getRangeList`; `params`, inclusive). `addr_size` is the stack
-    /// space's address size in bytes.
-    pub(crate) fn new(addr_size: u32, params: &[(u64, u64)]) -> LocalMap {
-        let highest = if addr_size >= 8 { u64::MAX } else { (1u64 << (8 * addr_size)) - 1 };
-        let mut m = LocalMap { ranges: Vec::new(), highest, min_param: u64::MAX, max_param: 0 };
+    /// (`ParamListStandard::getRangeList`; `params`, inclusive). `highest` is the stack space's
+    /// highest offset (its offset mask, [`super::heritage_guard::stack_mask`]).
+    pub(crate) fn new(highest: u64, params: &[(u64, u64)]) -> LocalMap {
+        let mut m = LocalMap::empty();
+        m.highest = highest;
         m.insert(highest - (highest >> 1).min(0x7fff_ffff), highest);
         for &(a, b) in params {
             m.insert(a, b);
@@ -39,11 +39,16 @@ impl LocalMap {
         m
     }
 
-    /// Port of `RangeList::insertRange`: overlapping or touching ranges merge.
+    /// A scope owning nothing, before `Funcdata::start_processing` knows the architecture.
+    pub(crate) fn empty() -> LocalMap {
+        LocalMap { ranges: Vec::new(), highest: u64::MAX, min_param: u64::MAX, max_param: 0 }
+    }
+
+    /// Port of `RangeList::insertRange`: overlapping ranges merge (touching ones do not).
     fn insert(&mut self, mut first: u64, mut last: u64) {
         let mut out = Vec::with_capacity(self.ranges.len() + 1);
         for &(a, b) in &self.ranges {
-            if b.saturating_add(1) < first || last.saturating_add(1) < a {
+            if b < first || last < a {
                 out.push((a, b));
             } else {
                 first = first.min(a);
@@ -148,9 +153,9 @@ pub(crate) fn restrict_local(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         for p in &locked.inputs {
             match p.storage {
                 Some(Storage::Stack { offset, size }) => marks.push((base.wrapping_add(offset), size)),
-                Some(Storage::Join(_)) => {
-                    return err("ActionRestrictLocal: a locked join parameter: not implemented in ghidra-rs yet")
-                }
+                // a join's stack pieces would be un-mapped, its register pieces are left alone;
+                // ghidra-rs joins hold SLEIGH-space (register) pieces only
+                Some(Storage::Join(_)) => {}
                 _ => {}
             }
         }
@@ -196,19 +201,22 @@ mod tests {
     #[test]
     fn default_window_is_params_and_locals() {
         // x86win: one stack <pentry> at offset 4, 500 bytes
-        let m = LocalMap::new(4, &[(4, 503)]);
+        let m = LocalMap::new(0xffff_ffff, &[(4, 503)]);
         assert_eq!(m.ranges, vec![(4, 503), (0x8000_0000, 0xffff_ffff)]);
         assert!(m.in_scope(4, 4) && m.in_scope(500, 4));
         assert!(!m.in_scope(0, 4) && !m.in_scope(502, 4) && !m.in_scope(0x1000, 4));
         assert!(m.in_scope(0xffff_fffc, 4) && !m.in_scope(0xffff_fffe, 4));
-        // touching ranges merge
-        let m = LocalMap::new(4, &[(0x7fff_fff0, 0x7fff_ffff), (4, 7), (8, 11)]);
-        assert_eq!(m.ranges, vec![(4, 11), (0x7fff_fff0, 0xffff_ffff)]);
+        // touching ranges stay apart, so no varnode spans two of them; overlapping ones merge
+        let m = LocalMap::new(0xffff_ffff, &[(0x7fff_fff0, 0x7fff_ffff), (4, 7), (8, 11), (6, 9)]);
+        assert_eq!(m.ranges, vec![(4, 11), (0x7fff_fff0, 0x7fff_ffff), (0x8000_0000, 0xffff_ffff)]);
+        assert!(!m.in_scope(0x7fff_fffc, 8));
+        let m = LocalMap::new(0xffff_ffff, &[(4, 7), (8, 11)]);
+        assert!(m.in_scope(4, 4) && !m.in_scope(4, 8));
     }
 
     #[test]
     fn removing_splits_and_records_the_parameter_extent() {
-        let mut m = LocalMap::new(4, &[(0, 511)]);
+        let mut m = LocalMap::new(0xffff_ffff, &[(0, 511)]);
         m.remove(8, 4, true);
         assert_eq!(m.ranges[..2], [(0, 7), (12, 511)]);
         assert!(!m.in_scope(8, 1) && m.in_scope(4, 4) && !m.in_scope(4, 8));

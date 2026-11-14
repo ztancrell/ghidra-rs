@@ -1268,7 +1268,7 @@ fn split_uses(fd: &mut Funcdata, vn: VarnodeId) -> Result<()> {
         fd.op_set_input(useop, newvn, slot)?;
         fd.op_insert_before(newop, op)?;
     }
-    fd.op_destroy(op);
+    // the original op stays, without readers: dead code removes it, as in the C++
     Ok(())
 }
 

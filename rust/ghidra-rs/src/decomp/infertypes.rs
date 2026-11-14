@@ -660,7 +660,10 @@ fn propagate_across_returns(fd: &mut Funcdata, arch: &Arch, st: &mut Infer) -> R
 
 /// Port of `ActionInferTypes::propagateSpacebaseRef`/`propagateRef`: types of stack varnodes
 /// reached through the stack pointer. Before the `stackvars` rules (stage R5) the only stack
-/// varnodes are those of locked parameters, typelocked, which `propagateRef` skips.
+/// varnodes are those of locked parameters, typelocked, which `propagateRef` skips. Its other
+/// skip, a varnode with a symbol entry (`getSymbolEntry() != 0`), adds nothing: the only local
+/// symbols are those parameters, and a varnode exactly at one is typelocked
+/// (`Funcdata::scoped_stack`) while a piece of one fails in heritage.
 fn propagate_spacebase_ref(fd: &Funcdata) -> Result<()> {
     let skipped = |vn| {
         let v = fd.vn(vn);

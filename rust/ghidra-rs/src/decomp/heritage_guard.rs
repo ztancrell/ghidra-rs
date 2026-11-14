@@ -7,7 +7,10 @@
 //! establishRange`/`finalizeRange`, rangeutil.cc's `ValueSetSolver`). A guard keeps only the
 //! offset its pointer was traced from; `guardLoads`, the one reader of the analysed range during
 //! heritage, fails when it would need it. With no load-guard COPYs, `handleNewLoadCopies` has
-//! nothing to do.
+//! nothing to do. The other readers of the analysed ranges, none ported yet, must fail while
+//! [`has_valid_guards`] is true: `StackAffectingOps::populate`/`affectsTest` (merge.cc, stage
+//! S7), `Funcdata::opCollapseIndirectsForAlias` (funcdata_op.cc, through `RuleAliasUpdate`)
+//! and `MapState::gatherOpen` / the alias checker (varmap.cc, `ActionRestructureVarnode`).
 
 use super::op::{OpFlags, OpId};
 use super::opcode::Opcode;
@@ -191,6 +194,15 @@ pub(crate) fn reprocess_free_stores(fd: &mut Funcdata, arch: &Arch, free: &[OpId
         }
     }
     Ok(())
+}
+
+/// Whether any load or store guard is still valid (`LoadGuard::isValid`: its op is alive and
+/// still a LOAD or STORE): a reader of the unanalysed guard ranges must then fail.
+#[allow(dead_code)] // for StackAffectingOps (stage S7, branch m3-s7), not merged yet
+pub(crate) fn has_valid_guards(fd: &Funcdata) -> bool {
+    let valid = |g: &LoadGuard, opc| !fd.op(g.op).is_dead() && fd.op(g.op).opc == opc;
+    fd.heritage.load_guards.iter().any(|g| valid(g, Opcode::Load))
+        || fd.heritage.store_guards.iter().any(|g| valid(g, Opcode::Store))
 }
 
 /// Port of `Heritage::guardLoads`: an address-tied stack range would get a COPY guard at each
