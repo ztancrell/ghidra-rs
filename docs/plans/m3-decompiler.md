@@ -675,7 +675,7 @@ detection let through.
 
 Not ported, left for part two:
 
-- `prefercomplement` and `structuretransform`: they need `opFlipInPlaceTest/Execute`,
+- Superseded (part two, below): `prefercomplement` and `structuretransform`: they need `opFlipInPlaceTest/Execute`,
   `opNormalizeFlip`, `replaceLessequal` and the boolean-flip table, which R2 ports
   (`rules/boolean.rs`, `rules/compare.rs` on `m3-r2`). Superseded: "blocked until R2 merges"; R2 is on master now, so they are next. The for-loop part
   of `BlockWhileDo::finalTransform` (`findLoopVariable`, `findInitializer`,
@@ -770,6 +770,42 @@ Left for R5 (slices 2 to 5, not started): `RuleLoadVarnode`/`RuleStoreVarnode` (
 the stack heritage pass, not ported; the constant-pointer path also needs `fillinReadOnly` after
 the ram pass to replace `fold_constants` in the jump-table partial function, where `stackvars` is
 on), double.cc, constseq.cc, bitfield.cc, and the `cleanup` rules that read types.
+
+### S8 part two: in part on branch `m3-s8b` (2026-11-13)
+
+Ported (`decomp/blocktransform.rs`): `ActionPreferComplement` and `ActionStructureTransform`
+with `getSplitPoint`, the blocks' `flipInPlaceTest`/`flipInPlaceExecute`,
+`BlockIfElse`/`BlockIfNoExit::preferComplement` (with `leafCount`, `structureDepth` and
+`getHaltType` on the hierarchy), `finalTransform` (the basic block's `opNormalizeFlip`, R2's,
+and `BlockWhileDo`'s for-loop recovery: `findLoopVariable`, `findInitializer`,
+`PcodeOp::isMoveable`), and `Funcdata::opFlipInPlaceTest`/`opFlipInPlaceExecute` (with R2's
+boolean-flip table and `replaceLessequal`). Superseded: part one's "`prefercomplement` and
+`structuretransform` ... not ported" and the two names in the S8 checks' skip list.
+
+Check (from `rust/`), as part one's with the two actions running on both engines:
+
+```sh
+PRINT=$'print tree block\nprint raw' BREAK=assignhigh DECOMP_SKIP_ACTIONS= \
+  OPTIONS=tools/corpus/s8-options.txt tools/decomp-diff.sh m500
+PRINT=$'print tree block\nprint raw' BREAK=assignhigh DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst \
+  OPTIONS=tools/corpus/s8-r-options.txt tools/decomp-diff.sh m500
+```
+
+| check | M8 | M500 |
+|---|---|---|
+| rule groups off | 8 / 8 | 499 / 499 the reference finishes (0x4c48d0 times out) |
+| rule-stage options | 8 / 8 | 498 / 499 (miss 0x47a6b0, `ActionConditionalExe`) |
+
+Under the rule-stage options `prefercomplement` changes the reference output of 137 M500
+functions and `structuretransform` of 10 (reference runs with and without each skipped);
+all are identical. Unit tests: a for loop (flip normalization, loop variable, iterate op
+moved, initializer), an if/else complemented in place, and a goto chosen by `TraceDAG`
+(`structure.rs`; that expected tree is pinned from this port, not derived by hand).
+
+`ActionReturnSplit` (`decomp/returnsplit.rs`: `gatherReturnGotos`, `isSplittable`, `gotoPrints`,
+`nextFlowAfter` per kind with the switch's cases in `grabCaseBasic` order, `Funcdata::nodeSplit`
+and `CloneBlockOps`) is ported with a unit test (a goto into a RETURN block split off); its group
+is off in the S8 option files so far, so no corpus check covers it yet.
 
 ## Running stages in parallel
 

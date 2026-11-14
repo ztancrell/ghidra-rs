@@ -179,8 +179,9 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    S8 (structuring, in part) on branch `m3-s8`: `ActionBlockStructure` (`CollapseStructure`,
    `LoopBody`, `TraceDAG`; `structure.rs`, `collapse.rs`) and `print tree block`; `print tree
    block` plus `print raw` at `assignhigh` with `blockrecovery` on: M8 8 / 8, M500 499 / 499 the
-   reference finishes (bar 98 %); with the rule-stage options M8 8 / 8, M500 496 / 499 before R2, 463 / 499 after R2 until `ConditionalJoin` was ported, 498 / 499 now (`ActionNodeJoin` ported, `nodejoin.rs`). Open: `prefercomplement` and
-   `structuretransform` (R2's flip helpers they need are now on master), `finalstructure`, `returnsplit`.
+   reference finishes (bar 98 %); with the rule-stage options M8 8 / 8, M500 496 / 499 before R2, 463 / 499 after R2 until `ConditionalJoin` was ported, 498 / 499 now (`ActionNodeJoin` ported, `nodejoin.rs`). Part two on `m3-s8b`: `prefercomplement`, `structuretransform` (for loops) and `returnsplit`
+   ported; both S8 checks unchanged with them on (499 / 499, 498 / 499). Superseded: the earlier
+   "Open: `prefercomplement`, `structuretransform`". Open: `finalstructure`, structured `printRaw`.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.

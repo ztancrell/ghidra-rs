@@ -11,6 +11,7 @@
 pub mod action;
 pub mod actiontree;
 mod block;
+mod blocktransform;
 mod collapse;
 mod coreaction;
 mod cparse;
@@ -32,6 +33,7 @@ mod opcode;
 mod print;
 mod rangeutil;
 mod readers;
+mod returnsplit;
 mod rules;
 mod splitflow;
 mod stdsort;

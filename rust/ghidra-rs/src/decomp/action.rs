@@ -177,7 +177,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
         ("deadcode", "deadcode", c::dead_code),
         ("donothing", "deadcontrolflow", c::do_nothing),
         ("switchnorm", "switchnorm", not_ported),
-        ("returnsplit", "returnsplit", not_ported),
+        ("returnsplit", "returnsplit", super::returnsplit::return_split),
         ("unjustifiedparams", "protorecovery", c::unjustified_params),
         ("starttypes", "typerecovery", super::infertypes::start_types),
         ("activereturn", "protorecovery", c::active_return),
@@ -202,8 +202,8 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
     root.extend(leaves(
         &mut t,
         &[
-            ("prefercomplement", "blockrecovery", not_ported),
-            ("structuretransform", "blockrecovery", not_ported),
+            ("prefercomplement", "blockrecovery", super::blocktransform::prefer_complement),
+            ("structuretransform", "blockrecovery", super::blocktransform::structure_transform),
             ("normalizebranches", "normalizebranches", not_ported),
             ("assignhigh", "merge", not_ported),
         ],
