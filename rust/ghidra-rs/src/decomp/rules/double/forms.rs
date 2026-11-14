@@ -985,7 +985,7 @@ impl IndirectForm {
     }
 
     /// `IndirectForm::verify`: (affector, reslo, reshi).
-    fn verify(fd: &Funcdata, lo: VarnodeId, indhi: OpId) -> Result<Option<(OpId, VarnodeId, VarnodeId)>> {
+    fn verify(fd: &Funcdata, arch: &Arch, lo: VarnodeId, indhi: OpId) -> Result<Option<(OpId, VarnodeId, VarnodeId)>> {
         let Some(affector) = fd.iop_target(inp(fd, indhi, 1)?) else { return Ok(None) };
         if fd.op(affector).is_dead() {
             return Ok(None);
@@ -1003,7 +1003,7 @@ impl IndirectForm {
                 return Ok(None);
             }
             let tied = |v: VarnodeId| fd.vn(v).flags.has(VnFlags::ADDRTIED);
-            if (tied(reslo) || tied(reshi)) && is_addr_tied_contiguous(fd, reslo, reshi).is_none() {
+            if (tied(reslo) || tied(reshi)) && is_addr_tied_contiguous(fd, arch, reslo, reshi).is_none() {
                 return Ok(None);
             }
             return Ok(Some((affector, reslo, reshi)));
@@ -1012,19 +1012,25 @@ impl IndirectForm {
     }
 
     /// `IndirectForm::applyRule`.
-    pub(super) fn apply_rule(i: &SplitVarnode, ind: OpId, workishi: bool, fd: &mut Funcdata) -> Result<bool> {
+    pub(super) fn apply_rule(
+        i: &SplitVarnode,
+        ind: OpId,
+        workishi: bool,
+        fd: &mut Funcdata,
+        arch: &Arch,
+    ) -> Result<bool> {
         if !workishi {
             return Ok(false);
         }
         let Some((lo, _)) = i.pieces() else { return Ok(false) };
-        let Some((affector, reslo, reshi)) = Self::verify(fd, lo, ind)? else { return Ok(false) };
+        let Some((affector, reslo, reshi)) = Self::verify(fd, arch, lo, ind)? else { return Ok(false) };
         let mut inv = i.clone();
         let mut outvn = SplitVarnode::default();
         outvn.init_partial(fd, i.wholesize, reslo, Some(reshi));
         if !inv.is_whole_feasible(fd, affector)? {
             return Ok(false); // prepareIndirectOp
         }
-        replace_indirect_op(fd, &mut outvn, &mut inv, affector)?;
+        replace_indirect_op(fd, arch, &mut outvn, &mut inv, affector)?;
         Ok(true)
     }
 }
@@ -1041,6 +1047,7 @@ impl CopyForceForm {
     /// `CopyForceForm::verify`: (copylo, the storage address).
     fn verify(
         fd: &Funcdata,
+        arch: &Arch,
         h: VarnodeId,
         l: VarnodeId,
         w: VarnodeId,
@@ -1061,7 +1068,7 @@ impl CopyForceForm {
             if !Self::forced_unread(fd, reslo) {
                 continue;
             }
-            let Some(addr_out) = is_addr_tied_contiguous(fd, reslo, reshi) else { continue };
+            let Some(addr_out) = is_addr_tied_contiguous(fd, arch, reslo, reshi) else { continue };
             if fd.op(copyhi).flags.has(OpFlags::RETURN_COPY) && !Self::return_form_ok(fd, h, l, w, addr_out) {
                 continue;
             }
@@ -1083,13 +1090,19 @@ impl CopyForceForm {
     }
 
     /// `CopyForceForm::applyRule`.
-    pub(super) fn apply_rule(i: &SplitVarnode, cpy: OpId, workishi: bool, fd: &mut Funcdata) -> Result<bool> {
+    pub(super) fn apply_rule(
+        i: &SplitVarnode,
+        cpy: OpId,
+        workishi: bool,
+        fd: &mut Funcdata,
+        arch: &Arch,
+    ) -> Result<bool> {
         if !workishi {
             return Ok(false);
         }
         let Some((lo, hi)) = i.pieces() else { return Ok(false) };
         let Some(w) = i.whole else { return Ok(false) };
-        let Some((copylo, addr_out)) = Self::verify(fd, hi, lo, w, cpy)? else { return Ok(false) };
+        let Some((copylo, addr_out)) = Self::verify(fd, arch, hi, lo, w, cpy)? else { return Ok(false) };
         replace_copy_force(fd, addr_out, i, copylo, cpy)?;
         Ok(true)
     }

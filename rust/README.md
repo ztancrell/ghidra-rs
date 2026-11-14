@@ -1877,6 +1877,98 @@ check).
 
 Every older bar was rerun on the merged binary (M8 8 / 8 in all 26 checks, M500 unchanged in all 28: no bar fell), and the stack check, S4, S6 unlocked and callees, `r1-options`, R5 typed, S7 with `s6-options` and the S8 rule stage again on the final binary, unchanged. The table of every bar is in `docs/plans/m3-decompiler.md`, "R5 slice 2".
 
+**R5 review fixes** (branch `m3-r5b`, 2026-11-14; paused before the final pass finished, see
+"Not rerun" below). Superseded: in "R5 slice 3" above, "Not modelled: symbol entries
+(`getSymbolEntry` is null: `isAddrTiedContiguous` tests storage only)" and the description of
+`ActionParamDouble`; in "R5 slices 4 and 5", "`stringcopy` never matches (no local symbols)";
+in "R5 slice 2", "5 silent differences with one cause, not traced".
+
+- `ActionLikelyTrash` (`coreaction.rs`): `countMarks` is ported (`count_marks`: an input of a
+  MULTIEQUAL or PIECE counts when it is marked or a chain of INDIRECTs leads back to a marked
+  varnode or to the op itself), and the test `isTypeLock() || isNameLock()` (`name_locked`).
+  `countMarks` was the cause of the 5 silent differences of the slice 2 check (0x5cc020,
+  0x5cee30, 0x5d1dd0, 0x5da930, 0x5db590): all 5 are identical now with `r5s-lock.txt`.
+- `ActionParamDouble` (`rules/double/mod.rs`, `param_double`): the locked-function branch is
+  ported (the half-size SUBPIECEs of a primitive locked parameter of at least the default size
+  get `precislo` / `precishi`, with `Datatype::isPrimitiveWhole` as `primitive_whole`); the
+  join search runs only for a call with neither trials nor a locked prototype; the first branch
+  (splitting a stack trial that is a PIECE: `checkInputSplit`, `ParamActive::splitTrial`) is a
+  loud error. Still erroring: the join itself (`checkInputJoin` / `doInputJoin`).
+- Symbol entries in the double rules: `rules/double/split.rs` `same_symbol` is the symbol test of
+  `RuleDoubleOut::attemptMarking` and `SplitVarnode::isAddrTiedContiguous`, over the symbols
+  there are: functions and external references of the global scope
+  (`infertypes::query_global(arch, addr, size)`, now with a size) and the locked parameters of
+  the function (`locked::param_symbol`, shared with `merge.rs` and `ActionLikelyTrash`).
+- `rules/constseq.rs` `string_copy`: a character copied into a locked parameter (the local
+  scope's only symbols, `ScopeLocal::queryContainer`) is a loud error (`StringSequence` is not
+  ported); it returned 0 before.
+- `fspec.rs`: `ParamEntry::justifiedContain` for stack entries is one helper
+  (`ParamEntry::stack_justified`) with the C++'s wrapping offsets; an exclusion entry
+  (`alignment == 0`) returns the offset into the entry, not 0.
+- No panic on bad input: wrapping last-byte offsets in `opCollapseIndirectsForCopy`
+  (`rules/stackvars.rs`), a checked size difference in `convertZextToPiece`
+  (`rules/typecleanup.rs`).
+- `heritage.rs` `abort_spacebase_relative`: the placeholder's LOAD goes only when the
+  placeholder is in the unique space (`IPTR_INTERNAL`), not in any SLEIGH space.
+- Removed: `has_bitfields()` in `rules/bitfield.rs` (a constant `false`). Kept:
+  `sub_right_op` and `dumpty_hump_late_op` in `rules/typecleanup.rs`, which the unit tests call
+  (no `Arch` can be built there).
+- New check: `tools/r1-options.sh` also writes `tools/corpus/r5dt-options.txt`
+  (`r5-options.txt` with `doubleload`, `doubleprecis` on: the double rules with types), run
+  unlocked, with every prototype locked, and locked with `stackvars` on:
+
+```sh
+{ cat rust/tools/corpus/r5dt-options.txt; grep '^parse line' rust/target/stack-lock.txt; } > rust/target/r5dt-lock.txt
+grep -v 'decompile stackvars off' rust/target/r5dt-lock.txt > rust/target/r5dt-lock-sv.txt
+export DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst
+DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=rust/tools/corpus/r5dt-options.txt rust/tools/decomp-diff.sh m500
+DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=rust/target/r5dt-lock.txt rust/tools/decomp-diff.sh rust/tools/corpus/r5d-adc.txt
+DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=rust/target/r5dt-lock-sv.txt rust/tools/decomp-diff.sh rust/tools/corpus/r5d-adc.txt
+```
+
+| typed double-rule check (types printed) | M8 | r5d-adc (215) | M500 |
+|---|---|---|---|
+| `r5dt-options.txt`, unlocked | 8 / 8 | 215 / 215 | 497 / 498 (0x47a6b0) |
+| plus the locks (`int4 a, int4 b`) | 8 / 8 | 209 / 215 | not run |
+| plus the locks and `stackvars` | 6 / 8 | 143 / 215 | not run |
+
+Every miss on r5d-adc and M8 is a loud "not implemented" error, none a silent difference: with
+the locks, 6 load-guard value-set errors (0x895f60, 0x9995b0, 0x9e94a3, 0x9e962c, 0x9e9762,
+0x9e98c3); with `stackvars` too, 52 parameter trials, 12 pieces of a locked stack parameter and
+8 load-guard errors (M8: 2 parameter trials). On M500 the reference does not finish 0x4c48d0
+and 0x6b21e0; they count as different, so "/ 498" is of the functions the reference finishes.
+
+Bars on the binary of this commit (M500; M8 is 8 / 8 in all 30 checks without `stackvars`, and
+6 / 8, 6 / 8, 3 / 8 in the three with it, as before):
+
+| check | README number | this commit |
+|---|---|---|
+| stack check, S7 print with `stack-lock.txt` | 498 / 499, 492 / 499 | 498 / 499, 492 / 499 |
+| `funclink`, `heritage`, `paramdouble` | 500 / 500 each | 500 / 500 each |
+| S4, S6 unlocked, locked `void`, locked `int4`, callees | 499 / 500 each | 499 / 500 each |
+| R1/R2/R3, subvar, R4 | 498 / 499 each | 498 / 499 each |
+| R5 untyped, R5 typed | 497 / 498 each | 497 / 498 each |
+| S7 `r1-options` (also with create indices), `subvar-options`, `r4-options` | 498 / 499 each | 498 / 499 each |
+| S7 `r5-options` | 497 / 498 | 497 / 498 |
+| S7 `s6-options` (also with create indices) | 493 / 499 | 493 / 499 |
+| S8 rules off, S8 rule stage | 499 / 499, 498 / 499 | 499 / 499, 498 / 499 |
+| R5c (`r5c-options`) | 494 / 498 | 494 / 498 |
+| R5d (`r5d-options`) | 498 / 499 | 498 / 499 |
+| R5d on `r5d-adc.txt` | 215 / 215 | not rerun |
+| S3 switch corpus | 1,947 / 2,050 | not rerun |
+| slice 2: stack-lock options with `stackvars` | 473 / 499 | not rerun |
+| slice 2: S6 options with `stackvars` | 499 / 499 | not rerun |
+| slice 2: R5 options plus the locks | 323 / 498 | not rerun (the 5 silent differences rerun: 5 / 5 identical) |
+| slice 2: R5 options unlocked (`r5s-options.txt`) | 132 / 498 | not rerun |
+
+No bar that ran fell. Not rerun: the pass was stopped before the last eight M500 runs. Open
+from the review: the slice 2 counts above do not add up ("323 / 498" with 171 + 1 + 5 misses,
+"132 / 498" with 350 + 17 + 1) and were not recounted: the misses very likely include the two
+functions the reference does not finish, which `decomp-diff.sh` counts as different, but that
+needs the rerun. The locked branch of `ActionParamDouble` and the symbol tests changed no
+output of a check that ran; no unit test covers them. `cargo test --release` 89 tests,
+`cargo clippy --release --all-targets -- -D warnings` and `cargo fmt --check` clean.
+
 ### Stack heritage (slice one, branch `m3-stack`)
 
 The stack space is heritaged from pass 1 on (`heritage.rs`, `heritage_guard.rs`, `varmap.rs`).

@@ -2068,6 +2068,9 @@ pub(crate) fn likely_trash(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     for st in arch.spec.models.get(m).likelytrash.clone() {
         let super::fspec::Storage::Space { space, offset, size } = st else { continue };
         let Some(vn) = fd.find_covered_input(Space::Sleigh(space), offset, size) else { continue };
+        if fd.vn(vn).has(VnFlags::TYPELOCK) || name_locked(fd, vn) {
+            continue;
+        }
         let Some(indlist) = trace_trash(fd, vn) else { continue };
         for op in indlist {
             if fd.op(op).opc == Opcode::Indirect {
@@ -2089,6 +2092,32 @@ pub(crate) fn likely_trash(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         }
     }
     Ok(count)
+}
+
+/// `Varnode::isNameLock`: the varnode maps to a parameter of the locked prototype declared with
+/// a name (the only name-locked symbols).
+fn name_locked(fd: &Funcdata, vn: VarnodeId) -> bool {
+    let named = |i: usize| fd.proto.locked.as_ref().is_some_and(|l| !l.inputs[i].name.is_empty());
+    super::locked::param_symbol(fd, vn).is_some_and(named)
+}
+
+/// Port of `ActionLikelyTrash::countMarks`: the inputs of `op` that are marked, or that a chain of
+/// INDIRECTs leads back to a marked varnode or to `op` itself.
+fn count_marks(fd: &Funcdata, op: OpId, marked: &[VarnodeId]) -> usize {
+    let chained = |mut vn: VarnodeId| loop {
+        if marked.contains(&vn) {
+            return true;
+        }
+        let Some(def) = fd.vn(vn).def else { return false };
+        if def == op {
+            return true;
+        }
+        if fd.op(def).opc != Opcode::Indirect {
+            return false;
+        }
+        vn = fd.op(def).ins[0];
+    };
+    fd.op(op).ins.iter().filter(|&&v| chained(v)).count()
 }
 
 /// Port of `ActionLikelyTrash::traceTrash`: the ops to cut, or `None` when the value is used.
@@ -2134,7 +2163,7 @@ fn trace_trash(fd: &Funcdata, vn: VarnodeId) -> Option<Vec<OpId>> {
                     if opmark.insert(op) {
                         allroutes.push(op);
                     }
-                    let nummark = o.ins.iter().filter(|v| marked.contains(v)).count();
+                    let nummark = count_marks(fd, op, &marked);
                     if nummark == o.ins.len() {
                         let out = out.unwrap();
                         if !marked.contains(&out) {

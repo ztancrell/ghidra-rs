@@ -1271,8 +1271,6 @@ impl Funcdata {
         Ok(true)
     }
 
-    /// Port of `Funcdata::totalReplaceConstant`: every read of `vn` reads the constant `val`; a
-    /// marker reads one COPY of it made after `vn`'s definition (or at the function's start).
     /// Port of `Funcdata::combineInputVarnodes` (little-endian; stage R5 slice 3,
     /// `RuleDoubleOut`): the contiguous inputs `vn_hi`, `vn_lo` become one input. The PIECEs of
     /// exactly them become COPYs of it; other readers read SUBPIECEs of it made at the start.
@@ -1325,6 +1323,8 @@ impl Funcdata {
         Ok(sub)
     }
 
+    /// Port of `Funcdata::totalReplaceConstant`: every read of `vn` reads the constant `val`; a
+    /// marker reads one COPY of it made after `vn`'s definition (or at the function's start).
     pub(crate) fn total_replace_constant(&mut self, vn: VarnodeId, val: u64) -> Result<()> {
         let size = self.vn(vn).size;
         let uniq = self.uniq.ok_or_else(|| LowlevelError("no unique space".into()))?;

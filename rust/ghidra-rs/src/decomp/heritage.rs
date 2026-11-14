@@ -348,21 +348,14 @@ pub(crate) fn abort_spacebase_relative(fd: &mut Funcdata, c: super::funcdata::Ca
         a.free_placeholder_slot();
     }
     let v = fd.vn(vn);
-    let internal = v.space == Space::Sleigh(arch_uniq(fd, vn));
+    // IPTR_INTERNAL: the unique space
+    let internal = fd.uniq.is_some_and(|u| v.space == Space::Sleigh(u));
     if v.descend.is_empty() && internal {
         if let Some(def) = v.def {
             fd.op_destroy(def);
         }
     }
     Ok(())
-}
-
-/// The unique space, as the placeholder's own space (it is always made there).
-fn arch_uniq(fd: &Funcdata, vn: VarnodeId) -> u32 {
-    match fd.vn(vn).space {
-        Space::Sleigh(s) => s,
-        _ => u32::MAX,
-    }
 }
 
 /// The space loop of `Heritage::heritage`: every varnode of the space that is read, written or

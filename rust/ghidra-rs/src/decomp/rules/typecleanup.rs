@@ -412,10 +412,8 @@ fn convert_zext_to_piece(fd: &mut Funcdata, arch: &Arch, zext: OpId, ct: TypeId,
     if is_const(fd, invn) {
         return Ok(false);
     }
-    let size = sz(fd, outvn) - sz(fd, invn);
-    if size > 8 {
-        return Ok(false);
-    }
+    // `int4 sz` against `sizeof(uintb)`: a negative difference compares as huge
+    let Some(size) = sz(fd, outvn).checked_sub(sz(fd, invn)).filter(|&s| s <= 8) else { return Ok(false) };
     let mut new_off = offset + i64::from(sz(fd, invn)); // little-endian
     let mut cur = Some(ct);
     while let Some(t) = cur.filter(|&t| fd.types.size(t) > size) {

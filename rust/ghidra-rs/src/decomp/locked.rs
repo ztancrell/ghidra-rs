@@ -136,7 +136,7 @@ pub(crate) fn lock_prototype(
 }
 
 /// The varnode location of a storage: a SLEIGH space or the stack, or a join made in `fd`.
-fn location(fd: &mut Funcdata, st: &Storage) -> Result<(Space, u64, u32)> {
+pub(crate) fn location(fd: &mut Funcdata, st: &Storage) -> Result<(Space, u64, u32)> {
     Ok(match st {
         Storage::Space { space, offset, size } => (Space::Sleigh(*space), *offset, *size),
         Storage::Stack { offset, size } => (Space::Stack, *offset, *size),
@@ -235,6 +235,22 @@ pub(crate) fn prototype_types(fd: &mut Funcdata, arch: &Arch) -> Result<bool> {
         update_type(fd, vn, p.ty, true, true);
     }
     Ok(true)
+}
+
+/// The locked parameter of the function that `vn` maps to (`Varnode::getSymbolEntry` in the
+/// local scope, whose only symbols are the locked parameters), as its index. A stack parameter's
+/// entry is address-tied, so every varnode exactly at it maps to it; a register parameter's
+/// holds at the entry only, so its input varnode does (`SymbolEntry::inUse`). A `join`
+/// parameter is not looked for.
+pub(crate) fn param_symbol(fd: &Funcdata, vn: VarnodeId) -> Option<usize> {
+    let v = fd.vn(vn);
+    fd.proto.locked.as_ref()?.inputs.iter().position(|p| match p.storage {
+        Some(Storage::Stack { offset, size }) => v.space == Space::Stack && v.offset == offset && v.size == size,
+        Some(Storage::Space { space, offset, size }) => {
+            v.has(VnFlags::LOCKED_INPUT) && v.space == Space::Sleigh(space) && v.offset == offset && v.size == size
+        }
+        _ => false,
+    })
 }
 
 /// Port of `funcLinkInput`/`funcLinkOutput` for a call with a locked prototype. Returns false

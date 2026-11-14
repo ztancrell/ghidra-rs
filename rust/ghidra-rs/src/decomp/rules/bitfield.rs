@@ -8,17 +8,10 @@
 
 use super::*;
 
-/// `Datatype::hasBitfields`: no type in the store has bit-fields.
-fn has_bitfields() -> bool {
-    false
-}
-
 /// Port of `RuleBitFieldStore`, `RuleBitFieldOut`, `RuleBitFieldLoad` and `RuleBitFieldIn`: each
-/// starts only for a type with bit-fields.
+/// starts only for a type with bit-fields (`Datatype::hasBitfields`), and the type store can hold
+/// none, so none ever starts.
 pub(super) fn bitfield_transform(_: &mut Funcdata, _: OpId, _: &Arch) -> Result<i32> {
-    if has_bitfields() {
-        return err("bit-field transforms (bitfield.cc) not implemented in ghidra-rs yet");
-    }
     Ok(0)
 }
 

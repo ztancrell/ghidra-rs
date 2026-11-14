@@ -221,7 +221,7 @@ pub(crate) fn sub_type(fd: &mut Funcdata, arch: &Arch, t: TypeId, off: i64) -> R
     if let Kind::Spacebase { scope, .. } = fd.types.get(t).kind {
         let addr = off as u64 & calc_mask(arch.spec.stack_pointer.2);
         if scope == GLOBAL_SCOPE {
-            if let Some(e) = query_global(arch, addr) {
+            if let Some(e) = query_global(arch, addr, 1) {
                 let ty = e.symbol_type(fd, arch);
                 return Ok(Some((ty, (addr - e.addr) as i64)));
             }
@@ -829,10 +829,11 @@ pub(crate) fn infer_types(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     Ok(0)
 }
 
-/// A symbol of the global scope a pointer constant can name (`MapEntry`): a function or an
-/// external reference. `rules/ptrarith.rs` (`AddTree::calc_subtype`) relies on no other kind
-/// existing; adding data symbols means porting `TypeSpacebase::nearestArrayedComponent*` there.
-struct Entry {
+/// A symbol of the global scope (`MapEntry`): a function or an external reference.
+/// `rules/ptrarith.rs` (`AddTree::calc_subtype`) relies on no other kind existing; adding data
+/// symbols means porting `TypeSpacebase::nearestArrayedComponent*` there.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Entry {
     addr: u64,
     externref: bool,
 }
@@ -849,17 +850,15 @@ impl Entry {
     }
 }
 
-/// Port of `Scope::queryContainer(addr, 1)` on the global scope: a function covers its entry
-/// byte, an external reference its pointer-sized slot.
-fn query_global(arch: &Arch, addr: u64) -> Option<Entry> {
-    if arch.functions.contains_key(&addr) {
+/// Port of `Scope::queryContainer(addr, size)` on the global scope: the symbol holding the whole
+/// range. A function covers its entry byte, an external reference its pointer-sized slot.
+pub(crate) fn query_global(arch: &Arch, addr: u64, size: u32) -> Option<Entry> {
+    if size == 1 && arch.functions.contains_key(&addr) {
         return Some(Entry { addr, externref: false });
     }
-    let size = u64::from(arch.spec.stack_pointer.2);
-    (0..size)
-        .filter_map(|d| addr.checked_sub(d))
-        .find(|s| arch.externrefs.contains_key(s))
-        .map(|s| Entry { addr: s, externref: true })
+    let slot = u64::from(arch.spec.stack_pointer.2);
+    let fits = |s: &u64| addr - s + u64::from(size) <= slot && arch.externrefs.contains_key(s);
+    (0..slot).filter_map(|d| addr.checked_sub(d)).find(fits).map(|s| Entry { addr: s, externref: true })
 }
 
 fn set_symcheck(fd: &mut Funcdata, vn: VarnodeId, complete: bool) {
@@ -918,7 +917,7 @@ fn is_pointer(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, op: OpId, slot: usi
             return None;
         }
     }
-    let entry = query_global(arch, off)?;
+    let entry = query_global(arch, off, 1)?;
     if needexact && entry.addr != off {
         set_symcheck(fd, vn, false);
         return None;

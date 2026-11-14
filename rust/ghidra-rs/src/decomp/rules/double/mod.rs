@@ -6,9 +6,8 @@
 //! The rules: `RuleDoubleIn` ([`double_in`]), `RuleDoubleOut` ([`double_out`]),
 //! `RuleDoubleLoad` ([`double_load`]), `RuleDoubleStore` ([`double_store`]). `RuleDoubleIn::reset`
 //! sets `Funcdata::doublePrecisRecovery` ([`Funcdata::double_precis_on`]) from
-//! `ActionTree::perform`. `ActionParamDouble`'s unlocked-call branch, which reads that flag, is
-//! [`param_double`]. Not modelled: symbol entries (`getSymbolEntry` is null, so two pieces of
-//! different symbols are still contiguous) and big-endian spaces.
+//! `ActionTree::perform`. `ActionParamDouble`, which reads that flag, is
+//! [`param_double`]. Not modelled: big-endian spaces.
 
 mod forms;
 mod less;
@@ -21,14 +20,14 @@ use split::*;
 use super::*;
 
 /// `SplitVarnode::applyRuleIn`: try every form on the readers of the high, then the low piece.
-fn apply_rule_in(inv: &SplitVarnode, fd: &mut Funcdata) -> Result<i32> {
+fn apply_rule_in(inv: &SplitVarnode, fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     for (vn, workishi) in [(inv.hi, true), (inv.lo, false)] {
         let Some(vn) = vn else { continue };
         for workop in readers(fd, vn) {
             if fd.op(workop).is_dead() {
                 continue; // not reachable in the C++: a form changes nothing unless it succeeds
             }
-            if try_forms(inv, workop, workishi, fd)? {
+            if try_forms(inv, workop, workishi, fd, arch)? {
                 return Ok(1);
             }
         }
@@ -37,7 +36,7 @@ fn apply_rule_in(inv: &SplitVarnode, fd: &mut Funcdata) -> Result<i32> {
 }
 
 /// The `switch` of `applyRuleIn` on one reader.
-fn try_forms(inv: &SplitVarnode, op: OpId, hi: bool, fd: &mut Funcdata) -> Result<bool> {
+fn try_forms(inv: &SplitVarnode, op: OpId, hi: bool, fd: &mut Funcdata, arch: &Arch) -> Result<bool> {
     Ok(match code(fd, op) {
         IntAdd => AddForm::apply_rule(inv, op, hi, fd)? || SubForm::apply_rule(inv, op, hi, fd)?,
         IntAnd => Equal3Form::apply_rule(inv, op, hi, fd)? || LogicalForm::apply_rule(inv, op, hi, fd)?,
@@ -55,10 +54,10 @@ fn try_forms(inv: &SplitVarnode, op: OpId, hi: bool, fd: &mut Funcdata) -> Resul
         IntRight | IntSright => ShiftForm::apply_rule(inv, op, hi, fd, false)?,
         IntMult => MultForm::apply_rule(inv, op, hi, fd)?,
         Multiequal => PhiForm::apply_rule(inv, op, hi, fd)?,
-        Indirect => IndirectForm::apply_rule(inv, op, hi, fd)?,
+        Indirect => IndirectForm::apply_rule(inv, op, hi, fd, arch)?,
         Copy => {
             let forced = fd.op(op).out.is_some_and(|o| fd.vn(o).flags.has(VnFlags::ADDRFORCE));
-            forced && CopyForceForm::apply_rule(inv, op, hi, fd)?
+            forced && CopyForceForm::apply_rule(inv, op, hi, fd, arch)?
         }
         _ => false,
     })
@@ -109,20 +108,23 @@ fn is_floating_point_op(opc: Opcode) -> bool {
     )
 }
 
+/// Port of `Datatype::isPrimitiveWhole`. The C++ looks into a struct or array whose first
+/// component fills it; that case is not ported and errors.
+fn primitive_whole(fd: &Funcdata, ty: super::super::types::TypeId) -> Result<bool> {
+    use super::super::types::Meta;
+    match fd.types.meta(ty) {
+        Meta::Array | Meta::Struct => err("isPrimitiveWhole of a struct or array not implemented in ghidra-rs yet"),
+        Meta::Union => Ok(false),
+        _ => Ok(true),
+    }
+}
+
 /// The `isTypeLock() && !getType()->isPrimitiveWhole()` test of the `attemptMarking`s: a
-/// locked aggregate refuses. The C++ looks into a struct or array whose first component fills
-/// it; that case is not ported and errors.
+/// locked aggregate refuses.
 fn locked_non_primitive(fd: &Funcdata, whole: VarnodeId) -> Result<bool> {
     let v = fd.vn(whole);
-    if !v.flags.has(VnFlags::TYPELOCK) {
-        return Ok(false);
-    }
-    let Some(ty) = v.ty else { return Ok(false) };
-    match fd.types.meta(ty) {
-        super::super::types::Meta::Array | super::super::types::Meta::Struct => {
-            err("isPrimitiveWhole of a locked struct or array not implemented in ghidra-rs yet")
-        }
-        super::super::types::Meta::Union => Ok(true),
+    match v.ty {
+        Some(ty) if v.flags.has(VnFlags::TYPELOCK) => Ok(!primitive_whole(fd, ty)?),
         _ => Ok(false),
     }
 }
@@ -167,7 +169,7 @@ fn double_in_marking(fd: &mut Funcdata, vn: VarnodeId, subpiece_op: OpId) -> Res
 
 /// Port of `RuleDoubleIn` (SUBPIECE): mark the pieces of a whole, then rebuild the operations
 /// reading them.
-pub(in super::super) fn double_in(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
+pub(in super::super) fn double_in(fd: &mut Funcdata, op: OpId, arch: &Arch) -> Result<i32> {
     let outvn = out(fd, op)?;
     if !fd.vn(outvn).is_precis_lo() {
         if fd.vn(outvn).is_precis_hi() {
@@ -179,7 +181,7 @@ pub(in super::super) fn double_in(fd: &mut Funcdata, op: OpId, _: &Arch) -> Resu
         return Ok(0);
     }
     for inv in whole_list(fd, inp(fd, op, 0)?)? {
-        let res = apply_rule_in(&inv, fd)?;
+        let res = apply_rule_in(&inv, fd, arch)?;
         if res != 0 {
             return Ok(res);
         }
@@ -188,12 +190,11 @@ pub(in super::super) fn double_in(fd: &mut Funcdata, op: OpId, _: &Arch) -> Resu
 }
 
 /// `RuleDoubleOut::attemptMarking`.
-fn double_out_marking(fd: &mut Funcdata, vnhi: VarnodeId, vnlo: VarnodeId, piece_op: OpId) -> Result<i32> {
+fn double_out_marking(fd: &mut Funcdata, arch: &Arch, vnhi: VarnodeId, vnlo: VarnodeId, piece_op: OpId) -> Result<i32> {
     let whole = out(fd, piece_op)?;
-    if locked_non_primitive(fd, whole)? || sz(fd, vnhi) != sz(fd, vnlo) {
+    if locked_non_primitive(fd, whole)? || sz(fd, vnhi) != sz(fd, vnlo) || !same_symbol(fd, arch, vnhi, vnlo) {
         return Ok(0);
     }
-    // getSymbolEntry is null for both pieces (no symbols modelled)
     let is_whole =
         fd.vn(whole).descend.iter().any(|&r| is_arithmetic_op(code(fd, r)) || is_floating_point_op(code(fd, r)));
     if !is_whole {
@@ -213,9 +214,9 @@ pub(in super::super) fn double_out(fd: &mut Funcdata, op: OpId, arch: &Arch) -> 
         return Ok(0);
     }
     if !h.is_precis_hi() || !l.is_precis_lo() {
-        return double_out_marking(fd, vnhi, vnlo, op);
+        return double_out_marking(fd, arch, vnhi, vnlo, op);
     }
-    if fd.blocks.unreachable || is_addr_tied_contiguous(fd, vnlo, vnhi).is_none() {
+    if fd.blocks.unreachable || is_addr_tied_contiguous(fd, arch, vnlo, vnhi).is_none() {
         return Ok(0);
     }
     fd.combine_input_varnodes(vnhi, vnlo, arch)?;
@@ -449,25 +450,97 @@ fn param_pair(fd: &Funcdata, op: OpId, j: usize) -> Result<bool> {
     Ok(false)
 }
 
-/// Port of `ActionParamDouble::apply` (group `protorecovery`). The console locks no
-/// prototype: the locked-call stack-trial split and the locked-input branch have nothing to
-/// do. With double precision on, two adjacent inputs of an (unlocked) call that are the pieces
-/// of one whole would be joined by `checkInputJoin` / `doInputJoin`, which are not ported:
-/// that path errors.
-pub(crate) fn param_double(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
-    if !fd.double_precis_on {
-        return Ok(0);
-    }
+/// Port of `ActionParamDouble::apply` (group `protorecovery`).
+///
+/// - A call with active trials: a stack trial whose varnode is a PIECE would be split in two
+///   (`checkInputSplit`, `ParamActive::splitTrial`). Not ported: it errors where the C++ would
+///   ask `checkInputSplit`.
+/// - A call with neither trials nor a locked prototype, double precision on: two adjacent inputs
+///   that are the pieces of one whole would be joined (`checkInputJoin` / `doInputJoin`). Not
+///   ported: that errors.
+/// - The function's own prototype locked, double precision on: the half-size SUBPIECEs of a
+///   primitive parameter of at least the default size are marked `precislo` / `precishi`, when
+///   the parameter is read through such halves only.
+pub(crate) fn param_double(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     for c in fd.qlst.clone() {
-        let op = fd.call(c).op;
-        let n = fd.op(op).ins.len();
-        for j in 1..n.saturating_sub(1) {
-            if param_pair(fd, op, j)? {
-                return err("ActionParamDouble: joining double-precision call inputs not implemented in ghidra-rs yet");
+        let call = fd.call(c);
+        let op = call.op;
+        if let Some(active) = &call.active_input {
+            for t in &active.trials {
+                if t.has(crate::decomp::fspec::ParamTrial::CHECKED)
+                    || t.has(crate::decomp::fspec::ParamTrial::UNREF)
+                    || t.space != Space::Stack
+                {
+                    continue;
+                }
+                let vn = inp(fd, op, t.slot)?;
+                let is_piece = fd.vn(vn).def.is_some_and(|d| code(fd, d) == Opcode::Piece);
+                if is_piece && call.proto.model.is_some() {
+                    return err(
+                        "ActionParamDouble: splitting a stack trial that is a PIECE not implemented in ghidra-rs yet",
+                    );
+                }
+            }
+        } else if call.proto.locked.is_none() && fd.double_precis_on {
+            let n = fd.op(op).ins.len();
+            for j in 1..n.saturating_sub(1) {
+                if param_pair(fd, op, j)? {
+                    return err(
+                        "ActionParamDouble: joining double-precision call inputs not implemented in ghidra-rs yet",
+                    );
+                }
             }
         }
     }
-    Ok(0)
+    let mut count = 0;
+    let Some(locked) = fd.proto.locked.clone().filter(|_| fd.double_precis_on) else { return Ok(0) };
+    let min_double_size = arch.pointer_size();
+    for p in &locked.inputs {
+        if !primitive_whole(fd, p.ty)? {
+            continue;
+        }
+        let Some(st) = &p.storage else { continue };
+        // findVarnodeInput(tp->getSize(), param->getAddress())
+        let (space, poff, _) = crate::decomp::locked::location(fd, st)?;
+        let Some(vn) = fd.loc_at(space, poff, fd.types.size(p.ty)).into_iter().find(|&v| fd.vn(v).is_input()) else {
+            continue;
+        };
+        if sz(fd, vn) < min_double_size {
+            continue;
+        }
+        let half = u64::from(sz(fd, vn) / 2);
+        let (mut lovec, mut hivec) = (Vec::new(), Vec::new());
+        let mut other_use = false;
+        for &subop in fd.vn(vn).descend.iter() {
+            if code(fd, subop) != Opcode::Subpiece {
+                continue;
+            }
+            let outvn = out(fd, subop)?;
+            if u64::from(sz(fd, outvn)) != half {
+                continue;
+            }
+            match off(fd, inp(fd, subop, 1)?) {
+                0 => lovec.push(outvn),
+                o if o == half => hivec.push(outvn),
+                _ => {
+                    other_use = true;
+                    break;
+                }
+            }
+        }
+        if other_use || lovec.is_empty() || hivec.is_empty() {
+            continue;
+        }
+        for (vec, flag) in [(lovec, VnFlags::PRECIS_LO), (hivec, VnFlags::PRECIS_HI)] {
+            for piece in vec {
+                if !fd.vn(piece).has(flag) {
+                    fd.vn_set(piece, flag);
+                    count += 1;
+                }
+            }
+        }
+    }
+    Ok(count)
 }
 
 #[cfg(test)]

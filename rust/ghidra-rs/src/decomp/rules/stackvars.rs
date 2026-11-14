@@ -153,8 +153,10 @@ fn collapse_indirects_for_copy(fd: &mut Funcdata, copy_op: OpId) -> Result<()> {
         }
         let vn2 = out(fd, op)?;
         let (a, b) = (fd.vn(vn1), fd.vn(vn2));
-        let (aend, bend) = (a.offset + u64::from(a.size), b.offset + u64::from(b.size));
-        if a.space != b.space || aend <= b.offset || bend <= a.offset {
+        // the last byte of each, wrapping as the C++ offsets do (characterizeOverlap, contains)
+        let last = |off: u64, size: u32| off.wrapping_add(u64::from(size)).wrapping_sub(1);
+        let (alast, blast) = (last(a.offset, a.size), last(b.offset, b.size));
+        if a.space != b.space || alast < b.offset || blast < a.offset {
             // no effect: the INDIRECT goes
             let i0 = inp(fd, op, 0)?;
             fd.total_replace(vn2, i0)?;
@@ -162,7 +164,7 @@ fn collapse_indirects_for_copy(fd: &mut Funcdata, copy_op: OpId) -> Result<()> {
             continue;
         }
         let exact = a.offset == b.offset && a.size == b.size;
-        let contained = b.offset >= a.offset && bend <= aend;
+        let contained = b.offset >= a.offset && blast <= alast;
         let trunc = b.offset.wrapping_sub(a.offset);
         fd.op_uninsert(op);
         if exact {

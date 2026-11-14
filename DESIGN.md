@@ -194,7 +194,7 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `AddTreeState`, `RuleStructOffset0`, `RulePushPtr` in `oppool2`, `RulePtraddUndo`,
    `RulePtrsubUndo`) and the stop-propagation flags; R5 check M8 8 / 8, M500 497 / 498 without
    types, 487 / 498 with types (bar 95 %; 497 / 498 after the `opSetInput` fix); S6 check 498 / 500 with the rules on. Open: stack
-   loads/stores, double.cc, constseq, bitfield, typed `cleanup` rules.
+   loads/stores, double.cc, constseq, bitfield, typed `cleanup` rules. Superseded: "double.cc" is ported (R5 slice 3, `rules/double/`).
    R5 slices 4 and 5 on branch `m3-r5b`: eight `cleanup` rules that read types (`ptrsubcharconstant`
    waits for string detection, S9) and the `constsequence`/`bitfields` entry tests; R1 check 498 / 499,
    R5 typed 497 / 498, new `r5c` check 494 / 498. Superseded: "constseq, bitfield, typed `cleanup` rules" above.
@@ -203,21 +203,27 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `stackvars` on: M500 499 / 499 unlocked without rules, 473 / 499 with every prototype locked, 323 / 498 locked with rules and types, 132 / 498 unlocked with rules (the rest fail loudly, 5 silent differences not traced); every older bar held. Open: stack parameter trials of
    unlocked calls (`ActionActiveParam` with trials), `stackvars` in the jump-table partial function.
    Superseded: "Open: stack loads/stores" above.
+   R5 review fixes on `m3-r5b` (2026-11-14): `ActionLikelyTrash::countMarks` and its lock test
+   (superseded: "5 silent differences not traced" above; the 5 match now), the locked branch of
+   `ActionParamDouble`, symbol tests in the double rules, `justifiedContain` for exclusion stack
+   entries; new typed double-rule check (`r5dt-options.txt`): M8 8 / 8, r5d-adc 215 / 215,
+   M500 497 / 498. The 27 M500 bars that ran held; the four `stackvars` checks, R5d on r5d-adc and
+   the switch corpus were not rerun (work paused).
    S8 (structuring, in part) on branch `m3-s8`: `ActionBlockStructure` (`CollapseStructure`,
    `LoopBody`, `TraceDAG`; `structure.rs`, `collapse.rs`) and `print tree block`; `print tree
    block` plus `print raw` at `assignhigh` with `blockrecovery` on: M8 8 / 8, M500 499 / 499 the
    reference finishes (bar 98 %); with the rule-stage options M8 8 / 8, M500 496 / 499 before R2, 463 / 499 after R2 until `ConditionalJoin` was ported, 498 / 499 now (`ActionNodeJoin` ported, `nodejoin.rs`). Open: `prefercomplement` and
    `structuretransform` (R2's flip helpers they need are now on master), `finalstructure`, `returnsplit`.
+   Part two on `m3-s8b`: `prefercomplement`, `structuretransform` (for loops) and `returnsplit`
+   ported; both S8 checks unchanged with them on (499 / 499, 498 / 499). Superseded: the earlier
+   "Open: `prefercomplement`, `structuretransform`" (their second, no-mods instances are wired since the S7 merge). Part three
+   (`finalstructure`) is blocked by `latedonothing`, the prototype and cast actions, and switch labels. Open: `finalstructure`,
+   structured `printRaw`.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
    Merged with R3b, R4, R2, S8, R5: rules on 498 / 499, types on 493 / 499 (a copySymbol type fix;
    superseded: 481 / 499). Open: `VariablePiece` groups, `dynamic.cc`, symbols.
-   reference finishes (bar 98 %); with the rule-stage options M8 8 / 8, M500 496 / 499 before R2, 463 / 499 after R2 until `ConditionalJoin` was ported, 498 / 499 now (`ActionNodeJoin` ported, `nodejoin.rs`). Part two on `m3-s8b`: `prefercomplement`, `structuretransform` (for loops) and `returnsplit`
-   ported; both S8 checks unchanged with them on (499 / 499, 498 / 499). Superseded: the earlier
-   "Open: `prefercomplement`, `structuretransform`" (their second, no-mods instances are wired since the S7 merge). Part three
-   (`finalstructure`) is blocked by `latedonothing`, the prototype and cast actions, and switch labels. Open: `finalstructure`,
-   structured `printRaw`.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.

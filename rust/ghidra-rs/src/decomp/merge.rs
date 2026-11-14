@@ -187,26 +187,11 @@ fn test_required(fd: &mut Funcdata, hout: HighId, hin: HighId) -> Result<bool> {
 }
 
 /// The local symbol a high maps to (`HighVariable::setSymbol`), as the index of a locked
-/// parameter of the function, the only local symbols, and whether it is name-locked
-/// (`ParameterSymbol::setTypeLock`: a parameter declared with a name). A stack parameter's
-/// entry is address-tied, so every varnode exactly at it maps to it; a register parameter's
-/// holds at the entry only, so its input varnode does (`SymbolEntry::inUse`). A `join`
-/// parameter is not looked for.
+/// parameter of the function ([`super::locked::param_symbol`]), and whether it is name-locked
+/// (`ParameterSymbol::setTypeLock`: a parameter declared with a name).
 fn high_symbol(fd: &Funcdata, h: HighId) -> Option<(usize, bool)> {
-    use super::fspec::Storage;
-    let l = fd.proto.locked.as_ref()?;
-    let at = |vn: &VarnodeId| {
-        let v = fd.vn(*vn);
-        l.inputs.iter().position(|p| match p.storage {
-            Some(Storage::Stack { offset, size }) => v.space == Space::Stack && v.offset == offset && v.size == size,
-            Some(Storage::Space { space, offset, size }) => {
-                v.has(VnFlags::LOCKED_INPUT) && v.space == Space::Sleigh(space) && v.offset == offset && v.size == size
-            }
-            _ => false,
-        })
-    };
-    let i = fd.highs.get(h).inst.iter().find_map(at)?;
-    Some((i, !l.inputs[i].name.is_empty()))
+    let i = fd.highs.get(h).inst.iter().find_map(|&vn| super::locked::param_symbol(fd, vn))?;
+    Some((i, !fd.proto.locked.as_ref()?.inputs[i].name.is_empty()))
 }
 
 /// `Varnode::isIllegalInput() && !isIndirectOnly()` of the high's input.

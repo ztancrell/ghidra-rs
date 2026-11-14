@@ -597,24 +597,18 @@ impl ParamList {
     /// `ParamListStandard::characterizeAsParam` for a range of the stack space (`mask`: the
     /// space's offset mask; a wrapped range is no parameter).
     pub(crate) fn characterize_stack(&self, off: u64, size: u32, mask: u64) -> Containment {
-        let end = off + u64::from(size) - 1;
-        if end > mask {
+        let end = off.wrapping_add(u64::from(size)).wrapping_sub(1);
+        if end < off || end > mask {
             return Containment::None;
         }
         let (mut contains, mut contained_by) = (false, false);
         for e in &self.entries {
             let Storage::Stack { offset: base, .. } = e.storage else { continue };
-            let eend = base + e.size as u64 - 1;
-            if eend < off || base > end {
-                continue;
-            }
-            // justifiedContain, little endian: an aligned entry holds a slot at each multiple
-            // of its alignment
-            if base <= off && end <= eend {
-                if (off - base).is_multiple_of(e.align.max(1) as u64) {
-                    return Containment::ContainsJustified;
-                }
-                contains = true;
+            let eend = base.wrapping_add(e.size as u64).wrapping_sub(1);
+            match e.stack_justified(base, off, size) {
+                Some(0) => return Containment::ContainsJustified,
+                Some(_) => contains = true,
+                None => {}
             }
             // isExclusion && containedBy
             if e.align == 0 && base >= off && eend <= end {
@@ -628,6 +622,22 @@ impl ParamList {
         } else {
             Containment::None
         }
+    }
+}
+
+impl ParamEntry {
+    /// Port of `ParamEntry::justifiedContain` (little-endian) for an entry at `base` of the stack
+    /// space and the stack range `[off, off + size)`, with the C++'s wrapping offsets: the offset
+    /// into an exclusion entry (`alignment == 0`, `Address::justifiedContain`), into the slot of
+    /// an aligned one.
+    fn stack_justified(&self, base: u64, off: u64, size: u32) -> Option<i32> {
+        let end = off.wrapping_add(u64::from(size)).wrapping_sub(1);
+        let eend = base.wrapping_add(self.size as u64).wrapping_sub(1);
+        if off < base || end > eend || (self.align != 0 && end < off) {
+            return None;
+        }
+        let start = off - base;
+        Some(if self.align == 0 { start } else { start % self.align as u64 } as i32)
     }
 }
 
@@ -680,6 +690,8 @@ impl ParamTrial {
     pub(crate) const CHECKED: u32 = 1;
     pub(crate) const USED: u32 = 2;
     pub(crate) const DEFNOUSE: u32 = 4;
+    /// `unref`: no varnode stands for the trial
+    pub(crate) const UNREF: u32 = 0x10;
     pub(crate) const ACTIVE: u32 = 8;
     pub(crate) const KILLEDBYCALL: u32 = 0x20;
     pub(crate) const REM_FORMED: u32 = 0x40;
@@ -838,11 +850,7 @@ impl ParamList {
         if space == Space::Stack {
             let e = &self.entries[i];
             let Storage::Stack { offset: base, .. } = e.storage else { return None };
-            let end = off.checked_add(u64::from(size).saturating_sub(1))?;
-            if off < base || end > base + e.size as u64 - 1 {
-                return None;
-            }
-            return Some(((off - base) % (e.align.max(1) as u64)) as i32);
+            return e.stack_justified(base, off, size);
         }
         let Space::Sleigh(sp) = space else { return None };
         let contain = |s: u32, base: u64, esize: u64| -> Option<i32> {

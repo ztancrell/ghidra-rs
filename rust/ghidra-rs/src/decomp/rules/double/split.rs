@@ -1,11 +1,13 @@
 //! Port of `SplitVarnode` (double.cc): a double-precision value as its two pieces, a whole
 //! varnode standing for both, or a constant; and the static helpers that build the whole
 //! operation once a form is recognised. x86 is little-endian: the big-endian address arithmetic
-//! is left out. `Varnode::getSymbolEntry` is always null here (local and global symbols are not
-//! modelled), so `isAddrTiedContiguous` tests storage only. `inHandLoNoHi` and `inHandHiOut`
+//! is left out. `Varnode::getSymbolEntry` is [`same_symbol`]: the functions and external references
+//! of the global scope and the locked parameters of the function are the symbols there are. `inHandLoNoHi` and `inHandHiOut`
 //! have no caller in the C++ and are left out.
 
 use super::*;
+use crate::decomp::infertypes::{query_global, Entry};
+use crate::decomp::locked::param_symbol;
 
 /// Port of `SplitVarnode`.
 #[derive(Debug, Clone, Default)]
@@ -460,13 +462,13 @@ impl SplitVarnode {
     }
 
     /// `SplitVarnode::createJoinedWhole`.
-    pub(super) fn create_joined_whole(&mut self, fd: &mut Funcdata) -> Result<()> {
+    pub(super) fn create_joined_whole(&mut self, fd: &mut Funcdata, arch: &Arch) -> Result<()> {
         self.mark_pieces(fd);
         if self.whole.is_some() {
             return Ok(());
         }
         let (lo, hi) = self.pieces().ok_or_else(|| LowlevelError("createJoinedWhole without pieces".into()))?;
-        let (space, offset) = match is_addr_tied_contiguous(fd, lo, hi) {
+        let (space, offset) = match is_addr_tied_contiguous(fd, arch, lo, hi) {
             Some(a) => a,
             None => {
                 let piece = |v: VarnodeId| match fd.vn(v).space {
@@ -585,14 +587,36 @@ pub(super) fn test_contiguous_pointers(fd: &Funcdata, most: OpId, least: OpId) -
     Ok(ok.then_some((first, second, spc)))
 }
 
-/// `SplitVarnode::isAddrTiedContiguous` (little-endian; no symbol entries): the address of the
-/// whole when `lo` and `hi` are address-tied and `lo` sits right below `hi`.
-pub(super) fn is_addr_tied_contiguous(fd: &Funcdata, lo: VarnodeId, hi: VarnodeId) -> Option<(Space, u64)> {
+/// The symbol of `Varnode::getSymbolEntry`, compared as the C++ compares `getSymbol()` of two
+/// pieces: a function or external reference of the global scope holding a ram varnode, or the
+/// locked parameter of the function a varnode maps to. `None`: no entry.
+fn symbol_of(fd: &Funcdata, arch: &Arch, vn: VarnodeId) -> Option<(Option<Entry>, Option<usize>)> {
+    let v = fd.vn(vn);
+    if fd.ram.is_some_and(|r| v.space == Space::Sleigh(r)) {
+        return query_global(arch, v.offset, v.size).map(|e| (Some(e), None));
+    }
+    param_symbol(fd, vn).map(|i| (None, Some(i)))
+}
+
+/// The symbol test of `RuleDoubleOut::attemptMarking` and `isAddrTiedContiguous`: neither piece
+/// has a symbol entry, or both are entries of one symbol.
+pub(super) fn same_symbol(fd: &Funcdata, arch: &Arch, a: VarnodeId, b: VarnodeId) -> bool {
+    symbol_of(fd, arch, a) == symbol_of(fd, arch, b)
+}
+
+/// `SplitVarnode::isAddrTiedContiguous` (little-endian): the address of the whole when `lo` and
+/// `hi` are address-tied, no symbol keeps them apart, and `lo` sits right below `hi`.
+pub(super) fn is_addr_tied_contiguous(
+    fd: &Funcdata,
+    arch: &Arch,
+    lo: VarnodeId,
+    hi: VarnodeId,
+) -> Option<(Space, u64)> {
     let (l, h) = (fd.vn(lo), fd.vn(hi));
-    if !l.flags.has(VnFlags::ADDRTIED) || !h.flags.has(VnFlags::ADDRTIED) || l.space != h.space {
+    if !l.flags.has(VnFlags::ADDRTIED) || !h.flags.has(VnFlags::ADDRTIED) || !same_symbol(fd, arch, lo, hi) {
         return None;
     }
-    if l.offset >= h.offset || l.offset.wrapping_add(u64::from(l.size)) != h.offset {
+    if l.space != h.space || l.offset >= h.offset || l.offset.wrapping_add(u64::from(l.size)) != h.offset {
         return None;
     }
     Some((l.space, l.offset))
@@ -839,11 +863,12 @@ pub(super) fn create_phi_op(
 /// `SplitVarnode::replaceIndirectOp`.
 pub(super) fn replace_indirect_op(
     fd: &mut Funcdata,
+    arch: &Arch,
     out: &mut SplitVarnode,
     inv: &mut SplitVarnode,
     affector: OpId,
 ) -> Result<()> {
-    out.create_joined_whole(fd)?;
+    out.create_joined_whole(fd, arch)?;
     inv.find_create_whole(fd)?;
     let newop = fd.new_indirect(affector)?;
     fd.op_set_output(newop, out.whole_vn()?)?;
