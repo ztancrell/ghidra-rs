@@ -252,6 +252,8 @@ impl Opcode {
             IntNotequal => Binary("!="),
             // TypeOpPtrsub::printRaw (ActionConstantPtr, stage S6)
             Ptrsub => Binary("->"),
+            // TypeOpCast::printRaw (`setcasts`, stage S9)
+            Cast => Unary("(cast)"),
             FloatNotequal => Binary("f!="),
             IntSless => Binary("s<"),
             IntSlessequal => Binary("s<="),

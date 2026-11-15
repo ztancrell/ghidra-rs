@@ -240,7 +240,7 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    After a review the scopes' maps follow the C++ `rangemap` order, the compiler spec's `<global>` ranges are read and the prototype checks also compare parameter names, storage and symbol attributes; the six checks are unchanged.
    `namevars` is ported (`namevars.rs`: symbols linked to the named variables, Ghidra's default names); its check (`print map`
    after `namevars`) is M8 8 / 8, M500 498 / 499 (99.8 %) rules on and 493 / 499 (98.8 %) types on.
-   Open: `setcasts` (S9). `switchnorm` and the case labels are ported but paused before full verification (2026-11-14: M8 8 / 8,
+   Open: `setcasts` (S9; superseded: ported on `m3-cast`, below). `switchnorm` and the case labels are ported but paused before full verification (2026-11-14: M8 8 / 8,
    switch corpus `finalstructure` 1,937 / 2,004 rules on; M500 and the other bars not rerun; see the plan, "Switch case labels").
    Superseded: "paused before full verification": verified on `m3-int` (2026-11-14) with every bar in one
    pass (`rust/tools/bars.sh`, 9 h 22 min alone on the machine): no bar fell; switch corpus `finalstructure`
@@ -248,6 +248,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    M500 498, 493, 495, 499 / 499. Open: global symbol types on new varnodes are set lazily (six
    `switchnorm` rules-on misses), 0x4f3366. Structured `printRaw` is not reachable from the
    console (`print raw` prints the basic blocks), so it waits for S9's printer.
+   S9 casts (branch `m3-cast`, 2026-11-15): `cast.cc` and `ActionSetCasts` are ported (`cast.rs`);
+   checks `cs` (`print raw` after `setcasts`), `fsc`, `swfsc` (`finalstructure` with it on): M8 8 / 8 in
+   all six, M500 `cs` 498 / 499 and 493 / 499, `fsc` 494 / 495 and 489 / 495 (rules on, types on; no new
+   miss), `swfsc` 498 / 499 and 493 / 499 (as `swfs`); M8 all 51 checks identical. Union resolution fails loudly.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

@@ -678,15 +678,17 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
 ```
 
 - `CORPORA`: `m8`, `m500`, `r5d-adc`, `switch` (files of `tools/corpus/`) or an address file;
-  default all four. Without `CHECKS`, M8 and M500 run all 45 checks, `r5d-adc` the four
-  double-rule checks (`r5d r5dt r5dtlock r5dtlocksv`) and `switch` the S3 bar (`paramdouble`)
-  and the four switch checks.
+  default all four. Without `CHECKS`, M8 and M500 run all 51 checks (superseded: 45, before
+  the six `setcasts` checks), `r5d-adc` the four double-rule checks (`r5d r5dt r5dtlock
+  r5dtlocksv`) and `switch` the S3 bar (`paramdouble`) and the six switch checks.
 - `CHECKS`: names from the script's `case`: `stack stackhigh funclink heritage paramdouble s4
   s6 s6void s6int4 s6callee r1 subvar r4 r5 r5typed s7r s7r2 s7sub s7r4 s7r5 s7t s7t2 s8 s8r`
   (the 24 standard bars), `r5c r5d r5dt r5dtlock r5dtlocksv` (R5 slices 3 to 5), `svlock svs6
   r5slock r5s` (R5 slice 2, `stackvars` on), `pg-r pg-t nm-r nm-t ldn-r ldn-t fs-r fs-t` (tail:
   prototypes and globals, names, `latedonothing`, `finalstructure`; `-r` rules on, `-t` types
-  on) and `swfs-r swfs-t swsn-r swsn-t` (`finalstructure` with case labels and `switchnorm`).
+  on), `cs-r cs-t fsc-r fsc-t` (S9 `setcasts`: `print raw` after it, and `finalstructure`
+  with it on) and `swfs-r swfs-t swsn-r swsn-t swfsc-r swfsc-t` (`finalstructure` with case
+  labels, `switchnorm`, and `finalstructure` with case labels and `setcasts` on).
 - `JOBS` (default `nproc`), `TIMEOUT` (seconds per function and engine, default 120 as for every bar here; 0x4c48d0 of M500 takes
   the reference about 485 s and ghidra-rs about 600 s alone, so at 120 s it counts as a function
   the reference does not finish), `OUT`
@@ -2094,7 +2096,8 @@ on); `latedonothing` 8 / 8, 498 / 499 (99.8 %) and 8 / 8, 493 / 499 (98.8 %); `f
 Existing bars on the final binary: R1/R3, subvar and R4 checks 498 / 499, R5 typed 497 / 498, S7 rules on 498 / 499 and types on 493 / 499, S8 rules off 499 / 499 and rule stage 498 / 499, S3 paramdouble 500 / 500, S4 and S6 499 / 500, switch corpus 1,947 / 2,050: all unchanged. Superseded: the switch corpus measured again on `m3-int` after `switchnorm` and the review fixes, 1,947 / 2,050, unchanged (`checkUnrolledGuard` and the empty-range stop of `findSmallestNormal` could have moved it); every bar: "Integration of `m3-tail` and `m3-r5b`" below.
 Every bar was rerun on the final binary, M8 and M500 (stack check, S1 to S8, R1 to R5, the switch
 corpus, the tail and names checks): none fell. The table is in docs/plans/m3-decompiler.md, "Tail".
-Open before S9: `setcasts`, and finishing the case labels. Superseded: "`switchnorm`, not
+Open before S9: `setcasts`, and finishing the case labels (superseded: `setcasts` is ported,
+section "Casts" below). Superseded: "`switchnorm`, not
 started" and "a switch with cases fails loudly" above: `switchnorm` and the case labels of
 `finalstructure` are ported (`jumptable.rs`, `finalstructure.rs`) but the work is paused before
 its full verification: M8 8 / 8 in the four switch checks, switch corpus `finalstructure`
@@ -2312,6 +2315,33 @@ Review fixes (same branch):
 After the fixes: M8 gate all 45 identical; M500 `r5s` 446 / 499, `r5slock` 450 / 498,
 `r5dtlocksv` 450 / 498 (the same misses by kind and count as before the fixes; 0x4c48d0 did not
 finish on the reference in 120 s this run, it was identical in the earlier one).
+
+### Casts: `setcasts` (branch `m3-cast`, 2026-11-15)
+
+- `cast.rs`: `ActionSetCasts` (`set_casts`: `castInput`, `castOutput`, `insertPtrsubZero`,
+  `testStructOffset0`, `isOpIdentical`, `checkPointerIssues`, the PTRADD and PTRSUB undo of
+  `apply`), `CastStrategyC` (`castStandard`, `arithmeticOutputStandard`, `intPromotionType`,
+  `localExtensionType`, `checkIntPromotionForCompare`/`ForExtension`, `markExplicitUnsigned`,
+  `markExplicitLongSize`) and the `getInputCast`/`getOutputToken` overrides of typeop.cc.
+- `types.rs`: `getTypedef` (the type a typedef names), `needsResolution`, `isEnumType`, the
+  first field of a struct; `varnode.rs`: `unsignedprint` and `longprint`; `opUndoPtradd` takes
+  `finalize`; `print raw` prints `(cast)`.
+- Fail loudly: union resolution (any data-type that `needsResolution`: union, one-field struct,
+  one-element array, a pointer to one), `findTruncation` of a struct or union SUBPIECE, the cast
+  rules of SEGMENTOP, INSERT, ZPULL, SPULL. Left out (printer only): `isExtensionCastImplied`,
+  `isSubpieceCast`, `isSextCast`, `isZextCast`, `CastStrategyJava`; `startCastPhase` (nothing
+  reads it); pointer space attributes (no ported pointer has one).
+- Checks (`bars.sh`): `cs-r`/`cs-t`, `print raw` with types at `BREAK=finalstructure`, the
+  tail's skipped leaves less `setcasts` (`SC`); `fsc-r`/`fsc-t` and `swfsc-r`/`swfsc-t`,
+  `fs-*`/`swfs-*` with `setcasts` on.
+
+Results (M8; M500 of the functions the reference finishes), rules on and types on: `cs` 8 / 8 and
+8 / 8, 498 / 499 (99.8 %) and 493 / 499 (98.8 %); `fsc` 7 / 7 and 7 / 7, 494 / 495 (99.8 %) and 489 / 495
+(98.8 %), the same as `fs-r`/`fs-t` with `setcasts` skipped; `swfsc` 8 / 8 and 8 / 8, M500 498 / 499 and 493 / 499 (as `swfs-r`/`swfs-t`). Every
+miss is one the earlier bars have: 0x47a6b0 (rules on) differs before `setcasts` already, the six
+types-on misses are the loud `mergeAddrTied` `VariablePiece` error. The M8 outputs have 6 to 628
+CAST ops a function. M8 gate: all 51 checks identical. Not run: the switch corpus with `setcasts`
+on, the full M500 pass of the other bars.
 
 ## Speed
 

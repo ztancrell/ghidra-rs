@@ -108,7 +108,14 @@ fn is_offset_valid(fd: &mut Funcdata, arch: &Arch, t: TypeId, off: i64, extra: i
 }
 
 /// Port of `Datatype::isPtrsubMatching` (`TypePointer`'s; the default is false).
-fn is_ptrsub_matching(fd: &mut Funcdata, arch: &Arch, t: TypeId, off: i64, extra: i64, mult: i64) -> Result<bool> {
+pub(crate) fn is_ptrsub_matching(
+    fd: &mut Funcdata,
+    arch: &Arch,
+    t: TypeId,
+    off: i64,
+    extra: i64,
+    mult: i64,
+) -> Result<bool> {
     match fd.types.ptr_to(t) {
         Some(to) => is_offset_valid(fd, arch, to, off, extra, mult),
         None => Ok(false),
@@ -577,8 +584,8 @@ fn collapse_int_mult_mult(fd: &mut Funcdata, vn: VarnodeId) -> Result<bool> {
     Ok(true)
 }
 
-/// Port of `Funcdata::opUndoPtradd(op, false)`.
-fn op_undo_ptradd(fd: &mut Funcdata, op: OpId) -> Result<()> {
+/// Port of `Funcdata::opUndoPtradd`: `finalize` (`setcasts`) gives the new offset its type, implied.
+pub(crate) fn op_undo_ptradd(fd: &mut Funcdata, op: OpId, finalize: bool) -> Result<()> {
     let mult_vn = inp(fd, op, 2)?;
     let mult_size = i64::from(off(fd, mult_vn) as i32);
     fd.op_remove_input(op, 2);
@@ -591,10 +598,20 @@ fn op_undo_ptradd(fd: &mut Funcdata, op: OpId) -> Result<()> {
     if is_const(fd, off_vn) {
         let v = (mult_size as u64).wrapping_mul(off(fd, off_vn)) & calc_mask(size);
         let c = fd.new_constant(size, v);
+        if finalize {
+            let t = vn_type(fd, off_vn);
+            no_union(fd, t)?;
+            fd.vn_mut(c).ty = Some(t);
+        }
         return fd.op_set_input(op, c, 1);
     }
     let mult_op = fd.new_op(IntMult, op_addr(fd, op));
     let add_vn = uniq_out(fd, size, mult_op)?;
+    if finalize {
+        let t = vn_type(fd, mult_vn);
+        fd.vn_mut(add_vn).ty = Some(t);
+        fd.vn_set(add_vn, VnFlags::IMPLIED);
+    }
     fd.op_set_input(mult_op, off_vn, 0)?;
     fd.op_set_input(mult_op, mult_vn, 1)?;
     fd.op_set_input(op, add_vn, 1)?;
@@ -827,7 +844,7 @@ pub(super) fn ptradd_undo(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> 
             }
         }
     }
-    op_undo_ptradd(fd, op)?;
+    op_undo_ptradd(fd, op, false)?;
     Ok(1)
 }
 
@@ -973,7 +990,7 @@ fn remove_local_adds(fd: &mut Funcdata, vn: VarnodeId) -> Result<i64> {
                     fd.op_remove_input(op, 1);
                     fd.op_set_opcode(op, Copy);
                 } else {
-                    op_undo_ptradd(fd, op)?;
+                    op_undo_ptradd(fd, op, false)?;
                     extra = extra.wrapping_add(remove_local_add_recurse(fd, op, 1, 0)?);
                 }
             }
@@ -1061,7 +1078,7 @@ mod tests {
         let p = input(&mut fd, 0);
         let (i, s) = (fd.new_constant(4, 3), fd.new_constant(4, 4));
         let (o, _) = op(&mut fd, Ptradd, &[p, i, s], 0x10);
-        op_undo_ptradd(&mut fd, o).unwrap();
+        op_undo_ptradd(&mut fd, o, false).unwrap();
         assert_eq!(code(&fd, o), IntAdd);
         assert_eq!(ins(&fd, o).len(), 2);
         assert_eq!(off(&fd, ins(&fd, o)[1]), 12);

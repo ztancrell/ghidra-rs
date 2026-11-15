@@ -9,7 +9,7 @@
 #
 #   CORPORA  m8, m500, r5d-adc, switch (files of tools/corpus/) or a file of addresses.
 #            Default: all four. Without CHECKS, r5d-adc runs only the double-rule checks and
-#            switch only the S3 bar (paramdouble) and the four switch checks.
+#            switch only the S3 bar (paramdouble) and the six switch checks.
 #   CHECKS   names from the `case` below. Default: every check that applies to the corpus.
 #   JOBS     parallel functions per check (default: nproc); TIMEOUT seconds per function and
 #            engine (default 600)
@@ -31,6 +31,7 @@ mkdir -p "$o"
 S3=multicse,shadowvar,condconst                   # rule-stage actions not ported, skipped on both engines
 L=restructure_varnode,mapped_local_sync           # the same for `localrecovery`
 S=inputprototype,mapglobals,namevars,setcasts     # the leaves before finalstructure
+SC=inputprototype,mapglobals,namevars          # the same with `setcasts` on (stage S9)
 TP=$'print tree block\nprint raw'; MP=$'print map\nprint raw'
 
 # run <check> <corpus> <env assignments...>
@@ -59,8 +60,8 @@ run() {
 
 std="stack stackhigh funclink heritage paramdouble s4 s6 s6void s6int4 s6callee r1 subvar r4 r5 r5typed s7r s7r2 s7sub s7r4 s7r5 s7t s7t2 s8 s8r"
 dbl="r5d r5dt r5dtlock r5dtlocksv"
-sw="swfs-r swfs-t swsn-r swsn-t"
-all="$std r5c $dbl svlock svs6 r5slock r5s pg-r pg-t nm-r nm-t ldn-r ldn-t fs-r fs-t $sw"
+sw="swfs-r swfs-t swsn-r swsn-t swfsc-r swfsc-t"
+all="$std r5c $dbl svlock svs6 r5slock r5s pg-r pg-t nm-r nm-t ldn-r ldn-t fs-r fs-t cs-r cs-t fsc-r fsc-t $sw"
 "$t/lock-options.sh" "$l" || exit 1
 for C in ${CORPORA:-m8 m500 r5d-adc switch}; do
     [ -f "$C" ] || C=$c/$C.txt
@@ -116,12 +117,19 @@ for C in ${CORPORA:-m8 m500 r5d-adc switch}; do
         ldn-t) run $k "$C" DECOMP_RAW_EXTRA=1 DECOMP_TREE_EXTRA=1 "PRINT=$TP" DECOMP_SKIP_ACTIONS= BREAK=inputprototype OPTIONS=$c/s8-t-options.txt ;;
         fs-r) run $k "$C" DECOMP_RAW_EXTRA=1 DECOMP_TREE_EXTRA=1 "PRINT=$TP" DECOMP_SKIP_ACTIONS=$S3,$S BREAK=prototypewarnings OPTIONS=$c/s8-r-options.txt ;;
         fs-t) run $k "$C" DECOMP_RAW_EXTRA=1 DECOMP_TREE_EXTRA=1 "PRINT=$TP" DECOMP_SKIP_ACTIONS=$S BREAK=prototypewarnings OPTIONS=$c/s8-t-options.txt ;;
+        # setcasts (stage S9): `print raw` after it (the CAST ops), and finalstructure with it on
+        cs-r) run $k "$C" DECOMP_RAW_EXTRA=1 DECOMP_SKIP_ACTIONS=$S3,$SC BREAK=finalstructure OPTIONS=$c/s8-r-options.txt ;;
+        cs-t) run $k "$C" DECOMP_RAW_EXTRA=1 DECOMP_SKIP_ACTIONS=$SC BREAK=finalstructure OPTIONS=$c/s8-t-options.txt ;;
+        fsc-r) run $k "$C" DECOMP_RAW_EXTRA=1 DECOMP_TREE_EXTRA=1 "PRINT=$TP" DECOMP_SKIP_ACTIONS=$S3,$SC BREAK=prototypewarnings OPTIONS=$c/s8-r-options.txt ;;
+        fsc-t) run $k "$C" DECOMP_RAW_EXTRA=1 DECOMP_TREE_EXTRA=1 "PRINT=$TP" DECOMP_SKIP_ACTIONS=$SC BREAK=prototypewarnings OPTIONS=$c/s8-t-options.txt ;;
         # the four switch checks (`switchnorm` on): finalstructure with case labels, and
         # switchnorm as `print raw` at the first break after it
         swfs-r) run $k "$C" DECOMP_RAW_EXTRA=1 DECOMP_TREE_EXTRA=1 "PRINT=$TP" DECOMP_SKIP_ACTIONS=$S3,$S BREAK=prototypewarnings OPTIONS=$c/sw-r-options.txt ;;
         swfs-t) run $k "$C" DECOMP_RAW_EXTRA=1 DECOMP_TREE_EXTRA=1 "PRINT=$TP" DECOMP_SKIP_ACTIONS=$S BREAK=prototypewarnings OPTIONS=$c/sw-t-options.txt ;;
         swsn-r) run $k "$C" DECOMP_RAW_EXTRA=1 DECOMP_SKIP_ACTIONS=$S3 BREAK=returnsplit OPTIONS=$c/sw-r-options.txt ;;
         swsn-t) run $k "$C" DECOMP_RAW_EXTRA=1 DECOMP_SKIP_ACTIONS= BREAK=returnsplit OPTIONS=$c/sw-t-options.txt ;;
+        swfsc-r) run $k "$C" DECOMP_RAW_EXTRA=1 DECOMP_TREE_EXTRA=1 "PRINT=$TP" DECOMP_SKIP_ACTIONS=$S3,$SC BREAK=prototypewarnings OPTIONS=$c/sw-r-options.txt ;;
+        swfsc-t) run $k "$C" DECOMP_RAW_EXTRA=1 DECOMP_TREE_EXTRA=1 "PRINT=$TP" DECOMP_SKIP_ACTIONS=$SC BREAK=prototypewarnings OPTIONS=$c/sw-t-options.txt ;;
         *) echo "unknown check $k" >&2; exit 1 ;;
         esac
     done

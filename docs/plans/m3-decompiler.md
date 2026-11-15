@@ -392,6 +392,7 @@ from the table row:
   stage.
 - Left for the S6 remainder: locked prototypes (`fspec.cc` locked paths, also decision 6's
   register ABI), `cast.cc` and `ActionSetCasts` (after `assignhigh`, checked with S9),
+  (superseded: ported on `m3-cast`, "Casts: `setcasts`" below)
   `unionresolve`, partial types and `TypePointerRel`, `<data_organization>` (struct layout),
   function types with prototypes, the scopes of `database.cc`.
   Superseded: rounds two and three port locked prototypes and `<data_organization>`; see
@@ -1279,7 +1280,8 @@ would only compare a state the C++ never prints.
 After the merge with S7 the leaves between `copymarker` and `finalstructure` still block a fair
 check: `latedonothing` (needs the delayed do-nothing mark of `ActionDoNothing` and
 `removingCreatesRedundancy`; it changes the CFG, so it cannot be skipped fairly), `outputprototype`,
-`inputprototype`, `mapglobals`, `namevars`, `setcasts` (S9: CAST ops `print raw` shows), and
+`inputprototype`, `mapglobals`, `namevars`, `setcasts` (S9: CAST ops `print raw` shows; superseded:
+ported, see "Casts: `setcasts`" below), and
 `BlockSwitch::finalizePrinting` needs the case labels of `switchnorm` (`recoverLabels`, not ported).
 Bars after the S7 merge: S8 rules off M500 499 / 499, rule-stage 498 / 499 (prefercomplement,
 structuretransform, returnsplit and nodejoin on both sides); S7 checks (their own options,
@@ -1664,6 +1666,19 @@ Review fixes: locked calls register their parameters' trials (`funcLinkInput`,
 unported branches of `AncestorRealistic` and the range defaults fail loudly; the three checks
 hold (446 / 499, 450 / 498, 450 / 498). Open: the "Error processing <name> called at <seq>: "
 wrapper of `ActionActiveParam`'s errors.
+
+### Casts: `setcasts` on branch `m3-cast` (2026-11-15)
+
+`cast.cc` (`CastStrategyC`, the parts `setcasts` calls) and `ActionSetCasts`, in `cast.rs`, with
+the `getInputCast`/`getOutputToken` overrides of typeop.cc (details and numbers: rust/README.md,
+"Casts"). Checks in `bars.sh`: `cs-r`/`cs-t` (`print raw` with types at `BREAK=finalstructure`,
+skipping `inputprototype,mapglobals,namevars` and, rules on, the S3 actions) and `fsc-r`/`fsc-t`,
+`swfsc-r`/`swfsc-t` (`fs-*`, `swfs-*` with `setcasts` on). M8 8 / 8 in all six; M500 `cs`
+498 / 499 and 493 / 499, `fsc` 494 / 495 and 489 / 495 (no new miss), `swfsc` 498 / 499 and 493 / 499 (as `swfs`). Fail
+loudly: union resolution (every type that `needsResolution`), struct or union SUBPIECE truncation,
+SEGMENTOP/INSERT/ZPULL/SPULL casts. Printer-only parts of `cast.cc` (`isSubpieceCast`,
+`isSextCast`, `isZextCast`, `isExtensionCastImplied`) come with the C printer. Not run: the
+switch corpus with `setcasts` on.
 
 ## Running stages in parallel
 

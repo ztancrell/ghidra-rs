@@ -30,7 +30,7 @@ mod floatrules;
 mod modulo;
 mod piece;
 mod pool;
-mod ptrarith;
+pub(crate) mod ptrarith;
 mod stackvars;
 mod subpiece;
 mod subvar;
