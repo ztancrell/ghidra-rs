@@ -681,8 +681,9 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
 
 - `CORPORA`: `m8`, `m500`, `r5d-adc`, `switch`, `simple` (files of `tools/corpus/`) or an
   address file; default all five. Without `CHECKS`, M8 and M500 run all 55 checks, `r5d-adc` the
-  four double-rule checks (`r5d r5dt r5dtlock r5dtlocksv`), `switch` the S3 bar (`paramdouble`)
-  and the six switch checks, and `simple` the four `print C` checks. Superseded: "all four",
+  four double-rule checks (`r5d r5dt r5dtlock r5dtlocksv`), `switch` the S3 bar (`paramdouble`),
+  the six switch checks and `pcc-r pcc-t` (with the `sw` options: `switchnorm` on, as the case
+  labels need; superseded: "and the six switch checks"), and `simple` the four `print C` checks. Superseded: "all four",
   "all 45 checks", "all 47", "all 51", "all 53" (before the six `setcasts` checks, `pc-r pc-t`, `pcc-r pcc-t` and the
   `simple` corpus).
 - `CHECKS`: names from the script's `case`: `stack stackhigh funclink heritage paramdouble s4
@@ -693,7 +694,7 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
   on), `cs-r cs-t fsc-r fsc-t` (S9 `setcasts`: `print raw` after it, and `finalstructure`
   with it on), `swfs-r swfs-t swsn-r swsn-t swfsc-r swfsc-t` (`finalstructure` with case
   labels, `switchnorm`, and `finalstructure` with case labels and `setcasts` on) and
-  `pc-r pc-t pcc-r pcc-t` (`print C`, S9 slice 1, `pcc` with `setcasts` on; see "C printing").
+  `pc-r pc-t pcc-r pcc-t` (`print C`, S9 slices 1 and 2, `pcc` with `setcasts` on; see "C printing").
 - `JOBS` (default `nproc`), `TIMEOUT` (seconds per function and engine, default 120 as for every bar here; 0x4c48d0 of M500 takes
   the reference about 485 s and ghidra-rs about 600 s alone, so at 120 s it counts as a function
   the reference does not finish), `OUT`
@@ -2455,7 +2456,8 @@ partial symbols and symbols or constants whose data-type needs resolution (`need
 a union, a one-element array, a one-field structure, a pointer to one), a global name a local
 name hides (a `::` scope prefix), anonymous and function types, locked prototypes. Casts are not
 printed yet: `setcasts` (`cast.cc`) is ported separately, so the checks skip it on both engines
-and neither prints a cast.
+and neither prints a cast. Superseded: the blocks, labels, gotos and casts are printed since slice 2
+(below, "C printing, slice 2").
 
 Checks (`tools/bars.sh`), at `break start prototypewarnings` with `print C`, `setcasts` and the
 `localrecovery` leaves skipped on both engines: `pc-r` (rules on, `tail-r-options.txt`) and `pc-t`
@@ -2524,7 +2526,7 @@ Merged with `m3-cast` on `m3-s9` (2026-11-15): M8 the 51 checks other than `pc-r
   fails loudly on any type that `needsResolution`, not only a union (`getTypeReadFacing`).
 - `print C` prints the `U` of a constant `setcasts` marks `isUnsignedPrint` (cleared when
   printed signed, as `pushConstant`); a constant marked `isLongPrint` fails loudly (the suffix
-  depends on the data organization's long size, not ported); a CAST op fails loudly.
+  depends on the data organization's long size, not ported); a CAST op fails loudly. (Superseded: printed since slice 2.)
 - Checks `pcc-r`, `pcc-t` (`bars.sh`): `pc-r`, `pc-t` with `setcasts` on.
 
 Numbers (functions the reference finishes): M8 all 51 checks before `pc-*` identical, `pc-*`
@@ -2534,6 +2536,68 @@ data-type 40, body comments 20; silent 0) against `pc-r` 47 / 495; `pcc-t` 8 / 4
 before (the six `mergeAddrTied` `VariablePiece` misses).
 Not run: the other M500 type checks (`s6*`, `r5typed`, `s7t*`, `pg-t`, `nm-t`, `ldn-t`, `pc-*`,
 unchanged by construction: no struct or union reaches them), the `simple` and switch corpora.
+
+### C printing, slice 2: blocks and casts (branch `m3-print2`, 2026-11-15)
+
+- `printc.rs`: every structured block of printc.cc: `emitBlockGraph`, `emitBlockCopy`,
+  `emitBlockGoto` (`gotoPrints`), `BlockMultiGoto`, `emitBlockLs` (with `only_branch`),
+  `emitBlockCondition` (`&&`/`||` in parentheses; a condition never negated keeps the
+  `INT_AND`/`INT_OR` of `newBlockCondition` and prints `||`, as the C++), `emitBlockIf` for
+  if, if/else, if-no-exit and if-goto with the `else if` merge (`PendingBrace`),
+  `emitBlockWhileDo` (plain, `while( true )` with `if (..) break;` for `f_whiledo_overflow`,
+  and `emitForLoop`), `emitBlockDoWhile`, `emitBlockInfLoop`, `emitBlockSwitch` and
+  `emitSwitchCase` (`default:`, one `case` line per label of the case's first basic block in
+  the switch variable's type, an explicit `break` for a case that exits), `emitGotoStatement`
+  (`break`, `continue`, `goto`), `emitLabel` (`code_`, `joined_`, `dup_` and the entry
+  address), `emitLabelStatement`, `emitAnyLabelStatement` (`f_label_bumpup`). Statements in a
+  condition are comma separated (`comma_separate`); `opCbranch`, `opBranch` and `opBranchind`
+  (structured printing).
+- Casts: `opTypeCast`, and `opIntZext`, `opIntSext`, `opSubpiece` with the four printer-only
+  functions of cast.cc now in `cast.rs` (`isZextCast`, `isSextCast`, `isSubpieceCast`,
+  `isExtensionCastImplied`): an extension or SUBPIECE prints as a cast, hidden (the
+  `hiddenfunction` token, `option_hide_exts` on) when C promotes it anyway, or as
+  `ZEXT14(x)`/`SEXT14(x)`/`SUB41(x,0)` (`opFunc`). The pending varnodes now keep the op reading
+  them (`readOp`), which `isExtensionCastImplied` needs.
+- `prettyprint.rs`: the `same_line` brace style, `openBrace`, and the pending print of a brace
+  (`setPendingPrint`, emitted by the next line break).
+- The basic blocks keep `f_joined_block` (`nodeJoinCreateBlock`) and `f_duplicate_block`
+  (`nodeSplitBlockEdge`) for the labels (superseded: "not kept, only printing reads it").
+- Fail loudly: a cast to a pointer to an array (`checkAddressOfCast`), a SUBPIECE with special
+  printing (a field extraction), the label of a block `spliceBlockBasic` merged (the C++ cover
+  may hold two ranges, and `getEntryAddr` picks the one of the first op: ghidra-rs keeps one
+  range), block nesting deeper than 1000 (the printer recurses as the C++ does). Comments in the
+  body, anonymous data-types, the long suffix and the operators of slice 1 stay loud.
+- `bars.sh`: `pcc-r` and `pcc-t` also run on the switch corpus, with the `sw` options there
+  (`switchnorm` on: the case labels come from it; with it off the reference fails on every
+  switch in `finalizePrinting`).
+
+Numbers (functions the reference finishes; before = slice 1 with the `m3-s9` review fixes):
+
+| check | M8 | M500 before | M500 after | simple after | switch after |
+|---|---|---|---|---|---|
+| `pcc-r` | 2 / 7 | 10 / 495 | 235 / 495 (loud 259, silent 1) | 109 / 194 (loud 85) | running |
+| `pcc-t` | 0 / 7 | 8 / 495 | 58 / 495 (loud 437, silent 0) | 57 / 194 (loud 137) | running |
+| `pc-r` | 2 / 7 | 47 / 495 | 244 / 495 (loud 250, silent 1) | 110 / 194 (loud 84) | |
+| `pc-t` | 0 / 7 | 24 / 495 | 45 / 495 (loud 450, silent 0) | 49 / 194 (loud 145) | |
+
+No block kind is a loud miss any more. The one silent miss of `pcc-r` and `pc-r` is 0x47a6b0,
+the known rules-on miss: it differs from `r1` on (`print raw` at `assignhigh`: the block
+numbering after the rules), so `finalstructure` and the printer see another function.
+The loud misses on M500, `pcc-r`: `CALLIND` 77, an anonymous data-type 45, `FLOAT2FLOAT` 36,
+`FLOAT_NAN` 29, comments in the body 20, float constants 12, a SUBPIECE field extraction 9,
+`PIECE` 8, then 4 or fewer each (one spliced-block label); `pcc-t`: array or field access 188,
+`PTRADD` 88, character constants 33, `PIECE` 24, comments 20, `INT_SBORROW` 16, `CALLIND` 14, float
+constants 14, `FLOAT2FLOAT` 11, `PTRSUB` 8, `FLOAT_NAN` 7, the `mergeAddrTied` error 6, then 2 or
+fewer. `pc-t` (no casts): array or field access 270, `PTRADD` 34, character constants 30, `PIECE`
+23, comments 20.
+On `simple` (before: `pc-r` 54, `pc-t` 34 / 194) every miss is loud; the most: comments in the body 31,
+`CALLIND` 16 and an anonymous data-type 15 (`pcc-r`), array or field access 34 and `PTRADD` 21 (`pcc-t`).
+M8: the 51 checks other than the print checks identical (8 / 8, `fs`, `fsc` 7 / 7); `pc-r`, `pcc-r` 2 / 7,
+`pc-t`, `pcc-t` 0 / 7, all misses loud (superseded: 0 / 7 each).
+Unit tests: the `else if` brace (`pending_brace_else_if`), the switch brace
+(`switch_brace_has_no_indent`), the printer-only casts (`printer_casts`); the block kinds
+themselves are covered by the corpus checks (a printed block needs a decompiled function).
+Not run: the full pass (`bars-queue.sh`), the other checks on M500, simple and switch.
 
 ## Speed
 

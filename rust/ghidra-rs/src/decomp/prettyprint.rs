@@ -9,6 +9,14 @@
 
 use std::collections::VecDeque;
 
+/// `Emit::brace_style` (the two the C printer uses: `option_brace_func` is `skip_line`, the
+/// if/else, loop and switch options `same_line`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BraceStyle {
+    SameLine,
+    SkipLine,
+}
+
 /// `TokenSplit::printclass`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Class {
@@ -59,6 +67,10 @@ pub(crate) struct EmitPrettyPrint {
     commentmode: bool,
     commentfill: String,
     /// the first error (`LowlevelError` in the C++), reported by [`EmitPrettyPrint::flush`]
+    /// the pending brace (`pendPrint`), by id
+    pending: Option<usize>,
+    /// per pending brace id: whether it was printed
+    braces: Vec<bool>,
     error: Option<String>,
 }
 
@@ -81,6 +93,8 @@ impl EmitPrettyPrint {
             commentmode: false,
             commentfill: String::new(),
             error: None,
+            pending: None,
+            braces: Vec::new(),
         }
     }
 
@@ -390,6 +404,7 @@ impl EmitPrettyPrint {
 
     /// `tagLine()`: a line break at the current indent
     pub(crate) fn tag_line(&mut self) {
+        self.emit_pending();
         self.checkbreak();
         let mut t = Token::new(Class::Break);
         t.numspaces = 999999;
@@ -397,6 +412,7 @@ impl EmitPrettyPrint {
     }
     /// `tagLine(indent)`: a line break to an absolute indent
     pub(crate) fn tag_line_indent(&mut self, indent: i32) {
+        self.emit_pending();
         self.checkbreak();
         let mut t = Token::new(Class::Break);
         t.numspaces = 999999;
@@ -427,19 +443,62 @@ impl EmitPrettyPrint {
         self.push(Token::new(Class::EndComment));
     }
 
-    /// `Emit::openBraceIndent` with `skip_line`, the style of a function body
-    /// (`option_brace_func`); the other styles come with the if and loop blocks.
-    pub(crate) fn open_brace_indent(&mut self, brace: &str) {
-        self.tag_line();
-        self.tag_line();
+    /// `Emit::openBraceIndent`: the brace on the same line after a space, or after a blank
+    /// line, then one indent level deeper.
+    pub(crate) fn open_brace_indent(&mut self, brace: &str, style: BraceStyle) {
+        self.brace_lead(style);
         self.start_indent();
         self.print_str(brace);
+    }
+    /// `Emit::openBrace`: as `openBraceIndent` without the indent (a `switch`).
+    pub(crate) fn open_brace(&mut self, brace: &str, style: BraceStyle) {
+        self.brace_lead(style);
+        self.print_str(brace);
+    }
+    fn brace_lead(&mut self, style: BraceStyle) {
+        match style {
+            BraceStyle::SameLine => self.spaces(1, 0),
+            BraceStyle::SkipLine => {
+                self.tag_line();
+                self.tag_line();
+            }
+        }
     }
     /// `Emit::closeBraceIndent`
     pub(crate) fn close_brace_indent(&mut self, brace: &str) {
         self.stop_indent();
         self.tag_line();
         self.print_str(brace);
+    }
+
+    /// `setPendingPrint` of a `PendingBrace` (the only `PendPrint` of the C printer): the next
+    /// line break first opens `{` on the current line. Returns the brace's id.
+    pub(crate) fn set_pending_brace(&mut self) -> usize {
+        self.braces.push(false);
+        let id = self.braces.len() - 1;
+        self.pending = Some(id);
+        id
+    }
+    /// `hasPendingPrint`
+    pub(crate) fn has_pending_brace(&self, id: usize) -> bool {
+        self.pending == Some(id)
+    }
+    /// `cancelPendingPrint`
+    pub(crate) fn cancel_pending(&mut self) {
+        self.pending = None;
+    }
+    /// `PendingBrace::getIndentId() >= 0`: the pending brace was printed.
+    pub(crate) fn brace_opened(&self, id: usize) -> bool {
+        self.braces.get(id).copied().unwrap_or(false)
+    }
+    /// `emitPending`: `PendingBrace::callback`, `openBraceIndent` with the if/else style.
+    fn emit_pending(&mut self) {
+        if let Some(id) = self.pending.take() {
+            if let Some(b) = self.braces.get_mut(id) {
+                *b = true;
+            }
+            self.open_brace_indent("{", BraceStyle::SameLine);
+        }
     }
 
     /// Port of `EmitPrettyPrint::flush`: print what is queued and hand back the text.
@@ -492,7 +551,7 @@ mod tests {
         let mut e = EmitPrettyPrint::new(width);
         e.open_group(); // beginFunction
         e.print_str("f");
-        e.open_brace_indent("{");
+        e.open_brace_indent("{", BraceStyle::SkipLine);
         f(&mut e);
         e.close_brace_indent("}");
         e.tag_line();
@@ -546,5 +605,66 @@ mod tests {
         e.open_group();
         e.print_str("x");
         assert!(e.flush().is_err());
+    }
+
+    /// The `else if` of `emitBlockIf`: an inner if's brace waits for a line break; with no
+    /// statement before its `if` it is cancelled and the `if` follows `else` on the line, with
+    /// one the brace opens on the `else` line and closes after the inner if.
+    #[test]
+    fn pending_brace_else_if() {
+        let run = |stmt: bool| {
+            body(100, |e| {
+                e.tag_line();
+                e.print_str("if (a)");
+                e.open_brace_indent("{", BraceStyle::SameLine);
+                e.tag_line();
+                e.print_str("x;");
+                e.close_brace_indent("}");
+                e.tag_line();
+                e.print_str("else");
+                let id = e.set_pending_brace();
+                if stmt {
+                    e.tag_line();
+                    e.print_str("y;");
+                }
+                if e.has_pending_brace(id) {
+                    e.cancel_pending();
+                    e.spaces(1, 0);
+                } else {
+                    e.tag_line();
+                }
+                e.print_str("if (b)");
+                e.open_brace_indent("{", BraceStyle::SameLine);
+                e.tag_line();
+                e.print_str("z;");
+                e.close_brace_indent("}");
+                if e.brace_opened(id) {
+                    e.close_brace_indent("}");
+                }
+            })
+        };
+        assert_eq!(run(false), "f\n\n{\n  if (a) {\n    x;\n  }\n  else if (b) {\n    z;\n  }\n}\n");
+        assert_eq!(
+            run(true),
+            "f\n\n{\n  if (a) {\n    x;\n  }\n  else {\n    y;\n    if (b) {\n      z;\n    }\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn switch_brace_has_no_indent() {
+        let s = body(100, |e| {
+            e.tag_line();
+            e.print_str("switch(x)");
+            e.open_brace("{", BraceStyle::SameLine);
+            e.tag_line();
+            e.print_str("case 1:");
+            e.start_indent();
+            e.tag_line();
+            e.print_str("y;");
+            e.stop_indent();
+            e.tag_line();
+            e.print_str("}");
+        });
+        assert_eq!(s, "f\n\n{\n  switch(x) {\n  case 1:\n    y;\n  }\n}\n");
     }
 }

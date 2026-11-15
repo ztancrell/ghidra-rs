@@ -1693,7 +1693,7 @@ M500 unchanged after the fixes (498, 493, 498, 493 / 499); `simple` 54 / 194 (ru
 loud (superseded: "M8 all 47 checks identical"). Fixed on the
 way: `namevars` links globals to their data symbols, `mapglobals` asks with the varnode's size
 whether a varnode is already linked, flow records the bad-instruction warnings.
-Next slices: if/else, loops, switch, gotos and labels; comments in the body (the comment
+Next slices (superseded in part: blocks and casts are slice 2): if/else, loops, switch, gotos and labels; comments in the body (the comment
 sorter); casts once `setcasts` lands; field and array access; strings and characters; the rest
 of `printc.cc`.
 
@@ -1703,10 +1703,26 @@ Review fixes on `m3-s9` (details: rust/README.md, "Review fixes and `print C` wi
 `checkPointerIssues` warns "Load size is inaccurate" as the C++; `calcSubmeta` (a pointer to a
 struct or union is `SUB_PTR_STRUCT`; no check moves, none declares a struct or union);
 CPOOLREF and NEW never cast; `opUndoPtradd` fails on every `needsResolution` type; `print C`
-prints the `U` suffix, fails loudly on the long suffix and on a CAST op. New checks `pcc-r`,
+prints the `U` suffix, fails loudly on the long suffix and on a CAST op. (Superseded: slice 2 prints it.) New checks `pcc-r`,
 `pcc-t` (`print C` with `setcasts` on): M500 10 / 495 and 8 / 495 identical, silent 0 (CAST 86
 and 66 loud), against `pc-r` 47 and `pc-t` 24 / 495; M500 `cs-t`, `fsc-t`, `fs-t` unchanged.
-Next for casts in the printer: `PrintC::opTypeCast` and the extension casts of `cast.cc`.
+Next for casts in the printer: `PrintC::opTypeCast` and the extension casts of `cast.cc`
+(superseded: done in slice 2, below).
+
+### S9 slice 2: structured blocks and casts in the printer, branch `m3-print2` (2026-11-15)
+
+Every structured block of printc.cc (if/else with the `else if` merge, while, for,
+`while( true )` overflow, do-while, infinite loop, `&&`/`||` conditions, switch and case labels,
+gotos, labels, break, continue), the branch ops, and casts: `opTypeCast`, `opIntZext`,
+`opIntSext`, `opSubpiece` with `isZextCast`, `isSextCast`, `isSubpieceCast` and
+`isExtensionCastImplied` (`cast.rs`). Details: rust/README.md, "C printing, slice 2". `pcc-r` and
+`pcc-t` also run on the switch corpus (with the `sw` options, `switchnorm` on). M500 `pcc-r` 235 /
+495 (was 10), `pcc-t` 58 / 495 (was 8), `pc-r` 244 / 495 (was 47), `pc-t` 45 / 495 (was 24); no
+block kind is a loud miss; silent: only 0x47a6b0 rules on, which differs from `r1` on. `simple`
+109, 57, 110, 49 / 194; switch not measured yet. M8: the 51 other checks identical, `pc-r`/`pcc-r` 2 / 7.
+Next: the loud blockers left: `CALLIND`, array and field access (`PTRSUB`, `PTRADD`),
+anonymous data-types, comments in the body, float and character constants, `PIECE`,
+`FLOAT2FLOAT`, `FLOAT_NAN`; labels of spliced blocks (several cover ranges).
 
 ## Running stages in parallel
 

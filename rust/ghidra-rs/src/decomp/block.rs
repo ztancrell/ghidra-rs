@@ -83,6 +83,13 @@ pub(crate) struct BlockBasic {
     pub(crate) donothing_loop: bool,
     /// `f_flip_path`: the two out edges were swapped an odd number of times (`swapEdges`)
     pub(crate) flip_path: bool,
+    /// `f_joined_block`: made by `nodeJoinCreateBlock` (its label is `joined_`)
+    pub(crate) joined: bool,
+    /// `f_duplicate_block`: made by `nodeSplitBlockEdge` (its label is `dup_`)
+    pub(crate) duplicated: bool,
+    /// `mergeRange` ran (`spliceBlockBasic`): the C++ cover may hold two ranges, which
+    /// `start`/`stop` do not keep, so `getEntryAddr` is not known
+    pub(crate) spliced: bool,
     /// the immediate dominator (`immed_dom`), none for the entry
     pub(crate) idom: Option<BlockId>,
 }
@@ -125,6 +132,9 @@ impl BlockGraph {
             delayed_donothing: false,
             donothing_loop: false,
             flip_path: false,
+            joined: false,
+            duplicated: false,
+            spliced: false,
             mark: false,
             entry_point: false,
             idom: None,

@@ -9,8 +9,8 @@
 #
 #   CORPORA  m8, m500, r5d-adc, switch, simple (files of tools/corpus/) or a file of addresses.
 #            Default: all five. Without CHECKS, r5d-adc runs only the double-rule checks,
-#            switch only the S3 bar (paramdouble) and the six switch checks, and simple only
-#            the four print C checks.
+#            switch only the S3 bar (paramdouble), the six switch checks and pcc-r, pcc-t (with
+#            `switchnorm` on: the sw options), and simple only the four print C checks.
 #   CHECKS   names from the `case` below. Default: every check that applies to the corpus.
 #   JOBS     parallel functions per check (default: nproc); TIMEOUT seconds per function and
 #            engine (default 600)
@@ -71,7 +71,9 @@ for C in ${CORPORA:-m8 m500 r5d-adc switch simple}; do
     C0=$C
     [ -f "$C" ] || C=$c/$C.txt
     [ -f "$C" ] || { echo "no corpus $C" >&2; exit 1; }
-    case $(basename "$C" .txt) in r5d-adc) def=$dbl ;; switch) def="paramdouble $sw" ;; simple) def=$pc ;; *) def=$all ;; esac
+    # print C with casts: switch cases need `switchnorm` (the case labels), on in the sw options
+    po=tail; [ "$(basename "$C" .txt)" = switch ] && po=sw
+    case $(basename "$C" .txt) in r5d-adc) def=$dbl ;; switch) def="paramdouble $sw pcc-r pcc-t" ;; simple) def=$pc ;; *) def=$all ;; esac
     for k in ${CHECKS:-$def}; do
         [ -n "$LIST" ] && { echo "$k $C0"; continue; }
         case $k in
@@ -140,9 +142,10 @@ for C in ${CORPORA:-m8 m500 r5d-adc switch simple}; do
         # engines (no casts printed)
         pc-r) run $k "$C" "PRINT=print C" DECOMP_SKIP_ACTIONS=$S3,$L,setcasts BREAK=prototypewarnings OPTIONS=$c/tail-r-options.txt ;;
         pc-t) run $k "$C" "PRINT=print C" DECOMP_SKIP_ACTIONS=$L,setcasts BREAK=prototypewarnings OPTIONS=$c/tail-t-options.txt ;;
-        # pcc-r, pcc-t: the same with `setcasts` on (casts printed)
-        pcc-r) run $k "$C" "PRINT=print C" DECOMP_SKIP_ACTIONS=$S3,$L BREAK=prototypewarnings OPTIONS=$c/tail-r-options.txt ;;
-        pcc-t) run $k "$C" "PRINT=print C" DECOMP_SKIP_ACTIONS=$L BREAK=prototypewarnings OPTIONS=$c/tail-t-options.txt ;;
+        # pcc-r, pcc-t: the same with `setcasts` on (casts printed); on the switch corpus with the
+        # sw options (`switchnorm` on, `localrecovery` off)
+        pcc-r) run $k "$C" "PRINT=print C" DECOMP_SKIP_ACTIONS=$S3,$L BREAK=prototypewarnings OPTIONS=$c/$po-r-options.txt ;;
+        pcc-t) run $k "$C" "PRINT=print C" DECOMP_SKIP_ACTIONS=$L BREAK=prototypewarnings OPTIONS=$c/$po-t-options.txt ;;
         *) echo "unknown check $k" >&2; exit 1 ;;
         esac
     done

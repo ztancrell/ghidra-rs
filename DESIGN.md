@@ -263,6 +263,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    M8 0 / 7, all loud.
    Both merged on `m3-s9` (2026-11-15): M8 all 51 checks before `pc-*` identical, `pc-r` and `pc-t` 0 / 7, all loud.
    Review fixes on `m3-s9`: `print C` with `setcasts` on (`pcc-r`, `pcc-t`) M500 10 / 495 and 8 / 495, silent 0 (a CAST op fails loudly).
+   S9 slice 2 on branch `m3-print2` (2026-11-15): every structured block (if/else, loops, switch, gotos,
+   labels) and casts in `print C` (superseded: "fails loudly" for those and for a CAST op); M500 `pcc-r` 235 / 495,
+   `pcc-t` 58 / 495, `pc-r` 244 / 495, `pc-t` 45 / 495, silent only 0x47a6b0 (differs from `r1` on); switch
+   not measured yet; M8 the 51 other checks identical.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

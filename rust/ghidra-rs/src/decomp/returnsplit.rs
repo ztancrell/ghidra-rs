@@ -185,7 +185,7 @@ fn is_splittable(fd: &Funcdata, b: BlockId) -> bool {
 /// `Funcdata::nodeSplit` with `nodeSplitBlockEdge` and `CloneBlockOps::cloneBlock`: in-edge
 /// `inedge` of `b` (which has no out-edges) goes to a new copy of `b`. (`nodeSplit`'s check for
 /// redundant in-edges marks `b` itself, so it can only fire on a self loop, which a block
-/// without out-edges cannot have; `f_duplicate_block` is not kept, only printing reads it.)
+/// without out-edges cannot have; `f_duplicate_block` is kept for the printer's `dup_` label.)
 fn node_split(fd: &mut Funcdata, b: BlockId, inedge: usize) -> Result<()> {
     let bl = fd.blocks.block(b);
     if !bl.outs.is_empty() {
@@ -196,6 +196,7 @@ fn node_split(fd: &mut Funcdata, b: BlockId, inedge: usize) -> Result<()> {
     }
     let (a, start, stop) = (bl.ins[inedge].point, bl.start, bl.stop);
     let bprime = fd.blocks.new_block(start);
+    fd.blocks.block_mut(bprime).duplicated = true;
     fd.blocks.block_mut(bprime).stop = stop;
     fd.blocks.switch_edge(a, b, bprime);
     clone_block(fd, b, bprime, inedge)?;

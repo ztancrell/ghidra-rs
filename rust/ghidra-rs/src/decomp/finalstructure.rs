@@ -26,6 +26,8 @@ use super::{err, Arch, Funcdata, LowlevelError, Result};
 pub(crate) const F_GOTO_GOTO: u32 = 1;
 /// `FlowBlock::f_break_goto`: the branch is a `break`.
 pub(crate) const F_BREAK_GOTO: u32 = 2;
+/// `FlowBlock::f_continue_goto`: the branch is a `continue`.
+pub(crate) const F_CONTINUE_GOTO: u32 = 4;
 /// `FlowBlock::f_unstructured_targ`: the target of an unstructured goto.
 pub(crate) const F_UNSTRUCTURED_TARG: u32 = 0x20;
 /// `FlowBlock::f_label_bumpup`: the block's label is printed higher up.
@@ -384,7 +386,7 @@ fn finalize_switch(s: &mut Structure, fd: &Funcdata, b: SId) -> Result<()> {
 }
 
 /// The basic block of a switch block's switch component (the block ending in the BRANCHIND).
-fn switch_leaf(s: &Structure, b: SId) -> Result<BlockId> {
+pub(crate) fn switch_leaf(s: &Structure, b: SId) -> Result<BlockId> {
     let switch_comp = *s.b(b).list.first().ok_or_else(|| LowlevelError("switch without components".into()))?;
     match s.exit_leaf(switch_comp).map(|l| &s.b(l).kind) {
         Some(Kind::Copy(bb)) => Ok(*bb),
@@ -393,7 +395,7 @@ fn switch_leaf(s: &Structure, b: SId) -> Result<BlockId> {
 }
 
 /// The jump table of the switch block `switchbl` (`BlockSwitch::jump`).
-fn switch_table(fd: &Funcdata, switchbl: BlockId) -> Result<&JumpTable> {
+pub(crate) fn switch_table(fd: &Funcdata, switchbl: BlockId) -> Result<&JumpTable> {
     let table = fd.jumptables.iter().find(|jt| fd.op(jt.op).parent == Some(switchbl));
     table.ok_or_else(|| LowlevelError("switch block without a jump table".into()))
 }
@@ -409,7 +411,7 @@ fn case_labels(fd: &Funcdata, switchbl: BlockId, cases: &[CaseOrder]) -> Result<
 }
 
 /// The first `max` labels of a case (`BlockSwitch::getNumLabels`, `getLabel`).
-fn case_label_list(fd: &Funcdata, jt: &JumpTable, case: &CaseOrder, max: usize) -> Result<Vec<u64>> {
+pub(crate) fn case_label_list(fd: &Funcdata, jt: &JumpTable, case: &CaseOrder, max: usize) -> Result<Vec<u64>> {
     let basic = case.basicblock.ok_or_else(|| LowlevelError("switch case without its basic block".into()))?;
     let num = jt.num_indices_by_block(fd, basic)?.min(max);
     let label = |j| {

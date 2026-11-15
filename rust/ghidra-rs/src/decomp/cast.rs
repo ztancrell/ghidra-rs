@@ -12,8 +12,10 @@
 //! - The pointer `space` attribute of `checkPointerIssues`: no ported pointer type has one.
 //! - `TypeCode` prototypes, `isVariableLength`, the partial types: none is ported, so the
 //!   branches that test them reduce to the code here.
-//! - `CastStrategy::isExtensionCastImplied`, `isSubpieceCast`, `isSextCast`, `isZextCast` and
-//!   `CastStrategyJava`: only the printer calls them (S9 printer).
+//! - `CastStrategyJava`. The printer-only `isExtensionCastImplied`, `isSubpieceCast`,
+//!   `isSextCast` and `isZextCast` are at the end (S9 printer, slice 2); `isSubpieceCastEndian`
+//!   is left out (only `pushPartialSymbol` calls it, not ported). Superseded: "only the printer
+//!   calls them", left out.
 //! - `Funcdata::startCastPhase` sets `cast_phase_index`, which nothing reads.
 //! - SEGMENTOP, INSERT, ZPULL and SPULL have their own cast rules: they fail loudly.
 
@@ -943,6 +945,83 @@ fn cast_op(fd: &mut Funcdata, arch: &Arch, op: OpId) -> Result<()> {
     Ok(())
 }
 
+/// `Varnode::getHighTypeReadFacing` / `getHighTypeDefFacing` for the printer (a type that needs
+/// resolution fails loudly).
+pub(crate) fn print_facing(fd: &mut Funcdata, vn: VarnodeId) -> Result<TypeId> {
+    facing(fd, vn)
+}
+
+/// Port of `CastStrategyC::isExtensionCastImplied`: whether the extension `op`, read by
+/// `read_op`, is an integer promotion C does on its own (then printed hidden).
+pub(crate) fn is_extension_cast_implied(fd: &mut Funcdata, op: OpId, read_op: Option<OpId>) -> Result<bool> {
+    let out = output(fd, op)?;
+    if is_explicit(fd, out) {
+        return Ok(false);
+    }
+    let Some(read_op) = read_op else { return Ok(false) };
+    let outtype = facing(fd, out)?;
+    let metatype = fd.types.meta(outtype);
+    use Opcode::*;
+    match fd.op(read_op).opc {
+        Ptradd => {}
+        IntAdd | IntSub | IntMult | IntDiv | IntAnd | IntOr | IntXor | IntEqual | IntNotequal | IntLess
+        | IntLessequal | IntSless | IntSlessequal => {
+            let slot =
+                fd.slot_of(read_op, out).ok_or_else(|| LowlevelError("PcodeOp::getSlot: not an input".into()))?;
+            let other = input(fd, read_op, 1 - slot)?;
+            if fd.vn(other).is_constant() {
+                // a constant bigger than the promotion size is not extended naturally
+                if fd.vn(other).size > PROMOTE_SIZE {
+                    return Ok(false);
+                }
+            } else if !is_explicit(fd, other) {
+                return Ok(false);
+            }
+            let othertype = facing(fd, other)?;
+            if fd.types.meta(othertype) != metatype {
+                return Ok(false);
+            }
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// Port of `CastStrategyC::isSubpieceCast`: a SUBPIECE of the low bytes that prints as a cast
+/// (the partial struct and union metatypes are not ported).
+pub(crate) fn is_subpiece_cast(t: &TypeFactory, outtype: TypeId, intype: TypeId, offset: u64) -> bool {
+    if offset != 0 {
+        return false;
+    }
+    let inmeta = t.meta(intype);
+    if !matches!(inmeta, Meta::Int | Meta::Uint | Meta::Unknown | Meta::Ptr) {
+        return false;
+    }
+    let outmeta = t.meta(outtype);
+    if !matches!(outmeta, Meta::Int | Meta::Uint | Meta::Unknown | Meta::Ptr | Meta::Float) {
+        return false;
+    }
+    if inmeta == Meta::Ptr {
+        if outmeta == Meta::Ptr && t.size(outtype) < t.size(intype) {
+            return true; // a far pointer to a near pointer
+        }
+        if !matches!(outmeta, Meta::Int | Meta::Uint) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Port of `CastStrategyC::isSextCast`: the input must be signed (or boolean).
+pub(crate) fn is_sext_cast(t: &TypeFactory, outtype: TypeId, intype: TypeId) -> bool {
+    matches!(t.meta(outtype), Meta::Uint | Meta::Int) && matches!(t.meta(intype), Meta::Int | Meta::Bool)
+}
+
+/// Port of `CastStrategyC::isZextCast`: the input must be unsigned (or boolean).
+pub(crate) fn is_zext_cast(t: &TypeFactory, outtype: TypeId, intype: TypeId) -> bool {
+    matches!(t.meta(outtype), Meta::Uint | Meta::Int) && matches!(t.meta(intype), Meta::Uint | Meta::Bool)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1002,5 +1081,29 @@ mod tests {
         assert!(inherits_sign_first_only(Opcode::IntSrem) && !inherits_sign_first_only(Opcode::IntSdiv));
         assert!(is_shift(Opcode::IntSright) && !is_shift(Opcode::IntMult));
         assert!(signbit_negative(0x80, 1) && !signbit_negative(0x7f, 1) && !signbit_negative(1, 0));
+    }
+
+    /// The printer-only casts: an extension is a cast when the input's sign matches it, a
+    /// SUBPIECE when it keeps the low bytes of an integer or pointer.
+    #[test]
+    fn printer_casts() {
+        let mut t = TypeFactory::new();
+        let (i4, u4, x4, b1, i1, u1) = (
+            t.base(4, Meta::Int),
+            t.base(4, Meta::Uint),
+            t.base(4, Meta::Unknown),
+            t.base(1, Meta::Bool),
+            t.base(1, Meta::Int),
+            t.base(1, Meta::Uint),
+        );
+        let f4 = t.base(4, Meta::Float);
+        assert!(is_zext_cast(&t, u4, u1) && is_zext_cast(&t, i4, b1) && !is_zext_cast(&t, u4, i1));
+        assert!(is_sext_cast(&t, i4, i1) && is_sext_cast(&t, u4, b1) && !is_sext_cast(&t, i4, u1));
+        assert!(!is_zext_cast(&t, x4, u1) && !is_sext_cast(&t, x4, i1));
+        assert!(is_subpiece_cast(&t, i1, i4, 0) && !is_subpiece_cast(&t, i1, i4, 1));
+        assert!(is_subpiece_cast(&t, f4, x4, 0) && !is_subpiece_cast(&t, b1, i4, 0));
+        let (p4, p2) = (t.pointer(4, i4, 1), t.pointer(2, i4, 1));
+        assert!(is_subpiece_cast(&t, p2, p4, 0) && is_subpiece_cast(&t, u1, p4, 0));
+        assert!(!is_subpiece_cast(&t, f4, p4, 0));
     }
 }

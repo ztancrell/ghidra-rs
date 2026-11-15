@@ -15,6 +15,7 @@ pub(crate) enum TokenType {
     Postsurround,
     Presurround,
     Space,
+    HiddenFunction,
 }
 
 /// Port of `OpToken`: an operator's text, precedence and spacing. Tokens are `static`s
@@ -34,6 +35,9 @@ pub(crate) struct OpToken {
 /// `PrintLanguage::modifiers` (the ones ported).
 pub(crate) mod modifier {
     pub(crate) const NO_BRANCH: u32 = 0x80;
+    pub(crate) const ONLY_BRANCH: u32 = 0x100;
+    pub(crate) const COMMA_SEPARATE: u32 = 0x200;
+    pub(crate) const PENDING_BRACE: u32 = 0x8000;
     pub(crate) const FORCE_HEX: u32 = 1;
     pub(crate) const FORCE_DEC: u32 = 2;
     pub(crate) const NEGATETOKEN: u32 = 0x2000;
@@ -51,6 +55,8 @@ struct ReversePolish {
 #[derive(Debug, Clone, Copy)]
 struct NodePending {
     vn: VarnodeId,
+    /// the op reading `vn`
+    op: OpId,
     mods: u32,
 }
 
@@ -60,6 +66,9 @@ pub(crate) enum Atom {
     Text(String),
     Blank,
 }
+
+/// The deepest block nesting the printer recurses into.
+pub(crate) const MAX_DEPTH: u32 = 1000;
 
 /// The printer: `PrintC` with its `PrintLanguage` state, printing one function.
 pub(crate) struct PrintC<'a> {
@@ -71,13 +80,25 @@ pub(crate) struct PrintC<'a> {
     pending: usize,
     pub(crate) mods: u32,
     modstack: Vec<u32>,
+    /// the block nesting being printed
+    pub(crate) depth: u32,
 }
 
 impl<'a> PrintC<'a> {
     pub(crate) fn new(fd: &'a mut Funcdata, arch: &'a Arch) -> PrintC<'a> {
         let mut emit = EmitPrettyPrint::new(100);
         emit.set_comment_fill("   "); // setCStyleComments: "/* " ... " */", filled with spaces
-        PrintC { fd, arch, emit, revpol: Vec::new(), nodepend: Vec::new(), pending: 0, mods: 0, modstack: Vec::new() }
+        PrintC {
+            fd,
+            arch,
+            emit,
+            revpol: Vec::new(),
+            nodepend: Vec::new(),
+            pending: 0,
+            mods: 0,
+            modstack: Vec::new(),
+            depth: 0,
+        }
     }
 
     pub(crate) fn is_set(&self, m: u32) -> bool {
@@ -93,6 +114,9 @@ impl<'a> PrintC<'a> {
     }
     pub(crate) fn set_mod(&mut self, m: u32) {
         self.mods |= m;
+    }
+    pub(crate) fn unset_mod(&mut self, m: u32) {
+        self.mods &= !m;
     }
 
     /// Port of `PrintLanguage::pushOp`.
@@ -142,11 +166,10 @@ impl<'a> PrintC<'a> {
         Ok(())
     }
 
-    /// Port of `PrintLanguage::pushVn`: the expression of `vn` is pushed later (the reading op is
-    /// not kept: no ported op prints by its reader),
-    /// by `recurse`; inputs are pushed last first.
-    pub(crate) fn push_vn(&mut self, vn: VarnodeId, mods: u32) {
-        self.nodepend.push(NodePending { vn, mods });
+    /// Port of `PrintLanguage::pushVn`: the expression of `vn`, read by `op`, is pushed later by
+    /// `recurse`; inputs are pushed last first.
+    pub(crate) fn push_vn(&mut self, vn: VarnodeId, op: OpId, mods: u32) {
+        self.nodepend.push(NodePending { vn, op, mods });
     }
 
     /// Port of `PrintLanguage::recurse`: push every pending varnode's expression.
@@ -162,7 +185,7 @@ impl<'a> PrintC<'a> {
                 let Some(def) = self.fd.vn(n.vn).def else {
                     return err("print C: an implied varnode without a defining op");
                 };
-                self.push_opcode(def)?;
+                self.push_opcode(def, Some(n.op))?;
             } else {
                 self.push_vn_explicit(n.vn)?;
             }
@@ -183,15 +206,15 @@ impl<'a> PrintC<'a> {
         self.push_op(tok)?;
         let ins = &self.fd.op(op).ins;
         let (a, b) = (ins[0], ins[1]);
-        self.push_vn(b, self.mods);
-        self.push_vn(a, self.mods);
+        self.push_vn(b, op, self.mods);
+        self.push_vn(a, op, self.mods);
         Ok(())
     }
 
     /// Port of `PrintLanguage::opUnary`.
     pub(crate) fn op_unary(&mut self, tok: &'static OpToken, op: OpId) -> Result<()> {
         self.push_op(tok)?;
-        self.push_vn(self.fd.op(op).ins[0], self.mods);
+        self.push_vn(self.fd.op(op).ins[0], op, self.mods);
         Ok(())
     }
 
@@ -215,6 +238,19 @@ impl<'a> PrintC<'a> {
                 Less => false,
                 _ => !matches!(op2.ty, TokenType::UnaryPrefix | TokenType::Presurround),
             },
+            TokenType::HiddenFunction => {
+                if stage == 0 && self.revpol.len() > 1 {
+                    // the new token prints next to the token before the hidden one
+                    let prev = self.revpol[self.revpol.len() - 2].tok;
+                    if !matches!(prev.ty, TokenType::Binary | TokenType::UnaryPrefix) {
+                        return false;
+                    }
+                    if prev.precedence < op2.precedence {
+                        return false;
+                    }
+                }
+                true
+            }
             TokenType::Postsurround => match prec() {
                 _ if stage == 1 => false,
                 Greater => true,
@@ -232,7 +268,13 @@ impl<'a> PrintC<'a> {
 
     /// Port of `PrintLanguage::emitOp` on the top of the stack.
     fn emit_op_top(&mut self) {
-        let Some(&ReversePolish { tok, visited, .. }) = self.revpol.last() else { return };
+        if let Some(&ReversePolish { tok, visited, .. }) = self.revpol.last() {
+            self.emit_op(tok, visited);
+        }
+    }
+
+    /// Port of `PrintLanguage::emitOp` of a token at stage `visited`.
+    pub(crate) fn emit_op(&mut self, tok: &OpToken, visited: u32) {
         match tok.ty {
             TokenType::Binary => {
                 if visited != 1 {
@@ -277,6 +319,7 @@ impl<'a> PrintC<'a> {
                     self.emit.spaces(tok.spacing, tok.bump);
                 }
             }
+            TokenType::HiddenFunction => {}
         }
     }
 

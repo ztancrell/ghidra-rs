@@ -246,10 +246,11 @@ impl Join {
 
 /// Port of `Funcdata::nodeJoinCreateBlock`: the new block (at `addr`) takes one edge into each
 /// exit (the one from the block with the lower in-slot), the other two edges go, and both
-/// blocks flow to it. (`f_joined_block` is not kept: only printing reads it.)
+/// blocks flow to it. (`f_joined_block` is kept for the label the printer gives the block.)
 fn node_join_create_block(fd: &mut Funcdata, j: &Join, addr: u64) -> Result<BlockId> {
     let g = &mut fd.blocks;
     let newblock = g.new_block(addr);
+    g.block_mut(newblock).joined = true;
     let (block1, block2) = (j.block1, j.block2);
     let swapa = if j.a_in1 > j.a_in2 {
         g.remove_edge(block1, j.exita);
