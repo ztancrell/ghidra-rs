@@ -29,8 +29,10 @@ if [ "$(uname -s)" = Darwin ]; then
         ADDITIONAL_FLAGS=-I$bu/include BFDLIB="$(echo "$bu"/lib/libbfd-*.dylib)" \
         COMMANDLINE_DEBUG=-DCPUI_DEBUG TEST_DEBUG=
 fi
-make -C "$build" -j"${JOBS:-$(nproc)}" "$@" decomp_dbg decomp_test_dbg
+make -C "$build" -j"${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}" "$@" decomp_dbg decomp_test_dbg
 if [ "$(uname -s)" = Darwin ]; then
     otool -L "$build/decomp_dbg" | grep -q libstdc++ || { echo "decomp_dbg does not link libstdc++" >&2; exit 1; }
 fi
+# what it was built from (the patch and the upstream sources, as committed), for bars-queue.sh
+git -C "$root" rev-parse HEAD:rust/tools/decomp-ref.patch HEAD:Ghidra/Features/Decompiler/src/decompile/cpp > "$build/ref.stamp"
 ls -l "$build/decomp_dbg" "$build/decomp_test_dbg"

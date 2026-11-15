@@ -723,32 +723,43 @@ NOLOCK=1 CORPORA=m8 rust/tools/bars-queue.sh       # a test: the local worker sk
 PUSH=1 rust/tools/bars-queue.sh                    # everything; push HEAD to the Mac first
 ```
 
-- Before it starts it stops loudly unless both clones are at the same commit with no tracked
-  changes (`PUSH=1` pushes HEAD to the git remote `mac` as branch `bars-queue` and checks it
-  out detached there), `cargo build --release` passes on both, and both preludes are the same.
-  It does not rebuild the reference: when the branch changes `tools/decomp-ref.patch`, run
-  `tools/decomp-ref.sh` on both machines first (on the Mac in `~/ghidra-rs/rust`, after the push).
+- Before it starts it stops loudly unless: both clones are at the same commit with no tracked
+  changes and no untracked files in `rust/tools` (`PUSH=1` pushes HEAD to the git remote `mac`
+  as branch `bars-queue` and checks it out detached there); no `bars.sh` or `decomp-diff.sh` of
+  either clone is running; `cargo build --release` passes on both; both references were built
+  from this commit's `decomp-ref.patch` and C++ sources (`decomp-ref.sh` writes the two git
+  object ids to `target/decomp-build/ref.stamp`); and the game binary, `x86.sla` and the
+  prelude have the same `cksum` on both. It does not rebuild the reference: when the stamp
+  differs, run `tools/decomp-ref.sh` on that machine (on the Mac in `~/ghidra-rs/rust`, after
+  the push).
+- `CORPORA` or `CHECKS` that `LIST=1 bars.sh` rejects (a missing corpus) stop it before any run.
 - The local worker runs each pair under `~/.claude/bin/heavy-run 5` with heavy-run's `JOBS`;
   `NOLOCK=1` skips the lock and uses `JOBS=$(heavy-run --jobs)`. The Mac runs each pair with
   `JOBS=16` (`REMOTE_JOBS`) under `caffeinate -i` (the Mac sleeps after a minute idle).
-- Output, under `rust/target/bars-queue/` (`OUT`): `summary.out` (the `bars.sh` summary lines of
-  both machines, appended as they finish, then `DONE` or `INCOMPLETE`), `times.out`
-  (`<check>-<corpus> <worker> <seconds>`), `local/` (the `bars.sh` files) and `mac/` (each
-  pair's output and its `.miss`, copied back). The Mac keeps its own files under its
-  `rust/target/bars-queue/`.
-- No retry. A Mac pair that ends without its summary line (ssh dropped, the Mac gone) prints
-  `lost: <check>-<corpus> on mac`; the Mac worker stops, the local worker runs the rest, and the
-  script exits 1, so the pass never counts as complete. A run already started on the Mac may
-  go on there; its lines are not counted.
+- Output, under `rust/target/bars-queue/` (`OUT`, emptied at the start of each run):
+  `summary.out` (the queue's header line, the `bars.sh` summary lines of both machines as they
+  finish, then `DONE`, `INCOMPLETE` or `STOPPED`), `times.out` (`<check>-<corpus> <worker>
+  <seconds>`), `local/` (the `bars.sh` files) and `mac/` (each pair's output and its `.miss`,
+  copied back; a failed copy prints a warning). The Mac keeps its own files under its
+  `rust/target/bars-queue/`, also emptied at the start.
+- No retry. Only a full summary line counts, ending `all outputs identical A / N`, with the
+  reference finishing at least one function. A pair without one (ssh dropped, the Mac gone, a
+  run that broke) prints `lost: <check>-<corpus> on <worker>`. A lost Mac pair stops the Mac
+  worker and kills its run there; the local worker runs the rest. Any lost pair ends the pass
+  `INCOMPLETE` with exit 1, so it never counts as complete.
+- Stopping a pass: Ctrl-C, or `kill <pid of bars-queue.sh>` (TERM). Each pair runs in its own
+  process group; the script kills both workers' runs (on the Mac the process group of the ssh
+  command, recorded in its `target/bars-queue/run.pid`), writes `STOPPED` and exits 1. Do not
+  `kill -9` it: that leaves both runs going, and the next pass stops until they end.
 - `REMOTE`, `REMOTE_DIR` (the clone, from `~`, default `ghidra-rs`), `REMOTE_BIN` (the game
   binary there), `REMOTE_FID` (the Function ID databases there, default
   `~/ghidra-rs/rust/target/fid`); `CORPORA`, `CHECKS`, `TIMEOUT` as in `bars.sh`.
 
 Setting up the Mac (macOS 26, Intel, Homebrew in `/usr/local`):
 
-- `brew install bash coreutils gnu-sed grep findutils gawk binutils`. `decomp-diff.sh` needs GNU
-  `sed` and `grep` (`\|` in basic regular expressions), `timeout` and `nproc`; the queue puts
-  their `gnubin` folders first on the PATH of each ssh command, with `/bin/bash` (3.2) as bash.
+- `brew install coreutils gnu-sed grep findutils gawk diffutils binutils`. `decomp-diff.sh` needs
+  GNU `sed` and `grep` (`\|` in basic regular expressions), `cmp`, `timeout` and `nproc`; the
+  queue puts their `gnubin` folders (diffutils: `bin`) first on the PATH of each ssh command, with `/bin/bash` (3.2) as bash.
 - The reference: `rust/tools/decomp-ref.sh` builds on macOS with Homebrew GCC (`g++-16`,
   `REF_CXX`) and libstdc++, never Apple's clang and libc++, and fails when `decomp_dbg` does not
   link libstdc++: `stdsort.rs` keeps libstdc++'s order of equal keys. `tools/stdsort_ref.cc`
