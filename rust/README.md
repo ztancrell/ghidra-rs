@@ -709,6 +709,82 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
   sections below are these files.
 - The switch corpus is `tools/corpus/switch.txt` (2,050 functions with a jump table; superseded:
   `rust/target/stk/switch.txt` of an agent's worktree).
+- `LIST=1 bars.sh` prints the `<check> <corpus>` pairs it would run and runs nothing.
+
+### One pass on two machines: `tools/bars-queue.sh`
+
+`rust/tools/bars-queue.sh` shares one `bars.sh` pass between this desktop and a second machine
+reached over ssh (the MacBook, `192.168.254.18`). It puts the pairs of `LIST=1 bars.sh` in one
+queue, M500, r5d-adc and switch first and M8 last, and runs two workers: local and the Mac. Each
+takes the next pair when it is free, so the faster machine runs more of them.
+
+```sh
+NOLOCK=1 CORPORA=m8 rust/tools/bars-queue.sh       # a test: the local worker skips heavy-run
+PUSH=1 rust/tools/bars-queue.sh                    # everything; push HEAD to the Mac first
+```
+
+- Before it starts it stops loudly unless: both clones are at the same commit with no tracked
+  changes and no untracked files in `rust/tools` (`PUSH=1` pushes HEAD to the git remote `mac`
+  as branch `bars-queue` and checks it out detached there); no `bars.sh` or `decomp-diff.sh` of
+  either clone is running; `cargo build --release` passes on both; both references were built
+  from this commit's `decomp-ref.patch` and C++ sources (`decomp-ref.sh` writes the two git
+  object ids to `target/decomp-build/ref.stamp`); and the game binary, `x86.sla` and the
+  prelude have the same `cksum` on both. It does not rebuild the reference: when the stamp
+  differs, run `tools/decomp-ref.sh` on that machine (on the Mac in `~/ghidra-rs/rust`, after
+  the push).
+- `CORPORA` or `CHECKS` that `LIST=1 bars.sh` rejects (a missing corpus) stop it before any run.
+- The local worker runs each pair under `~/.claude/bin/heavy-run 5` with heavy-run's `JOBS`;
+  `NOLOCK=1` skips the lock and uses `JOBS=$(heavy-run --jobs)`. The Mac runs each pair with
+  `JOBS=16` (`REMOTE_JOBS`) under `caffeinate -i` (the Mac sleeps after a minute idle).
+- Output, under `rust/target/bars-queue/` (`OUT`, emptied at the start of each run):
+  `summary.out` (the queue's header line, the `bars.sh` summary lines of both machines as they
+  finish, then `DONE`, `INCOMPLETE` or `STOPPED`), `times.out` (`<check>-<corpus> <worker>
+  <seconds>`), `local/` (the `bars.sh` files) and `mac/` (each pair's output and its `.miss`,
+  copied back; a failed copy prints a warning). The Mac keeps its own files under its
+  `rust/target/bars-queue/`, also emptied at the start.
+- No retry. Only a full summary line counts, ending `all outputs identical A / N`, with the
+  reference finishing at least one function. A pair without one (ssh dropped, the Mac gone, a
+  run that broke) prints `lost: <check>-<corpus> on <worker>`. A lost Mac pair stops the Mac
+  worker and kills its run there; the local worker runs the rest. Any lost pair ends the pass
+  `INCOMPLETE` with exit 1, so it never counts as complete.
+- Stopping a pass: Ctrl-C, or `kill <pid of bars-queue.sh>` (TERM). Each pair runs in its own
+  process group; the script kills both workers' runs (on the Mac the process group of the ssh
+  command, recorded in its `target/bars-queue/run.pid`), writes `STOPPED` and exits 1. Do not
+  `kill -9` it: that leaves both runs going, and the next pass stops until they end.
+- `REMOTE`, `REMOTE_DIR` (the clone, from `~`, default `ghidra-rs`), `REMOTE_BIN` (the game
+  binary there), `REMOTE_FID` (the Function ID databases there, default
+  `~/ghidra-rs/rust/target/fid`); `CORPORA`, `CHECKS`, `TIMEOUT` as in `bars.sh`.
+
+Setting up the Mac (macOS 26, Intel, Homebrew in `/usr/local`):
+
+- `brew install coreutils gnu-sed grep findutils gawk diffutils binutils`. `decomp-diff.sh` needs
+  GNU `sed` and `grep` (`\|` in basic regular expressions), `cmp`, `timeout` and `nproc`; the
+  queue puts their `gnubin` folders (diffutils: `bin`) first on the PATH of each ssh command, with `/bin/bash` (3.2) as bash.
+- The reference: `rust/tools/decomp-ref.sh` builds on macOS with Homebrew GCC (`g++-16`,
+  `REF_CXX`) and libstdc++, never Apple's clang and libc++, and fails when `decomp_dbg` does not
+  link libstdc++: `stdsort.rs` keeps libstdc++'s order of equal keys. `tools/stdsort_ref.cc`
+  built with `g++-16` prints `tests/data/stdsort-gxx.txt` exactly; built with clang it differs
+  from the first line. BFD comes from Homebrew `binutils` (`BINUTILS`), and the console is built
+  without `__TERMINAL__`, because macOS's `tcgetattr` on `/dev/null` fails with an errno the
+  console does not expect (on Linux it reports "not a terminal" and the console goes on).
+- The inputs, copied from the desktop: the game binary to the same place under `~`
+  (`decomp-diff.sh`'s `BIN` default is now `~/projects/mercs/mercs2-decomp/orig/...`), the
+  compiled `x86.sla` and `x86-64.sla`, and Ghidra's `*_x86.fidbf` Function ID databases to
+  `rust/target/fid/` (`GHIDRA_RS_FID`). Without the databases the prelude names no FID
+  functions (801,671 bytes instead of 839,707) and every check differs.
+- The clone: the desktop has the git remote `mac` (`ssh://192.168.254.18/Users/zpt/ghidra-rs`),
+  and the Mac clone has `receive.denyCurrentBranch updateInstead`.
+
+Acceptance on master 95bbb60e89 (2026-11-15), the Mac with `JOBS=16`, `TIMEOUT=120`: all 45 M8
+lines equal the desktop's master lines (`r5dtlocksv` and `r5slock` 6 / 8, `r5s` 3 / 8, `fs-*`
+7 / 7, the rest 8 / 8), in 278 s. Six M500 checks equal the bars above: `heritage` 500 / 500
+(264 s), `s6` 499 / 499 (336 s), `r5` 497 / 498 (338 s), `s7t` 493 / 499 (341 s), `s8r`
+498 / 499 (340 s), `fs-t` 489 / 495 (346 s). An M500 check takes about 5.5 minutes there, against
+about 4.6 on the desktop alone with `JOBS=12`. The queue on M8 (`NOLOCK=1`, the local worker at
+`JOBS=3` while a pass held heavy-run): 45 pairs in 3 min 33 s, 27 on the Mac and 18 local, every
+line equal to the desktop's. With the Mac's ssh killed in the middle: `lost: funclink-m8 on mac`,
+the other 44 run locally and equal, `INCOMPLETE`, exit 1. Not yet run: a full pass through the
+queue, and the local worker under the heavy-run lock.
 
 ## Decompiler (Milestone 3)
 
