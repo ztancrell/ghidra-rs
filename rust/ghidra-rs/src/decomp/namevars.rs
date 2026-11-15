@@ -6,10 +6,12 @@
 //! `getSymbolOffset` and `finalizeDatatype`.
 //!
 //! What is left out, and why it changes nothing or fails loudly:
-//! - A persistent varnode links to a symbol of the global scope (a function, an external
-//!   reference, a data symbol of `ActionMapGlobals`). Such a symbol has a name, is not
-//!   size-locked and is global, so the action does nothing more with it; the link itself is
-//!   read by the printer only (S9). The same holds for `PTRSUB(#0, offset)` into a global.
+//! - A persistent varnode links to a symbol of the global scope. A data symbol of
+//!   `ActionMapGlobals` is linked (`mapentry`): it has a name, is not size-locked and is global,
+//!   so the action does nothing more with it; the printer reads the link. A function or an
+//!   external reference (kept in `Arch`, not in the scope) is not linked, and the printer fails
+//!   on such a variable. Superseded: "the link itself is read by the printer only (S9)" with no
+//!   link made. `PTRSUB(#0, offset)` into a global only marks the offset.
 //! - Name recommendations (`recoverNameRecommendationsForSymbols`): the scope collects them
 //!   from name-locked symbols when it is cleared, and it holds none.
 //! - CAST ops (`setcasts` runs after this action) and proto-partial varnodes do not exist.
@@ -20,7 +22,7 @@ use std::collections::BTreeMap;
 
 use super::funcdata::Funcdata;
 use super::opcode::Opcode;
-use super::scope::{NameFlags, NameRequest, StackNaming, SymbolEntry, SymbolId, UseLimit, LOCAL};
+use super::scope::{NameFlags, NameRequest, StackNaming, SymbolEntry, SymbolId, UseLimit, GLOBAL, LOCAL};
 use super::types::{Kind, Meta, TypeId};
 use super::variable::{h_is, h_type, high, input_varnode, is_internal, vn_has_cover, HighId};
 use super::varnode::{Space, VarnodeId, VnFlags, CONST_SPACE};
@@ -71,14 +73,14 @@ pub(crate) fn name_vars(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
 
 /// `HighVariable::getSymbol`: the symbol and entry of the first member linked to one, and that
 /// member.
-fn high_symbol(fd: &Funcdata, h: HighId) -> Option<(SymbolId, usize, VarnodeId)> {
+pub(crate) fn high_symbol(fd: &Funcdata, h: HighId) -> Option<(SymbolId, usize, VarnodeId)> {
     fd.highs.get(h).inst.iter().find_map(|vn| fd.mapentry.get(vn).map(|&(s, e)| (s, e, *vn)))
 }
 
 /// `HighVariable::getSymbolOffset` (`setSymbol`): -1 when the linked member is the whole symbol,
 /// else its offset into it (`Address::overlapJoin` from the entry, plus the entry's own offset
 /// when it maps a piece of a join).
-fn symbol_offset(fd: &Funcdata, arch: &Arch, h: HighId) -> Result<i32> {
+pub(crate) fn symbol_offset(fd: &Funcdata, arch: &Arch, h: HighId) -> Result<i32> {
     let Some((sym, e, vn)) = high_symbol(fd, h) else { return Ok(-1) };
     let (s, v) = (fd.symtab.symbol(sym), fd.vn(vn));
     let entry =
@@ -128,7 +130,7 @@ fn compare_name(fd: &Funcdata, vn1: VarnodeId, vn2: VarnodeId) -> bool {
 }
 
 /// Port of `HighVariable::getNameRepresentative`.
-fn name_representative(fd: &Funcdata, h: HighId) -> Result<VarnodeId> {
+pub(crate) fn name_representative(fd: &Funcdata, h: HighId) -> Result<VarnodeId> {
     let mut inst = fd.highs.get(h).inst.iter().copied();
     let first = inst.next().ok_or_else(|| LowlevelError("namevars: a high variable without members".into()))?;
     Ok(inst.fold(first, |rep, vn| if compare_name(fd, rep, vn) { vn } else { rep }))
@@ -214,11 +216,20 @@ fn link_symbol(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId) -> Result<Option<S
         return Ok(Some(sym));
     }
     let v = fd.vn(vn);
-    if v.has(VnFlags::PERSIST) {
+    let (space, offset, persist) = (v.space, v.offset, v.has(VnFlags::PERSIST));
+    let usepoint = use_point(fd, arch, vn);
+    if persist {
+        // queryProperties: the global scope owns the storage; its data symbols (`ActionMapGlobals`)
+        // are linked here. A function or an external reference (kept in `Arch`) is not: the
+        // printer fails on such a variable.
+        if let Some((sym, e)) = fd.symtab.find_container(GLOBAL, space, offset, 1, Some(usepoint))? {
+            if !fd.symtab.symbol(sym).entries[e].conflict {
+                fd.mapentry.insert(vn, (sym, e));
+                return Ok(Some(sym));
+            }
+        }
         return Ok(None);
     }
-    let (space, offset) = (v.space, v.offset);
-    let usepoint = use_point(fd, arch, vn);
     // queryProperties(addr, 1, usepoint): the local scope, then (for storage it does not own)
     // the global one, which holds nothing outside its ranges
     if let Some((sym, e)) = fd.symtab.find_container(LOCAL, space, offset, 1, Some(usepoint))? {
@@ -352,6 +363,7 @@ fn link_symbols(fd: &mut Funcdata, arch: &Arch, namerec: &mut Vec<Rec>) -> Resul
         }
         let Some(sym) = link_symbol(fd, arch, vn)? else { continue };
         let s = fd.symtab.symbol(sym);
+        let global = s.scope == GLOBAL;
         if s.is_name_undefined() && symbol_offset(fd, arch, h)? < 0 {
             namerec.push(Rec::Vn(vn));
         }
@@ -361,8 +373,8 @@ fn link_symbols(fd: &mut Funcdata, arch: &Arch, namerec: &mut Vec<Rec>) -> Resul
             let same = old.is_some_and(|t| fd.types.size(t) == fd.types.size(ty));
             fd.symtab.override_size_lock_type(sym, ty, same)?;
         }
-        if fd.vn(vn).has(VnFlags::ADDRTIED) {
-            finalize_datatype(fd, arch, h, sym)?; // the symbol is local
+        if fd.vn(vn).has(VnFlags::ADDRTIED) && !global {
+            finalize_datatype(fd, arch, h, sym)?;
         }
     }
     Ok(())

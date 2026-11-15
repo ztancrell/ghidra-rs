@@ -189,6 +189,10 @@ impl TypeFactory {
     pub(crate) fn get(&self, id: TypeId) -> &Datatype {
         &self.types[id.0 as usize]
     }
+    /// `Datatype::getName` (empty for a pointer or an array).
+    pub(crate) fn name(&self, id: TypeId) -> Option<&str> {
+        self.get(id).name.as_deref()
+    }
     pub(crate) fn meta(&self, id: TypeId) -> Meta {
         self.get(id).meta
     }

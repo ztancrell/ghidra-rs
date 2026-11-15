@@ -250,11 +250,17 @@ impl Flow<'_> {
             Ok(len) => len,
             Err(EmitError::Unimplemented) => {
                 self.artificial_halt(addr, Some(Halt::Unimplemented))?;
+                self.fd.warning("Unimplemented instruction - Truncating control flow here", addr);
+                // `unimplemented_present`: the header warning once (`print C` prints it once)
+                self.fd.warning_header("Control flow encountered unimplemented instructions");
                 1
             }
             Err(EmitError::BadData(msg)) => {
                 self.count_bad_data(msg)?;
                 self.artificial_halt(addr, Some(Halt::BadInstruction))?;
+                self.fd.warning("Bad instruction - Truncating control flow here", addr);
+                // `baddata_present`
+                self.fd.warning_header("Control flow encountered bad instruction data");
                 1
             }
             Err(EmitError::Fatal(e)) => return Err(e),

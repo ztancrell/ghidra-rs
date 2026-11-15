@@ -248,6 +248,12 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    M500 498, 493, 495, 499 / 499. Open: global symbol types on new varnodes are set lazily (six
    `switchnorm` rules-on misses), 0x4f3366. Structured `printRaw` is not reachable from the
    console (`print raw` prints the basic blocks), so it waits for S9's printer.
+   S9 slice 1 on branch `m3-print1` (2026-11-15): `print C` for straight-line functions in the
+   three layers (`prettyprint.rs`, `printlanguage.rs`, `printc.rs`); every construct not ported
+   (if, loops, switch, gotos, comments in the body, field and array access, the remaining
+   operators and constants) fails loudly. Casts are not printed yet (`setcasts` skipped on both
+   engines). Checks `pc-r`, `pc-t` (`tools/bars.sh`): `simple` corpus 54 / 194 and 34 / 194
+   identical, the rest loud; M8 0 / 7, all loud.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

@@ -1665,6 +1665,21 @@ unported branches of `AncestorRealistic` and the range defaults fail loudly; the
 hold (446 / 499, 450 / 498, 450 / 498). Open: the "Error processing <name> called at <seq>: "
 wrapper of `ActionActiveParam`'s errors.
 
+### S9 slice 1: the C printer for straight-line functions, branch `m3-print1` (2026-11-15)
+
+`print C` through the three layers (`prettyprint.rs`: `EmitPrettyPrint`; `printlanguage.rs`: the
+operator stack and parentheses; `printc.rs`: `PrintC` for the header warnings, the declaration,
+the local declarations, lists of basic blocks and the plain statements and operators). Details:
+rust/README.md, "C printing, slice 1". Checks `pc-r` and `pc-t` in `tools/bars.sh` (at
+`break start prototypewarnings`, `setcasts` skipped on both engines: no casts are printed yet)
+and the corpus `tools/corpus/simple.txt`. M8 0 / 7 loud (every M8 function has an `if` or more); `simple` 54 / 194 (rules on) and
+34 / 194 (types on), no silent miss left after the fixes; M8 all 47 checks identical. Fixed on the
+way: `namevars` links globals to their data symbols, `mapglobals` asks with the varnode's size
+whether a varnode is already linked, flow records the bad-instruction warnings.
+Next slices: if/else, loops, switch, gotos and labels; comments in the body (the comment
+sorter); casts once `setcasts` lands; field and array access; strings and characters; the rest
+of `printc.cc`.
+
 ## Running stages in parallel
 
 Strict chain first: S0 → S1a → S1b → S2. After S2 the work fans out. Under the cap of two

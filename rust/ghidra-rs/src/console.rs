@@ -329,8 +329,13 @@ impl Console {
                 let Some(fd) = &self.fd else { return Err("No function selected".into()) };
                 write!(out, "{}", crate::decomp::print_block_tree(fd).map_err(|e| e.to_string())?).map_err(io)?;
             }
+            // `IfcPrintCStruct`: the first slice of the C printer (decomp/printc.rs)
             ["print", "C"] => {
-                return Err(format!("{line}: not implemented in ghidra-rs yet (milestone 3, later stages)"));
+                let (Some(arch), Some(fd)) = (&self.arch, &mut self.fd) else {
+                    return Err("No function selected".into());
+                };
+                let name = self.function.as_ref().map_or("", |f| f.1.as_str());
+                write!(out, "{}", crate::decomp::print_c(fd, arch, name).map_err(|e| e.to_string())?).map_err(io)?;
             }
             _ => return Err(format!("not implemented in ghidra-rs: {line}")),
         }
