@@ -21,6 +21,7 @@
 #   STOP=1     one function at a time, in corpus order, stopping at the first mismatch the reference ran
 #   OUT        output directory (default: rust/target/decomp-check/<corpus>)
 #   TIMEOUT    seconds each engine may take per function (default 120; a killed run prints nothing)
+#   BIN        the game binary (default ~/projects/mercs/mercs2-decomp/orig/Mercenaries2.analysis.exe)
 # Each function is selected with `load function <name>`, its name taken from the prelude (which maps
 # every function, FID names included; `load addr` for one it lacks). Outputs are compared from that
 # line on: everything before it is the shared prelude.
@@ -32,7 +33,7 @@ export SLEIGHHOME=$root
 export DECOMP=${DECOMP:-$rust/target/decomp-build/decomp_dbg}
 export GHIDRA_RS=${GHIDRA_RS:-$rust/target/release/ghidra-rs}
 export GHIDRA_RS_SLA=${GHIDRA_RS_SLA:-$root/Ghidra/Processors/x86/data/languages/x86.sla}
-export BIN=${BIN:-/home/zpt/projects/mercs/mercs2-decomp/orig/Mercenaries2.analysis.exe}
+export BIN=${BIN:-$HOME/projects/mercs/mercs2-decomp/orig/Mercenaries2.analysis.exe}
 export PRELUDE=${PRELUDE:-$rust/target/decomp-check/mercs2.prelude}
 export BREAK PRINT=${PRINT:-print raw} OPTIONS CONTINUES=${CONTINUES:-0} TIMEOUT=${TIMEOUT:-120}
 [ -x "$DECOMP" ] || { echo "no reference: run rust/tools/decomp-ref.sh" >&2; exit 1; }

@@ -19,6 +19,8 @@
 #            differs: `loud` when ghidra-rs printed an error, `silent` otherwise, `timeout` when
 #            it printed nothing; `reference failed` lines for those the reference does not finish)
 #   KEEP=1   keep the per-function outputs (OUT/<check>-<corpus>/), deleted otherwise
+#   LIST=1   only print the check-corpus pairs it would run, one `<check> <corpus>` per line
+#            (bars-queue.sh shares them between two machines)
 #
 # Summary line: `<check>-<corpus>: reference finished F / N, identical I / F (loud L, silent S,
 # timeout T), all outputs identical A / N`. I counts only functions the reference finishes; A is
@@ -64,12 +66,14 @@ dbl="r5d r5dt r5dtlock r5dtlocksv"
 sw="swfs-r swfs-t swsn-r swsn-t swfsc-r swfsc-t"
 pc="pc-r pc-t pcc-r pcc-t"
 all="$std r5c $dbl svlock svs6 r5slock r5s pg-r pg-t nm-r nm-t ldn-r ldn-t fs-r fs-t cs-r cs-t fsc-r fsc-t $sw $pc"
-"$t/lock-options.sh" "$l" || exit 1
+[ -n "$LIST" ] || "$t/lock-options.sh" "$l" || exit 1
 for C in ${CORPORA:-m8 m500 r5d-adc switch simple}; do
+    C0=$C
     [ -f "$C" ] || C=$c/$C.txt
     [ -f "$C" ] || { echo "no corpus $C" >&2; exit 1; }
     case $(basename "$C" .txt) in r5d-adc) def=$dbl ;; switch) def="paramdouble $sw" ;; simple) def=$pc ;; *) def=$all ;; esac
     for k in ${CHECKS:-$def}; do
+        [ -n "$LIST" ] && { echo "$k $C0"; continue; }
         case $k in
         # stack heritage: every prototype locked with two stack parameters
         stack) run $k "$C" DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=$l/stack-lock.txt ;;
@@ -143,4 +147,5 @@ for C in ${CORPORA:-m8 m500 r5d-adc switch simple}; do
         esac
     done
 done
+[ -n "$LIST" ] && exit 0
 echo "DONE $(date +%T)" | tee -a "$o/summary.out"
