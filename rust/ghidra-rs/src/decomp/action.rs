@@ -80,6 +80,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
     ];
     let groups = if jumptable { JUMPTABLE } else { DECOMPILE };
     let on = |g: &str| groups.contains(&g) && !disabled.contains(g);
+    t.double_precis = on("doubleprecis");
     let rule_on = |rl: &super::rules::Rule| on(rl.group) && !disabled.contains(&format!("rule:{}", rl.name));
     let leaves = |t: &mut ActionTree, list: &[(&'static str, &str, super::actiontree::ApplyFn)]| -> Vec<_> {
         list.iter()
@@ -130,7 +131,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("unreachable", "base", unreachable),
             ("varnodeprops", "base", varnode_props),
             ("heritage", "base", heritage_pass),
-            ("paramdouble", "protorecovery", c::nothing),
+            ("paramdouble", "protorecovery", super::rules::param_double),
             ("segmentize", "base", c::nothing),
             ("internalstorage", "base", c::nothing),
             ("forcegoto", "blockrecovery", c::nothing),
@@ -156,8 +157,12 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("constantptr", "typerecovery", super::infertypes::constant_ptr),
         ],
     ));
-    // oppool2 (stage R5: the `typerecovery` pointer rules; `stackvars` is not ported)
-    let pool2 = super::rules::select(super::rules::OPPOOL2, rule_on);
+    // oppool2 (stage R5): the `typerecovery` pointer rules and the `stackvars` rules.
+    // ponytail: the jump-table partial function still folds its constant loads itself
+    // (`jumptable::fold_constants`) and runs without the `stackvars` rules, which the C++ has
+    // on there; switch them on with `fillinReadOnly` when `fold_constants` goes.
+    let pool2 =
+        super::rules::select(super::rules::OPPOOL2, |rl| rule_on(rl) && !(jumptable && rl.group == "stackvars"));
     mainloop.push(t.pool("oppool2", pool2));
     mainloop.extend(leaves(
         &mut t,

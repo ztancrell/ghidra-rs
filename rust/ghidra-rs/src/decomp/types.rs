@@ -227,6 +227,11 @@ impl TypeFactory {
         size.div_ceil(a) * a
     }
 
+    /// `Datatype::isCharPrint`: a `char` or a wide character type.
+    pub(crate) fn is_char_print(&self, id: TypeId) -> bool {
+        matches!(self.get(id).submeta, sub::INT_CHAR | sub::INT_UNICODE)
+    }
+
     /// Port of `TypeFactory::getBase(int4,type_metatype)`.
     pub(crate) fn base(&mut self, size: u32, meta: Meta) -> TypeId {
         if let Some(&id) = self.cache.get(&(size, meta)) {

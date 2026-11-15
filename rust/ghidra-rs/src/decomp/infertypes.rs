@@ -221,7 +221,7 @@ pub(crate) fn sub_type(fd: &mut Funcdata, arch: &Arch, t: TypeId, off: i64) -> R
     if let Kind::Spacebase { scope, .. } = fd.types.get(t).kind {
         let addr = off as u64 & calc_mask(arch.spec.stack_pointer.2);
         if scope == GLOBAL_SCOPE {
-            if let Some(e) = query_global(arch, addr) {
+            if let Some(e) = query_global(arch, addr, 1) {
                 let ty = e.symbol_type(fd, arch);
                 return Ok(Some((ty, (addr - e.addr) as i64)));
             }
@@ -672,21 +672,100 @@ fn propagate_across_returns(fd: &mut Funcdata, arch: &Arch, st: &mut Infer) -> R
     Ok(())
 }
 
-/// Port of `ActionInferTypes::propagateSpacebaseRef`/`propagateRef`: types of stack varnodes
-/// reached through the stack pointer. Before the `stackvars` rules (stage R5) the only stack
-/// varnodes are those of locked parameters, typelocked, which `propagateRef` skips. Its other
-/// skip, a varnode with a symbol entry (`getSymbolEntry() != 0`), adds nothing: the only local
-/// symbols are those parameters, and a varnode exactly at one is typelocked
-/// (`Funcdata::scoped_stack`) while a piece of one fails in heritage.
-fn propagate_spacebase_ref(fd: &Funcdata) -> Result<()> {
-    let skipped = |vn| {
-        let v = fd.vn(vn);
-        v.has(VnFlags::TYPELOCK) || v.is_annotation() || (v.def.is_none() && v.descend.is_empty())
-    };
-    if fd.loc_space(Space::Stack).into_iter().all(skipped) {
+/// Port of `TypeFactory::getExactPiece`: the piece of `ct` at `offset` of exactly `size` bytes.
+/// Partial structs, unions and enums are not ported (`sub_type` fails on their parents).
+fn exact_piece(fd: &mut Funcdata, arch: &Arch, mut ct: TypeId, offset: u64, size: u32) -> Result<Option<TypeId>> {
+    let mut cur = offset as i64;
+    let mut last = None;
+    loop {
+        if i64::from(fd.types.size(ct)) < i64::from(size) + cur {
+            break;
+        }
+        if fd.types.size(ct) == size {
+            return Ok(Some(ct));
+        }
+        last = Some(ct);
+        match sub_type(fd, arch, ct, cur)? {
+            Some((t, o)) => (ct, cur) = (t, o),
+            None => break,
+        }
+    }
+    if last.is_some_and(|t| matches!(fd.types.meta(t), Meta::Struct | Meta::Array | Meta::Union)) {
+        return err("a partial struct, array or union (getExactPiece): not implemented in ghidra-rs yet");
+    }
+    Ok(None)
+}
+
+/// Port of `ActionInferTypes::propagateRef`: the type `vn` points to goes to the stack varnodes
+/// at stack offset `off` it covers. Its skip of a varnode with a symbol entry adds nothing: the
+/// only local symbols are the locked stack parameters, and a varnode exactly at one is
+/// typelocked (`Funcdata::scoped_stack`) while a piece of one fails in heritage.
+fn propagate_ref(fd: &mut Funcdata, arch: &Arch, st: &mut Infer, vn: VarnodeId, off: u64) -> Result<()> {
+    let ct = st.temp(fd, vn);
+    let Some(ct) = fd.types.ptr_to(ct) else { return Ok(()) };
+    if matches!(fd.types.meta(ct), Meta::Spacebase | Meta::Unknown) {
         return Ok(());
     }
-    err("type propagation into stack varnodes (propagateRef): not implemented in ghidra-rs yet")
+    let csize = fd.types.size(ct);
+    let mask = super::heritage_guard::stack_mask(arch);
+    let end = off.wrapping_add(u64::from(csize)) & mask;
+    // endLoc(endaddr) is past the varnodes at the end address; a wrapped range runs to the
+    // end of the space
+    let to = if end < off || end == mask { None } else { Some(end + 1) };
+    let (mut lastoff, mut lastsize, mut lastct) = (0, csize, Some(ct));
+    for cur in fd.loc_range(Space::Stack, off, to) {
+        let v = fd.vn(cur);
+        if skipped(fd, cur) || v.has(VnFlags::TYPELOCK) {
+            continue;
+        }
+        let (curoff, cursize) = (v.offset.wrapping_sub(off), v.size);
+        if curoff.wrapping_add(u64::from(cursize)) > u64::from(csize) {
+            continue;
+        }
+        if cursize != lastsize || curoff != lastoff {
+            (lastoff, lastsize) = (curoff, cursize);
+            lastct = exact_piece(fd, arch, ct, curoff, cursize)?;
+        }
+        let Some(t) = lastct else { continue };
+        let curt = st.temp(fd, cur);
+        if fd.types.order(t, curt) < 0 {
+            st.set_temp(cur, t);
+            propagate_one(fd, arch, st, cur)?;
+        }
+    }
+    Ok(())
+}
+
+/// Port of `ActionInferTypes::propagateSpacebaseRef` for the input stack pointer
+/// (`findSpacebaseInput` of the local scope's space): the types of the pointers made from it
+/// go to the stack varnodes they point to.
+fn propagate_spacebase_ref(fd: &mut Funcdata, arch: &Arch, st: &mut Infer) -> Result<()> {
+    let (sp, spoff, size) = arch.spec.stack_pointer;
+    let Some(spcvn) = fd.loc_at(Space::Sleigh(sp), spoff, size).into_iter().find(|&v| fd.vn(v).is_input()) else {
+        return Ok(());
+    };
+    // the varnode's own type, not the temporary one
+    let spctype = vn_type(fd, spcvn);
+    if !fd.types.ptr_to(spctype).is_some_and(|t| fd.types.meta(t) == Meta::Spacebase) {
+        return Ok(());
+    }
+    let mask = super::heritage_guard::stack_mask(arch);
+    let readers = fd.vn(spcvn).descend.to_vec(); // snapshot: propagation edits fd
+    for op in readers {
+        let o = fd.op(op);
+        let konst = |slot: usize| o.ins.get(slot).map(|&i| fd.vn(i)).filter(|v| v.is_constant()).map(|v| v.offset);
+        let off = match o.opc {
+            Opcode::Copy => Some(0),
+            Opcode::IntAdd | Opcode::Ptrsub => konst(1),
+            Opcode::Ptradd => konst(1).map(|c| c.wrapping_mul(konst(2).unwrap_or(0))),
+            _ => None,
+        };
+        if let (Some(off), Some(out)) = (off, o.out) {
+            // TypeSpacebase::getAddress: the constant wrapped into the stack space
+            propagate_ref(fd, arch, st, out, off & mask)?;
+        }
+    }
+    Ok(())
 }
 
 /// Port of `ActionStartTypes::apply`.
@@ -731,7 +810,7 @@ pub(crate) fn infer_types(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         }
     }
     propagate_across_returns(fd, arch, &mut st)?;
-    propagate_spacebase_ref(fd)?;
+    propagate_spacebase_ref(fd, arch, &mut st)?;
     // writeBack
     let mut change = false;
     for vn in locs {
@@ -750,9 +829,10 @@ pub(crate) fn infer_types(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     Ok(0)
 }
 
-/// A symbol of the global scope a pointer constant can name (`MapEntry`): a function or an
-/// external reference. `rules/ptrarith.rs` (`AddTree::calc_subtype`) relies on no other kind
-/// existing; adding data symbols means porting `TypeSpacebase::nearestArrayedComponent*` there.
+/// A symbol of the global scope (`MapEntry`): a function or an external reference.
+/// `rules/ptrarith.rs` (`AddTree::calc_subtype`) relies on no other kind existing; adding data
+/// symbols means porting `TypeSpacebase::nearestArrayedComponent*` there.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Entry {
     pub(crate) addr: u64,
     pub(crate) externref: bool,
@@ -770,17 +850,15 @@ impl Entry {
     }
 }
 
-/// Port of `Scope::queryContainer(addr, 1)` on the global scope: a function covers its entry
-/// byte, an external reference its pointer-sized slot.
-pub(crate) fn query_global(arch: &Arch, addr: u64) -> Option<Entry> {
-    if arch.functions.contains_key(&addr) {
+/// Port of `Scope::queryContainer(addr, size)` on the global scope: the symbol holding the whole
+/// range. A function covers its entry byte, an external reference its pointer-sized slot.
+pub(crate) fn query_global(arch: &Arch, addr: u64, size: u32) -> Option<Entry> {
+    if size == 1 && arch.functions.contains_key(&addr) {
         return Some(Entry { addr, externref: false });
     }
-    let size = u64::from(arch.spec.stack_pointer.2);
-    (0..size)
-        .filter_map(|d| addr.checked_sub(d))
-        .find(|s| arch.externrefs.contains_key(s))
-        .map(|s| Entry { addr: s, externref: true })
+    let slot = u64::from(arch.spec.stack_pointer.2);
+    let fits = |s: &u64| addr - s + u64::from(size) <= slot && arch.externrefs.contains_key(s);
+    (0..slot).filter_map(|d| addr.checked_sub(d)).find(fits).map(|s| Entry { addr: s, externref: true })
 }
 
 fn set_symcheck(fd: &mut Funcdata, vn: VarnodeId, complete: bool) {
@@ -839,7 +917,7 @@ fn is_pointer(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, op: OpId, slot: usi
             return None;
         }
     }
-    let entry = query_global(arch, off)?;
+    let entry = query_global(arch, off, 1)?;
     if needexact && entry.addr != off {
         set_symcheck(fd, vn, false);
         return None;

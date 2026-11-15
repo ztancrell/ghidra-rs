@@ -96,6 +96,9 @@ fn concat_of(fd: &Funcdata, vn: VarnodeId) -> Result<Option<OpId>> {
 pub(super) fn split_flow(fd: &mut Funcdata, op: OpId, arch: &Arch) -> Result<i32> {
     let lo_size = int4(fd, inp(fd, op, 1)?);
     let vn = inp(fd, op, 0)?;
+    if lo_size != 0 && fd.vn(vn).is_written() && fd.vn(vn).is_precis() {
+        return Ok(0);
+    }
     if lo_size == 0 || i64::from(fd.vn(out(fd, op)?).size) + lo_size != i64::from(fd.vn(vn).size) {
         return Ok(0);
     }

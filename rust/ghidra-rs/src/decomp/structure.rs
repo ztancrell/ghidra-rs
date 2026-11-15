@@ -694,11 +694,11 @@ impl Structure {
     /// `Funcdata::printBlockTree`: `printTree` of the root, if structured: each block's header
     /// indented two spaces a level, then a graph's components in order (a work stack, depth
     /// first). `BlockCopy::printTree` prints its basic block.
-    pub(crate) fn print_tree(&self, fd: &Funcdata) -> String {
+    pub(crate) fn print_tree(&self, fd: &Funcdata) -> Result<String> {
         use std::fmt::Write;
         let mut s = String::new();
         if self.is_empty() {
-            return s;
+            return Ok(s);
         }
         let mut stack = vec![(ROOT, 0usize)];
         while let Some((b, level)) = stack.pop() {
@@ -706,15 +706,15 @@ impl Structure {
             let bl = self.b(b);
             if let Kind::Copy(bb) = bl.kind {
                 let basic = fd.blocks.block(bb);
-                let extra = super::finalstructure::tree_extra(self, fd, b);
+                let extra = super::finalstructure::tree_extra(self, fd, b)?;
                 let _ = writeln!(s, "Basic Block {} 0x{:08x}-0x{:08x}{extra}", basic.index, basic.start, basic.stop);
                 continue;
             }
-            let extra = super::finalstructure::tree_extra(self, fd, b);
+            let extra = super::finalstructure::tree_extra(self, fd, b)?;
             let _ = writeln!(s, "{}{}{extra}", self.header_name(b), bl.index);
             stack.extend(bl.list.iter().rev().map(|&c| (c, level + 1)));
         }
-        s
+        Ok(s)
     }
 
     /// The `printHeader` text before `FlowBlock::printHeader` (the index) of a graph block.
@@ -869,7 +869,7 @@ mod tests {
     /// `ActionBlockStructure` without the architecture: the change count and the tree.
     fn structure(fd: &mut Funcdata) -> (i32, String) {
         let n = build_and_collapse(fd).unwrap();
-        (n, fd.structure.print_tree(fd))
+        (n, fd.structure.print_tree(fd).unwrap())
     }
 
     /// A->{B,C}, B->D, C->D: if/else, no negation (the true clause is out 1). List order is

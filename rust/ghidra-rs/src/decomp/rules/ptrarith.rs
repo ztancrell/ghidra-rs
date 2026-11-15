@@ -754,7 +754,7 @@ fn collect_duplicate_needs(fd: &Funcdata, mut vn: VarnodeId) -> Result<Vec<OpId>
 }
 
 /// Port of `RulePushPtr::duplicateNeed`.
-fn duplicate_need(fd: &mut Funcdata, op: OpId) -> Result<()> {
+pub(super) fn duplicate_need(fd: &mut Funcdata, op: OpId) -> Result<()> {
     let out_vn = out(fd, op)?;
     let in_vn = inp(fd, op, 0)?;
     let second = ins(fd, op).get(1).copied();
@@ -1029,22 +1029,7 @@ mod tests {
         assert_eq!(sext(0x80, 1), -128);
     }
 
-    /// A register input of 4 bytes at `off`.
-    fn input(fd: &mut Funcdata, off: u64) -> VarnodeId {
-        let v = fd.new_varnode(4, Space::Sleigh(1), off);
-        fd.vn_set(v, VnFlags::INPUT);
-        v
-    }
-
-    /// A new op `opc` with inputs `ins` and a register output at `off`.
-    fn op(fd: &mut Funcdata, opc: Opcode, ins: &[VarnodeId], off: u64) -> (OpId, VarnodeId) {
-        let o = fd.new_op(opc, 0x1000);
-        let out = fd.new_varnode_out(4, Space::Sleigh(1), off, o);
-        for (i, &v) in ins.iter().enumerate() {
-            fd.op_set_input(o, v, i).unwrap();
-        }
-        (o, out)
-    }
+    use crate::decomp::rules::testutil::{input, op};
 
     #[test]
     fn add_tree_splits_multiples_and_offsets() {

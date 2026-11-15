@@ -3,8 +3,8 @@
 //! in [`bits`], [`compare`], [`boolean`], [`cleanup`]; stage R3: extension, concat and sub-pieces
 //! in [`extend`], [`piece`], [`subpiece`]; stage R4: division, remainder, sign and float rules in
 //! [`div`], [`modulo`], [`floatrules`] and `RuleSubfloatConvert` in `decomp/subfloat.rs`; the
-//! `subvar` group and `RulePiecePathology` of stage R3b in [`subvar`], [`piece`]; ruleaction.cc)
-//! and the pool walk ([`pool`]), with the expression helpers they share ([`cse`]) and float constant
+//! `subvar` group and `RulePiecePathology` of stage R3b in [`subvar`], [`piece`]; ruleaction.cc),
+//! the double-precision rules of stage R5 slice 3 in [`double`] (double.cc), and the pool walk ([`pool`]), with the expression helpers they share ([`cse`]) and float constant
 //! folding ([`float`]); the `Funcdata` methods they need (`cseEliminateList`,
 //! `distributeIntMultAdd`, `totalReplaceConstant`, ...) are in `funcdata.rs`.
 //!
@@ -14,13 +14,16 @@
 //! big-endian address arithmetic of the rules is left out.
 
 mod arith;
+mod bitfield;
 mod bits;
 mod boolean;
 mod cleanup;
 mod compare;
+mod constseq;
 mod copy;
 mod cse;
 mod div;
+mod double;
 mod extend;
 mod float;
 mod floatrules;
@@ -28,31 +31,39 @@ mod modulo;
 mod piece;
 mod pool;
 mod ptrarith;
+mod stackvars;
 mod subpiece;
 mod subvar;
+mod typecleanup;
 
 pub(crate) use boolean::{boolean_flip, op_normalize_flip};
 pub(crate) use compare::replace_lessequal;
 pub(crate) use cse::func_eq_level;
 pub(crate) use cse::func_equal;
+pub(crate) use double::param_double;
 pub(crate) use pool::{nonzero_mask, pool_apply, select, Pool};
 
 use arith::*;
+use bitfield::*;
 use bits::*;
 use boolean::*;
 use cleanup::*;
 use compare::*;
+use constseq::*;
 use copy::*;
 use cse::*;
 use div::*;
+use double::*;
 use extend::*;
 use float::*;
 use floatrules::*;
 use modulo::*;
 use piece::*;
 use ptrarith::*;
+use stackvars::*;
 use subpiece::*;
 use subvar::*;
+use typecleanup::*;
 
 use std::collections::HashSet;
 
@@ -231,6 +242,10 @@ pub(crate) const OPPOOL1: &[Rule] = &[
     r("ptraddundo", "typerecovery", &[Ptradd], ptradd_undo),
     r("ptrsubundo", "typerecovery", &[Ptrsub], ptrsub_undo),
     r("piecepathology", "protorecovery", &[Piece], piece_pathology),
+    r("doubleload", "doubleload", &[Piece], double_load),
+    r("doublestore", "doubleprecis", &[Store], double_store),
+    r("doublein", "doubleprecis", &[Subpiece], double_in),
+    r("doubleout", "doubleprecis", &[Piece], double_out),
 ];
 
 /// The ported rules of `oppool2`, in `universalAction`'s order (stage R5).
@@ -239,13 +254,36 @@ pub(crate) const OPPOOL2: &[Rule] = &[
     r("pushptr", "typerecovery", &[IntAdd], push_ptr),
     r("structoffset0", "typerecovery", &[Load, Store], struct_offset0),
     r("ptrarith", "typerecovery", &[IntAdd], ptr_arith),
+    r("loadvarnode", "stackvars", &[Load], load_varnode),
+    r("storevarnode", "stackvars", &[Store], store_varnode),
 ];
 
 /// The ported rules of the `cleanup` pool, in `universalAction`'s order.
 #[rustfmt::skip]
 pub(crate) const CLEANUP: &[Rule] = &[
     r("multnegone", "cleanup", &[IntMult], mult_neg_one),
+    r("addunsigned", "cleanup", &[IntAdd], add_unsigned),
     r("2comp2sub", "cleanup", &[Int2comp], two_comp_2_sub),
+    r("dumptyhumplate", "cleanup", &[Subpiece], dumpty_hump_late),
+    r("subright", "cleanup", &[Subpiece], sub_right),
+    r("floatsigncleanup", "cleanup", &[IntAnd, IntXor], float_sign_cleanup),
+    r("expandload", "cleanup", &[Load], expand_load),
+    r("extensionpush", "cleanup", &[IntZext, IntSext], extension_push),
+    r("piecestructure", "cleanup", &[Piece, IntZext], piece_structure),
+    r("andstructure", "cleanup", &[IntAnd], and_structure),
+    r("stringcopy", "constsequence", &[Copy], string_copy),
+    r("stringstore", "constsequence", &[Store], string_store),
+    r("bitfield_store", "bitfields", &[Store], bitfield_transform),
+    r("bitfield_out", "bitfields", &[
+        Copy, IntEqual, IntNotequal, IntSless, IntSlessequal, IntLess, IntLessequal, IntZext, IntSext, IntAdd,
+        IntCarry, IntScarry, IntXor, IntAnd, IntOr, IntLeft, IntRight, IntSright, IntMult, BoolNegate, BoolXor,
+        BoolAnd, BoolOr, FloatEqual, FloatNotequal, FloatLess, FloatLessequal, FloatNan, Subpiece], bitfield_transform),
+    r("bitfield_load", "bitfields", &[Load], bitfield_transform),
+    r("bitfield_in", "bitfields", &[
+        Copy, IntEqual, IntNotequal, IntSless, IntSlessequal, IntLess, IntLessequal, IntZext, IntSext, IntAdd,
+        IntNegate, IntAnd, IntLeft, IntRight, IntSright, IntMult, Subpiece], bitfield_transform),
+    r("pull_absorb", "bitfields", &[Zpull, Spull], bitfield_absorb),
+    r("insert_absorb", "bitfields", &[Insert], bitfield_absorb),
 ];
 
 // ---- helpers on ops and varnodes ----
@@ -356,6 +394,40 @@ fn shl(v: u64, sa: i32) -> u64 {
 /// `uintb >> int4` as x86-64 computes it.
 fn shr(v: u64, sa: i32) -> u64 {
     v.wrapping_shr(sa as u32)
+}
+
+/// Hand-built ops for the rule tests.
+#[cfg(test)]
+pub(super) mod testutil {
+    use super::*;
+
+    /// A register input of 4 bytes at `off`.
+    pub(crate) fn input(fd: &mut Funcdata, off: u64) -> VarnodeId {
+        let v = fd.new_varnode(4, Space::Sleigh(1), off);
+        fd.vn_set(v, VnFlags::INPUT);
+        v
+    }
+
+    /// A new op `opc` with inputs `ins` and a 4-byte register output at `off`.
+    pub(crate) fn op(fd: &mut Funcdata, opc: Opcode, ins: &[VarnodeId], off: u64) -> (OpId, VarnodeId) {
+        op_sized(fd, opc, ins, off, 4)
+    }
+
+    /// A new op `opc` with inputs `ins` and a register output of `size` bytes at `off`.
+    pub(crate) fn op_sized(
+        fd: &mut Funcdata,
+        opc: Opcode,
+        ins: &[VarnodeId],
+        off: u64,
+        size: u32,
+    ) -> (OpId, VarnodeId) {
+        let o = fd.new_op(opc, 0x1000);
+        let out = fd.new_varnode_out(size, Space::Sleigh(1), off, o);
+        for (i, &v) in ins.iter().enumerate() {
+            fd.op_set_input(o, v, i).unwrap();
+        }
+        (o, out)
+    }
 }
 
 #[cfg(test)]

@@ -153,7 +153,6 @@ impl<'a> Printer<'a> {
                 4
             }
             Space::Sleigh(sp) => self.address(sp, v.offset, v.size),
-            // stack varnodes come with the `stackvars` rules (stage R5)
             // JoinSpace::printRaw: the pieces' names
             Space::Join => {
                 let text = join_raw(self.fd(), self.arch, v.offset).unwrap_or_else(|e| e.0);

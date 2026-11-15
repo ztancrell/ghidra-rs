@@ -19,12 +19,4 @@ option togglerule switchsingle off
 option togglerule conditionalmove off
 option togglerule orpredicate off
 option togglerule funcptrencoding off
-option togglerule addunsigned off
-option togglerule dumptyhumplate off
-option togglerule subright off
-option togglerule floatsigncleanup off
-option togglerule expandload off
 option togglerule ptrsubcharconstant off
-option togglerule extensionpush off
-option togglerule piecestructure off
-option togglerule andstructure off

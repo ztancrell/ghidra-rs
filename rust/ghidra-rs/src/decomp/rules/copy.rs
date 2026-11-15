@@ -189,8 +189,8 @@ pub(super) fn build_subpiece(fd: &mut Funcdata, base: VarnodeId, outsize: u32, s
     Ok(outvn)
 }
 
-/// Port of `RulePullsubMulti`. (`isPrecisLo`/`isPrecisHi` are set by the double-precision
-/// rules of R5; nothing sets them yet.)
+/// Port of `RulePullsubMulti` (a double-precision piece, `isPrecisLo`/`isPrecisHi`, is left
+/// whole).
 pub(super) fn pullsub_multi(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
     let vn = inp(fd, op, 0)?;
     let Some(mult) = def(fd, vn) else { return Ok(0) };
@@ -205,6 +205,9 @@ pub(super) fn pullsub_multi(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32
     let new_size = max - min + 1;
     if max < min || new_size >= fd.vn(vn).size as i32 || !acceptable_size(new_size) {
         return Ok(0);
+    }
+    if fd.vn(out(fd, op)?).is_precis() {
+        return Ok(0); // don't pull apart a double precision object
     }
     if min > 8 {
         return Ok(0);

@@ -570,11 +570,12 @@ fn mark_label_bump_up(s: &mut Structure) {
 /// `DECOMP_TREE_EXTRA` (rust/tools/decomp-ref.patch): what `print tree block` adds after a block's
 /// header: the unstructured-target and label-bump-up flags, a goto block's goto type, a
 /// switch's cases (block index and goto type, in order) and a while-do's for-loop ops.
-pub(crate) fn tree_extra(s: &Structure, fd: &Funcdata, b: SId) -> String {
+/// A case label the jump table cannot give is an error, as `printCaseExtra` throws it.
+pub(crate) fn tree_extra(s: &Structure, fd: &Funcdata, b: SId) -> Result<String> {
     use std::fmt::Write;
     static EXTRA: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if !*EXTRA.get_or_init(|| std::env::var_os("DECOMP_TREE_EXTRA").is_some()) {
-        return String::new();
+        return Ok(String::new());
     }
     let bl = s.b(b);
     let mut out = format!(" {{f{:x}", bl.flags & (F_UNSTRUCTURED_TARG | F_LABEL_BUMPUP));
@@ -591,7 +592,7 @@ pub(crate) fn tree_extra(s: &Structure, fd: &Funcdata, b: SId) -> String {
                 let Some(jt) = table else { continue };
                 let (d, x) = (if c.isdefault { "d" } else { "" }, if c.isexit { "x" } else { "" });
                 let chain = c.chain.map_or(-1, |k| k as i64);
-                let labels = case_label_list(fd, jt, c, usize::MAX).unwrap_or_default();
+                let labels = case_label_list(fd, jt, c, usize::MAX)?;
                 let labels: Vec<String> = labels.iter().map(|l| format!("{l:x}")).collect();
                 let _ = write!(out, ":{d}{x}:{chain}:{}:{}", c.depth, labels.join(","));
             }
@@ -607,7 +608,7 @@ pub(crate) fn tree_extra(s: &Structure, fd: &Funcdata, b: SId) -> String {
         _ => {}
     }
     out.push('}');
-    out
+    Ok(out)
 }
 
 #[cfg(test)]

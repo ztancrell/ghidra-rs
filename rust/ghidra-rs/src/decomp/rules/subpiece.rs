@@ -1,7 +1,7 @@
 //! The rules on truncation: `RuleDoubleSub`, `RuleSubExtComm`, `RuleSubCommute`,
 //! `RuleSubZext`, `RuleSubCancel`, `RuleShiftSub`, `RuleSubNormal` (ruleaction.cc). The
-//! double-precision marks (`isPrecisLo`, `isPrecisHi`) are set by `double.cc` (R5): no varnode
-//! has them yet.
+//! double-precision marks (`isPrecisLo`, `isPrecisHi`, set by `double.cc`, R5 slice 3) stop
+//! `RuleSubCommute` and `RuleSubNormal`. Superseded: "no varnode has them yet".
 
 use super::*;
 
@@ -153,6 +153,9 @@ pub(super) fn sub_commute(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> 
     let Some(longform) = def(fd, base) else { return Ok(0) };
     let offset = int4(fd, inp(fd, op, 1)?);
     let outvn = out(fd, op)?;
+    if fd.vn(outvn).is_precis() {
+        return Ok(0);
+    }
     let insize = fd.vn(base).size;
     let mut skip = None; // the shift amount of INT_LEFT is not truncated
     match fd.op(longform).opc {
@@ -409,6 +412,9 @@ pub(super) fn sub_normal(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
     let savn = inp(fd, shiftop, 1)?;
     let a = inp(fd, shiftop, 0)?;
     if !is_const(fd, savn) || fd.vn(a).is_free() {
+        return Ok(0);
+    }
+    if fd.vn(out(fd, op)?).is_precis() {
         return Ok(0);
     }
     let mut n = int4(fd, savn);

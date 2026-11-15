@@ -4,6 +4,7 @@
 #
 #   decomp-diff.sh <corpus>        corpus: m8, m500, a file of addresses (one per line, `#` comments), or d
 #   decomp-diff.sh --script <file> one script, both engines, full diff
+#   decomp-diff.sh --prelude       only write the prelude (below) when it is missing
 #
 # A corpus run writes, per function, a script and both outputs under rust/target/decomp-check/<corpus>/
 # and prints `identical N / M`, the functions the reference could not decompile, and the first
@@ -55,6 +56,7 @@ if [ ! -f "$PRELUDE" ]; then
     mv "$PRELUDE.$$" "$PRELUDE"
 fi
 
+[ "$1" = --prelude ] && exit 0
 if [ "$1" = --script ]; then
     diff <("$DECOMP" -i "$2" </dev/null 2>&1) <("$GHIDRA_RS" decompile -i "$2" 2>&1) && echo identical
     exit 0

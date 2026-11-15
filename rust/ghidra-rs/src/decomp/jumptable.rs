@@ -1042,8 +1042,8 @@ impl<'a> JumpBasic<'a> {
     /// `BlockBasic::findMultiequal`: the MULTIEQUAL of `bl` taking exactly `vars`.
     fn find_multiequal(&self, bl: BlockId, vars: &[VarnodeId]) -> Option<OpId> {
         let fd = self.fd;
-        let readers = fd.vn(vars[0]).descend.iter().copied();
-        let op = readers.into_iter().find(|&o| fd.op(o).opc == Opcode::Multiequal && fd.op(o).parent == Some(bl))?;
+        let mut readers = fd.vn(vars[0]).descend.iter().copied();
+        let op = readers.find(|&o| fd.op(o).opc == Opcode::Multiequal && fd.op(o).parent == Some(bl))?;
         (fd.op(op).ins.as_slice() == vars).then_some(op)
     }
 
@@ -1799,17 +1799,26 @@ fn push_branch(fd: &mut Funcdata, bb: BlockId, slot: usize, bbnew: BlockId) -> R
     structure_reset(fd)
 }
 
+/// The table whose BRANCHIND is `jop`. Held as an op, not an index: `push_branch` resets the
+/// structure, which drops dead tables and moves the others (the C++ keeps a `JumpTable *`).
+fn table_of(fd: &Funcdata, jop: OpId) -> Result<usize> {
+    fd.jumptables
+        .iter()
+        .position(|jt| jt.op == jop)
+        .ok_or_else(|| LowlevelError("jump table lost while folding a guard".into()))
+}
+
 /// Port of `JumpBasic::foldInOneGuard`: the guard's other target becomes the switch's default,
 /// as a new out edge of the switch block or, when the switch already goes there, by fixing the
-/// CBRANCH's condition.
-fn fold_in_one_guard(fd: &mut Funcdata, i: usize, cbranch: OpId, stored: usize) -> Result<bool> {
+/// CBRANCH's condition. `jop` is the table's BRANCHIND.
+fn fold_in_one_guard(fd: &mut Funcdata, jop: OpId, cbranch: OpId, stored: usize) -> Result<bool> {
     let Some(cbl) = fd.op(cbranch).parent else { return Ok(false) };
     let cb = fd.blocks.block(cbl);
     if cb.outs.len() != 2 {
         return Ok(false); // the branch was converted since the recovery
     }
     let indpath = if cb.flip_path { 1 - stored } else { stored };
-    let Some(switchbl) = fd.op(fd.jumptables[i].op).parent else { return Ok(false) };
+    let Some(switchbl) = fd.op(jop).parent else { return Ok(false) };
     if cb.outs[indpath].point != switchbl {
         return Ok(false); // the guard must go straight into the switch block
     }
@@ -1817,7 +1826,7 @@ fn fold_in_one_guard(fd: &mut Funcdata, i: usize, cbranch: OpId, stored: usize) 
     let outs = &fd.blocks.block(switchbl).outs;
     let nout = outs.len();
     let pos = outs.iter().position(|e| e.point == guardtarget).unwrap_or(nout);
-    let jt = &fd.jumptables[i];
+    let jt = &fd.jumptables[table_of(fd, jop)?];
     if jt.default_is_folded && jt.default_block != Some(pos) {
         return Ok(false); // only one folded target
     }
@@ -1827,6 +1836,7 @@ fn fold_in_one_guard(fd: &mut Funcdata, i: usize, cbranch: OpId, stored: usize) 
     if pos == nout {
         // addBlockToSwitch without a label, setLastAsDefault
         let start = fd.blocks.block(guardtarget).start;
+        let i = table_of(fd, jop)?;
         let jt = &mut fd.jumptables[i];
         jt.targets.push(start);
         jt.last_block = nout;
@@ -1839,14 +1849,17 @@ fn fold_in_one_guard(fd: &mut Funcdata, i: usize, cbranch: OpId, stored: usize) 
         let size = fd.vn(fd.op(cbranch).ins[0]).size;
         let c = fd.new_constant(size, val);
         fd.op_set_input(cbranch, c, 1)?;
+        let i = table_of(fd, jop)?;
         fd.jumptables[i].default_block = Some(pos);
     }
+    let i = table_of(fd, jop)?;
     fd.jumptables[i].default_is_folded = true;
     Ok(true)
 }
 
 /// Port of `JumpBasic::foldInGuards` (with `JumpBasic2::foldInOneGuard`) for table `i`.
 fn fold_in_guards(fd: &mut Funcdata, i: usize) -> Result<bool> {
+    let jop = fd.jumptables[i].op;
     let Some(mut model) = fd.jumptables[i].model.take() else { return Ok(false) };
     let mut change = false;
     for g in &mut model.guards {
@@ -1857,26 +1870,31 @@ fn fold_in_guards(fd: &mut Funcdata, i: usize) -> Result<bool> {
         }
         let folded = if model.basic2 {
             // the last block of the table is the value the guard's other path gives
-            fd.jumptables[i].default_block = Some(fd.jumptables[i].last_block);
+            let i = table_of(fd, jop)?;
+            let jt = &mut fd.jumptables[i];
+            jt.default_block = Some(jt.last_block);
             true
         } else {
-            fold_in_one_guard(fd, i, cbranch, g.1)?
+            fold_in_one_guard(fd, jop, cbranch, g.1)?
         };
         if folded {
             g.0 = None;
             change = true;
         }
     }
+    let i = table_of(fd, jop)?;
     fd.jumptables[i].model = Some(model);
     Ok(change)
 }
 
 /// Port of `ActionSwitchNorm::apply`: each table gets its case labels once (the model matched
 /// on the function, the labels, the BRANCHIND reading the unnormalized switch variable), and
-/// its guards are folded into the switch as they become foldable.
+/// its guards are folded into the switch as they become foldable. As in the C++, the count of
+/// tables is read again each time round (folding a guard can drop a dead table).
 pub(crate) fn switch_norm(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     let mut count = 0;
-    for i in 0..fd.jumptables.len() {
+    let mut i = 0;
+    while i < fd.jumptables.len() {
         if fd.jumptables[i].labels.is_empty() {
             recover_labels(fd, arch, i)?;
             count += 1;
@@ -1885,6 +1903,7 @@ pub(crate) fn switch_norm(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             fd.structure.clear(); // the structure is redone
             count += 1;
         }
+        i += 1;
     }
     Ok(count)
 }

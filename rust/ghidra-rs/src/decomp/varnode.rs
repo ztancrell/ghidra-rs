@@ -21,8 +21,8 @@ pub(crate) enum Space {
     Iop,
     /// `fspec`: the offset names a call (the first input of a CALL).
     Fspec,
-    /// the `stack` space the `.cspec`'s `<stackpointer>` makes (no varnode lives in it until
-    /// the `stackvars` rules, stage R5)
+    /// the `stack` space the `.cspec`'s `<stackpointer>` makes (its varnodes: locked stack
+    /// parameters, and what the `stackvars` rules of stage R5 load and store)
     Stack,
     /// `join`: the offset indexes [`super::funcdata::Funcdata::joins`] (`JoinRecord`)
     Join,
@@ -107,6 +107,13 @@ impl VnFlags {
     pub(crate) const EXPLICIT: VnFlags = VnFlags(1 << 24);
     /// `indirectonly`: an illegal input only INDIRECTs read (`markIndirectOnly`, stage S7)
     pub(crate) const INDIRECTONLY: VnFlags = VnFlags(1 << 25);
+    /// `precislo`: the least significant half of a double-precision whole (double.cc, stage R5)
+    pub(crate) const PRECIS_LO: VnFlags = VnFlags(1 << 27);
+    /// `precishi`: the most significant half of a double-precision whole (double.cc, stage R5)
+    pub(crate) const PRECIS_HI: VnFlags = VnFlags(1 << 28);
+    /// `stack_store` (an additional flag in C++): written by a COPY that was a STORE
+    /// (`RuleStoreVarnode`, stage R5)
+    pub(crate) const STACK_STORE: VnFlags = VnFlags(1 << 29);
 
     /// both sets of flags
     pub(crate) const fn with(self, f: VnFlags) -> VnFlags {
@@ -157,6 +164,18 @@ impl Varnode {
 
     pub(crate) fn is_constant(&self) -> bool {
         self.space == CONST_SPACE
+    }
+    /// `Varnode::isPrecisLo`.
+    pub(crate) fn is_precis_lo(&self) -> bool {
+        self.flags.has(VnFlags::PRECIS_LO)
+    }
+    /// `Varnode::isPrecisHi`.
+    pub(crate) fn is_precis_hi(&self) -> bool {
+        self.flags.has(VnFlags::PRECIS_HI)
+    }
+    /// `isPrecisLo() || isPrecisHi()`: a piece of a double-precision whole.
+    pub(crate) fn is_precis(&self) -> bool {
+        self.is_precis_lo() || self.is_precis_hi()
     }
     pub(crate) fn is_annotation(&self) -> bool {
         matches!(self.space, Space::Iop | Space::Fspec) || self.has(VnFlags::CODEREF)

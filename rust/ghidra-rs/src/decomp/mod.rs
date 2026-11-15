@@ -68,8 +68,8 @@ pub fn print_map(fd: &Funcdata, arch: &Arch, name: &str) -> std::result::Result<
 }
 
 /// `Funcdata::printBlockTree` (`print tree block`): the structured hierarchy, empty before
-/// `ActionBlockStructure` ran.
-pub fn print_block_tree(fd: &Funcdata) -> String {
+/// `ActionBlockStructure` ran. Fails as `printCaseExtra` of the reference patch does.
+pub fn print_block_tree(fd: &Funcdata) -> std::result::Result<String, LowlevelError> {
     fd.structure.print_tree(fd)
 }
 

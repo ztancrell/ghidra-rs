@@ -1,8 +1,6 @@
 //! The rules of the `cleanup` pool that need no data-types (stage R2): `RuleMultNegOne`,
-//! `Rule2Comp2Sub` (ruleaction.cc). The pool's other rules of group `cleanup` read data-types
-//! or belong to later stages (`RuleAddUnsigned`, `RuleSubRight`, `RuleDumptyHumpLate`,
-//! `RuleFloatSignCleanup`, `RuleExpandLoad`, `RulePtrsubCharConstant`, `RuleExtensionPush`,
-//! `RulePieceStructure`, `RuleAndStructure`): the check switches them off on the reference.
+//! `Rule2Comp2Sub` (ruleaction.cc). Superseded: the pool's rules that read data-types are in
+//! `typecleanup.rs` (stage R5, slice 4); `RulePtrsubCharConstant` is still not ported.
 
 use super::*;
 

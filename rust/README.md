@@ -665,6 +665,51 @@ ACTIONS="funclink heritage paramdouble" rust/tools/decomp-bisect.sh 0x401000 5
 The reference only accepts an absolute script path (`decomp_dbg -i /abs/path`); with a relative
 one it fails a libstdc++ assertion and prints nothing.
 
+### Every check at once: `tools/bars.sh`
+
+`rust/tools/bars.sh` runs every milestone 3 check (each stage's `BREAK`, options and print, as
+the sections below give them) through `decomp-diff.sh` and prints one summary line per check.
+It is the one copy of the "run every bar" script; a stage that adds a check adds it there.
+
+```sh
+CORPORA=m8 rust/tools/bars.sh                          # the fast gate, about 2 minutes
+rust/tools/bars.sh                                     # everything: M8, M500, r5d-adc, switch
+CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
+```
+
+- `CORPORA`: `m8`, `m500`, `r5d-adc`, `switch` (files of `tools/corpus/`) or an address file;
+  default all four. Without `CHECKS`, M8 and M500 run all 45 checks, `r5d-adc` the four
+  double-rule checks (`r5d r5dt r5dtlock r5dtlocksv`) and `switch` the S3 bar (`paramdouble`)
+  and the four switch checks.
+- `CHECKS`: names from the script's `case`: `stack stackhigh funclink heritage paramdouble s4
+  s6 s6void s6int4 s6callee r1 subvar r4 r5 r5typed s7r s7r2 s7sub s7r4 s7r5 s7t s7t2 s8 s8r`
+  (the 24 standard bars), `r5c r5d r5dt r5dtlock r5dtlocksv` (R5 slices 3 to 5), `svlock svs6
+  r5slock r5s` (R5 slice 2, `stackvars` on), `pg-r pg-t nm-r nm-t ldn-r ldn-t fs-r fs-t` (tail:
+  prototypes and globals, names, `latedonothing`, `finalstructure`; `-r` rules on, `-t` types
+  on) and `swfs-r swfs-t swsn-r swsn-t` (`finalstructure` with case labels and `switchnorm`).
+- `JOBS` (default `nproc`), `TIMEOUT` (seconds per function and engine, default 120 as for every bar here; 0x4c48d0 of M500 takes
+  the reference about 485 s and ghidra-rs about 600 s alone, so at 120 s it counts as a function
+  the reference does not finish), `OUT`
+  (default `rust/target/bars`), `KEEP=1` keeps the per-function outputs.
+- Output, all under `rust/target/`: `bars/summary.out` (the printed lines, appended),
+  `bars/<check>-<corpus>.log` (the `decomp-diff.sh` output) and `.miss` (one line per
+  differing function: `loud` with ghidra-rs's error, `silent` with the first differing line,
+  `timeout`; and the `reference failed` lines).
+- The summary line is `<check>-<corpus>: reference finished F / N, identical I / F (loud L,
+  silent S, timeout T), all outputs identical A / N`. `I / F` counts only the functions the
+  reference finishes, which is how the README's bars are given. `A / N` is `decomp-diff.sh`'s
+  own count, where a function the reference does not finish counts as identical only when both
+  engines print the same thing.
+- The option files that lock every prototype (`lock-void`, `lock-int4`, `lock-stk`,
+  `stack-lock`, and the `stackvars` and R5 variants built on them) hold one `parse line extern`
+  per mercs2 function, so they are not committed: `tools/lock-options.sh` writes them to
+  `rust/target/locks/` from the prelude (`decomp-locked-options.sh`) and the committed options
+  files, and `bars.sh` runs it first. Superseded: the hand-made `rust/target/stack-lock.txt`,
+  `lock-sv.txt`, `s6-sv.txt`, `r5s-lock.txt`, `r5dt-lock.txt`, `r5dt-lock-sv.txt` of the
+  sections below are these files.
+- The switch corpus is `tools/corpus/switch.txt` (2,050 functions with a jump table; superseded:
+  `rust/target/stk/switch.txt` of an agent's worktree).
+
 ## Decompiler (Milestone 3)
 
 Stage S1a (branch `m3-s1a`): flow and raw p-code. `decompile` follows the function's flow with
@@ -1261,7 +1306,7 @@ would round it up to the smallest one; ghidra-rs rounds as IEEE does (a known di
 met in the checks).
 
 Not ported, with no effect on `print raw`: `isPrecisLo`/`isPrecisHi` (set by R5's
-double-precision rules), big-endian address arithmetic. A `pullsub_multi` on a join varnode
+double-precision rules; superseded: ported in R5 slice 3), big-endian address arithmetic. A `pullsub_multi` on a join varnode
 fails loudly (`Address::renormalize` of join addresses is not ported). The jump-table
 stand-ins (`jumptable.rs`) stay as they are: the partial function would need the `jumptable`
 root action's pool with R2's comparison rules too.
@@ -1730,7 +1775,80 @@ paramdouble 500 / 500, switch corpus 1,947 / 2,050, S4 498 / 500. The locked S6 
 
 Left for R5: `RuleLoadVarnode`/`RuleStoreVarnode` and removing `jumptable::fold_constants`
 (stack loads need the stack heritage pass), double.cc, constseq.cc, bitfield.cc and the
-`cleanup` rules that read types (see the plan, "R5").
+`cleanup` rules that read types (see the plan, "R5"). Superseded: double.cc is ported (R5
+slice 3, below).
+
+**R5 slice 3 (double.cc)**, branch `m3-r5-double`. `ghidra-rs/src/decomp/rules/double/`:
+`split.rs` (`SplitVarnode` and its static helpers), `forms.rs` (`AddForm`, `SubForm`,
+`LogicalForm`, `Equal1Form`, `Equal2Form`, `Equal3Form`, `ShiftForm`, `MultForm`, `PhiForm`,
+`IndirectForm`, `CopyForceForm`), `less.rs` (`LessThreeWay`, `LessConstForm`), `mod.rs`
+(`RuleDoubleIn`, `RuleDoubleOut`, `RuleDoubleLoad`, `RuleDoubleStore`, `applyRuleIn`, and
+`ActionParamDouble`), `tests.rs`. The four rules end `OPPOOL1` in the C++ order (`doubleload`
+group `doubleload`, the others `doubleprecis`). New varnode marks `VnFlags::PRECIS_LO` (1 << 27)
+and `PRECIS_HI` (1 << 28); the readers that test them are in place: `RulePullsubMulti`,
+`RuleSubCommute`, `RuleSubNormal`, `RuleSplitFlow` and `SplitFlow::traceForward`;
+`buildOutputFromTrials` sets them on a two-piece call output when double precision is on.
+`RuleDoubleIn::reset` is `ActionTree::double_precis` (the `decompile` root has group
+`doubleprecis` on), which `ActionTree::perform` copies into `Funcdata::double_precis_on`
+(`doublePrecisRecovery`; set even when `togglerule doublein off`, as `ActionPool::reset` resets
+every rule). `Funcdata::combine_input_varnodes` is new (`RuleDoubleOut`). Not modelled: symbol
+entries (`getSymbolEntry` is null: `isAddrTiedContiguous` tests storage only), big-endian spaces;
+erroring paths: `ActionParamDouble` joining two call inputs that are the pieces of one whole
+(`checkInputJoin`/`doInputJoin` not ported), and `isPrimitiveWhole` of a type-locked struct or
+array whole. The check (options `rust/tools/corpus/r5d-options.txt`: r1's with `doubleload` and
+`doubleprecis` on; corpus `rust/tools/corpus/r5d-adc.txt`: the 215 mercs2 functions under 600
+bytes with an ADC, SHLD or SHRD), from the worktree root with
+`DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst`:
+`BREAK=assignhigh OPTIONS=$PWD/rust/tools/corpus/r5d-options.txt OUT=$PWD/rust/target/r5d-m8 rust/tools/decomp-diff.sh m8`
+(and `m500` with `TIMEOUT=120`, and `rust/tools/corpus/r5d-adc.txt`). Results: M8 8 / 8, M500
+498 / 499 the reference finishes (0x47a6b0, the known `ActionConditionalExe` miss; 0x4c48d0
+never finishes), r5d-adc 215 / 215. Exercise: on M500 the double rules change no reference
+output; on r5d-adc they change 23 of the 215 reference outputs (rules on against r1-options), and
+ghidra-rs's output changes on the same 23 and matches the reference on all of them (for
+example 0x7b8f10: `AddForm` on a call's `j{EDX,EAX}` output, then `RuleDoubleStore`).
+R1 check (`r1-options.txt`) rerun on the branch: M500 498 / 499 (0x47a6b0). `cargo test --release`
+and `cargo clippy --release --all-targets -- -D warnings` clean.
+
+R5 slices 4 and 5 (branch `m3-r5b`, 2026-11-13). Superseded: "constseq.cc, bitfield.cc and the
+`cleanup` rules that read types" in the list above (slice 3, double.cc, is on its own branch).
+
+- Slice 4, `rules/typecleanup.rs`: the `cleanup` rules `addunsigned`, `dumptyhumplate`
+  (subflow.cc), `subright`, `floatsigncleanup`, `expandload`, `extensionpush`, `piecestructure`,
+  `andstructure`, in the `CLEANUP` table in the C++ order, with `Funcdata::opDestroyRecursive`,
+  `opUnlink`, `Datatype::findSmallestContainer` and `TypeFactory::is_char_print`
+  (`isCharPrint`). Symbols are not modelled: no equate stops `addunsigned`, `getStructuredType`
+  is the varnode's type, `isNameLock` is false. Failing loudly where reached: the CONCAT tree
+  rewrite of `piecestructure` (`PieceNode::gatherPieces` onward; proto-partials need
+  `VariablePiece`, so `registerProtoPartialRoot` has no caller yet), join addresses in
+  `andstructure`, struct sub-types, unions. Not ported: `ptrsubcharconstant` (string detection,
+  `StringManager::isString`, S9: three M500 functions reach it, 0x4bff10, 0x74d520, 0x766350),
+  so the check still switches it off. `threewaycomp`, `conditionalmove`, `orpredicate` (oppool1)
+  are not in the plan's R5 row and stay off.
+- Slice 5, `rules/constseq.rs`, `rules/bitfield.rs`: the groups `constsequence` and `bitfields`
+  as far as they run without scopes and bit-field types. `stringcopy` never matches (no local
+  symbols), `stringstore` fails at `HeapSequence` (not ported); no type has bit-fields, so the four
+  `bitfield_*` transforms never start, and `pull_absorb`/`insert_absorb` fail on their ops (made
+  only by those transforms).
+- Checks: `r1-options.sh` regenerated (9 `togglerule`s in `r1-options.txt`) and writes
+  `r5c-options.txt` (`r5-options.txt` plus `constsequence`, `bitfields`).
+
+```sh
+export DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst
+BREAK=assignhigh OPTIONS=$PWD/rust/tools/corpus/r1-options.txt TIMEOUT=120 rust/tools/decomp-diff.sh m500
+DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=$PWD/rust/tools/corpus/r5-options.txt TIMEOUT=120 rust/tools/decomp-diff.sh m500
+DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=$PWD/rust/tools/corpus/r5c-options.txt TIMEOUT=120 rust/tools/decomp-diff.sh m500
+```
+
+| check (M500, at `assignhigh`) | identical |
+|---|---|
+| R1 check (`r1-options.txt`), M8 / M500 | 8 / 8; 498 / 499 the reference finishes (0x47a6b0) |
+| R5 typed (`r5-options.txt`, types printed), M8 / M500 | 8 / 8; 497 / 498 (0x47a6b0) |
+| R5c (`r5c-options.txt`, types printed) | 494 / 498 (99.2 %, bar 95 %): 0x47a6b0 and three functions where `stringstore` reaches `HeapSequence` (0x41f7f0, 0x4c1230, 0x766350) |
+
+Exercise: with the slice 4 rules switched off on both sides as the control, they change 23 M500
+reference outputs under the R1 options and 66 under the R5 (typed) options; all 23 and 63 of the
+66 are identical, the other three were `ptrsubcharconstant`'s, which is off again. The reference
+does not finish 0x4c48d0 (and 0x6b21e0 in the typed runs).
 
 Merged with S8 part one and R5 slice one (2026-11-13). Superseded: the rules-on 481 / 499 above.
 The `X & #0x1` constant-type misses were `copySymbol` on an untyped source: every C++ varnode
@@ -1747,6 +1865,158 @@ functions (0x402c20, 0x405990, 0x4c0070, 0x62f0d0, 0x757810, 0x7586e0; with the 
 rules remove those overlaps); with R5, 0x6b21e0 (R5's unported `assignPropagatedType`).
 Existing bars on the merged binary: R3, subvar and R4 checks 498 / 499, R5 typed 497 / 498,
 S3 500 / 500, S4 and S6 499 / 500, S8 rules off 499 / 499 and rule stage 498 / 499.
+
+**R5 slice 2 (in part) and the merge with stack heritage** (branch `m3-r5b`, 2026-11-14).
+Superseded: "Left for R5: `RuleLoadVarnode`/`RuleStoreVarnode`" above, and "LOADs and STOREs
+through the stack pointer stay unconverted until R5's `RuleLoadVarnode`/`RuleStoreVarnode`" in
+"Stack heritage" below. `master` 836d04baee is merged in (one conflict, `tools/r1-options.sh`,
+both sides kept).
+
+- `ghidra-rs/src/decomp/rules/stackvars.rs`: the rules `loadvarnode` and `storevarnode` (group
+  `stackvars`, the end of `OPPOOL2`): a LOAD or STORE at a constant address, or at the stack
+  pointer plus a constant, becomes a COPY from or to a varnode of that space. With them:
+  `resolveSpacebaseRelative` (a call's stack offset), `opCollapseIndirectsForCopy`, the
+  `stack_store` mark (`VnFlags::STACK_STORE`) read by `ActionDirectWrite`,
+  `propagateSpacebaseRef`/`propagateRef` with `getExactPiece` in `infertypes.rs`, and stack
+  entries in `characterizeAsParam` (`ParamList::characterize_stack` in `fspec.rs`).
+- Open, failing loudly: stack parameter trials of a call without a locked prototype
+  (`ActionActiveParam` with trials: `checkInputTrialUse`, `fillinMap`,
+  `buildInputFromTrials`), which nearly every unlocked function with the rules on reaches; a
+  partly overlapping INDIRECT in `opCollapseIndirectsForCopy`; partial structs, arrays and
+  unions in `getExactPiece`. The jump-table partial function runs without the two rules and
+  keeps `jumptable::fold_constants`.
+- `tools/r1-options.sh` also writes `tools/corpus/r5s-options.txt` (`r5-options.txt` with
+  `stackvars` on).
+
+Checks (from the repository root, types printed, `break start assignhigh`):
+
+```sh
+rust/tools/decomp-locked-options.sh void rust/target/stack-lock.txt "int4 a, int4 b"
+grep -v 'decompile stackvars off' rust/target/stack-lock.txt > rust/target/lock-sv.txt
+grep -v 'decompile stackvars off' rust/tools/corpus/s6-options.txt > rust/target/s6-sv.txt
+{ cat rust/tools/corpus/r5s-options.txt; grep '^parse line' rust/target/stack-lock.txt; } > rust/target/r5s-lock.txt
+DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=rust/target/lock-sv.txt rust/tools/decomp-diff.sh m500
+DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=rust/target/s6-sv.txt rust/tools/decomp-diff.sh m500
+export DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst
+DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=rust/target/r5s-lock.txt rust/tools/decomp-diff.sh m500
+DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=rust/tools/corpus/r5s-options.txt rust/tools/decomp-diff.sh m500
+```
+
+| slice 2 check (`stackvars` on) | M8 | M500 |
+|---|---|---|
+| stack-lock options (every prototype locked, rules off) | 8 / 8 | 473 / 499 |
+| S6 options (unlocked, rules off) | 8 / 8 | 499 / 499 |
+| R5 options plus the locks (rules and types on, every prototype locked) | 6 / 8 | 323 / 498 |
+| R5 options (`r5s-options.txt`: rules and types on, unlocked) | 3 / 8 | 132 / 498 |
+
+Every miss that is not listed is a loud "not implemented" error. Stack-lock options: 26 misses
+(16 parameter trials of a call that stays unlocked, mostly indirect calls; 9 "a piece of a locked
+stack parameter"; 1 the load-guard value-set error). S6 options: no miss among the 499 the
+reference finishes. R5 options plus the locks: 171 loud (125 parameter trials, 32 pieces of a
+locked stack parameter, 14 heritage errors), 0x47a6b0 (the rule-stage miss of every check), and
+5 silent differences with one cause, not traced: at a call, the INDIRECT for the stack slot
+`s0xfffffffc` is an indirect creation (`= [create]`) on the reference and an ordinary INDIRECT
+of `ECX(i)` here (0x5cc020, 0x5cee30, 0x5d1dd0, 0x5da930, 0x5db590). R5 options unlocked: 350
+parameter trials, 17 heritage errors, 0x47a6b0; M8 fails on the trials in 5 of 8, and with the
+locks in 2 of 8 (0x4042e0, 0x73a340). The reference does not finish 0x4c48d0 (nor 0x6b21e0 with
+the R5 options). Found by these checks and fixed: `ParamEntry::justifiedContain` had no stack
+entries, so `possibleInputParam` was false for a stack parameter of the function, its INDIRECT
+at a call lost `addrforce` in `ActionDeadCode` and was removed (26 functions of the S6-options
+check).
+
+Every older bar was rerun on the merged binary (M8 8 / 8 in all 26 checks, M500 unchanged in all 28: no bar fell), and the stack check, S4, S6 unlocked and callees, `r1-options`, R5 typed, S7 with `s6-options` and the S8 rule stage again on the final binary, unchanged. The table of every bar is in `docs/plans/m3-decompiler.md`, "R5 slice 2".
+
+**R5 review fixes** (branch `m3-r5b`, 2026-11-14; superseded: "paused before the final pass finished": the full pass ran on `m3-int`, "Integration of `m3-tail` and `m3-r5b`" below; see
+"Not rerun" below). Superseded: in "R5 slice 3" above, "Not modelled: symbol entries
+(`getSymbolEntry` is null: `isAddrTiedContiguous` tests storage only)" and the description of
+`ActionParamDouble`; in "R5 slices 4 and 5", "`stringcopy` never matches (no local symbols)";
+in "R5 slice 2", "5 silent differences with one cause, not traced".
+
+- `ActionLikelyTrash` (`coreaction.rs`): `countMarks` is ported (`count_marks`: an input of a
+  MULTIEQUAL or PIECE counts when it is marked or a chain of INDIRECTs leads back to a marked
+  varnode or to the op itself), and the test `isTypeLock() || isNameLock()` (`name_locked`).
+  `countMarks` was the cause of the 5 silent differences of the slice 2 check (0x5cc020,
+  0x5cee30, 0x5d1dd0, 0x5da930, 0x5db590): all 5 are identical now with `r5s-lock.txt`.
+- `ActionParamDouble` (`rules/double/mod.rs`, `param_double`): the locked-function branch is
+  ported (the half-size SUBPIECEs of a primitive locked parameter of at least the default size
+  get `precislo` / `precishi`, with `Datatype::isPrimitiveWhole` as `primitive_whole`); the
+  join search runs only for a call with neither trials nor a locked prototype; the first branch
+  (splitting a stack trial that is a PIECE: `checkInputSplit`, `ParamActive::splitTrial`) is a
+  loud error. Still erroring: the join itself (`checkInputJoin` / `doInputJoin`).
+- Symbol entries in the double rules: `rules/double/split.rs` `same_symbol` is the symbol test of
+  `RuleDoubleOut::attemptMarking` and `SplitVarnode::isAddrTiedContiguous`, over the symbols
+  there are: functions and external references of the global scope
+  (`infertypes::query_global(arch, addr, size)`, now with a size) and the locked parameters of
+  the function (`locked::param_symbol`, shared with `merge.rs` and `ActionLikelyTrash`).
+- `rules/constseq.rs` `string_copy`: a character copied into a locked parameter (the local
+  scope's only symbols, `ScopeLocal::queryContainer`) is a loud error (`StringSequence` is not
+  ported); it returned 0 before.
+- `fspec.rs`: `ParamEntry::justifiedContain` for stack entries is one helper
+  (`ParamEntry::stack_justified`) with the C++'s wrapping offsets; an exclusion entry
+  (`alignment == 0`) returns the offset into the entry, not 0.
+- No panic on bad input: wrapping last-byte offsets in `opCollapseIndirectsForCopy`
+  (`rules/stackvars.rs`), a checked size difference in `convertZextToPiece`
+  (`rules/typecleanup.rs`).
+- `heritage.rs` `abort_spacebase_relative`: the placeholder's LOAD goes only when the
+  placeholder is in the unique space (`IPTR_INTERNAL`), not in any SLEIGH space.
+- Removed: `has_bitfields()` in `rules/bitfield.rs` (a constant `false`). Kept:
+  `sub_right_op` and `dumpty_hump_late_op` in `rules/typecleanup.rs`, which the unit tests call
+  (no `Arch` can be built there).
+- New check: `tools/r1-options.sh` also writes `tools/corpus/r5dt-options.txt`
+  (`r5-options.txt` with `doubleload`, `doubleprecis` on: the double rules with types), run
+  unlocked, with every prototype locked, and locked with `stackvars` on:
+
+```sh
+{ cat rust/tools/corpus/r5dt-options.txt; grep '^parse line' rust/target/stack-lock.txt; } > rust/target/r5dt-lock.txt
+grep -v 'decompile stackvars off' rust/target/r5dt-lock.txt > rust/target/r5dt-lock-sv.txt
+export DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst
+DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=rust/tools/corpus/r5dt-options.txt rust/tools/decomp-diff.sh m500
+DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=rust/target/r5dt-lock.txt rust/tools/decomp-diff.sh rust/tools/corpus/r5d-adc.txt
+DECOMP_RAW_EXTRA=1 BREAK=assignhigh OPTIONS=rust/target/r5dt-lock-sv.txt rust/tools/decomp-diff.sh rust/tools/corpus/r5d-adc.txt
+```
+
+| typed double-rule check (types printed) | M8 | r5d-adc (215) | M500 |
+|---|---|---|---|
+| `r5dt-options.txt`, unlocked | 8 / 8 | 215 / 215 | 497 / 498 (0x47a6b0) |
+| plus the locks (`int4 a, int4 b`) | 8 / 8 | 209 / 215 | not run |
+| plus the locks and `stackvars` | 6 / 8 | 143 / 215 | not run |
+
+Every miss on r5d-adc and M8 is a loud "not implemented" error, none a silent difference: with
+the locks, 6 load-guard value-set errors (0x895f60, 0x9995b0, 0x9e94a3, 0x9e962c, 0x9e9762,
+0x9e98c3); with `stackvars` too, 52 parameter trials, 12 pieces of a locked stack parameter and
+8 load-guard errors (M8: 2 parameter trials). On M500 the reference does not finish 0x4c48d0
+and 0x6b21e0; they count as different, so "/ 498" is of the functions the reference finishes.
+
+Bars on the binary of this commit (M500; M8 is 8 / 8 in all 30 checks without `stackvars`, and
+6 / 8, 6 / 8, 3 / 8 in the three with it, as before):
+
+| check | README number | this commit |
+|---|---|---|
+| stack check, S7 print with `stack-lock.txt` | 498 / 499, 492 / 499 | 498 / 499, 492 / 499 |
+| `funclink`, `heritage`, `paramdouble` | 500 / 500 each | 500 / 500 each |
+| S4, S6 unlocked, locked `void`, locked `int4`, callees | 499 / 500 each | 499 / 500 each |
+| R1/R2/R3, subvar, R4 | 498 / 499 each | 498 / 499 each |
+| R5 untyped, R5 typed | 497 / 498 each | 497 / 498 each |
+| S7 `r1-options` (also with create indices), `subvar-options`, `r4-options` | 498 / 499 each | 498 / 499 each |
+| S7 `r5-options` | 497 / 498 | 497 / 498 |
+| S7 `s6-options` (also with create indices) | 493 / 499 | 493 / 499 |
+| S8 rules off, S8 rule stage | 499 / 499, 498 / 499 | 499 / 499, 498 / 499 |
+| R5c (`r5c-options`) | 494 / 498 | 494 / 498 |
+| R5d (`r5d-options`) | 498 / 499 | 498 / 499 |
+| R5d on `r5d-adc.txt` | 215 / 215 | not rerun |
+| S3 switch corpus | 1,947 / 2,050 | not rerun |
+| slice 2: stack-lock options with `stackvars` | 473 / 499 | not rerun |
+| slice 2: S6 options with `stackvars` | 499 / 499 | not rerun |
+| slice 2: R5 options plus the locks | 323 / 498 | not rerun (the 5 silent differences rerun: 5 / 5 identical) |
+| slice 2: R5 options unlocked (`r5s-options.txt`) | 132 / 498 | not rerun |
+
+No bar that ran fell. Not rerun: the pass was stopped before the last eight M500 runs (superseded: every row was rerun on `m3-int`, and the counts below are recounted there, "Integration of `m3-tail` and `m3-r5b`"). Open
+from the review: the slice 2 counts above do not add up ("323 / 498" with 171 + 1 + 5 misses,
+"132 / 498" with 350 + 17 + 1) and were not recounted: the misses very likely include the two
+functions the reference does not finish, which `decomp-diff.sh` counts as different, but that
+needs the rerun. The locked branch of `ActionParamDouble` and the symbol tests changed no
+output of a check that ran; no unit test covers them. `cargo test --release` 89 tests,
+`cargo clippy --release --all-targets -- -D warnings` and `cargo fmt --check` clean.
 
 ### Stack heritage (slice one, branch `m3-stack`)
 
@@ -1821,7 +2091,7 @@ Checks and commands: docs/plans/m3-decompiler.md, "Tail". Results (M8; M500 of t
 reference finishes): prototypes and globals 8 / 8, 498 / 499 (99.8 %) (rules on) and 8 / 8, 493 / 499 (98.8 %) (types
 on); `latedonothing` 8 / 8, 498 / 499 (99.8 %) and 8 / 8, 493 / 499 (98.8 %); `finalstructure` 7 / 7, 494 / 495 (99.8 %) and
 7 / 7, 489 / 495 (98.8 %) (switch functions do not finish on the reference with `switchnorm` off).
-Existing bars on the final binary: R1/R3, subvar and R4 checks 498 / 499, R5 typed 497 / 498, S7 rules on 498 / 499 and types on 493 / 499, S8 rules off 499 / 499 and rule stage 498 / 499, S3 paramdouble 500 / 500, S4 and S6 499 / 500, switch corpus 1,947 / 2,050: all unchanged.
+Existing bars on the final binary: R1/R3, subvar and R4 checks 498 / 499, R5 typed 497 / 498, S7 rules on 498 / 499 and types on 493 / 499, S8 rules off 499 / 499 and rule stage 498 / 499, S3 paramdouble 500 / 500, S4 and S6 499 / 500, switch corpus 1,947 / 2,050: all unchanged. Superseded: the switch corpus measured again on `m3-int` after `switchnorm` and the review fixes, 1,947 / 2,050, unchanged (`checkUnrolledGuard` and the empty-range stop of `findSmallestNormal` could have moved it); every bar: "Integration of `m3-tail` and `m3-r5b`" below.
 Every bar was rerun on the final binary, M8 and M500 (stack check, S1 to S8, R1 to R5, the switch
 corpus, the tail and names checks): none fell. The table is in docs/plans/m3-decompiler.md, "Tail".
 Open before S9: `setcasts`, and finishing the case labels. Superseded: "`switchnorm`, not
@@ -1829,7 +2099,7 @@ started" and "a switch with cases fails loudly" above: `switchnorm` and the case
 `finalstructure` are ported (`jumptable.rs`, `finalstructure.rs`) but the work is paused before
 its full verification: M8 8 / 8 in the four switch checks, switch corpus `finalstructure`
 1,937 / 2,004 (rules on) and 1,929 / 2,004 (types on), `switchnorm` rules on 1,943 / 2,004;
-M500 and the other bars were not rerun on that tree. State and next steps:
+M500 and the other bars were not rerun on that tree (superseded: verified on `m3-int`, every bar rerun, `switchnorm` types on 1,947 / 2,004, M500 in all four; "Integration of `m3-tail` and `m3-r5b`" below). State and next steps:
 docs/plans/m3-decompiler.md, "Tail", "Switch case labels". Superseded: `namevars` in this list (ported: names check, `print map` after
 `namevars`, M8 8 / 8 and 8 / 8, M500 498 / 499 (99.8 %) rules on and 493 / 499 (98.8 %) types on).
 
@@ -1854,6 +2124,112 @@ locked callee is name-locked in the C++ (`ParameterSymbol::setTypeLock`), and th
 renames the arguments as ghidra-rs does (M8 with locked `__fastcall` callees: 5 / 8 identical,
 three fail loudly in `deindirect`). The eight tail checks are unchanged on M8; on M500 the
 three finished so far are unchanged (prototypes and globals, names with rules on).
+
+### Integration of `m3-tail` and `m3-r5b` (branch `m3-int`, 2026-11-14)
+
+Both paused branches merged into one tree and verified by one pass. Superseded: the "paused"
+and "not rerun" notes of "R5 review fixes" above and of this section ("work is paused before its
+full verification", "M500 and the other bars were not rerun"); the numbers below replace them.
+
+- Merge: `m3-tail` first, then `m3-r5b`. Conflicts: `Funcdata` keeps both new fields
+  (`symtab`, `double_precis_on`); `infertypes::query_global` takes `m3-r5b`'s size argument
+  (`queryContainer(addr, size)`) and `m3-tail`'s two callers in `coreaction.rs` pass 1 (the
+  C++ `queryContainer(addr, 1)` of `getSymbolEntry`); `Entry`'s fields stay `pub(crate)` for
+  them; the `ParamTrial::UNREF` both sides added is kept once; `r1-options.sh` writes all
+  fifteen files of both. `r1-options.sh` rerun: `tail-r-options.txt` and `sw-r-options.txt`
+  lose eight `togglerule` lines for the rules `m3-r5b` ported.
+- Review fixes of the switch work: `fold_in_one_guard` / `fold_in_guards` (`jumptable.rs`) find
+  the table again by its BRANCHIND after `push_branch` (its `structure_reset` drops dead tables
+  and moves the others; the C++ keeps a `JumpTable *`), and `switch_norm` reads the table count
+  each time round as `ActionSwitchNorm::apply` does; `splice_block` (`block.rs`) clears
+  `f_flip_path`, the mark and the do-nothing flags (`bl->flags = fl1 | fl2`); `print tree block`
+  fails when a case's labels cannot be read (`printCaseExtra` throws) instead of printing none.
+  None changed a number below.
+- `tools/bars.sh`, `tools/lock-options.sh`, `tools/corpus/switch.txt`: see "Every check at once".
+
+The pass: every check on M500, r5d-adc and the switch corpus, `JOBS=12` on the 12-thread
+machine with nothing else heavy running: 9 h 22 min (M500 8 h 38 min, r5d-adc 1 min, switch
+corpus 44 min), with `TIMEOUT=600`. Most of the M500 time went to one function, 0x4c48d0: alone
+the reference takes 485 s on it and ghidra-rs 599 s, with identical output (3,895,241 lines of
+the S7 types-on print), not a hang; each check waited for both runs of it at its end. With 600 s
+the reference finishes it, so the pass's counts are of 500 where the bars above are of 499; the
+table gives both. The default of `bars.sh` is 120 s again, as for every bar above; at 120 s an
+M500 check takes about 4 to 5 minutes. After the review fixes the four switch checks (M8, M500
+at 120 s, switch corpus) and the S3 switch bar were rerun, and the M8 gate and the M500 checks
+that read the flags `splice_block` now clears: M8 all 45 as before; M500 S4 499 / 499, S8 rule stage
+498 / 499, `latedonothing` 498 / 499 and 493 / 499, `finalstructure` 494 / 495 and 489 / 495, prototypes rules
+on 498 / 499, names types on 493 / 499: each equal to its bar above (4.6 minutes per M500 check).
+
+| check | before (README or branch) | pass (`TIMEOUT=600`) | difference |
+|---|---|---|---|
+| M8, all 45 checks | 8 / 8; `fs-*` 7 / 7; `r5dtlocksv`, `r5slock` 6 / 8; `r5s` 3 / 8 | the same | none |
+| stack check, S7 print with `stack-lock.txt` | 498 / 499, 492 / 499 | 499 / 500, 493 / 500 | 0x4c48d0 finishes, identical |
+| `funclink`, `heritage`, `paramdouble` | 500 / 500 each | 500 / 500 each | none |
+| S4, S6 unlocked, locked `void`, `int4`, callees | 499 / 500 each | 500 / 500 each | 0x4c48d0 identical |
+| R1/R2/R3, subvar, R4 | 498 / 499 each | 499 / 500 each | 0x4c48d0 identical; miss 0x47a6b0 |
+| R5 untyped, typed | 497 / 498 each | 498 / 499 each | 0x4c48d0 identical |
+| S7 `r1`, `r1` with create indices, `subvar`, `r4` | 498 / 499 each | 498 / 500 each | 0x4c48d0: ghidra-rs past 600 s |
+| S7 `r5-options` | 497 / 498 | 497 / 499 | 0x4c48d0: ghidra-rs past 600 s |
+| S7 `s6-options` (also with create indices) | 493 / 499 | 494 / 500 | 0x4c48d0 identical |
+| S8 rules off, rule stage | 499 / 499, 498 / 499 | 500 / 500, 499 / 500 | 0x4c48d0 identical |
+| R5c | 494 / 498 | 495 / 499 | 0x4c48d0 identical |
+| R5d, R5d on r5d-adc | 498 / 499, 215 / 215 | 499 / 500, 215 / 215 | 0x4c48d0 identical |
+| R5dt; on r5d-adc | 497 / 498; 215 / 215 | 498 / 499; 215 / 215 | 0x4c48d0 identical |
+| R5dt locked; on r5d-adc | M500 not run; 209 / 215 | 482 / 499; 209 / 215 | new on M500 |
+| R5dt locked with `stackvars`; on r5d-adc | M500 not run; 143 / 215 | 328 / 499; 143 / 215 | new on M500 |
+| slice 2: stack-lock options with `stackvars` | 473 / 499 | 474 / 500 | 0x4c48d0 identical |
+| slice 2: S6 options with `stackvars` | 499 / 499 | 500 / 500 | 0x4c48d0 identical |
+| slice 2: R5 options plus the locks | 323 / 498 | 328 / 499 | the 5 `countMarks` functions now match |
+| slice 2: R5 options unlocked | 132 / 498 | 132 / 499 | 0x4c48d0 fails loudly |
+| prototypes and globals, rules on / types on | 498 / 499, 493 / 499 | 498 / 500, 494 / 500 | rules on: 0x4c48d0 past 600 s |
+| names, rules on / types on | 498 / 499, 493 / 499 | 498 / 500, 494 / 500 | the same |
+| `latedonothing`, rules on / types on | 498 / 499, 493 / 499 | 498 / 500, 494 / 500 | the same |
+| `finalstructure` (`switchnorm` off), rules on / types on | 494 / 495, 489 / 495 | 494 / 496, 489 / 496 | 0x4c48d0: ghidra-rs past 600 s |
+| S3 switch corpus (`paramdouble`) | 1,947 / 2,050 | 1,947 / 2,050 (1,947 / 2,004 the reference finishes) | none |
+| switch `finalstructure`, rules on: M500; switch corpus | not run; 1,937 / 2,004 | 498 / 500; 1,937 / 2,004 | none |
+| switch `finalstructure`, types on: M500; switch corpus | not run; 1,929 / 2,004 | 494 / 500; 1,929 / 2,004 | none |
+| `switchnorm`, rules on: M500; switch corpus | not run; 1,943 / 2,004 | 496 / 500; 1,943 / 2,004 | none |
+| `switchnorm`, types on: M500; switch corpus | not run; stopped | 500 / 500; 1,947 / 2,004 | new |
+
+No bar fell. After the review fixes, at 120 s: the four switch checks M8 8 / 8 each; M500
+498 / 499, 493 / 499, 495 / 499, 499 / 499 (rules on and types on `finalstructure`, then
+`switchnorm`; 0x4c48d0 counts as not finished); switch corpus 1,937, 1,929, 1,943, 1,947 of
+2,004; S3 switch bar 1,947 / 2,050. The S3 bar could have moved with two changes to the guard
+analysis of `m3-tail`, `checkUnrolledGuard` and the stop of `findSmallestNormal` at an empty
+range (`find_smallest_normal`, as the C++); it did not.
+
+How the slice 2 rows count (the open item of "R5 review fixes" above): the summary line of
+`bars.sh` counts only the functions the reference finishes, and splits the misses into loud
+(ghidra-rs printed an error), silent and timeout. R5 options plus the locks: 499 finished
+(0x6b21e0 is not finished with the R5 options), 328 identical, 170 loud, 1 silent (0x47a6b0):
+328 + 170 + 1 = 499. R5 options unlocked: 132 + 366 loud + 1 silent = 499. The old "323 / 498"
+and "132 / 498" were `decomp-diff.sh`'s count over all 500, where a function the reference does
+not finish counts as different unless both engines print the same thing; their miss lists also
+mixed the error kinds.
+
+Misses explained, none new from the merge (each is in a branch's own miss list):
+
+- `switchnorm` rules on, M500: 0x47a6b0 (the rule-stage miss of every check) and 0x48a430,
+  0x5c5940, 0x6b3730; switch corpus: also 0x8d8f40, 0x8eabe0, 0x8ead90 (the "3 not looked at"
+  of the plan) and 0x5a3c30 (conditional execution, known). The six differ only in the type of
+  the INDIRECTs on an import slot (`r0x00b05370<code() *>` on the reference, `<xunknown4>`
+  here). The C++ gives a varnode its global symbol's type when it is made (`newVarnode` ->
+  `setSymbolProperties`); ghidra-rs does it lazily (`infertypes::symbol_types`, before each type
+  inference pass and before merging), and this check is the only one that prints types, with
+  `typerecovery` off, at a break (`returnsplit`) before both. At `inputprototype` the three M500
+  functions are identical. Open: set the symbol properties when a varnode is made.
+- switch `finalstructure` types on: 0x4f3366 keeps a call's join output (`j{EDX,EAX}`) the
+  reference does not have; in `m3-tail`'s list, not traced. Open.
+- The 57 switch-corpus functions that differ at flow time (S3), `VariablePiece` (7 rules on, 15
+  types on), 0x1cdee32 and 0x1cdf675 (128-entry flow-time tables): as in the plan, "Switch case
+  labels".
+- Open: ghidra-rs is about 1.25 times slower than the reference on 0x4c48d0 (merging and dead
+  code over a function whose print has 3.9 million lines); with `TIMEOUT=600` it passes the
+  limit when the machine is loaded.
+
+`cargo test --release`: 105 tests (86 unit tests in the library, 19 in `tests/`: the count of
+`#[test]` functions: `m3-tail` had 76 + 19, `m3-r5b` 70 + 19, so its "89" was the total and `m3-tail`'s "76" the library only), `cargo clippy --release
+--all-targets -- -D warnings` and `cargo fmt --check` clean.
 
 ## Speed
 

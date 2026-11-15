@@ -60,6 +60,10 @@ struct Node {
 #[derive(Debug, Clone, Default)]
 pub struct ActionTree {
     nodes: Vec<Node>,
+    /// the `decompile` root has group `doubleprecis` on, so `oppool1` holds `RuleDoubleIn`, whose
+    /// `reset` sets `Funcdata::doublePrecisRecovery` (also when `togglerule` switched it off:
+    /// `ActionPool::reset` resets every rule it holds)
+    pub(crate) double_precis: bool,
 }
 
 /// What a run of [`ActionTree::perform`] ended with.
@@ -136,6 +140,7 @@ impl ActionTree {
     /// Port of `Action::perform` on the root: run, or resume after a breakpoint.
     pub fn perform(&mut self, fd: &mut Funcdata, arch: &Arch) -> Result<Outcome> {
         fd.typerecovery_on = self.has_leaf("starttypes"); // ActionStartTypes::reset
+        fd.double_precis_on |= self.double_precis; // RuleDoubleIn::reset
         let root = self.root();
         if self.perform_node(root, fd, arch)? < 0 {
             let mut path = String::new();

@@ -201,18 +201,29 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `AddTreeState`, `RuleStructOffset0`, `RulePushPtr` in `oppool2`, `RulePtraddUndo`,
    `RulePtrsubUndo`) and the stop-propagation flags; R5 check M8 8 / 8, M500 497 / 498 without
    types, 487 / 498 with types (bar 95 %; 497 / 498 after the `opSetInput` fix); S6 check 498 / 500 with the rules on. Open: stack
-   loads/stores, double.cc, constseq, bitfield, typed `cleanup` rules.
+   loads/stores, double.cc, constseq, bitfield, typed `cleanup` rules. Superseded: "double.cc" is ported (R5 slice 3, `rules/double/`).
+   R5 slices 4 and 5 on branch `m3-r5b`: eight `cleanup` rules that read types (`ptrsubcharconstant`
+   waits for string detection, S9) and the `constsequence`/`bitfields` entry tests; R1 check 498 / 499,
+   R5 typed 497 / 498, new `r5c` check 494 / 498. Superseded: "constseq, bitfield, typed `cleanup` rules" above.
+   R5 slice 2 in part on `m3-r5b` (2026-11-14, merged with stack heritage): `RuleLoadVarnode` and
+   `RuleStoreVarnode` (`rules/stackvars.rs`), the call's stack offset, `propagateRef`; with
+   `stackvars` on: M500 499 / 499 unlocked without rules, 473 / 499 with every prototype locked, 323 / 498 locked with rules and types, 132 / 498 unlocked with rules (the rest fail loudly, 5 silent differences not traced); every older bar held. Open: stack parameter trials of
+   unlocked calls (`ActionActiveParam` with trials), `stackvars` in the jump-table partial function.
+   Superseded: "Open: stack loads/stores" above.
+   R5 review fixes on `m3-r5b` (2026-11-14): `ActionLikelyTrash::countMarks` and its lock test
+   (superseded: "5 silent differences not traced" above; the 5 match now), the locked branch of
+   `ActionParamDouble`, symbol tests in the double rules, `justifiedContain` for exclusion stack
+   entries; new typed double-rule check (`r5dt-options.txt`): M8 8 / 8, r5d-adc 215 / 215,
+   M500 497 / 498. The 27 M500 bars that ran held; the four `stackvars` checks, R5d on r5d-adc and
+   the switch corpus were not rerun (work paused). Superseded: all rerun on `m3-int` (2026-11-14, merged with
+   `m3-tail`): no bar fell; slice 2 with the locks and rules 328 / 499 (was 323 / 498: the 5 match, and
+   the count is of the functions the reference finishes), R5dt locked on M500 482 / 499.
    S8 (structuring, in part) on branch `m3-s8`: `ActionBlockStructure` (`CollapseStructure`,
    `LoopBody`, `TraceDAG`; `structure.rs`, `collapse.rs`) and `print tree block`; `print tree
    block` plus `print raw` at `assignhigh` with `blockrecovery` on: M8 8 / 8, M500 499 / 499 the
    reference finishes (bar 98 %); with the rule-stage options M8 8 / 8, M500 496 / 499 before R2, 463 / 499 after R2 until `ConditionalJoin` was ported, 498 / 499 now (`ActionNodeJoin` ported, `nodejoin.rs`). Open: `prefercomplement` and
    `structuretransform` (R2's flip helpers they need are now on master), `finalstructure`, `returnsplit`.
-   S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
-   .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
-   `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
-   Merged with R3b, R4, R2, S8, R5: rules on 498 / 499, types on 493 / 499 (a copySymbol type fix;
-   superseded: 481 / 499). Open: `VariablePiece` groups, `dynamic.cc`, symbols.
-   reference finishes (bar 98 %); with the rule-stage options M8 8 / 8, M500 496 / 499 before R2, 463 / 499 after R2 until `ConditionalJoin` was ported, 498 / 499 now (`ActionNodeJoin` ported, `nodejoin.rs`). Part two on `m3-s8b`: `prefercomplement`, `structuretransform` (for loops) and `returnsplit`
+   Part two on `m3-s8b`: `prefercomplement`, `structuretransform` (for loops) and `returnsplit`
    ported; both S8 checks unchanged with them on (499 / 499, 498 / 499). Superseded: the earlier
    "Open: `prefercomplement`, `structuretransform`" (their second, no-mods instances are wired since the S7 merge). Part three
    (`finalstructure`) is blocked by `latedonothing`, the prototype and cast actions, and switch labels. Open: `finalstructure`,
@@ -225,8 +236,18 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `namevars` is ported (`namevars.rs`: symbols linked to the named variables, Ghidra's default names); its check (`print map`
    after `namevars`) is M8 8 / 8, M500 498 / 499 (99.8 %) rules on and 493 / 499 (98.8 %) types on.
    Open: `setcasts` (S9). `switchnorm` and the case labels are ported but paused before full verification (2026-11-14: M8 8 / 8,
-   switch corpus `finalstructure` 1,937 / 2,004 rules on; M500 and the other bars not rerun; see the plan, "Switch case labels"). Structured `printRaw` is not reachable from the
+   switch corpus `finalstructure` 1,937 / 2,004 rules on; M500 and the other bars not rerun; see the plan, "Switch case labels").
+   Superseded: "paused before full verification": verified on `m3-int` (2026-11-14) with every bar in one
+   pass (`rust/tools/bars.sh`, 9 h 22 min alone on the machine): no bar fell; switch corpus `finalstructure`
+   1,937 and 1,929 / 2,004, `switchnorm` 1,943 and 1,947 / 2,004 (rules on, types on), S3 bar 1,947 / 2,050;
+   M500 498, 493, 495, 499 / 499. Open: global symbol types on new varnodes are set lazily (six
+   `switchnorm` rules-on misses), 0x4f3366. Structured `printRaw` is not reachable from the
    console (`print raw` prints the basic blocks), so it waits for S9's printer.
+   S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
+   .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
+   `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
+   Merged with R3b, R4, R2, S8, R5: rules on 498 / 499, types on 493 / 499 (a copySymbol type fix;
+   superseded: 481 / 499). Open: `VariablePiece` groups, `dynamic.cc`, symbols.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.

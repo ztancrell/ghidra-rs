@@ -327,7 +327,7 @@ impl Console {
             // read by the corpora but needing later stages
             ["print", "tree", "block"] => {
                 let Some(fd) = &self.fd else { return Err("No function selected".into()) };
-                write!(out, "{}", crate::decomp::print_block_tree(fd)).map_err(io)?;
+                write!(out, "{}", crate::decomp::print_block_tree(fd).map_err(|e| e.to_string())?).map_err(io)?;
             }
             ["print", "C"] => {
                 return Err(format!("{line}: not implemented in ghidra-rs yet (milestone 3, later stages)"));
