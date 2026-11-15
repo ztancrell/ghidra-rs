@@ -596,6 +596,8 @@ fn input_cast(fd: &mut Funcdata, op: OpId, slot: usize) -> Result<Option<TypeId>
             }
             Ok((fd.types.strip_typedefs(cb) != fd.types.strip_typedefs(rb)).then_some(req))
         }
+        // TypeOpCpoolref and TypeOpNew: never cast (typeop.hh)
+        Cpoolref | New => Ok(None),
         Segmentop | Insert | Zpull | Spull => not_ported_op(opc),
         _ => {
             if fd.vn(vn).is_annotation() {
@@ -849,13 +851,15 @@ fn check_pointer_issues(fd: &mut Funcdata, op: OpId, vn: VarnodeId) -> Result<()
     let ptype = facing(fd, input(fd, op, 1)?)?;
     let valsize = fd.vn(vn).size;
     if fd.types.ptr_to(ptype).is_none_or(|to| fd.types.size(to) != valsize) {
-        let name = if fd.op(op).opc == Opcode::Load { "LOAD" } else { "STORE" };
+        let name = if fd.op(op).opc == Opcode::Load { "Load" } else { "Store" };
         fd.warning(&format!("{name} size is inaccurate"), fd.op(op).seq.addr);
     }
     Ok(())
 }
 
-/// `PcodeOp::notPrinted`: a marker or a non-printing op (no op carries `noreturn` here).
+/// `PcodeOp::notPrinted`: a marker or a non-printing op. `PcodeOp::noreturn` is left out because
+/// the Rust never creates a noreturn halt: `fail_callother` fails loudly (flow.rs, the jump-table
+/// recovery) and no console prototype says a call does not return (`setup_call_specs`).
 fn not_printed(fd: &Funcdata, op: OpId) -> bool {
     let o = fd.op(op);
     o.is_marker() || o.flags.has(OpFlags::NONPRINTING)

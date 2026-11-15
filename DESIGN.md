@@ -249,8 +249,8 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `switchnorm` rules-on misses), 0x4f3366. Structured `printRaw` is not reachable from the
    console (`print raw` prints the basic blocks), so it waits for S9's printer.
    S9 casts (branch `m3-cast`, 2026-11-15): `cast.cc` and `ActionSetCasts` are ported (`cast.rs`);
-   checks `cs` (`print raw` after `setcasts`), `fsc`, `swfsc` (`finalstructure` with it on): M8 8 / 8 in
-   all six, M500 `cs` 498 / 499 and 493 / 499, `fsc` 494 / 495 and 489 / 495 (rules on, types on; no new
+   checks `cs` (`print raw` after `setcasts`), `fsc`, `swfsc` (`finalstructure` with it on): M8 `cs`, `swfsc` 8 / 8 and
+   `fsc` 7 / 7 (0x4042e0 is outside `fs`; superseded: "8 / 8 in all six"), M500 `cs` 498 / 499 and 493 / 499, `fsc` 494 / 495 and 489 / 495 (rules on, types on; no new
    miss), `swfsc` 498 / 499 and 493 / 499 (as `swfs`); M8 all 51 checks identical. Union resolution fails loudly.
    S9 slice 1 on branch `m3-print1` (2026-11-15): `print C` for straight-line functions in the
    three layers (`prettyprint.rs`, `printlanguage.rs`, `printc.rs`); every construct not ported
@@ -262,6 +262,7 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `namevars` and `mapglobals` fixes;
    M8 0 / 7, all loud.
    Both merged on `m3-s9` (2026-11-15): M8 all 51 checks before `pc-*` identical, `pc-r` and `pc-t` 0 / 7, all loud.
+   Review fixes on `m3-s9`: `print C` with `setcasts` on (`pcc-r`, `pcc-t`) M500 10 / 495 and 8 / 495, silent 0 (a CAST op fails loudly).
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

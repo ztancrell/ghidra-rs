@@ -4,10 +4,10 @@
 //! over the arithmetic, logic and comparison operators, constants and variables.
 //!
 //! Every construct the C++ would print that is not ported fails with an error naming it, so a
-//! function prints identically or not at all. Not ported yet: casts (`setcasts` is not ported,
-//! the checks skip it on both engines), structured control flow (if, loops, switch, gotos and
-//! labels), comments inside the body, strings and characters, floats, field and array access,
-//! and the remaining operators.
+//! function prints identically or not at all. Not ported yet: casts (a CAST op fails loudly; the
+//! `U` suffix of `isUnsignedPrint` is printed, the long suffix fails), structured control flow
+//! (if, loops, switch, gotos and labels), comments inside the body, strings and characters,
+//! floats, field and array access, and the remaining operators.
 
 use super::op::{Halt, OpFlags, OpId};
 use super::opcode::Opcode;
@@ -711,11 +711,19 @@ impl PrintC<'_> {
                 return err("print C: a constant with a symbol (equate) is not ported");
             }
         }
+        // isUnsignedPrint and isLongPrint, set by setcasts (markExplicitUnsigned, markExplicitLongSize)
+        let flags = vn.filter(|&v| !self.fd.vn(v).is_annotation()).map(|v| self.fd.vn(v));
+        let mut force_unsigned = flags.is_some_and(|v| v.has(VnFlags::UNSIGNED_PRINT));
+        if flags.is_some_and(|v| v.has(VnFlags::LONG_PRINT)) {
+            // sizeSuffix comes from the data organization's long size, not ported
+            return err("print C: the long suffix of a constant (isLongPrint, sizeSuffix) is not ported");
+        }
         let mut negsign = false;
         if sign {
             let mask = calc_mask(size);
             let flip = val ^ mask;
             negsign = flip < val;
+            force_unsigned = false;
             if negsign {
                 val = flip.wrapping_add(1);
             }
@@ -732,6 +740,9 @@ impl PrintC<'_> {
             t.push('-');
         }
         t += &if hex { format!("0x{val:x}") } else { format!("{val}") };
+        if force_unsigned {
+            t.push('U');
+        }
         self.push_atom(Atom::Text(t))
     }
 }

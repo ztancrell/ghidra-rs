@@ -1673,7 +1673,7 @@ wrapper of `ActionActiveParam`'s errors.
 the `getInputCast`/`getOutputToken` overrides of typeop.cc (details and numbers: rust/README.md,
 "Casts"). Checks in `bars.sh`: `cs-r`/`cs-t` (`print raw` with types at `BREAK=finalstructure`,
 skipping `inputprototype,mapglobals,namevars` and, rules on, the S3 actions) and `fsc-r`/`fsc-t`,
-`swfsc-r`/`swfsc-t` (`fs-*`, `swfs-*` with `setcasts` on). M8 8 / 8 in all six; M500 `cs`
+`swfsc-r`/`swfsc-t` (`fs-*`, `swfs-*` with `setcasts` on). M8 `cs` and `swfsc` 8 / 8, `fsc` 7 / 7 (0x4042e0 is outside `fs`; superseded: "8 / 8 in all six"); M500 `cs`
 498 / 499 and 493 / 499, `fsc` 494 / 495 and 489 / 495 (no new miss), `swfsc` 498 / 499 and 493 / 499 (as `swfs`). Fail
 loudly: union resolution (every type that `needsResolution`), struct or union SUBPIECE truncation,
 SEGMENTOP/INSERT/ZPULL/SPULL casts. Printer-only parts of `cast.cc` (`isSubpieceCast`,
@@ -1698,6 +1698,15 @@ sorter); casts once `setcasts` lands; field and array access; strings and charac
 of `printc.cc`.
 
 Merged with `m3-cast` on `m3-s9` (2026-11-15): M8 the 51 checks other than `pc-r`/`pc-t` identical, those two 0 / 7, all loud; M500 not rerun on the merge.
+
+Review fixes on `m3-s9` (details: rust/README.md, "Review fixes and `print C` with casts"):
+`checkPointerIssues` warns "Load size is inaccurate" as the C++; `calcSubmeta` (a pointer to a
+struct or union is `SUB_PTR_STRUCT`; no check moves, none declares a struct or union);
+CPOOLREF and NEW never cast; `opUndoPtradd` fails on every `needsResolution` type; `print C`
+prints the `U` suffix, fails loudly on the long suffix and on a CAST op. New checks `pcc-r`,
+`pcc-t` (`print C` with `setcasts` on): M500 10 / 495 and 8 / 495 identical, silent 0 (CAST 86
+and 66 loud), against `pc-r` 47 and `pc-t` 24 / 495; M500 `cs-t`, `fsc-t`, `fs-t` unchanged.
+Next for casts in the printer: `PrintC::opTypeCast` and the extension casts of `cast.cc`.
 
 ## Running stages in parallel
 

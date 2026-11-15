@@ -45,6 +45,7 @@ mod sub {
     pub(super) const CODE: u8 = 9;
     pub(super) const FLOAT: u8 = 8;
     pub(super) const PTR: u8 = 6;
+    pub(super) const PTR_STRUCT: u8 = 4;
     pub(super) const UINT_ENUM: u8 = 13;
     pub(super) const ARRAY: u8 = 3;
     pub(super) const STRUCT: u8 = 2;
@@ -286,13 +287,14 @@ impl TypeFactory {
 
     /// Port of `TypeFactory::getTypePointer`.
     pub(crate) fn pointer(&mut self, size: u32, to: TypeId, wordsize: u32) -> TypeId {
-        self.intern(Datatype {
-            meta: Meta::Ptr,
-            submeta: sub::PTR,
-            size,
-            name: None,
-            kind: Kind::Pointer { to, wordsize },
-        })
+        // TypePointer::calcSubmeta: a pointer to a struct (unless it needs resolution) or to a
+        // union compares as a pointer into a struct
+        let submeta = match self.meta(to) {
+            Meta::Struct if !self.needs_resolution(to) => sub::PTR_STRUCT,
+            Meta::Union => sub::PTR_STRUCT,
+            _ => sub::PTR,
+        };
+        self.intern(Datatype { meta: Meta::Ptr, submeta, size, name: None, kind: Kind::Pointer { to, wordsize } })
     }
 
     /// Port of `TypeFactory::getTypePointerStripArray`.
@@ -587,6 +589,29 @@ mod tests {
         let void = f.base(1, Meta::Void);
         assert!(f.aggregate("v", false, vec![("v".into(), void)]).is_err());
         assert!(f.array_of(i4, u32::MAX).is_err());
+    }
+
+    /// TypePointer::calcSubmeta: struct (not needing resolution) and union pointees give
+    /// SUB_PTR_STRUCT, which orders before a plain pointer.
+    #[test]
+    fn pointer_submeta() {
+        let mut f = TypeFactory::new();
+        let (i4, c) = (f.base(4, Meta::Int), f.base(1, Meta::Int));
+        let s2 = f.aggregate("s2", false, vec![("a".into(), i4), ("c".into(), c)]).unwrap();
+        let s1 = f.aggregate("s1", false, vec![("a".into(), i4)]).unwrap();
+        let u = f.aggregate("u", true, vec![("a".into(), i4), ("c".into(), c)]).unwrap();
+        let a1 = f.array_of(i4, 1).unwrap();
+        let sub_of = |f: &mut TypeFactory, to| {
+            let p = f.pointer(4, to, 1);
+            f.get(p).submeta
+        };
+        assert_eq!(sub_of(&mut f, s2), sub::PTR_STRUCT);
+        assert_eq!(sub_of(&mut f, u), sub::PTR_STRUCT);
+        assert_eq!(sub_of(&mut f, s1), sub::PTR);
+        assert_eq!(sub_of(&mut f, a1), sub::PTR);
+        assert_eq!(sub_of(&mut f, i4), sub::PTR);
+        let (ps, pi) = (f.pointer(4, s2, 1), f.pointer(4, i4, 1));
+        assert!(f.order(ps, pi) < 0 && f.order(pi, ps) > 0);
     }
 
     #[test]

@@ -680,10 +680,10 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
 ```
 
 - `CORPORA`: `m8`, `m500`, `r5d-adc`, `switch`, `simple` (files of `tools/corpus/`) or an
-  address file; default all five. Without `CHECKS`, M8 and M500 run all 53 checks, `r5d-adc` the
+  address file; default all five. Without `CHECKS`, M8 and M500 run all 55 checks, `r5d-adc` the
   four double-rule checks (`r5d r5dt r5dtlock r5dtlocksv`), `switch` the S3 bar (`paramdouble`)
-  and the six switch checks, and `simple` the two `print C` checks. Superseded: "all four",
-  "all 45 checks", "all 47", "all 51" (before the six `setcasts` checks, `pc-r pc-t` and the
+  and the six switch checks, and `simple` the four `print C` checks. Superseded: "all four",
+  "all 45 checks", "all 47", "all 51", "all 53" (before the six `setcasts` checks, `pc-r pc-t`, `pcc-r pcc-t` and the
   `simple` corpus).
 - `CHECKS`: names from the script's `case`: `stack stackhigh funclink heritage paramdouble s4
   s6 s6void s6int4 s6callee r1 subvar r4 r5 r5typed s7r s7r2 s7sub s7r4 s7r5 s7t s7t2 s8 s8r`
@@ -693,7 +693,7 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
   on), `cs-r cs-t fsc-r fsc-t` (S9 `setcasts`: `print raw` after it, and `finalstructure`
   with it on), `swfs-r swfs-t swsn-r swsn-t swfsc-r swfsc-t` (`finalstructure` with case
   labels, `switchnorm`, and `finalstructure` with case labels and `setcasts` on) and
-  `pc-r pc-t` (`print C`, S9 slice 1; see "C printing").
+  `pc-r pc-t pcc-r pcc-t` (`print C`, S9 slice 1, `pcc` with `setcasts` on; see "C printing").
 - `JOBS` (default `nproc`), `TIMEOUT` (seconds per function and engine, default 120 as for every bar here; 0x4c48d0 of M500 takes
   the reference about 485 s and ghidra-rs about 600 s alone, so at 120 s it counts as a function
   the reference does not finish), `OUT`
@@ -2435,6 +2435,29 @@ also after the review fixes; `pc-r` and `pc-t` are 0 / 7, all loud (superseded: 
 on M8 identical"). Not rerun: the older checks on M500 and the other corpora.
 
 Merged with `m3-cast` on `m3-s9` (2026-11-15): M8 the 51 checks other than `pc-r`/`pc-t` identical, those two 0 / 7, all loud; M500 not rerun on the merge.
+
+### Review fixes and `print C` with casts (branch `m3-s9`, 2026-11-15)
+
+- `checkPointerIssues` warns "Load size is inaccurate" / "Store size is inaccurate", the
+  TypeOp name with its first letter upper-cased, as coreaction.cc (superseded: "LOAD size").
+- `TypeFactory::getTypePointer` ports `TypePointer::calcSubmeta`: a pointer to a struct that
+  does not need resolution, or to a union, gets `SUB_PTR_STRUCT` (4) and orders before a plain
+  pointer (6). No check moves: no prelude, options or lock file declares a struct or union
+  (`parse line` is the only maker of one), so every pointer of the checks keeps `SUB_PTR`.
+- `getInputCast` of CPOOLREF and NEW never casts (typeop.hh); `opUndoPtradd`'s finalize branch
+  fails loudly on any type that `needsResolution`, not only a union (`getTypeReadFacing`).
+- `print C` prints the `U` of a constant `setcasts` marks `isUnsignedPrint` (cleared when
+  printed signed, as `pushConstant`); a constant marked `isLongPrint` fails loudly (the suffix
+  depends on the data organization's long size, not ported); a CAST op fails loudly.
+- Checks `pcc-r`, `pcc-t` (`bars.sh`): `pc-r`, `pc-t` with `setcasts` on.
+
+Numbers (functions the reference finishes): M8 all 51 checks before `pc-*` identical, `pc-*`
+and `pcc-*` 0 / 7 loud. M500 `pcc-r` 10 / 495 (loud 485: `BlockIf` 332, CAST 86, an anonymous
+data-type 40, body comments 20; silent 0) against `pc-r` 47 / 495; `pcc-t` 8 / 495 (loud 487:
+`BlockIf` 376, CAST 66, body comments 20; silent 0) against `pc-t` 24 / 495. `cs-t` 493 / 499, `fsc-t` and `fs-t` 489 / 495, as
+before (the six `mergeAddrTied` `VariablePiece` misses).
+Not run: the other M500 type checks (`s6*`, `r5typed`, `s7t*`, `pg-t`, `nm-t`, `ldn-t`, `pc-*`,
+unchanged by construction: no struct or union reaches them), the `simple` and switch corpora.
 
 ## Speed
 
