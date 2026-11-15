@@ -2365,6 +2365,9 @@ Older stages fixed on the way, found by silent `print C` differences or by the r
   when a function (one byte) or an external reference (a pointer), kept in `Arch` and not in
   the global scope, is smaller, the variable stays unlinked and the printer fails on it; a
   data symbol of the same size fails loudly in `namevars`.
+  With globals linked, `lookForBadJumpTables` renames only a symbol of the local scope to
+  `UNRECOVERED_JUMPTABLE`, as the C++ does (renaming the global target cost 18 `nm-r` functions
+  on M500 before this).
 - `mapglobals` asks whether a varnode is already linked with the varnode's size, as
   `setSymbolProperties` does: a 4-byte varnode at an import's slot is held by the external
   reference, not by the 1-byte function symbol there, so it no longer raises the "Globals
@@ -2380,7 +2383,7 @@ Numbers (functions the reference finishes):
 
 | check | M8 | M500 | simple |
 |---|---|---|---|
-| `pc-r` | 0 / 7 (loud 7) | not run | 54 / 194 (loud 140, silent 0) |
+| `pc-r` | 0 / 7 (loud 7) | 47 / 495 (loud 448, silent 0) | 54 / 194 (loud 140, silent 0) |
 | `pc-t` | 0 / 7 (loud 7) | 24 / 495 (loud 471, silent 0) | 34 / 194 (loud 160, silent 0) |
 
 The silent miss of both, 0x1c8c780, was the header warning of a bad instruction, which flow
@@ -2388,8 +2391,12 @@ did not record; `FlowInfo` now records it (and the body warning, so the function
 The loud misses on M500, `pc-t`: `BlockIf` 376, array or field access 25, comments in the body
 20, `PTRADD` 8, `BlockDoWhile` 7, `mergeAddrTied`, `SUBPIECE` and `FLOAT2FLOAT` 6 each, `PTRSUB` and
 float constants 4, `INT_ZEXT` 3, `PIECE` 2, `SQRT`, `CALLIND`, `BlockInfLoop` and an anonymous
-data-type 1 each (M500 ran before the flow fix, which can only turn a silent miss loud; there
-was none). The loud misses on `simple`, `pc-t`: `BlockIf` 83, comments in the body 30, array or field
+data-type 1 each; `pc-r`: `BlockIf` 332, an anonymous data-type 40, comments in the body 20,
+`FLOAT2FLOAT` 14, `BlockDoWhile` 12, `BlockWhileDo` 10, then 5 or fewer each. Both rerun after the
+review fixes (superseded: `pc-t` measured before the flow fix, the same 24 / 495). The checks the
+`namevars` and `mapglobals` fixes could move, on M500 after the review fixes: `pg-r` 498 / 499,
+`pg-t` 493 / 499, `nm-r` 498 / 499, `nm-t` 493 / 499, as before (the misses: 0x47a6b0 rules on,
+the six `VariablePiece` functions types on). The loud misses on `simple`, `pc-t`: `BlockIf` 83, comments in the body 30, array or field
 access 15, `INT_ZEXT` 5, `BlockDoWhile` 4, `SUBPIECE`, `PTRADD`, `FLOAT2FLOAT`, `BlockWhileDo`,
 `BlockInfLoop` and the `mergeAddrTied` error 3 each, `PTRSUB` 2, `PIECE` and `CALLOTHER` 1; `pc-r`:
 `BlockIf` 73, comments 30, an anonymous data-type 13, `INT_ZEXT` 6, then 4 or fewer each. On M8 the

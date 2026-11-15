@@ -408,8 +408,9 @@ fn look_for_bad_jump_tables(fd: &mut Funcdata) -> Result<()> {
         }
         let h = high(fd, vn)?;
         let Some((sym, _, _)) = high_symbol(fd, h) else { continue };
-        if fd.symtab.symbol(sym).flags.name_locked {
-            continue; // every linked symbol is local
+        let s = fd.symtab.symbol(sym);
+        if s.flags.name_locked || s.scope != LOCAL {
+            continue; // only a symbol of the local scope is renamed (a global is linked too)
         }
         let name = fd.symtab.make_name_unique(LOCAL, "UNRECOVERED_JUMPTABLE")?;
         fd.symtab.rename_symbol(sym, &name);
