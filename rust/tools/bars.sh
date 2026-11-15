@@ -7,9 +7,10 @@
 #   CORPORA="m8" bars.sh                 the fast gate (minutes)
 #   CHECKS="r1 s7t" CORPORA=m500 bars.sh exactly these checks on these corpora
 #
-#   CORPORA  m8, m500, r5d-adc, switch (files of tools/corpus/) or a file of addresses.
-#            Default: all four. Without CHECKS, r5d-adc runs only the double-rule checks and
-#            switch only the S3 bar (paramdouble) and the six switch checks.
+#   CORPORA  m8, m500, r5d-adc, switch, simple (files of tools/corpus/) or a file of addresses.
+#            Default: all five. Without CHECKS, r5d-adc runs only the double-rule checks,
+#            switch only the S3 bar (paramdouble) and the six switch checks, and simple only
+#            the two print C checks.
 #   CHECKS   names from the `case` below. Default: every check that applies to the corpus.
 #   JOBS     parallel functions per check (default: nproc); TIMEOUT seconds per function and
 #            engine (default 600)
@@ -61,12 +62,13 @@ run() {
 std="stack stackhigh funclink heritage paramdouble s4 s6 s6void s6int4 s6callee r1 subvar r4 r5 r5typed s7r s7r2 s7sub s7r4 s7r5 s7t s7t2 s8 s8r"
 dbl="r5d r5dt r5dtlock r5dtlocksv"
 sw="swfs-r swfs-t swsn-r swsn-t swfsc-r swfsc-t"
-all="$std r5c $dbl svlock svs6 r5slock r5s pg-r pg-t nm-r nm-t ldn-r ldn-t fs-r fs-t cs-r cs-t fsc-r fsc-t $sw"
+pc="pc-r pc-t"
+all="$std r5c $dbl svlock svs6 r5slock r5s pg-r pg-t nm-r nm-t ldn-r ldn-t fs-r fs-t cs-r cs-t fsc-r fsc-t $sw $pc"
 "$t/lock-options.sh" "$l" || exit 1
-for C in ${CORPORA:-m8 m500 r5d-adc switch}; do
+for C in ${CORPORA:-m8 m500 r5d-adc switch simple}; do
     [ -f "$C" ] || C=$c/$C.txt
     [ -f "$C" ] || { echo "no corpus $C" >&2; exit 1; }
-    case $(basename "$C" .txt) in r5d-adc) def=$dbl ;; switch) def="paramdouble $sw" ;; *) def=$all ;; esac
+    case $(basename "$C" .txt) in r5d-adc) def=$dbl ;; switch) def="paramdouble $sw" ;; simple) def=$pc ;; *) def=$all ;; esac
     for k in ${CHECKS:-$def}; do
         case $k in
         # stack heritage: every prototype locked with two stack parameters
@@ -130,6 +132,10 @@ for C in ${CORPORA:-m8 m500 r5d-adc switch}; do
         swsn-t) run $k "$C" DECOMP_RAW_EXTRA=1 DECOMP_SKIP_ACTIONS= BREAK=returnsplit OPTIONS=$c/sw-t-options.txt ;;
         swfsc-r) run $k "$C" DECOMP_RAW_EXTRA=1 DECOMP_TREE_EXTRA=1 "PRINT=$TP" DECOMP_SKIP_ACTIONS=$S3,$SC BREAK=prototypewarnings OPTIONS=$c/sw-r-options.txt ;;
         swfsc-t) run $k "$C" DECOMP_RAW_EXTRA=1 DECOMP_TREE_EXTRA=1 "PRINT=$TP" DECOMP_SKIP_ACTIONS=$SC BREAK=prototypewarnings OPTIONS=$c/sw-t-options.txt ;;
+        # S9 slice 1: `print C` at the end of the ported actions, `setcasts` skipped on both
+        # engines (no casts printed)
+        pc-r) run $k "$C" "PRINT=print C" DECOMP_SKIP_ACTIONS=$S3,$L,setcasts BREAK=prototypewarnings OPTIONS=$c/tail-r-options.txt ;;
+        pc-t) run $k "$C" "PRINT=print C" DECOMP_SKIP_ACTIONS=$L,setcasts BREAK=prototypewarnings OPTIONS=$c/tail-t-options.txt ;;
         *) echo "unknown check $k" >&2; exit 1 ;;
         esac
     done

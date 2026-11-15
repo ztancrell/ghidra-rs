@@ -1633,9 +1633,19 @@ fn group_partials(fd: &Funcdata) -> Result<()> {
     Ok(())
 }
 
-/// `ActionMergeMultiEntry`: the local scope holds no symbols (`localrecovery` is not ported),
-/// so none has several entries.
-pub(crate) fn merge_multi_entry(_: &mut Funcdata, _: &Arch) -> Result<i32> {
+/// `ActionMergeMultiEntry`: only a symbol with several whole entries has work; the local scope
+/// holds none here (`localrecovery`, which would make them, is not ported), so one fails
+/// loudly. Superseded: "the local scope holds no symbols" (it holds the parameters, one entry
+/// each).
+pub(crate) fn merge_multi_entry(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
+    let multi = fd
+        .symtab
+        .map_records(super::scope::LOCAL)
+        .into_iter()
+        .any(|(sym, _)| fd.symtab.symbol(sym).entries.iter().filter(|e| e.piece.is_none()).count() > 1);
+    if multi {
+        return err("mergeMultiEntry: a symbol with several entries is not ported");
+    }
     Ok(0)
 }
 

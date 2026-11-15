@@ -53,7 +53,9 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   placement and renaming), `action.rs` (the universal
   action up to `paramdouble`), `print.rs` (`print raw`), `stdsort.rs` (libstdc++'s `std::sort`), `rangemap.rs` (the
   `rangemap` template the scopes' maps use), `scope.rs` (symbols, default names), `namevars.rs`
-  (`ActionNameVars`).
+  (`ActionNameVars`), and `print C` in three layers: `prettyprint.rs` (`EmitPrettyPrint`: tokens,
+  line breaking, indents), `printlanguage.rs` (the operator stack, parentheses, number base) and
+  `printc.rs` (`PrintC`: declarations, blocks, statements; first slice).
   See "Decompiler (Milestone 3)" below.
 - `ghidra-rs/tests/decomp.rs`, `tests/data/raw-funclink-*.txt`, `tests/data/raw-heritage-40a110.txt`,
   `tests/data/raw-paramdouble-40ad80.txt` (S2: a loop at `paramdouble`):
@@ -673,22 +675,25 @@ It is the one copy of the "run every bar" script; a stage that adds a check adds
 
 ```sh
 CORPORA=m8 rust/tools/bars.sh                          # the fast gate, about 2 minutes
-rust/tools/bars.sh                                     # everything: M8, M500, r5d-adc, switch
+rust/tools/bars.sh                                     # everything: M8, M500, r5d-adc, switch, simple
 CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
 ```
 
-- `CORPORA`: `m8`, `m500`, `r5d-adc`, `switch` (files of `tools/corpus/`) or an address file;
-  default all four. Without `CHECKS`, M8 and M500 run all 51 checks (superseded: 45, before
-  the six `setcasts` checks), `r5d-adc` the four double-rule checks (`r5d r5dt r5dtlock
-  r5dtlocksv`) and `switch` the S3 bar (`paramdouble`) and the six switch checks.
+- `CORPORA`: `m8`, `m500`, `r5d-adc`, `switch`, `simple` (files of `tools/corpus/`) or an
+  address file; default all five. Without `CHECKS`, M8 and M500 run all 53 checks, `r5d-adc` the
+  four double-rule checks (`r5d r5dt r5dtlock r5dtlocksv`), `switch` the S3 bar (`paramdouble`)
+  and the six switch checks, and `simple` the two `print C` checks. Superseded: "all four",
+  "all 45 checks", "all 47", "all 51" (before the six `setcasts` checks, `pc-r pc-t` and the
+  `simple` corpus).
 - `CHECKS`: names from the script's `case`: `stack stackhigh funclink heritage paramdouble s4
   s6 s6void s6int4 s6callee r1 subvar r4 r5 r5typed s7r s7r2 s7sub s7r4 s7r5 s7t s7t2 s8 s8r`
   (the 24 standard bars), `r5c r5d r5dt r5dtlock r5dtlocksv` (R5 slices 3 to 5), `svlock svs6
   r5slock r5s` (R5 slice 2, `stackvars` on), `pg-r pg-t nm-r nm-t ldn-r ldn-t fs-r fs-t` (tail:
   prototypes and globals, names, `latedonothing`, `finalstructure`; `-r` rules on, `-t` types
   on), `cs-r cs-t fsc-r fsc-t` (S9 `setcasts`: `print raw` after it, and `finalstructure`
-  with it on) and `swfs-r swfs-t swsn-r swsn-t swfsc-r swfsc-t` (`finalstructure` with case
-  labels, `switchnorm`, and `finalstructure` with case labels and `setcasts` on).
+  with it on), `swfs-r swfs-t swsn-r swsn-t swfsc-r swfsc-t` (`finalstructure` with case
+  labels, `switchnorm`, and `finalstructure` with case labels and `setcasts` on) and
+  `pc-r pc-t` (`print C`, S9 slice 1; see "C printing").
 - `JOBS` (default `nproc`), `TIMEOUT` (seconds per function and engine, default 120 as for every bar here; 0x4c48d0 of M500 takes
   the reference about 485 s and ghidra-rs about 600 s alone, so at 120 s it counts as a function
   the reference does not finish), `OUT`
@@ -2342,6 +2347,94 @@ miss is one the earlier bars have: 0x47a6b0 (rules on) differs before `setcasts`
 types-on misses are the loud `mergeAddrTied` `VariablePiece` error. The M8 outputs have 6 to 628
 CAST ops a function. M8 gate: all 51 checks identical. Not run: the switch corpus with `setcasts`
 on, the full M500 pass of the other bars.
+### C printing, slice 1 (branch `m3-print1`, 2026-11-15)
+
+`print C` (`IfcPrintCStruct`, `PrintC::docFunction`) prints a straight-line function, ported in
+the three layers of the C++:
+
+- `decomp/prettyprint.rs`: `EmitPrettyPrint` over `EmitNoMarkup`. Tokens (strings, breaks,
+  group begins and ends, indents, comments) wait in a queue until the breaker knows whether a
+  group fits the 100-column line; a break that saves fewer than 10 columns is not taken, an
+  overflow raises the indents to half the width, comments refill with three spaces. Unit tests
+  pin a short line, a broken expression, an absolute-indent comment and the missing-group error.
+- `decomp/printlanguage.rs`: the `PrintLanguage` reverse-Polish stack (`pushOp`, `pushAtom`,
+  `pushVn`, `recurse`), `parentheses`, `emitOp`, `opBinary`/`opUnary`, the modifier stack and
+  `mostNaturalBase`.
+- `decomp/printc.rs`: the `PrintC` tokens and what a straight-line function reaches: the header
+  warnings (`emitCommentFuncHeader`, `emitLineComment`), the declaration (return type, a
+  prototype model other than the default, the parameters as declarations, `void`), the local
+  declarations (`emitScopeVarDecls` on the local scope), the root graph, lists and basic blocks
+  (`emitBlockLs`, `emitBlockBasic`), statements of assignments, `*p` loads and stores, direct
+  calls, returns and special halts, the arithmetic, logic, shift, comparison and boolean
+  operators (a negated comparison prints flipped), integer and boolean constants (a pointer
+  constant with its cast), named and unnamed variables (`register_ESP`, `unique0x00017200`),
+  pointer and array types in declarations.
+
+Every other construct fails loudly with the C++ name: `BlockIf`, `BlockDoWhile`,
+`BlockWhileDo`, `BlockInfLoop`, `BlockSwitch`, `BlockGoto` and the other block kinds, labels,
+comments inside the body (warnings at an address), array and field access (`PTRSUB`, `PTRADD`),
+the operators not listed (extensions, `SUBPIECE`, `PIECE`, `CALLIND`, `CALLOTHER`, float
+conversions, ...), float, character, string, enum and function-pointer constants, equates,
+partial symbols and symbols or constants whose data-type needs resolution (`needsResolution`:
+a union, a one-element array, a one-field structure, a pointer to one), a global name a local
+name hides (a `::` scope prefix), anonymous and function types, locked prototypes. Casts are not
+printed yet: `setcasts` (`cast.cc`) is ported separately, so the checks skip it on both engines
+and neither prints a cast.
+
+Checks (`tools/bars.sh`), at `break start prototypewarnings` with `print C`, `setcasts` and the
+`localrecovery` leaves skipped on both engines: `pc-r` (rules on, `tail-r-options.txt`) and `pc-t`
+(types on, `tail-t-options.txt`); corpora M8, M500 and `tools/corpus/simple.txt` (200 small
+functions: every 27th of the 5,443 mercs2 functions at most 32 bytes before the next mapped one).
+
+Older stages fixed on the way, found by silent `print C` differences or by the review
+(superseded: "two older stages"):
+
+- `namevars` now links a persistent variable to the global data symbol holding it
+  (`linkSymbol` through `queryProperties`), so globals print by name (`iRam0256f88a`) rather
+  than as `ram0x0256f88a`. As `findContainer`, the smallest entry holding the first byte wins:
+  when a function (one byte) or an external reference (a pointer), kept in `Arch` and not in
+  the global scope, is smaller, the variable stays unlinked and the printer fails on it; a
+  data symbol of the same size fails loudly in `namevars`.
+  With globals linked, `lookForBadJumpTables` renames only a symbol of the local scope to
+  `UNRECOVERED_JUMPTABLE`, as the C++ does (renaming the global target cost 18 `nm-r` functions
+  on M500 before this).
+- `mapglobals` asks whether a varnode is already linked with the varnode's size, as
+  `setSymbolProperties` does: a 4-byte varnode at an import's slot is held by the external
+  reference, not by the 1-byte function symbol there, so it no longer raises the "Globals
+  starting with '_' overlap smaller symbols" header warning the reference does not print.
+- Warnings carry their prefix where they are made (`WARNING: `, or `WARNING (jumptable): ` in
+  jump-table recovery's partial function), and the warnings the partial function adds are
+  carried over to the function, as the C++ comment database the two share keeps them; flow
+  records the bad and unimplemented instruction warnings.
+- `mergeMultiEntry` fails loudly on a local symbol with several whole entries (none is made
+  while `localrecovery` is not ported) instead of doing nothing.
+
+Numbers (functions the reference finishes):
+
+| check | M8 | M500 | simple |
+|---|---|---|---|
+| `pc-r` | 0 / 7 (loud 7) | 47 / 495 (loud 448, silent 0) | 54 / 194 (loud 140, silent 0) |
+| `pc-t` | 0 / 7 (loud 7) | 24 / 495 (loud 471, silent 0) | 34 / 194 (loud 160, silent 0) |
+
+The silent miss of both, 0x1c8c780, was the header warning of a bad instruction, which flow
+did not record; `FlowInfo` now records it (and the body warning, so the function fails loudly;; `simple` rerun after it and the review fixes).
+The loud misses on M500, `pc-t`: `BlockIf` 376, array or field access 25, comments in the body
+20, `PTRADD` 8, `BlockDoWhile` 7, `mergeAddrTied`, `SUBPIECE` and `FLOAT2FLOAT` 6 each, `PTRSUB` and
+float constants 4, `INT_ZEXT` 3, `PIECE` 2, `SQRT`, `CALLIND`, `BlockInfLoop` and an anonymous
+data-type 1 each; `pc-r`: `BlockIf` 332, an anonymous data-type 40, comments in the body 20,
+`FLOAT2FLOAT` 14, `BlockDoWhile` 12, `BlockWhileDo` 10, then 5 or fewer each. Both rerun after the
+review fixes (superseded: `pc-t` measured before the flow fix, the same 24 / 495). The checks the
+`namevars` and `mapglobals` fixes could move, on M500 after the review fixes: `pg-r` 498 / 499,
+`pg-t` 493 / 499, `nm-r` 498 / 499, `nm-t` 493 / 499, as before (the misses: 0x47a6b0 rules on,
+the six `VariablePiece` functions types on). The loud misses on `simple`, `pc-t`: `BlockIf` 83, comments in the body 30, array or field
+access 15, `INT_ZEXT` 5, `BlockDoWhile` 4, `SUBPIECE`, `PTRADD`, `FLOAT2FLOAT`, `BlockWhileDo`,
+`BlockInfLoop` and the `mergeAddrTied` error 3 each, `PTRSUB` 2, `PIECE` and `CALLOTHER` 1; `pc-r`:
+`BlockIf` 73, comments 30, an anonymous data-type 13, `INT_ZEXT` 6, then 4 or fewer each. On M8 the
+45 older checks are identical as before (8 / 8, `fs-r` and `fs-t` 7 / 7) after the fixes below,
+also after the review fixes; `pc-r` and `pc-t` are 0 / 7, all loud (superseded: "all 47 checks
+on M8 identical"). Not rerun: the older checks on M500 and the other corpora.
+
+Merged with `m3-cast` on `m3-s9` (2026-11-15): M8 the 51 checks other than `pc-r`/`pc-t` identical, those two 0 / 7, all loud; M500 not rerun on the merge.
 
 ## Speed
 

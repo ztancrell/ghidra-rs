@@ -16,7 +16,7 @@
 mod arith;
 mod bitfield;
 mod bits;
-mod boolean;
+pub(crate) mod boolean;
 mod cleanup;
 mod compare;
 mod constseq;
