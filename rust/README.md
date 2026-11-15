@@ -709,6 +709,71 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
   sections below are these files.
 - The switch corpus is `tools/corpus/switch.txt` (2,050 functions with a jump table; superseded:
   `rust/target/stk/switch.txt` of an agent's worktree).
+- `LIST=1 bars.sh` prints the `<check> <corpus>` pairs it would run and runs nothing.
+
+### One pass on two machines: `tools/bars-queue.sh`
+
+`rust/tools/bars-queue.sh` shares one `bars.sh` pass between this desktop and a second machine
+reached over ssh (the MacBook, `192.168.254.18`). It puts the pairs of `LIST=1 bars.sh` in one
+queue, M500, r5d-adc and switch first and M8 last, and runs two workers: local and the Mac. Each
+takes the next pair when it is free, so the faster machine runs more of them.
+
+```sh
+NOLOCK=1 CORPORA=m8 rust/tools/bars-queue.sh       # a test: the local worker skips heavy-run
+PUSH=1 rust/tools/bars-queue.sh                    # everything; push HEAD to the Mac first
+```
+
+- Before it starts it stops loudly unless both clones are at the same commit with no tracked
+  changes (`PUSH=1` pushes HEAD to the git remote `mac` as branch `bars-queue` and checks it
+  out detached there), `cargo build --release` passes on both, and both preludes are the same.
+  It does not rebuild the reference: when the branch changes `tools/decomp-ref.patch`, run
+  `tools/decomp-ref.sh` on both machines first (on the Mac in `~/ghidra-rs/rust`, after the push).
+- The local worker runs each pair under `~/.claude/bin/heavy-run 5` with heavy-run's `JOBS`;
+  `NOLOCK=1` skips the lock and uses `JOBS=$(heavy-run --jobs)`. The Mac runs each pair with
+  `JOBS=16` (`REMOTE_JOBS`) under `caffeinate -i` (the Mac sleeps after a minute idle).
+- Output, under `rust/target/bars-queue/` (`OUT`): `summary.out` (the `bars.sh` summary lines of
+  both machines, appended as they finish, then `DONE` or `INCOMPLETE`), `times.out`
+  (`<check>-<corpus> <worker> <seconds>`), `local/` (the `bars.sh` files) and `mac/` (each
+  pair's output and its `.miss`, copied back). The Mac keeps its own files under its
+  `rust/target/bars-queue/`.
+- No retry. A Mac pair that ends without its summary line (ssh dropped, the Mac gone) prints
+  `lost: <check>-<corpus> on mac`; the Mac worker stops, the local worker runs the rest, and the
+  script exits 1, so the pass never counts as complete. A run already started on the Mac may
+  go on there; its lines are not counted.
+- `REMOTE`, `REMOTE_DIR` (the clone, from `~`, default `ghidra-rs`), `REMOTE_BIN` (the game
+  binary there), `REMOTE_FID` (the Function ID databases there, default
+  `~/ghidra-rs/rust/target/fid`); `CORPORA`, `CHECKS`, `TIMEOUT` as in `bars.sh`.
+
+Setting up the Mac (macOS 26, Intel, Homebrew in `/usr/local`):
+
+- `brew install bash coreutils gnu-sed grep findutils gawk binutils`. `decomp-diff.sh` needs GNU
+  `sed` and `grep` (`\|` in basic regular expressions), `timeout` and `nproc`; the queue puts
+  their `gnubin` folders first on the PATH of each ssh command, with `/bin/bash` (3.2) as bash.
+- The reference: `rust/tools/decomp-ref.sh` builds on macOS with Homebrew GCC (`g++-16`,
+  `REF_CXX`) and libstdc++, never Apple's clang and libc++, and fails when `decomp_dbg` does not
+  link libstdc++: `stdsort.rs` keeps libstdc++'s order of equal keys. `tools/stdsort_ref.cc`
+  built with `g++-16` prints `tests/data/stdsort-gxx.txt` exactly; built with clang it differs
+  from the first line. BFD comes from Homebrew `binutils` (`BINUTILS`), and the console is built
+  without `__TERMINAL__`, because macOS's `tcgetattr` on `/dev/null` fails with an errno the
+  console does not expect (on Linux it reports "not a terminal" and the console goes on).
+- The inputs, copied from the desktop: the game binary to the same place under `~`
+  (`decomp-diff.sh`'s `BIN` default is now `~/projects/mercs/mercs2-decomp/orig/...`), the
+  compiled `x86.sla` and `x86-64.sla`, and Ghidra's `*_x86.fidbf` Function ID databases to
+  `rust/target/fid/` (`GHIDRA_RS_FID`). Without the databases the prelude names no FID
+  functions (801,671 bytes instead of 839,707) and every check differs.
+- The clone: the desktop has the git remote `mac` (`ssh://192.168.254.18/Users/zpt/ghidra-rs`),
+  and the Mac clone has `receive.denyCurrentBranch updateInstead`.
+
+Acceptance on master 95bbb60e89 (2026-11-15), the Mac with `JOBS=16`, `TIMEOUT=120`: all 45 M8
+lines equal the desktop's master lines (`r5dtlocksv` and `r5slock` 6 / 8, `r5s` 3 / 8, `fs-*`
+7 / 7, the rest 8 / 8), in 278 s. Six M500 checks equal the bars above: `heritage` 500 / 500
+(264 s), `s6` 499 / 499 (336 s), `r5` 497 / 498 (338 s), `s7t` 493 / 499 (341 s), `s8r`
+498 / 499 (340 s), `fs-t` 489 / 495 (346 s). An M500 check takes about 5.5 minutes there, against
+about 4.6 on the desktop alone with `JOBS=12`. The queue on M8 (`NOLOCK=1`, the local worker at
+`JOBS=3` while a pass held heavy-run): 45 pairs in 3 min 33 s, 27 on the Mac and 18 local, every
+line equal to the desktop's. With the Mac's ssh killed in the middle: `lost: funclink-m8 on mac`,
+the other 44 run locally and equal, `INCOMPLETE`, exit 1. Not yet run: a full pass through the
+queue, and the local worker under the heavy-run lock.
 
 ## Decompiler (Milestone 3)
 
