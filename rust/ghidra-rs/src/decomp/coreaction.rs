@@ -613,16 +613,22 @@ pub(crate) fn active_param(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             if active.needs_final_check {
                 final_input_check(fd, c);
             }
-            let Some(active) = &fd.call(c).active_input else { continue };
-            if !active.trials.is_empty() {
-                return err("parameter trials of a call (resolveModel, deriveInputMap, buildInputFromTrials): not implemented in ghidra-rs yet");
+            let Some(mut active) = fd.call_mut(c).active_input.take() else { continue };
+            let models = &arch.spec.models;
+            // FuncProto::resolveModel: a merged model becomes the member the trials fit best
+            if let Some(m) = fd.call(c).proto.model.filter(|&m| !models.get(m).members.is_empty()) {
+                let pick = models.select_model(m, &active)?;
+                fd.call_mut(c).proto.set_model(models, pick);
             }
-            // resolveModel (calls never take a merged model) and deriveInputMap have no trials
-            // to work on; buildInputFromTrials keeps input 0
-            let in0 = fd.input(op, 0)?;
-            fd.op_set_all_input(op, &[in0])?;
-            let call = fd.call_mut(c);
-            call.kept_input = call.active_input.take();
+            // deriveInputMap (fillinMap returns at once without trials)
+            match fd.call(c).proto.model {
+                Some(m) => models.get(m).input.fillin_map_input(&mut active)?,
+                None if active.trials.is_empty() => {}
+                None => return err("deriveInputMap: a call with parameter trials and no prototype model"),
+            }
+            build_input_from_trials(fd, arch, c, &mut active)?;
+            // clearActiveInput: the trials stay for checkCallDoubleUse
+            fd.call_mut(c).kept_input = Some(active);
             count += 1;
         }
     }
@@ -709,6 +715,57 @@ fn check_input_trial_use(
             fd.op_set_input(op, zero, slot)?;
         }
     }
+    Ok(())
+}
+
+/// Port of `FuncCallSpecs::buildInputFromTrials`: the call's inputs become the call address and
+/// the used trials in order; an unreferenced trial gets a new varnode, a varnode bigger than its
+/// trial is truncated by a SUBPIECE before the call, and a stack parameter's range (relative to
+/// the caller's stack) leaves the local scope. The used trials are renumbered.
+fn build_input_from_trials(fd: &mut Funcdata, arch: &Arch, c: CallId, active: &mut ParamActive) -> Result<()> {
+    let op = fd.call(c).op;
+    if fd.call(c).proto.locked.as_ref().is_some_and(|l| l.dotdotdot) {
+        return err(
+            "buildInputFromTrials of a locked varargs call (sortFixedPosition): not implemented in ghidra-rs yet",
+        );
+    }
+    let mut newparam = vec![fd.input(op, 0)?];
+    let addr = fd.op(op).seq.addr;
+    for t in active.trials.iter().filter(|t| t.is_used()) {
+        let (sz, space) = (t.size, t.space);
+        let mut off = t.off;
+        if space == Space::Stack {
+            // the C++ would add offset_unknown; no stack trial exists before the offset is known
+            let so = fd.call(c).stack_offset.ok_or_else(|| {
+                LowlevelError("buildInputFromTrials: a stack parameter of a call whose stack offset is unknown".into())
+            })?;
+            off = so.wrapping_add(off) & fd.localmap.highest();
+        }
+        let vn = if t.has(ParamTrial::UNREF) {
+            fd.new_varnode(sz, space, off)
+        } else {
+            let vn = fd.input(op, t.slot)?;
+            let (vsize, vspace, voff) = (fd.vn(vn).size, fd.vn(vn).space, fd.vn(vn).offset);
+            if vsize > sz {
+                let newop = fd.new_op(Opcode::Subpiece, addr);
+                let at = if arch.sleigh.big_endian { voff + u64::from(vsize - sz) } else { voff };
+                let outvn = fd.new_varnode_out(sz, vspace, at, newop);
+                fd.op_set_input(newop, vn, 0)?;
+                let zero = fd.new_constant(1, 0);
+                fd.op_set_input(newop, zero, 1)?;
+                fd.op_insert_before(newop, op)?;
+                outvn
+            } else {
+                vn
+            }
+        };
+        newparam.push(vn);
+        if space == Space::Stack {
+            super::varmap::mark_not_mapped(fd, Space::Stack, off, sz, true);
+        }
+    }
+    fd.op_set_all_input(op, &newparam)?;
+    active.delete_unused_trials();
     Ok(())
 }
 
@@ -2768,5 +2825,46 @@ mod tests {
         let (fd, call) = call_of_copied_input(true);
         assert!(ancestor_realistic(&fd, call, 1, &mut trial, true));
         assert!(trial.has(ParamTrial::ANCESTOR_SOLID));
+    }
+
+    /// `buildInputFromTrials` on x86: a used 2-byte trial read from a 4-byte register is
+    /// truncated by a SUBPIECE inserted before the call, an unreferenced used trial gets a new
+    /// varnode, an unused trial is dropped, and the kept trials are renumbered from slot 1.
+    #[test]
+    fn inputs_rebuilt_from_the_used_trials() {
+        use crate::sleigh::Sleigh;
+        let path = Sleigh::sla_path("x86");
+        assert!(path.exists(), "{} is missing: run rust/build-sla.sh first", path.display());
+        let cspec = std::fs::read_to_string(path.with_file_name("x86win.cspec")).unwrap();
+        let arch = Arch::new(Sleigh::load(&path).unwrap(), Default::default(), &cspec).unwrap();
+        let reg = arch.sleigh.spaces.iter().position(|s| s.name == "register").unwrap() as u32;
+        let (mut fd, call) = call_of_copied_input(true);
+        let x = fd.op(call).ins[1];
+        fd.vn_mut(x).space = Space::Sleigh(reg);
+        let unused = fd.new_varnode(4, Space::Sleigh(reg), 0x8);
+        let set = fd.new_op(Opcode::Copy, 0x1001);
+        let one = fd.new_constant(4, 1);
+        fd.op_set_input(set, one, 0).unwrap();
+        fd.op_set_output(set, unused).unwrap();
+        fd.op_set_input(call, unused, 2).unwrap();
+        let c = CallId(fd.calls.len() as u32);
+        fd.calls.push(super::super::fspec::CallSpec::new(call, Some(0x2000), false));
+        fd.qlst.push(c);
+        let mut active = ParamActive::subcall(0);
+        active.register_trial(Space::Sleigh(reg), 0, 2);
+        active.register_trial(Space::Sleigh(reg), 8, 4);
+        active.register_trial(Space::Sleigh(reg), 4, 4);
+        active.trials[0].set(ParamTrial::USED);
+        active.trials[2].set(ParamTrial::USED | ParamTrial::UNREF);
+        build_input_from_trials(&mut fd, &arch, c, &mut active).unwrap();
+        let ins = fd.op(call).ins.clone();
+        assert_eq!(ins.len(), 3);
+        let sub = fd.vn(ins[1]).def.unwrap();
+        assert_eq!((fd.op(sub).opc, fd.op(sub).ins[0], fd.vn(ins[1]).size), (Opcode::Subpiece, x, 2));
+        assert_eq!(fd.previous_op(call), Some(sub));
+        assert_eq!((fd.vn(ins[2]).offset, fd.vn(ins[2]).size), (4, 4));
+        assert!(fd.vn(ins[2]).def.is_none() && !fd.vn(ins[2]).is_input());
+        let slots: Vec<_> = active.trials.iter().map(|t| (t.off, t.slot)).collect();
+        assert_eq!(slots, vec![(0, 1), (4, 2)]);
     }
 }

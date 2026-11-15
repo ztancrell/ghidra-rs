@@ -1086,6 +1086,7 @@ Remaining differences, by cause:
   revisited marker, parameter trials of calls (calls take `__stdcall`, whose parameters live on
   the stack, and no stack varnode exists before the `stackvars` rules), a varnode consumed by
   nothing but read (`varnodeprops` zero replacement), INSERT/ZPULL/SPULL in dead code.
+  Superseded: parameter trials of calls are ported (branch `m3-ap`, "Parameter trials of calls").
 - `Funcdata::fillinExtrapop` is only called from `callgraph.cc` (not ported), so nothing in a
   decompile records a function's extrapop for later decompiles; `ActionStackPtrFlow` sets only
   the call sites' `effective_extrapop`. Superseded: S1b and S2 placed it in `ActionStackPtrFlow`.
@@ -1879,12 +1880,11 @@ both sides kept).
   `stack_store` mark (`VnFlags::STACK_STORE`) read by `ActionDirectWrite`,
   `propagateSpacebaseRef`/`propagateRef` with `getExactPiece` in `infertypes.rs`, and stack
   entries in `characterizeAsParam` (`ParamList::characterize_stack` in `fspec.rs`).
-- Open, failing loudly: stack parameter trials of a call without a locked prototype
-  (`ActionActiveParam` with trials: `checkInputTrialUse`, `fillinMap`,
-  `buildInputFromTrials`), which nearly every unlocked function with the rules on reaches; a
+- Open, failing loudly: a
   partly overlapping INDIRECT in `opCollapseIndirectsForCopy`; partial structs, arrays and
   unions in `getExactPiece`. The jump-table partial function runs without the two rules and
-  keeps `jumptable::fold_constants`.
+  keeps `jumptable::fold_constants`. Superseded: stack parameter trials of a call
+  (`ActionActiveParam` with trials) are ported, "Parameter trials of calls (branch `m3-ap`)".
 - `tools/r1-options.sh` also writes `tools/corpus/r5s-options.txt` (`r5-options.txt` with
   `stackvars` on).
 
@@ -2257,6 +2257,37 @@ the 54 others are 53 loud (36 `ActionParamDouble` splitting a stack trial that i
 heritage indexed stack loads; unported paths reached after the first pass) and 0x47a6b0 (a block
 order difference that master has at the same point, before any trial). In every one of the 54
 the trial lines ghidra-rs prints match the reference's. M8 gate (`bars.sh`, 45 checks) unchanged.
+Superseded (slice 2): a fully checked call with trials no longer fails.
+
+Slice 2: once a call's trials are fully checked, `FuncProto::resolveModel` (a merged model
+becomes the member `selectModel` scores best), `deriveInputMap` (`ParamListStandard::fillinMap`,
+`fillin_map_input`, the same code as the function's own inputs) and
+`FuncCallSpecs::buildInputFromTrials` (the used trials become the call's inputs: a new varnode
+for an unreferenced trial, a SUBPIECE before the call for a varnode bigger than its trial, the
+stack range of a stack parameter `markNotMapped`; the used trials renumbered and kept). Failing
+loudly: a locked varargs call (`sortFixedPosition`), a stack trial of a call whose stack offset
+is unknown, and `getTrialForInputVarnode` past the end of a call's trials (the C++ reads past the
+end; an empty list is taken as no match, as before).
+
+| check (`bars.sh`, M500, of the functions the reference finishes in 120 s) | before | slice 2 |
+|---|---|---|
+| `r5s` (R5 options with `stackvars`, unlocked) | 132 / 499 (366 loud) | 446 / 499 (52 loud, 1 silent) |
+| `r5slock` (the same with every prototype locked) | 328 / 499 (170 loud) | 450 / 498 (47 loud, 1 silent) |
+| `r5dtlocksv` (typed double rules, locked, `stackvars`) | 328 / 499 (170 loud) | 451 / 499 (47 loud, 1 silent) |
+
+Every remaining loud miss is a path that was not reached before: `ActionParamDouble` splitting a
+stack trial that is a PIECE (36 in `r5s`), heritage's indexed stack LOAD that may read an
+address-tied range (16 in `r5s`), a piece of a locked stack parameter (31 in `r5slock`). The
+silent miss is 0x47a6b0, the rule-stage miss of every check. 0x6b21e0 is not finished by the
+reference (and in this `r5slock` run 0x4c48d0, 120 s under load).
+
+Regression guards, M500 at `bars.sh`'s 120 s (0x4c48d0 counts as not finished; the integration
+pass used 600 s): `r5c` 494 / 498 (3 HeapSequence, 0x47a6b0; 0x6b21e0 not finished by the
+reference this run), `r5d` 498 / 499, `s7r` 498 / 499, `s8r` 498 / 499, `fs-r` 494 / 495, `fs-t`
+489 / 495 (6 `mergeAddrTied` VariablePiece), `swsn-r` 495 / 499 (0x47a6b0 and the three lazy
+global-type misses): every miss is one the integration pass lists. M8 gate: all 45 checks
+identical (`r5s`, `r5slock`, `r5dtlocksv` now 8 / 8, were 3, 6, 6). Not run: the other M500
+checks, r5d-adc and the switch corpus.
 
 ## Speed
 

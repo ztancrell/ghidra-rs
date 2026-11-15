@@ -210,6 +210,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `stackvars` on: M500 499 / 499 unlocked without rules, 473 / 499 with every prototype locked, 323 / 498 locked with rules and types, 132 / 498 unlocked with rules (the rest fail loudly, 5 silent differences not traced); every older bar held. Open: stack parameter trials of
    unlocked calls (`ActionActiveParam` with trials), `stackvars` in the jump-table partial function.
    Superseded: "Open: stack loads/stores" above.
+   Superseded (branch `m3-ap`, 2026-11-14): `ActionActiveParam` with trials is ported
+   (`checkInputTrialUse`, `AliasChecker`, `finalInputCheck`, `resolveModel`, `deriveInputMap`,
+   `buildInputFromTrials`, `checkCallDoubleUse`); `r5s` 446 / 499, `r5slock` 450 / 498,
+   `r5dtlocksv` 451 / 499 (were 132, 328, 328), M8 all 45 checks identical. Open, failing loudly:
+   `ActionParamDouble` on a stack PIECE, heritage's indexed stack LOAD, a piece of a locked stack parameter.
    R5 review fixes on `m3-r5b` (2026-11-14): `ActionLikelyTrash::countMarks` and its lock test
    (superseded: "5 silent differences not traced" above; the 5 match now), the locked branch of
    `ActionParamDouble`, symbol tests in the double rules, `justifiedContain` for exclusion stack

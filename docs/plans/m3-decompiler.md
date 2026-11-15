@@ -951,6 +951,7 @@ Open, failing loudly:
   trials (`checkInputTrialUse` with `AliasChecker`, `finalInputCheck`, `fillinMap`,
   `buildInputFromTrials`) is not ported. With the rules on, almost every function that pushes
   arguments reaches it, so the unlocked check below is far from its bar. This is the next piece.
+  Superseded: ported on branch `m3-ap`, "Parameter trials of calls" below.
 - An INDIRECT of the old STORE that overlaps the new COPY in part (the PIECE/SUBPIECE rebuild
   of `opCollapseIndirectsForCopy`); partial structs, arrays and unions in `getExactPiece`.
 - Not modelled: `PcodeOp::isStoreUnmapped` (set only by `ActionRestructureVarnode`, not
@@ -1645,6 +1646,19 @@ and the explained misses: rust/README.md, "Integration of `m3-tail` and `m3-r5b`
   0x8eabe0, 0x8ead90 (switch corpus) at `returnsplit`; 0x4f3366 (switch `finalstructure` types
   on) keeps a call's join output; ghidra-rs is about 1.25 times slower than the reference on
   0x4c48d0.
+
+### Parameter trials of calls: branch `m3-ap` (2026-11-14)
+
+`ActionActiveParam` for calls with trials, in two slices (details and numbers: rust/README.md,
+"Parameter trials of calls"). Slice 1: `checkInputTrialUse` with the `AliasChecker`,
+`finalInputCheck`, the pass counting, `checkCallDoubleUse` with trials; check device
+`DECOMP_TRIALS_EXTRA` (`print raw` ends with each active call's trials), compared at
+`BREAK=activeparam` with `CONTINUES=1` (slice 1 alone cannot go further): M8 8 / 8, M500 446 / 500
+with the trial lines equal in all 500. Slice 2: `resolveModel`, `deriveInputMap`
+(`fillin_map_input`), `buildInputFromTrials`. `r5s` 132 / 499 to 446 / 499, `r5slock` 328 / 499 to
+450 / 498, `r5dtlocksv` 328 / 499 to 451 / 499; M8 all 45 checks identical. Open, failing loudly (newly reached):
+`ActionParamDouble` splitting a stack trial that is a PIECE, heritage's indexed stack LOAD that
+may read an address-tied range, a piece of a locked stack parameter.
 
 ## Running stages in parallel
 
