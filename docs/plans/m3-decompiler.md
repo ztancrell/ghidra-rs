@@ -1672,7 +1672,8 @@ operator stack and parentheses; `printc.rs`: `PrintC` for the header warnings, t
 the local declarations, lists of basic blocks and the plain statements and operators). Details:
 rust/README.md, "C printing, slice 1". Checks `pc-r` and `pc-t` in `tools/bars.sh` (at
 `break start prototypewarnings`, `setcasts` skipped on both engines: no casts are printed yet)
-and the corpus `tools/corpus/simple.txt`. M8 0 / 7 loud (every M8 function has an `if` or more); `simple` 54 / 194 (rules on) and
+and the corpus `tools/corpus/simple.txt`. M8 0 / 7 loud (every M8 function has an `if` or more); M500 `pc-t` 24 / 495 identical, loud 471
+(`BlockIf` 376), silent 0; `simple` 54 / 194 (rules on) and
 34 / 194 (types on), no silent miss left after the fixes; M8 all 47 checks identical. Fixed on the
 way: `namevars` links globals to their data symbols, `mapglobals` asks with the varnode's size
 whether a varnode is already linked, flow records the bad-instruction warnings.

@@ -253,7 +253,8 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    (if, loops, switch, gotos, comments in the body, field and array access, the remaining
    operators and constants) fails loudly. Casts are not printed yet (`setcasts` skipped on both
    engines). Checks `pc-r`, `pc-t` (`tools/bars.sh`): `simple` corpus 54 / 194 and 34 / 194
-   identical, the rest loud; M8 0 / 7, all loud.
+   identical, the rest loud; M500 `pc-t` 24 / 495 (loud 471, 376 of them `BlockIf`, silent 0);
+   M8 0 / 7, all loud.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

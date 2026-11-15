@@ -2367,15 +2367,19 @@ Two older stages were fixed on the way, both found by silent `print C` differenc
 
 Numbers (functions the reference finishes):
 
-| check | M8 | simple |
-|---|---|---|
-| `pc-r` | 0 / 7 (loud 7) | 54 / 194 (loud 139, silent 1; 140 and 0 after the flow fix) |
-| `pc-t` | 0 / 7 (loud 7) | 34 / 194 (loud 159, silent 1; 160 and 0 after the flow fix) |
+| check | M8 | M500 | simple |
+|---|---|---|---|
+| `pc-r` | 0 / 7 (loud 7) | not run | 54 / 194 (loud 139, silent 1; 140 and 0 after the flow fix) |
+| `pc-t` | 0 / 7 (loud 7) | 24 / 495 (loud 471, silent 0) | 34 / 194 (loud 159, silent 1; 160 and 0 after the flow fix) |
 
 The silent miss of both, 0x1c8c780, was the header warning of a bad instruction, which flow
 did not record; `FlowInfo` now records it (and the body warning, so the function fails loudly;
 rechecked alone with `pc-r`, the rest of `simple` was not rerun after this fix).
-The loud misses on `simple`, `pc-t`: `BlockIf` 83, comments in the body 30, array or field
+The loud misses on M500, `pc-t`: `BlockIf` 376, array or field access 25, comments in the body
+20, `PTRADD` 8, `BlockDoWhile` 7, `mergeAddrTied`, `SUBPIECE` and `FLOAT2FLOAT` 6 each, `PTRSUB` and
+float constants 4, `INT_ZEXT` 3, `PIECE` 2, `SQRT`, `CALLIND`, `BlockInfLoop` and an anonymous
+data-type 1 each (M500 ran before the flow fix, which can only turn a silent miss loud; there
+was none). The loud misses on `simple`, `pc-t`: `BlockIf` 83, comments in the body 30, array or field
 access 15, `INT_ZEXT` 5, `BlockDoWhile` 4, `SUBPIECE`, `PTRADD`, `FLOAT2FLOAT`, `BlockWhileDo`,
 `BlockInfLoop` and the `mergeAddrTied` error 3 each, `PTRSUB` 2, `PIECE` and `CALLOTHER` 1; `pc-r`:
 `BlockIf` 73, comments 30, an anonymous data-type 13, `INT_ZEXT` 6, then 4 or fewer each. All
