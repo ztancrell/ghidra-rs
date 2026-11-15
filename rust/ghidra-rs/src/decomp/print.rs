@@ -7,6 +7,7 @@
 //! state so the text matches byte for byte.
 
 use super::block::{BlockBasic, BlockId};
+use super::fspec::ParamTrial;
 use super::op::{OpFlags, OpId, SeqNum};
 use super::opcode::{Opcode, RawForm, Sizes};
 use super::varnode::{Space, VarnodeId};
@@ -53,6 +54,9 @@ pub fn print_raw(fd: &Funcdata, arch: &Arch) -> Result<String> {
     }
     let mut p = Printer { fd, arch, out: Out { s: String::new(), hex: false }, highs: Default::default() };
     p.graph()?;
+    if std::env::var_os("DECOMP_TRIALS_EXTRA").is_some() {
+        p.trials();
+    }
     Ok(p.out.s)
 }
 
@@ -86,6 +90,31 @@ impl<'a> Printer<'a> {
             self.basic_block(b)?;
         }
         Ok(())
+    }
+
+    /// `DECOMP_TRIALS_EXTRA` (rust/tools/decomp-ref.patch): the parameter trials of each call
+    /// whose input recovery is active, with the state of their passes.
+    fn trials(&mut self) {
+        let fd = self.fd();
+        for &c in &fd.qlst {
+            let call = fd.call(c);
+            let Some(a) = &call.active_input else { continue };
+            self.out.str("trials ");
+            self.out.seq(fd.op(call.op).seq);
+            let (full, fin) = (u8::from(a.fully_checked), u8::from(a.needs_final_check));
+            let _ = writeln!(self.out.s, ": passes {} max {} checked {full} final {fin}", a.numpasses, a.maxpass);
+            for t in &a.trials {
+                let space = match t.space {
+                    Space::Sleigh(s) => self.arch.sleigh.spaces.get(s as usize).map_or("?", |s| s.name.as_str()),
+                    Space::Stack => "stack",
+                    Space::Join => "join",
+                    Space::Iop | Space::Fspec => "?",
+                };
+                // markUnref sets the slot to -1
+                let slot = if t.has(ParamTrial::UNREF) { -1 } else { t.slot as i64 };
+                let _ = writeln!(self.out.s, "  {space} 0x{:x} {} slot {slot} flags 0x{:x}", t.off, t.size, t.flags);
+            }
+        }
     }
 
     /// Port of `BlockBasic::printRaw`.

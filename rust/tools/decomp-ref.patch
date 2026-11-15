@@ -56,6 +56,35 @@
    if (bblocks.getSize()==0) {
      if (obank.empty())
        throw RecovError("No operations to print");
+@@ -220,6 +222,28 @@
+   }
+   else
+     bblocks.printRaw(s);
++  // ghidra-rs (rust/tools/decomp-ref.patch): with DECOMP_TRIALS_EXTRA set, also print the parameter
++  // trials of each call whose input recovery is active (ActionActiveParam)
++  if (getenv("DECOMP_TRIALS_EXTRA") != (char *)0) {
++    std::ios_base::fmtflags fl = s.flags();
++    for(int4 i=0;i<qlst.size();++i) {
++      FuncCallSpecs *fc = qlst[i];
++      if (!fc->isInputActive()) continue;
++      ParamActive *a = fc->getActiveInput();
++      s << "trials " << fc->getOp()->getSeqNum() << ": passes " << dec << a->getNumPasses() << " max "
++	<< a->getMaxPass() << " checked " << a->isFullyChecked() << " final " << a->needsFinalCheck() << endl;
++      for(int4 j=0;j<a->getNumTrials();++j) {
++	const ParamTrial &t(a->getTrial(j));
++	uint4 f = (t.isChecked() ? 1 : 0) | (t.isUsed() ? 2 : 0) | (t.isDefinitelyNotUsed() ? 4 : 0) |
++	  (t.isActive() ? 8 : 0) | (t.isUnref() ? 0x10 : 0) | (t.isKilledByCall() ? 0x20 : 0) |
++	  (t.isRemFormed() ? 0x40 : 0) | (t.isIndCreateFormed() ? 0x80 : 0) | (t.hasCondExeEffect() ? 0x100 : 0) |
++	  (t.hasAncestorRealistic() ? 0x200 : 0) | (t.hasAncestorSolid() ? 0x400 : 0);
++	s << "  " << t.getAddress().getSpace()->getName() << " 0x" << hex << t.getAddress().getOffset() << dec
++	  << ' ' << t.getSize() << " slot " << t.getSlot() << " flags 0x" << hex << f << endl;
++      }
++    }
++    s.flags(fl);
++  }
+ }
+ 
+ /// This routine searches for an marks Varnode objects, like stack-pointer registers,
 --- a/funcdata_block.cc
 +++ b/funcdata_block.cc
 @@ -14,6 +14,9 @@

@@ -504,6 +504,9 @@ pub(crate) struct CallSpec {
     pub(crate) stack_placeholder_slot: Option<usize>,
     /// the parameter trials (`activeinput`, `isinputactive`), from `ActionFuncLink` on
     pub(crate) active_input: Option<ParamActive>,
+    /// the used trials, renumbered, that `activeinput` keeps once `ActionActiveParam` has rebuilt
+    /// the inputs (`clearActiveInput` only turns the recovery off; `checkCallDoubleUse` reads them)
+    pub(crate) kept_input: Option<ParamActive>,
     /// the return-value trials (`activeoutput`, `isoutputactive`), from `ActionFuncLink` on
     pub(crate) active_output: Option<ParamActive>,
     /// `effective_extrapop`, from `ActionStackPtrFlow`
@@ -540,6 +543,7 @@ impl CallSpec {
             proto: FuncProto::default(),
             stack_placeholder_slot: None,
             active_input: None,
+            kept_input: None,
             active_output: None,
             effective_extrapop: None,
             bad_jump_table: false,
@@ -762,6 +766,11 @@ pub(crate) struct ParamActive {
     pub(crate) numpasses: i32,
     pub(crate) maxpass: i32,
     pub(crate) fully_checked: bool,
+    /// `needsfinalcheck`: an active trial may be affected by conditional execution
+    pub(crate) needs_final_check: bool,
+    /// `recoversubcall`: the trials are a sub-function call's (`initActiveInput` and
+    /// `initActiveOutput` of `FuncCallSpecs`), not the function's own
+    pub(crate) recover_subcall: bool,
 }
 
 impl ParamActive {
@@ -775,7 +784,24 @@ impl ParamActive {
             numpasses: 0,
             maxpass: if maxdelay > 0 { 3 } else { 0 },
             fully_checked: false,
+            needs_final_check: false,
+            recover_subcall: false,
         }
+    }
+
+    /// The trial list of a sub-function call (`ParamActive(true)`).
+    pub(crate) fn subcall(maxdelay: i32) -> ParamActive {
+        ParamActive { recover_subcall: true, ..ParamActive::new(maxdelay) }
+    }
+
+    /// Port of `ParamActive::getTrialForInputVarnode`: the trial of the call's input `slot`
+    /// by position in the list (input 0 is the call address; the stack placeholder's slot is
+    /// skipped), as the C++ indexes it.
+    pub(crate) fn trial_for_input_varnode(&self, slot: usize) -> Result<&ParamTrial> {
+        let skip = if self.stackplaceholder < 0 || (slot as i32) < self.stackplaceholder { 1 } else { 2 };
+        slot.checked_sub(skip)
+            .and_then(|i| self.trials.get(i))
+            .ok_or_else(|| LowlevelError(format!("getTrialForInputVarnode: no trial for input slot {slot}")))
     }
 
     /// Port of `ParamActive::whichTrial`: the first trial overlapping the range.
@@ -1330,9 +1356,8 @@ impl ParamList {
         }
     }
 
-    /// Port of `ParamListStandard::forceInactiveChain` for the function's own inputs (not a
-    /// sub-call): a chain of more than `maxchain` inactive slots ends the parameters; inactive
-    /// trials before the last active one become active.
+    /// Port of `ParamListStandard::forceInactiveChain`: a chain of more than `maxchain` inactive
+    /// slots ends the parameters; inactive trials before the last active one become active.
     fn force_inactive_chain(
         &self,
         active: &mut ParamActive,
@@ -1350,6 +1375,12 @@ impl ParamList {
                 continue;
             }
             if !active.trials[i].is_active() {
+                // a sub-call's unreferenced stack slot ends the chain: only a register can be
+                // passed on unread from the caller's own inputs
+                let t = &active.trials[i];
+                if t.has(ParamTrial::UNREF) && active.recover_subcall && t.space == Space::Stack {
+                    seen = true;
+                }
                 chain += if i == start {
                     slot_group(&active.trials[i]) - group_start + 1
                 } else {
@@ -1524,6 +1555,19 @@ mod tests {
                 (Space::Stack, 8, true, false),
             ]
         );
+    }
+
+    /// The same trials of a sub-function call (`recoversubcall`): the unreferenced first stack
+    /// slot cannot be a caller's input passed on, so it ends the chain; the later stack trial
+    /// becomes inactive and only ECX is a parameter (EDX lies after the last active trial).
+    #[test]
+    fn fillin_map_of_a_call_stops_at_a_stack_hole() {
+        let l = list(vec![reg(4), reg(8), stack()]);
+        let mut a = trials(&[(Space::Sleigh(3), 4), (Space::Stack, 8)]);
+        a.recover_subcall = true;
+        l.fillin_map_input(&mut a).unwrap();
+        let used: Vec<_> = a.trials.iter().filter(|t| t.is_used()).map(|t| (t.space, t.off)).collect();
+        assert_eq!(used, vec![(Space::Sleigh(3), 4)]);
     }
 
     /// `ScoreProtoModel`: a read of ECX fits a list starting with ECX (0) and misses a

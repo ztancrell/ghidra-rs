@@ -2231,6 +2231,33 @@ Misses explained, none new from the merge (each is in a branch's own miss list):
 `#[test]` functions: `m3-tail` had 76 + 19, `m3-r5b` 70 + 19, so its "89" was the total and `m3-tail`'s "76" the library only), `cargo clippy --release
 --all-targets -- -D warnings` and `cargo fmt --check` clean.
 
+### Parameter trials of calls (branch `m3-ap`, 2026-11-14)
+
+Slice 1: `ActionActiveParam` checks the trials of each call (`coreaction.rs`):
+`FuncCallSpecs::checkInputTrialUse` (stack trials: `AliasChecker` in `varmap.rs`, the local
+range, a callee-popped extrapop, then `AncestorRealistic` and `ancestorOpUse`; register trials
+with conditional execution allowed), `finalInputCheck` and the pass counting. Also ported for it:
+`Funcdata::checkCallDoubleUse` with trials (reading a finished call's kept trials,
+`CallSpec::kept_input`, as the C++ reads `activeinput` after `clearActiveInput`),
+`ParamActive::getTrialForInputVarnode` (by position, as the C++), the type-locked input case of
+`ancestorOpUse`, and the sub-call stack-hole rule of `forceInactiveChain` (`recoversubcall`).
+Check device (same in `decomp-ref.patch`): `DECOMP_TRIALS_EXTRA=1` makes `print raw` end with
+each call whose input recovery is active, its passes, maximum, `isFullyChecked`,
+`needsFinalCheck`, and each trial's space, offset, size, slot and flags.
+
+```sh
+# the trials before the first two activeparam passes, R5 options with stackvars
+DECOMP_TRIALS_EXTRA=1 DECOMP_SKIP_ACTIONS=multicse,shadowvar,condconst BREAK=activeparam CONTINUES=1 \
+  OPTIONS=rust/tools/corpus/r5s-options.txt rust/tools/decomp-diff.sh m500
+```
+
+Slice 1 alone still fails loudly where a call with trials is fully checked (rebuilding its
+inputs is slice 2), so the print compares before the first two passes: M8 8 / 8, M500 446 / 500,
+the 54 others are 53 loud (36 `ActionParamDouble` splitting a stack trial that is a PIECE, 17
+heritage indexed stack loads; unported paths reached after the first pass) and 0x47a6b0 (a block
+order difference that master has at the same point, before any trial). In every one of the 54
+the trial lines ghidra-rs prints match the reference's. M8 gate (`bars.sh`, 45 checks) unchanged.
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The

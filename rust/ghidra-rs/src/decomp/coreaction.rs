@@ -136,22 +136,49 @@ fn alternate_path_valid(fd: &Funcdata, vn: VarnodeId, flags: u32) -> bool {
     }
 }
 
-/// Port of `Funcdata::checkCallDoubleUse` for a call without parameter trials of its own (calls take
-/// `__stdcall`, whose parameters live on the stack; a call gets stack trials only once the
-/// `stackvars` rules resolve its stack offset, and those fail in [`active_param`]): a value
-/// reaching a call is a use unless it is the called address.
-fn check_call_double_use(fd: &Funcdata, op: OpId, vn: VarnodeId) -> Result<bool> {
+/// Port of `Funcdata::checkCallDoubleUse`: whether `vn`, reaching call `op` from the trial of
+/// `opmatch` along a path with flags `fl`, is a legitimate second use (the same parameter of
+/// another call to the same function, or a parameter `op` does not take) rather than a use.
+fn check_call_double_use(
+    fd: &Funcdata,
+    opmatch: OpId,
+    op: OpId,
+    vn: VarnodeId,
+    fl: u32,
+    trial: &ParamTrial,
+) -> Result<bool> {
     let j = fd.slot_of(op, vn).unwrap_or(0);
     if j == 0 {
         return Ok(false);
     }
-    if let Some(c) = fd.call_of(op) {
-        if fd.call(c).active_input.as_ref().is_some_and(|a| !a.trials.is_empty()) {
-            return err("checkCallDoubleUse with parameter trials: not implemented in ghidra-rs yet");
+    let fc = fd.call_of(op).ok_or_else(|| LowlevelError("checkCallDoubleUse: a call without call specs".into()))?;
+    let (o, m) = (fd.op(op), fd.op(opmatch));
+    if o.opc == m.opc {
+        let mc = fd.call_of(opmatch).ok_or_else(|| LowlevelError("checkCallDoubleUse: no call specs".into()))?;
+        let same = if m.opc == Opcode::Call { fd.call(mc).entry == fd.call(fc).entry } else { o.ins[0] == m.ins[0] };
+        // the trials a call keeps once its recovery ends are still read here, as the C++ does; a
+        // call without trials (a locked prototype, or none were used) has an empty list the C++
+        // reads past the end of, taken here as no match
+        let call = fd.call(fc);
+        let trials = call.active_input.as_ref().or(call.kept_input.as_ref());
+        if let Some(trials) = trials.filter(|t| same && !t.trials.is_empty()) {
+            let cur = trials.trial_for_input_varnode(j)?;
+            // the same parameter: in another block, or after opmatch, which has dibs
+            if cur.space == trial.space && cur.off == trial.off && (o.parent != m.parent || m.order < o.order) {
+                return Ok(true);
+            }
         }
-        if fd.call(c).active_input.is_some() {
-            return err("checkCallDoubleUse on a call parameter: not implemented in ghidra-rs yet");
+    }
+    if let Some(a) = &fd.call(fc).active_input {
+        let cur = a.trial_for_input_varnode(j)?;
+        if cur.is_checked() {
+            if cur.is_active() {
+                return Ok(false);
+            }
+        } else if alternate_path_valid(fd, vn, fl) {
+            return Ok(false);
         }
+        return Ok(true);
     }
     Ok(false)
 }
@@ -177,7 +204,7 @@ fn only_op_use(fd: &Funcdata, invn: VarnodeId, opmatch: OpId, trial: &ParamTrial
                     return Ok(false)
                 }
                 Opcode::Call | Opcode::Callind => {
-                    if check_call_double_use(fd, op, vn)? {
+                    if check_call_double_use(fd, opmatch, op, vn, cur, trial)? {
                         continue;
                     }
                     return Ok(false);
@@ -257,8 +284,12 @@ fn ancestor_op_use(
         return Ok(false);
     }
     let Some(def) = fd.vn(invn).def else {
-        // an input is a use only with a locked type, and nothing is typed yet
-        return Ok(false);
+        // a type-locked input is as good as written
+        let v = fd.vn(invn);
+        if !v.is_input() || !v.has(VnFlags::TYPELOCK) {
+            return Ok(false);
+        }
+        return only_op_use(fd, invn, op, trial, main);
     };
     let d = fd.op(def);
     match d.opc {
@@ -556,21 +587,22 @@ fn upon_pop(
     res
 }
 
-/// Port of `ActionActiveParam::apply` for calls without parameter trials (see
-/// [`check_call_double_use`]), so each call's analysis only counts its passes and then
-/// rebuilds the inputs from the (no) used trials.
-pub(crate) fn active_param(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
+/// Port of `ActionActiveParam::apply`: each pass marks which parameter trials of each call
+/// look used; once a call's trials are fully checked, its inputs are rebuilt from the trials
+/// the model takes.
+pub(crate) fn active_param(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     let mut count = 0;
+    let mut aliascheck = super::varmap::AliasChecker::default();
     for i in 0..fd.qlst.len() {
         let c = fd.qlst[i];
         let op = fd.call(c).op;
         let callind = fd.op(op).opc == Opcode::Callind;
-        let Some(active) = &mut fd.call_mut(c).active_input else { continue };
+        let Some(active) = &fd.call(c).active_input else { continue };
         let trimmable = active.numpasses > 0 || !callind;
-        if !active.trials.is_empty() {
-            return err("parameter trials of a call (checkInputTrialUse, fillinMap, buildInputFromTrials): not implemented in ghidra-rs yet");
+        if !active.fully_checked {
+            check_input_trial_use(fd, arch, c, &mut aliascheck)?;
         }
-        // checkInputTrialUse: no trials to check
+        let Some(active) = &mut fd.call_mut(c).active_input else { continue };
         active.numpasses += 1;
         if active.numpasses > active.maxpass {
             active.fully_checked = true;
@@ -578,18 +610,125 @@ pub(crate) fn active_param(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
             count += 1;
         }
         if trimmable && active.fully_checked {
-            if fd.op(op).is_dead() {
-                return err("Function call in dead code");
+            if active.needs_final_check {
+                final_input_check(fd, c);
             }
-            // finalInputCheck, resolveModel (calls never take a merged model) and
-            // deriveInputMap have no trials to work on; buildInputFromTrials keeps input 0
+            let Some(active) = &fd.call(c).active_input else { continue };
+            if !active.trials.is_empty() {
+                return err("parameter trials of a call (resolveModel, deriveInputMap, buildInputFromTrials): not implemented in ghidra-rs yet");
+            }
+            // resolveModel (calls never take a merged model) and deriveInputMap have no trials
+            // to work on; buildInputFromTrials keeps input 0
             let in0 = fd.input(op, 0)?;
             fd.op_set_all_input(op, &[in0])?;
-            fd.call_mut(c).active_input = None;
+            let call = fd.call_mut(c);
+            call.kept_input = call.active_input.take();
             count += 1;
         }
     }
     Ok(count)
+}
+
+/// Port of `FuncCallSpecs::checkInputTrialUse`: whether each unchecked trial of call `c` is
+/// written for the call with no read in between (active), maybe a parameter (inactive) or
+/// definitely not one; a trial definitely not used gives its input slot a constant 0.
+fn check_input_trial_use(
+    fd: &mut Funcdata,
+    arch: &Arch,
+    c: CallId,
+    aliascheck: &mut super::varmap::AliasChecker,
+) -> Result<()> {
+    let op = fd.call(c).op;
+    if fd.op(op).is_dead() {
+        return err("Function call in dead code");
+    }
+    // callee_pop: a callee popping its own parameters by a recovered amount tells which
+    // stack trials are parameters (an extrapop of 4 may be __cdecl with none)
+    let call = fd.call(c);
+    let model_unknown = call.proto.model.is_some_and(|m| arch.spec.models.get(m).extrapop == ExtraPop::Unknown);
+    let expop = match call.proto.extrapop {
+        ExtraPop::Known(e) if model_unknown && e > 4 => Some(e),
+        _ => None,
+    };
+    let ntrials = call.active_input.as_ref().map_or(0, |a| a.trials.len());
+    for i in 0..ntrials {
+        let Some(mut trial) = fd.call(c).active_input.as_ref().map(|a| a.trials[i].clone()) else { break };
+        if trial.is_checked() {
+            continue;
+        }
+        let slot = trial.slot;
+        let vn = fd.input(op, slot)?;
+        let v = fd.vn(vn);
+        if v.space == Space::Stack {
+            if aliascheck.has_local_alias(fd, arch, vn) || !fd.localmap.in_local_range(v.offset) {
+                trial.mark_no_use();
+            } else if let Some(expop) = expop {
+                if (trial.off.wrapping_add(u64::from(trial.size) - 1) as i32) < expop {
+                    trial.mark_active();
+                } else {
+                    trial.mark_no_use();
+                }
+            } else if ancestor_realistic(fd, op, slot, &mut trial, false) {
+                let mut marks = HashSet::new();
+                if ancestor_op_use(fd, TRIM_RECURSE_MAX, vn, op, &mut trial, 0, 0, &mut marks)? {
+                    trial.mark_active();
+                } else {
+                    trial.mark_inactive();
+                }
+            } else {
+                // a stack variable with an unrealistic ancestor is no parameter
+                trial.mark_no_use();
+            }
+        } else if ancestor_realistic(fd, op, slot, &mut trial, true) {
+            let mut marks = HashSet::new();
+            if ancestor_op_use(fd, TRIM_RECURSE_MAX, vn, op, &mut trial, 0, 0, &mut marks)? {
+                trial.mark_active();
+                if trial.has(ParamTrial::CONDEXE_EFFECT) {
+                    if let Some(a) = &mut fd.call_mut(c).active_input {
+                        a.needs_final_check = true;
+                    }
+                }
+            } else {
+                trial.mark_inactive();
+            }
+        } else if fd.vn(vn).is_input() {
+            // not likely a parameter, but maybe
+            trial.mark_inactive();
+        } else {
+            // an ancestor is unaffected, an unusual input, or killed by a call
+            trial.mark_no_use();
+        }
+        let nouse = trial.has(ParamTrial::DEFNOUSE);
+        if let Some(a) = &mut fd.call_mut(c).active_input {
+            a.trials[i] = trial;
+        }
+        if nouse {
+            // free up the data-flow
+            let size = fd.vn(vn).size;
+            let zero = fd.new_constant(size, 0);
+            fd.op_set_input(op, zero, slot)?;
+        }
+    }
+    Ok(())
+}
+
+/// Port of `FuncCallSpecs::finalInputCheck`: an active trial that conditional execution may
+/// affect is checked again, without allowing the conditional path.
+fn final_input_check(fd: &mut Funcdata, c: CallId) {
+    let op = fd.call(c).op;
+    let n = fd.call(c).active_input.as_ref().map_or(0, |a| a.trials.len());
+    for i in 0..n {
+        let Some(mut trial) = fd.call(c).active_input.as_ref().map(|a| a.trials[i].clone()) else { break };
+        if !trial.is_active() || !trial.has(ParamTrial::CONDEXE_EFFECT) {
+            continue;
+        }
+        if !ancestor_realistic(fd, op, trial.slot, &mut trial, false) {
+            trial.mark_no_use();
+        }
+        if let Some(a) = &mut fd.call_mut(c).active_input {
+            a.trials[i] = trial;
+        }
+    }
 }
 
 /// Port of `ActionReturnRecovery::apply`.
@@ -2589,4 +2728,45 @@ pub(crate) fn map_globals(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         fd.warnings.push("Globals starting with '_' overlap smaller symbols at the same address".into());
     }
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A CALL (`call #0x2000, x`) in one block, `x` written by `COPY s` from an input `s` of
+    /// register space 3 at 0x10 (as EBX, saved across the function when unaffected).
+    fn call_of_copied_input(directwrite: bool) -> (Funcdata, OpId) {
+        let mut fd = Funcdata::new(0x1000);
+        fd.uniq = Some(1);
+        let b = fd.blocks.new_block(0x1000);
+        fd.blocks.set_start_block(b);
+        let s = fd.new_varnode(4, Space::Sleigh(3), 0x10);
+        fd.vn_set(s, VnFlags::INPUT);
+        fd.vn_set(s, if directwrite { VnFlags::DIRECTWRITE } else { VnFlags::UNAFFECTED });
+        let copy = fd.new_op(Opcode::Copy, 0x1000);
+        let x = fd.new_varnode_out(4, Space::Sleigh(3), 0, copy);
+        fd.op_set_input(copy, s, 0).unwrap();
+        fd.op_insert_end(copy, b);
+        let call = fd.new_op(Opcode::Call, 0x1002);
+        let target = fd.new_constant(4, 0x2000);
+        fd.op_set_input(call, target, 0).unwrap();
+        fd.op_set_input(call, x, 1).unwrap();
+        fd.op_insert_end(call, b);
+        (fd, call)
+    }
+
+    /// `AncestorRealistic`: a register copied from a saved (unaffected, never written) input
+    /// is no realistic parameter; copied from an input the function writes directly it is,
+    /// with solid movement into the trial.
+    #[test]
+    fn ancestor_realistic_rejects_a_saved_register() {
+        let mut trial =
+            ParamTrial { space: Space::Sleigh(3), off: 0, size: 4, slot: 1, flags: 0, entry: None, offset: -1 };
+        let (fd, call) = call_of_copied_input(false);
+        assert!(!ancestor_realistic(&fd, call, 1, &mut trial, true));
+        let (fd, call) = call_of_copied_input(true);
+        assert!(ancestor_realistic(&fd, call, 1, &mut trial, true));
+        assert!(trial.has(ParamTrial::ANCESTOR_SOLID));
+    }
 }

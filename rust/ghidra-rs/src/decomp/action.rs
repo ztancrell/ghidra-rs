@@ -420,8 +420,8 @@ fn funclink(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             continue;
         }
         let call = fd.call_mut(c);
-        call.active_input = Some(ParamActive::new(din));
-        call.active_output = Some(ParamActive::new(dout));
+        call.active_input = Some(ParamActive::subcall(din));
+        call.active_output = Some(ParamActive::subcall(dout));
         let Some(model) = model else { continue };
         if arch.spec.models.get(model).input.has_stack() {
             create_placeholder(fd, arch, c)?;

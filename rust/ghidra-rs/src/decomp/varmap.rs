@@ -9,8 +9,9 @@
 use super::fspec::{EffectKind, Storage};
 use super::funcdata::Funcdata;
 use super::opcode::Opcode;
-use super::varnode::{Space, VnFlags};
+use super::varnode::{Space, VarnodeId, VnFlags};
 use super::{Arch, Result};
+use std::collections::HashSet;
 
 /// The stack ranges of `ScopeLocal`: sorted, disjoint, inclusive offset pairs, and the
 /// parameter extent `markNotMapped` records (`minParamOffset`, `maxParamOffset`).
@@ -21,6 +22,9 @@ pub(crate) struct LocalMap {
     highest: u64,
     min_param: u64,
     max_param: u64,
+    /// the last offset of the model's parameter range (`paramrange.getLastRange()->getLast()`,
+    /// the default range `[0, highest >> 2]` when the input list has no stack entry)
+    param_last: u64,
 }
 
 impl LocalMap {
@@ -36,12 +40,14 @@ impl LocalMap {
         for &(a, b) in params {
             m.insert(a, b);
         }
+        // the last of the merged parameter ranges ends at the largest end
+        m.param_last = params.iter().map(|&(_, b)| b).max().unwrap_or((highest >> 2).min(0x7fff_ffff));
         m
     }
 
     /// A scope owning nothing, before `Funcdata::start_processing` knows the architecture.
     pub(crate) fn empty() -> LocalMap {
-        LocalMap { ranges: Vec::new(), highest: u64::MAX, min_param: u64::MAX, max_param: 0 }
+        LocalMap { ranges: Vec::new(), highest: u64::MAX, min_param: u64::MAX, max_param: 0, param_last: 0 }
     }
 
     /// Port of `RangeList::insertRange`: overlapping ranges merge (touching ones do not).
@@ -219,9 +225,162 @@ pub(crate) fn restrict_local(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     Ok(0)
 }
 
+/// Port of `AliasChecker` for the stack space as `ActionActiveParam` uses it (`gather` deferred,
+/// then `hasLocalAlias`): a stack offset at or above the lowest local offset some pointer into
+/// the stack reaches may be aliased. The stack grows down on every ghidra-rs target
+/// (`direction == 1`).
+#[derive(Debug, Default)]
+pub(crate) struct AliasChecker {
+    /// `aliasBoundary`, once calculated (`gatherInternal` runs at the first query)
+    boundary: Option<u64>,
+}
+
+impl AliasChecker {
+    /// Port of `AliasChecker::hasLocalAlias`.
+    pub(crate) fn has_local_alias(&mut self, fd: &Funcdata, arch: &Arch, vn: VarnodeId) -> bool {
+        let boundary = *self.boundary.get_or_insert_with(|| alias_boundary(fd, arch));
+        let v = fd.vn(vn);
+        v.space == Space::Stack && v.offset >= boundary
+    }
+}
+
+/// Port of `AliasChecker::gatherInternal` (with `deriveBoundaries`): the lowest offset, at or
+/// above the end of the parameter range, of a sum based on the input stack pointer.
+fn alias_boundary(fd: &Funcdata, arch: &Arch) -> u64 {
+    let (sp, off, size) = arch.spec.stack_pointer;
+    let base = fd.loc_at(Space::Sleigh(sp), off, size).into_iter().find(|&v| fd.vn(v).is_input());
+    // localExtreme is ~0 for a stack growing down; the model always has both ranges
+    base.map_or(u64::MAX, |base| boundary_from(fd, base, fd.localmap.param_last))
+}
+
+/// The loop of `gatherInternal`: sums of `base` at or above `local_boundary` (below it they
+/// reference parameters) start the aliased region.
+fn boundary_from(fd: &Funcdata, base: VarnodeId, local_boundary: u64) -> u64 {
+    let mut boundary = u64::MAX;
+    for b in gather_additive_base(fd, base) {
+        // addressToByte with a word size of 1
+        let offset = gather_offset(fd, b);
+        if offset >= local_boundary && offset < boundary {
+            boundary = offset;
+        }
+    }
+    boundary
+}
+
+/// Port of `AliasChecker::gatherAdditiveBase`: the varnodes of the sums `start` is in that are
+/// used other than in a further sum (the index terms are not needed here).
+fn gather_additive_base(fd: &Funcdata, start: VarnodeId) -> Vec<VarnodeId> {
+    let mut queue = vec![start];
+    let mut marked: HashSet<VarnodeId> = HashSet::from([start]);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < queue.len() {
+        let vn = queue[i];
+        i += 1;
+        let mut nonadduse = false;
+        for &op in fd.vn(vn).descend.iter() {
+            let o = fd.op(op);
+            let follow = match o.opc {
+                Opcode::Copy => {
+                    nonadduse = true;
+                    true
+                }
+                Opcode::IntSub if o.ins[1] == vn => {
+                    nonadduse = true;
+                    false
+                }
+                Opcode::IntSub | Opcode::IntAdd | Opcode::Ptradd | Opcode::Ptrsub | Opcode::Segmentop => true,
+                _ => {
+                    nonadduse = true;
+                    false
+                }
+            };
+            if let Some(sub) = o.out.filter(|_| follow) {
+                if marked.insert(sub) {
+                    queue.push(sub);
+                }
+            }
+        }
+        if nonadduse {
+            out.push(vn);
+        }
+    }
+    out
+}
+
+/// Port of `AliasChecker::gatherOffset`: the constant part of the sum `vn` is the result of
+/// (64-bit wrapping arithmetic, as the C++ `uintb`).
+fn gather_offset(fd: &Funcdata, vn: VarnodeId) -> u64 {
+    let v = fd.vn(vn);
+    if v.is_constant() {
+        return v.offset;
+    }
+    let Some(def) = v.def else { return 0 };
+    let d = fd.op(def);
+    let res = match d.opc {
+        Opcode::Copy => gather_offset(fd, d.ins[0]),
+        Opcode::Ptrsub | Opcode::IntAdd => gather_offset(fd, d.ins[0]).wrapping_add(gather_offset(fd, d.ins[1])),
+        Opcode::IntSub => gather_offset(fd, d.ins[0]).wrapping_sub(gather_offset(fd, d.ins[1])),
+        Opcode::Ptradd => {
+            let (index, mult) = (fd.vn(d.ins[1]), fd.vn(d.ins[2]));
+            let base = gather_offset(fd, d.ins[0]);
+            if index.is_constant() {
+                base.wrapping_add(index.offset.wrapping_mul(mult.offset))
+            } else if mult.offset == 1 {
+                base.wrapping_add(gather_offset(fd, d.ins[1]))
+            } else {
+                base
+            }
+        }
+        Opcode::Segmentop => gather_offset(fd, d.ins[2]),
+        _ => 0,
+    };
+    res & super::rangeutil::calc_mask(v.size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::LocalMap;
+
+    /// `AliasChecker::gatherInternal`: from ESP, `ESP + 8` passed to a call references a
+    /// parameter (below the parameter range's end, 503); `ESP + -0x20` copied and then
+    /// `ESP + -0x20 + 4` stored through start the aliased region at the lowest local offset
+    /// reached, -0x20.
+    #[test]
+    fn stack_pointers_into_locals_start_the_alias_region() {
+        use super::super::funcdata::Funcdata;
+        use super::super::opcode::Opcode;
+        use super::super::varnode::{Space, VarnodeId};
+        let mut fd = Funcdata::new(0x1000);
+        let b = fd.blocks.new_block(0x1000);
+        let esp = fd.new_varnode(4, Space::Sleigh(3), 0x10);
+        fd.vn_set(esp, super::VnFlags::INPUT);
+        let op = |fd: &mut Funcdata, opc: Opcode, ins: &[VarnodeId]| {
+            let o = fd.new_op(opc, 0x1000);
+            let out = fd.new_varnode_out(4, Space::Sleigh(1), u64::from(o.0) * 4, o);
+            for (i, &v) in ins.iter().enumerate() {
+                fd.op_set_input(o, v, i).unwrap();
+            }
+            fd.op_insert_end(o, b);
+            out
+        };
+        // a constant has one use
+        let c = |fd: &mut Funcdata, v: u64| fd.new_constant(4, v);
+        let k = c(&mut fd, 8);
+        let param = op(&mut fd, Opcode::IntAdd, &[esp, k]);
+        let k = c(&mut fd, 0x2000);
+        op(&mut fd, Opcode::Call, &[k, param]);
+        let k = c(&mut fd, 0xffff_ffe0);
+        let local = op(&mut fd, Opcode::IntAdd, &[esp, k]);
+        let copy = op(&mut fd, Opcode::Copy, &[local]);
+        let k = c(&mut fd, 4);
+        let field = op(&mut fd, Opcode::IntAdd, &[copy, k]);
+        let (k, v) = (c(&mut fd, 1), c(&mut fd, 0));
+        op(&mut fd, Opcode::Store, &[k, field, v]);
+        assert_eq!(super::boundary_from(&fd, esp, 503), 0xffff_ffe0);
+        // with nothing but the parameter reference, nothing is aliased
+        assert_eq!(super::boundary_from(&fd, param, 503), u64::MAX);
+    }
 
     #[test]
     fn default_window_is_params_and_locals() {
