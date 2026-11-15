@@ -156,9 +156,10 @@ fn check_call_double_use(
     if o.opc == m.opc {
         let mc = fd.call_of(opmatch).ok_or_else(|| LowlevelError("checkCallDoubleUse: no call specs".into()))?;
         let same = if m.opc == Opcode::Call { fd.call(mc).entry == fd.call(fc).entry } else { o.ins[0] == m.ins[0] };
-        // the trials a call keeps once its recovery ends are still read here, as the C++ does; a
-        // call without trials (a locked prototype, or none were used) has an empty list the C++
-        // reads past the end of, taken here as no match
+        // the trials a call keeps once its recovery ends (or, for a locked call, the active
+        // trial of each parameter with storage that funcLinkInput or commitNewInputs registers)
+        // are read here, as the C++ does; an empty list (no parameter with storage, or none
+        // used) the C++ reads past the end of, taken here as no match
         let call = fd.call(fc);
         let trials = call.active_input.as_ref().or(call.kept_input.as_ref());
         if let Some(trials) = trials.filter(|t| same && !t.trials.is_empty()) {
@@ -486,6 +487,10 @@ fn enter_node(
                 stack.push(State { op: def, slot: 0, flags: 0, offset: 0 });
                 return Cmd::Enter;
             }
+            // the C++ also fails on `op->isStoreUnmapped()` along this walk: the mark is only
+            // ever set on STOREs (ActionInternalStorage), and the walk sees COPY, SUBPIECE and
+            // PIECE only, so it never holds. `PcodeOp::isIncidentalCopy` (here and in the
+            // SUBPIECE case) needs a fixup declaring it, which the cspec reader refuses loudly.
             let mut cur = op.ins[0];
             loop {
                 let c = fd.vn(cur);
@@ -666,10 +671,15 @@ fn check_input_trial_use(
         let vn = fd.input(op, slot)?;
         let v = fd.vn(vn);
         if v.space == Space::Stack {
+            // getLocalRange reads the function's model (the default range: ProtoModel::decode
+            // refuses <localrange>); the C++ has no answer without one
+            if fd.proto.model.is_none() {
+                return err("checkInputTrialUse: a stack trial in a function without a prototype model");
+            }
             if aliascheck.has_local_alias(fd, arch, vn) || !fd.localmap.in_local_range(v.offset) {
                 trial.mark_no_use();
             } else if let Some(expop) = expop {
-                if (trial.off.wrapping_add(u64::from(trial.size) - 1) as i32) < expop {
+                if (trial.off.wrapping_add(u64::from(trial.size).wrapping_sub(1)) as i32) < expop {
                     trial.mark_active();
                 } else {
                     trial.mark_no_use();
@@ -761,7 +771,7 @@ fn build_input_from_trials(fd: &mut Funcdata, arch: &Arch, c: CallId, active: &m
         };
         newparam.push(vn);
         if space == Space::Stack {
-            super::varmap::mark_not_mapped(fd, Space::Stack, off, sz, true);
+            super::varmap::mark_not_mapped(fd, Space::Stack, off, sz, true)?;
         }
     }
     fd.op_set_all_input(op, &newparam)?;
@@ -2813,9 +2823,12 @@ mod tests {
         (fd, call)
     }
 
-    /// `AncestorRealistic`: a register copied from a saved (unaffected, never written) input
-    /// is no realistic parameter; copied from an input the function writes directly it is,
-    /// with solid movement into the trial.
+    /// `AncestorRealistic`, the COPY walk: a register copied from an input the function never
+    /// writes directly (no `directwrite`) is no realistic parameter; copied from an input it
+    /// writes directly it is, with solid movement into the trial. Then the unwritten-input
+    /// branch of `enterNode` (reached when the trial may be affected by conditional execution,
+    /// so `execute` does not stop at an input): the saved (unaffected) input itself fails, a
+    /// directly written one succeeds.
     #[test]
     fn ancestor_realistic_rejects_a_saved_register() {
         let mut trial =
@@ -2825,6 +2838,14 @@ mod tests {
         let (fd, call) = call_of_copied_input(true);
         assert!(ancestor_realistic(&fd, call, 1, &mut trial, true));
         assert!(trial.has(ParamTrial::ANCESTOR_SOLID));
+        for directwrite in [false, true] {
+            let (mut fd, call) = call_of_copied_input(directwrite);
+            let copy = fd.vn(fd.op(call).ins[1]).def.unwrap();
+            let s = fd.op(copy).ins[0];
+            fd.op_set_input(call, s, 1).unwrap();
+            let mut t = ParamTrial { flags: ParamTrial::CONDEXE_EFFECT, ..trial.clone() };
+            assert_eq!(ancestor_realistic(&fd, call, 1, &mut t, true), directwrite);
+        }
     }
 
     /// `buildInputFromTrials` on x86: a used 2-byte trial read from a 4-byte register is

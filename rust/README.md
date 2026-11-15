@@ -2289,6 +2289,30 @@ global-type misses): every miss is one the integration pass lists. M8 gate: all 
 identical (`r5s`, `r5slock`, `r5dtlocksv` now 8 / 8, were 3, 6, 6). Not run: the other M500
 checks, r5d-adc and the switch corpus.
 
+Review fixes (same branch):
+- A locked call holds trials too: `funcLinkInput` (`locked::func_link`) and `commitNewInputs`
+  (`lateres.rs`) register one active trial per parameter with storage (none for a parameter
+  without storage, as the C++), kept in `CallSpec::kept_input` with recovery off; the placeholder
+  slot `commitNewInputs` sets while recovery is on is recorded. `checkCallDoubleUse`'s
+  same-function test reads them.
+- `markNotMapped` widens the parameter extent before looking at symbols (the C++ order), and
+  fails loudly over a local symbol other than a locked parameter (the C++ removes it, or keeps
+  the range for a `fake_input`); ghidra-rs's local scope holds none while it runs.
+- `AncestorRealistic`'s COPY walk: `isStoreUnmapped` cannot hold there (only STOREs carry it);
+  `PcodeOp::isIncidentalCopy` needs a call fixup declaring `incidentalcopy`, which the cspec
+  reader now refuses loudly.
+- The callee-pop test wraps `size - 1` as the C++ `int`.
+- Local and parameter ranges are the defaults (`ProtoModel::decode` already refuses
+  `<localrange>` and `<paramrange>`); without a model the alias boundary is `deriveBoundaries`'
+  0x1000000 and a stack trial fails loudly (`getLocalRange` needs the model).
+- Open: the C++ wraps an error inside `ActionActiveParam` as "Error processing <name> called at
+  <seq>: ..."; ghidra-rs prints the inner message, so such an error differs in text (it is loud
+  on both sides).
+
+After the fixes: M8 gate all 45 identical; M500 `r5s` 446 / 499, `r5slock` 450 / 498,
+`r5dtlocksv` 450 / 498 (the same misses by kind and count as before the fixes; 0x4c48d0 did not
+finish on the reference in 120 s this run, it was identical in the earlier one).
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The

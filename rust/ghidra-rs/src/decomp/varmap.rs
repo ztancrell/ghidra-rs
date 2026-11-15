@@ -112,17 +112,34 @@ impl LocalMap {
         u128::from(off) + u128::from(size.max(1)) - 1 <= u128::from(last)
     }
 
-    /// The range part of `ScopeLocal::markNotMapped`: `[first, first + sz)`, clipped to the
-    /// top of the space, leaves the scope; a parameter range widens the parameter extent.
-    fn remove(&mut self, first: u64, sz: u32, parameter: bool) {
-        let last = match first.checked_add(u64::from(sz.max(1)) - 1) {
+    /// `[first, first + sz)` clipped to the top of the space (`markNotMapped`'s `last`).
+    fn clipped_last(&self, first: u64, sz: u32) -> u64 {
+        match first.checked_add(u64::from(sz.max(1)) - 1) {
             Some(l) if l <= self.highest => l,
             _ => self.highest,
-        };
-        if parameter {
-            self.min_param = self.min_param.min(first);
-            self.max_param = self.max_param.max(last);
         }
+    }
+
+    /// The first part of `ScopeLocal::markNotMapped`, before any symbol is looked at: a
+    /// parameter range widens the parameter extent.
+    fn widen_params(&mut self, first: u64, sz: u32) {
+        let last = self.clipped_last(first, sz);
+        self.min_param = self.min_param.min(first);
+        self.max_param = self.max_param.max(last);
+    }
+
+    #[cfg(test)]
+    /// The range part of `ScopeLocal::markNotMapped` (`removeRange`): `[first, first + sz)`,
+    /// clipped to the top of the space, leaves the scope.
+    fn remove(&mut self, first: u64, sz: u32, parameter: bool) {
+        if parameter {
+            self.widen_params(first, sz);
+        }
+        self.remove_range(first, sz);
+    }
+
+    fn remove_range(&mut self, first: u64, sz: u32) {
+        let last = self.clipped_last(first, sz);
         let mut out = Vec::with_capacity(self.ranges.len() + 1);
         for &(a, b) in &self.ranges {
             if b < first || a > last {
@@ -154,14 +171,29 @@ fn locked_stack_params(fd: &Funcdata) -> Vec<(u64, u32, String)> {
 }
 
 /// Port of `ScopeLocal::markNotMapped`: the stack range is no longer mapped by the local
-/// scope. A typelocked symbol under it (a locked parameter) keeps it, with a warning unless both
-/// are parameters.
-pub(crate) fn mark_not_mapped(fd: &mut Funcdata, space: Space, first: u64, sz: u32, parameter: bool) {
+/// scope. A parameter range widens the parameter extent first; a typelocked symbol under it (a
+/// locked parameter) keeps the range, with a warning unless both are parameters. Any other
+/// local symbol under it (removed, or a `fake_input` that keeps the range, in the C++) fails
+/// loudly: ghidra-rs's local scope holds none while this runs.
+pub(crate) fn mark_not_mapped(fd: &mut Funcdata, space: Space, first: u64, sz: u32, parameter: bool) -> Result<()> {
     if space != Space::Stack {
-        return;
+        return Ok(());
+    }
+    if parameter {
+        fd.localmap.widen_params(first, sz);
     }
     let end = u128::from(first) + u128::from(sz);
-    let hit = locked_stack_params(fd)
+    let locked = locked_stack_params(fd);
+    let other = fd.symtab.overlapping(super::scope::LOCAL, Space::Stack, first, sz).into_iter().any(|s| {
+        let sym = fd.symtab.symbol(s);
+        !(sym.flags.type_locked && sym.entries.iter().any(|e| locked.iter().any(|l| l.0 == e.offset)))
+    });
+    if other {
+        return super::err(
+            "markNotMapped over a local symbol that is not a locked parameter: not implemented in ghidra-rs yet",
+        );
+    }
+    let hit = locked
         .into_iter()
         .find(|&(off, size, _)| u128::from(off) < end && u128::from(first) < u128::from(off) + u128::from(size));
     if let Some((_, _, name)) = hit {
@@ -169,9 +201,10 @@ pub(crate) fn mark_not_mapped(fd: &mut Funcdata, space: Space, first: u64, sz: u
         if !parameter {
             fd.warning_header(format!("Variable defined which should be unmapped: {name}"));
         }
-        return;
+        return Ok(());
     }
-    fd.localmap.remove(first, sz, parameter);
+    fd.localmap.remove_range(first, sz);
+    Ok(())
 }
 
 /// Port of `ActionRestrictLocal::apply`: the stack parameters of calls with a locked prototype
@@ -192,7 +225,7 @@ pub(crate) fn restrict_local(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         }
         let mask = fd.localmap.highest;
         for (off, size) in marks {
-            mark_not_mapped(fd, Space::Stack, off & mask, size, true);
+            mark_not_mapped(fd, Space::Stack, off & mask, size, true)?;
         }
     }
     let Some(model) = fd.proto.model.map(|m| arch.spec.models.get(m)) else { return Ok(0) };
@@ -219,7 +252,7 @@ pub(crate) fn restrict_local(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             .map(|out| (fd.vn(out).offset, fd.vn(out).size))
             .collect();
         for (off, size) in saves {
-            mark_not_mapped(fd, Space::Stack, off, size, false);
+            mark_not_mapped(fd, Space::Stack, off, size, false)?;
         }
     }
     Ok(0)
@@ -249,8 +282,11 @@ impl AliasChecker {
 fn alias_boundary(fd: &Funcdata, arch: &Arch) -> u64 {
     let (sp, off, size) = arch.spec.stack_pointer;
     let base = fd.loc_at(Space::Sleigh(sp), off, size).into_iter().find(|&v| fd.vn(v).is_input());
-    // localExtreme is ~0 for a stack growing down; the model always has both ranges
-    base.map_or(u64::MAX, |base| boundary_from(fd, base, fd.localmap.param_last))
+    // localExtreme is ~0 for a stack growing down; a model always has both ranges (the defaults:
+    // ProtoModel::decode refuses <localrange> and <paramrange>), and without one
+    // deriveBoundaries keeps localBoundary at 0x1000000
+    let local_boundary = if fd.proto.model.is_some() { fd.localmap.param_last } else { 0x100_0000 };
+    base.map_or(u64::MAX, |base| boundary_from(fd, base, local_boundary))
 }
 
 /// The loop of `gatherInternal`: sums of `base` at or above `local_boundary` (below it they

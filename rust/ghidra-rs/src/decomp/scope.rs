@@ -479,6 +479,24 @@ impl Database {
         self.scope(scope).categories.get(cat as usize).map_or(Vec::new(), |l| l.iter().flatten().copied().collect())
     }
 
+    /// The live symbols of `scope` with an entry overlapping `[first, first + sz)` of `space`
+    /// (what `findOverlap` can return), in arena order.
+    pub(crate) fn overlapping(&self, scope: ScopeId, space: Space, first: u64, sz: u32) -> Vec<SymbolId> {
+        let end = u128::from(first) + u128::from(sz);
+        (0..self.symbols.len())
+            .filter(|&i| {
+                let s = &self.symbols[i];
+                s.scope == scope
+                    && s.entries.iter().any(|e| {
+                        e.space == space
+                            && u128::from(e.offset) < end
+                            && u128::from(first) < u128::from(e.offset) + u128::from(e.size)
+                    })
+            })
+            .map(|i| SymbolId(i as u32))
+            .collect()
+    }
+
     /// `ScopeInternal::removeSymbol`: out of the name tree, the map and its category list (the
     /// arena keeps the slot, so ids stay valid).
     pub(crate) fn remove_symbol(&mut self, sym: SymbolId) {

@@ -3,7 +3,7 @@
 //! an indirect call to a function whose prototype is locked, the call's inputs and output are
 //! redone from the locked parameters, reusing the varnodes its trials found.
 
-use super::fspec::{Containment, ExtraPop, FuncProto, ParamTrial, Storage};
+use super::fspec::{Containment, ExtraPop, FuncProto, ParamActive, ParamTrial, Storage};
 use super::funcdata::{CallId, Funcdata};
 use super::locked::{containment, Locked};
 use super::op::OpFlags;
@@ -140,13 +140,15 @@ fn commit_new_inputs(
     fd.call_mut(c).stack_placeholder_slot = None;
     let spec = &arch.spec;
     let uniq = arch.sleigh.uniq_space();
+    // activeinput.clear(), then one active trial per parameter with storage
+    let mut trials = ParamActive::subcall(0);
     for (i, p) in locked.inputs.iter().enumerate() {
         let Some(st) = &p.storage else {
             let size = arch.types.size(p.ty);
             newinput[i + 1] = Some(fd.new_constant(size, 0));
             continue;
         };
-        let (_, off, size) = range(st).ok_or_else(|| LowlevelError("commitNewInputs: a join parameter".into()))?;
+        let (space, off, size) = range(st).ok_or_else(|| LowlevelError("commitNewInputs: a join parameter".into()))?;
         // buildParam
         let vn = match newinput[i + 1] {
             None => {
@@ -159,6 +161,10 @@ fn commit_new_inputs(
             }
         };
         newinput[i + 1] = Some(vn);
+        trials.register_trial(space, off, size);
+        if let Some(t) = trials.trials.last_mut() {
+            t.mark_active();
+        }
         if noplacehold && matches!(st, Storage::Stack { .. }) {
             fd.vn_set(vn, VnFlags::SPACEBASE_PLACEHOLDER);
             noplacehold = false;
@@ -169,9 +175,14 @@ fn commit_new_inputs(
     if let Some(ph) = placeholder {
         all.push(ph);
         fd.call_mut(c).stack_placeholder_slot = Some(all.len() - 1);
+        // setStackPlaceholderSlot while the recovery is still on
+        trials.set_placeholder_slot();
     }
     fd.op_set_all_input(op, &all)?;
-    fd.call_mut(c).active_input = None;
+    // clearActiveInput: the trials stay
+    let call = fd.call_mut(c);
+    call.active_input = None;
+    call.kept_input = Some(trials);
     Ok(())
 }
 

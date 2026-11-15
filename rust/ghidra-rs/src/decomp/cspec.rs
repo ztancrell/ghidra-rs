@@ -154,6 +154,14 @@ impl CompilerSpec {
                     let body = el.kid("pcode").and_then(|p| p.kid("body")).ok_or_else(|| {
                         LowlevelError(format!("callfixup {}: missing <pcode><body>", el.attr("name").unwrap_or("?")))
                     })?;
+                    // InjectPayload::isIncidentalCopy marks the fixup's COPYs (markIncidentalCopy),
+                    // which the parameter analysis reads; no ghidra-rs op carries that mark
+                    if el.kid("pcode").and_then(|p| p.attr("incidentalcopy")) == Some("true") {
+                        return Err(LowlevelError(
+                            "a call fixup with incidentalcopy (PcodeOp::incidental_copy): not implemented in ghidra-rs yet"
+                                .into(),
+                        ));
+                    }
                     injects.add_callfixup(names, el.req("name")?, &body.text)?;
                 }
                 // read with the prototypes, or later (see the module comment)

@@ -1659,6 +1659,11 @@ with the trial lines equal in all 500. Slice 2: `resolveModel`, `deriveInputMap`
 450 / 498, `r5dtlocksv` 328 / 499 to 451 / 499; M8 all 45 checks identical. Open, failing loudly (newly reached):
 `ActionParamDouble` splitting a stack trial that is a PIECE, heritage's indexed stack LOAD that
 may read an address-tied range, a piece of a locked stack parameter.
+Review fixes: locked calls register their parameters' trials (`funcLinkInput`,
+`commitNewInputs`), `markNotMapped` widens the parameter extent first, the unreachable or
+unported branches of `AncestorRealistic` and the range defaults fail loudly; the three checks
+hold (446 / 499, 450 / 498, 450 / 498). Open: the "Error processing <name> called at <seq>: "
+wrapper of `ActionActiveParam`'s errors.
 
 ## Running stages in parallel
 

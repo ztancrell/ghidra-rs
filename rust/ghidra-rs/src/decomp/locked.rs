@@ -5,7 +5,7 @@
 //! actions that read a prototype: `ActionPrototypeTypes`, `ActionFuncLink` (`funcLinkInput`,
 //! `funcLinkOutput`) and `FuncProto::characterizeAs*`/`possible*Param`.
 
-use super::fspec::{Containment, FuncProto, ModelId, ParamList, Storage, TypeClass};
+use super::fspec::{Containment, FuncProto, ModelId, ParamActive, ParamList, Storage, TypeClass};
 use super::funcdata::{CallId, Funcdata};
 use super::infertypes::update_type;
 use super::opcode::Opcode;
@@ -266,7 +266,17 @@ pub(crate) fn func_link(fd: &mut Funcdata, arch: &Arch, c: CallId) -> Result<boo
     let mut setplaceholder = false;
     let spec = &arch.spec;
     let uniq = arch.sleigh.uniq_space();
+    // the trials activeinput holds for a locked call, never active (isinputactive stays off):
+    // one per parameter with storage, marked active (checkCallDoubleUse reads them)
+    let mut trials = ParamActive::subcall(0);
     for p in &locked.inputs {
+        if let Some(st) = &p.storage {
+            let (space, off, size) = location(fd, st)?;
+            trials.register_trial(space, off, size);
+            if let Some(t) = trials.trials.last_mut() {
+                t.mark_active();
+            }
+        }
         let slot = fd.op(op).ins.len();
         let vn: VarnodeId = match &p.storage {
             None => {
@@ -294,6 +304,7 @@ pub(crate) fn func_link(fd: &mut Funcdata, arch: &Arch, c: CallId) -> Result<boo
         };
         fd.op_insert_input(op, vn, slot)?;
     }
+    fd.call_mut(c).kept_input = Some(trials);
     if spacebase {
         super::action::create_placeholder(fd, arch, c)?;
     }
