@@ -189,6 +189,19 @@ impl TypeFactory {
     pub(crate) fn get(&self, id: TypeId) -> &Datatype {
         &self.types[id.0 as usize]
     }
+    /// `Datatype::needsResolution`: a union, a one-element array, a structure with one field
+    /// filling it, or a pointer to one of those (not through another pointer).
+    pub(crate) fn needs_resolution(&self, id: TypeId) -> bool {
+        let t = self.get(id);
+        match &t.kind {
+            _ if t.meta == Meta::Union => true,
+            Kind::Array { count, .. } => *count == 1,
+            Kind::Fields(f) if t.meta == Meta::Struct => f.len() == 1 && self.size(f[0].2) == t.size,
+            Kind::Pointer { to, .. } => self.meta(*to) != Meta::Ptr && self.needs_resolution(*to),
+            _ => false,
+        }
+    }
+
     /// `Datatype::getName` (empty for a pointer or an array).
     pub(crate) fn name(&self, id: TypeId) -> Option<&str> {
         self.get(id).name.as_deref()
@@ -476,6 +489,23 @@ impl TypeFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn needs_resolution_kinds() {
+        let mut f = TypeFactory::new();
+        let i4 = f.base(4, Meta::Int);
+        assert!(!f.needs_resolution(i4));
+        let one = f.array_of(i4, 1).unwrap();
+        let two = f.array_of(i4, 2).unwrap();
+        assert!(f.needs_resolution(one) && !f.needs_resolution(two));
+        let s1 = f.aggregate("s1", false, vec![("a".into(), i4)]).unwrap();
+        let s2 = f.aggregate("s2", false, vec![("a".into(), i4), ("b".into(), i4)]).unwrap();
+        let u = f.aggregate("u", true, vec![("a".into(), i4), ("b".into(), i4)]).unwrap();
+        assert!(f.needs_resolution(s1) && !f.needs_resolution(s2) && f.needs_resolution(u));
+        let p = f.pointer(4, s1, 1);
+        let pp = f.pointer(4, p, 1);
+        assert!(f.needs_resolution(p) && !f.needs_resolution(pp));
+    }
 
     #[test]
     fn core_types_and_order() {

@@ -133,7 +133,7 @@ impl Flow<'_> {
             // the injected call's callee is always known: its prototype holds the fixup
             let callee =
                 self.fd.call(call).callee().and_then(|e| arch.functions.get(&e)).map_or("", |f| f.name.as_str());
-            self.fd.warnings.push(format!("Function: {callee} replaced with injection: {}", payload.name));
+            self.fd.warning_header(format!("Function: {callee} replaced with injection: {}", payload.name));
             self.fd.qlst.retain(|&c| c != call);
         }
         Ok(())
@@ -529,10 +529,25 @@ impl Flow<'_> {
     /// Port of `Funcdata::stageJumpTable`: build the partial function on first use
     /// (`truncatedFlow`, then the `jumptable` root action) and recover the table from it.
     /// The outer `Result` is an error that ends the decompile, the inner one the recovery.
+    /// The warnings the partial function added (from `nw` header and `nc` body warnings on):
+    /// the C++ writes them, with their `WARNING (jumptable): ` prefix, to the comment database
+    /// the function shares, so they print with the function's own.
+    fn carry_warnings(&mut self, p: &Funcdata, nw: usize, nc: usize) {
+        for w in p.warnings.iter().skip(nw) {
+            if !self.fd.warnings.contains(w) {
+                self.fd.warnings.push(w.clone());
+            }
+        }
+        for (a, m) in p.comments.iter().skip(nc) {
+            self.fd.add_comment(*a, m.clone());
+        }
+    }
+
     fn stage_jump_table(&mut self, partial: &mut Option<Funcdata>, op: OpId) -> Result<Staged> {
         if partial.is_none() {
             let mut p = self.fd.clone();
             p.jumptablerecovery_on = true;
+            let (nw, nc) = (p.warnings.len(), p.comments.len());
             let mut pflow = Flow {
                 fd: &mut p,
                 arch: self.arch,
@@ -545,7 +560,9 @@ impl Flow<'_> {
                 baddata_count: 0,
             };
             pflow.generate_blocks()?;
-            if let Err(e) = action::jumptable_partial(&mut p, self.arch) {
+            let res = action::jumptable_partial(&mut p, self.arch);
+            self.carry_warnings(&p, nw, nc);
+            if let Err(e) = res {
                 // An error of the jumptable action fails the table, as in the C++ (`stageJumpTable`
                 // catches `LowlevelError`). One from a path ghidra-rs does not port is not a
                 // failure the reference has: it is reported on stderr, always, so a check
@@ -562,6 +579,7 @@ impl Flow<'_> {
             }
             jumptable::fold_constants(&mut p, self.arch);
             jumptable::calc_nz_mask(&mut p, self.arch);
+            self.carry_warnings(&p, nw, nc);
             *partial = Some(p);
         }
         let p = partial.as_ref().unwrap();

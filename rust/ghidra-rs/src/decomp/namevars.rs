@@ -208,8 +208,8 @@ fn detect_symbol_conflicts(fd: &mut Funcdata, vn: VarnodeId, h: HighId) -> Resul
 }
 
 /// Port of `Funcdata::linkSymbol`: the symbol of `vn`'s high, an entry of the local scope
-/// holding its first byte at its use point, or a new local symbol. `None` for a persistent
-/// varnode (see the module comment).
+/// holding its first byte at its use point, or a new local symbol. For a persistent varnode, the
+/// global data symbol holding its first byte, `None` otherwise (see the module comment).
 fn link_symbol(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId) -> Result<Option<SymbolId>> {
     let h = high(fd, vn)?;
     if let Some((sym, _, _)) = high_symbol(fd, h) {
@@ -219,10 +219,24 @@ fn link_symbol(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId) -> Result<Option<S
     let (space, offset, persist) = (v.space, v.offset, v.has(VnFlags::PERSIST));
     let usepoint = use_point(fd, arch, vn);
     if persist {
-        // queryProperties: the global scope owns the storage; its data symbols (`ActionMapGlobals`)
-        // are linked here. A function or an external reference (kept in `Arch`) is not: the
-        // printer fails on such a variable.
-        if let Some((sym, e)) = fd.symtab.find_container(GLOBAL, space, offset, 1, Some(usepoint))? {
+        // queryProperties: the global scope owns the storage. `findContainer` takes the smallest
+        // entry holding the first byte among the data symbols (`ActionMapGlobals`, linked here),
+        // the functions (one byte) and the external references (a pointer), the last two kept in
+        // `Arch`: a variable they hold stays unlinked here and the printer fails on it.
+        let other = (space == Space::Sleigh(arch.spec.stack_container))
+            .then(|| super::infertypes::query_global(arch, offset, 1))
+            .flatten()
+            .map(|e| if e.externref { arch.spec.stack_pointer.2 } else { 1 });
+        let data = fd.symtab.find_container(GLOBAL, space, offset, 1, Some(usepoint))?;
+        if let Some((sym, e)) = data {
+            let size = fd.symtab.symbol(sym).entries[e].size;
+            match other {
+                Some(o) if o < size => return Ok(None),
+                Some(o) if o == size => {
+                    return err("namevars: a global data symbol the size of a function or external reference at the same address is not ported");
+                }
+                _ => {}
+            }
             if !fd.symtab.symbol(sym).entries[e].conflict {
                 fd.mapentry.insert(vn, (sym, e));
                 return Ok(Some(sym));

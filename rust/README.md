@@ -2345,7 +2345,9 @@ Every other construct fails loudly with the C++ name: `BlockIf`, `BlockDoWhile`,
 comments inside the body (warnings at an address), array and field access (`PTRSUB`, `PTRADD`),
 the operators not listed (extensions, `SUBPIECE`, `PIECE`, `CALLIND`, `CALLOTHER`, float
 conversions, ...), float, character, string, enum and function-pointer constants, equates,
-partial and union symbols, anonymous and function types, locked prototypes. Casts are not
+partial symbols and symbols or constants whose data-type needs resolution (`needsResolution`:
+a union, a one-element array, a one-field structure, a pointer to one), a global name a local
+name hides (a `::` scope prefix), anonymous and function types, locked prototypes. Casts are not
 printed yet: `setcasts` (`cast.cc`) is ported separately, so the checks skip it on both engines
 and neither prints a cast.
 
@@ -2354,27 +2356,35 @@ Checks (`tools/bars.sh`), at `break start prototypewarnings` with `print C`, `se
 (types on, `tail-t-options.txt`); corpora M8, M500 and `tools/corpus/simple.txt` (200 small
 functions: every 27th of the 5,443 mercs2 functions at most 32 bytes before the next mapped one).
 
-Two older stages were fixed on the way, both found by silent `print C` differences:
+Older stages fixed on the way, found by silent `print C` differences or by the review
+(superseded: "two older stages"):
 
 - `namevars` now links a persistent variable to the global data symbol holding it
   (`linkSymbol` through `queryProperties`), so globals print by name (`iRam0256f88a`) rather
-  than as `ram0x0256f88a`. A variable over a function or an external reference (kept in
-  `Arch`, not in the global scope) is still not linked, and the printer fails on it.
+  than as `ram0x0256f88a`. As `findContainer`, the smallest entry holding the first byte wins:
+  when a function (one byte) or an external reference (a pointer), kept in `Arch` and not in
+  the global scope, is smaller, the variable stays unlinked and the printer fails on it; a
+  data symbol of the same size fails loudly in `namevars`.
 - `mapglobals` asks whether a varnode is already linked with the varnode's size, as
   `setSymbolProperties` does: a 4-byte varnode at an import's slot is held by the external
   reference, not by the 1-byte function symbol there, so it no longer raises the "Globals
   starting with '_' overlap smaller symbols" header warning the reference does not print.
+- Warnings carry their prefix where they are made (`WARNING: `, or `WARNING (jumptable): ` in
+  jump-table recovery's partial function), and the warnings the partial function adds are
+  carried over to the function, as the C++ comment database the two share keeps them; flow
+  records the bad and unimplemented instruction warnings.
+- `mergeMultiEntry` fails loudly on a local symbol with several whole entries (none is made
+  while `localrecovery` is not ported) instead of doing nothing.
 
 Numbers (functions the reference finishes):
 
 | check | M8 | M500 | simple |
 |---|---|---|---|
-| `pc-r` | 0 / 7 (loud 7) | not run | 54 / 194 (loud 139, silent 1; 140 and 0 after the flow fix) |
-| `pc-t` | 0 / 7 (loud 7) | 24 / 495 (loud 471, silent 0) | 34 / 194 (loud 159, silent 1; 160 and 0 after the flow fix) |
+| `pc-r` | 0 / 7 (loud 7) | not run | 54 / 194 (loud 140, silent 0) |
+| `pc-t` | 0 / 7 (loud 7) | 24 / 495 (loud 471, silent 0) | 34 / 194 (loud 160, silent 0) |
 
 The silent miss of both, 0x1c8c780, was the header warning of a bad instruction, which flow
-did not record; `FlowInfo` now records it (and the body warning, so the function fails loudly;
-rechecked alone with `pc-r`, the rest of `simple` was not rerun after this fix).
+did not record; `FlowInfo` now records it (and the body warning, so the function fails loudly;; `simple` rerun after it and the review fixes).
 The loud misses on M500, `pc-t`: `BlockIf` 376, array or field access 25, comments in the body
 20, `PTRADD` 8, `BlockDoWhile` 7, `mergeAddrTied`, `SUBPIECE` and `FLOAT2FLOAT` 6 each, `PTRSUB` and
 float constants 4, `INT_ZEXT` 3, `PIECE` 2, `SQRT`, `CALLIND`, `BlockInfLoop` and an anonymous
@@ -2382,9 +2392,10 @@ data-type 1 each (M500 ran before the flow fix, which can only turn a silent mis
 was none). The loud misses on `simple`, `pc-t`: `BlockIf` 83, comments in the body 30, array or field
 access 15, `INT_ZEXT` 5, `BlockDoWhile` 4, `SUBPIECE`, `PTRADD`, `FLOAT2FLOAT`, `BlockWhileDo`,
 `BlockInfLoop` and the `mergeAddrTied` error 3 each, `PTRSUB` 2, `PIECE` and `CALLOTHER` 1; `pc-r`:
-`BlockIf` 73, comments 30, an anonymous data-type 13, `INT_ZEXT` 6, then 4 or fewer each. All
-47 checks on M8 identical as before (the 45 older ones 8 / 8, `fs-r` and `fs-t` 7 / 7), after the
-`namevars` and `mapglobals` fixes. Not rerun: the older checks on M500 and the other corpora.
+`BlockIf` 73, comments 30, an anonymous data-type 13, `INT_ZEXT` 6, then 4 or fewer each. On M8 the
+45 older checks are identical as before (8 / 8, `fs-r` and `fs-t` 7 / 7) after the fixes below,
+also after the review fixes; `pc-r` and `pc-t` are 0 / 7, all loud (superseded: "all 47 checks
+on M8 identical"). Not rerun: the older checks on M500 and the other corpora.
 
 ## Speed
 

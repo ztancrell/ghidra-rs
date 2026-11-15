@@ -90,6 +90,19 @@ pub fn print_c(fd: &mut Funcdata, arch: &Arch, name: &str) -> Result<String> {
     p.emit.flush().map_err(LowlevelError)
 }
 
+/// `AddrSpace::printRaw` for an address size `size`, wordsize 1.
+fn raw_offset(size: u32, off: u64) -> String {
+    let sz = match size {
+        s if s > 4 && off >> 32 == 0 => 4,
+        s if s > 4 && off >> 48 == 0 => 6,
+        s => s,
+    };
+    format!("0x{off:0w$x}", w = 2 * sz as usize)
+}
+
+/// `FlowBlock::f_unstructured_targ` (block.hh): the block is the target of a goto.
+const F_UNSTRUCTURED_TARG: u32 = 0x20;
+
 /// `calc_mask`
 fn calc_mask(size: u32) -> u64 {
     if size >= 8 {
@@ -125,19 +138,14 @@ impl PrintC<'_> {
         Ok(())
     }
 
-    /// Port of `PrintC::emitCommentFuncHeader`: the header warnings
-    /// (`Funcdata::warningHeader`, each stored once).
+    /// Port of `PrintC::emitCommentFuncHeader`: the header warnings (`Funcdata::warningHeader`,
+    /// stored once each with their prefix, the partial function's included).
     fn emit_comment_func_header(&mut self) {
-        let mut seen: Vec<&String> = Vec::new();
         let warnings = self.fd.warnings.clone();
         for w in &warnings {
-            if seen.contains(&w) {
-                continue;
-            }
-            seen.push(w);
-            self.emit_line_comment(0, &format!("WARNING: {w}"));
+            self.emit_line_comment(0, w);
         }
-        if !seen.is_empty() {
+        if !warnings.is_empty() {
             self.emit.tag_line();
         }
     }
@@ -248,10 +256,8 @@ impl PrintC<'_> {
             if s.entries[e].piece.is_some() || s.category.is_some() || s.name.is_empty() {
                 continue;
             }
-            // a multi-entry symbol is declared at its first whole entry (`getFirstWholeMap`)
-            if s.entries.len() > 1 && s.entries.iter().position(|x| x.piece.is_none()) != Some(e) {
-                continue;
-            }
+            // no symbol has several whole entries (`mergeMultiEntry` fails on one), so each is
+            // declared at its entry (`getFirstWholeMap`)
             notempty = true;
             self.emit.tag_line();
             self.emit_var_decl(sym)?;
@@ -353,7 +359,7 @@ impl PrintC<'_> {
         match bl.kind.clone() {
             Kind::Copy(bb) => {
                 // emitAnyLabelStatement: the target of a goto has a label
-                if bl.flags & 0x20 != 0 {
+                if bl.flags & F_UNSTRUCTURED_TARG != 0 {
                     return err("print C: labels (the target of a goto) are not ported");
                 }
                 self.emit_block_basic(bb)
@@ -426,19 +432,20 @@ impl PrintC<'_> {
         }
         if let Some(out) = o.out {
             self.push_op(&ASSIGNMENT)?;
-            self.push_symbol_detail(out, op, false)?;
+            self.push_symbol_detail(out)?;
         }
-        self.push_opcode(op, None)?;
+        self.push_opcode(op)?;
         self.recurse()
     }
 
-    /// `TypeOp::push`: the expression of `op` (read by `read`, unused by the ported ops).
-    pub(crate) fn push_opcode(&mut self, op: OpId, _read: Option<OpId>) -> Result<()> {
+    /// `TypeOp::push`: the expression of `op` (the reading op, `readOp`, matters only to the
+    /// extensions, not ported).
+    pub(crate) fn push_opcode(&mut self, op: OpId) -> Result<()> {
         use Opcode::*;
         let opc = self.fd.op(op).opc;
         let tok: &'static OpToken = match opc {
             Copy => {
-                self.push_vn(self.fd.op(op).ins[0], op, self.mods);
+                self.push_vn(self.fd.op(op).ins[0], self.mods);
                 return Ok(());
             }
             Load => return self.op_load(op),
@@ -489,7 +496,7 @@ impl PrintC<'_> {
         let ptr = self.fd.op(op).ins[1];
         self.check_array_deref(ptr)?;
         self.push_op(&DEREFERENCE)?;
-        self.push_vn(ptr, op, self.mods);
+        self.push_vn(ptr, self.mods);
         Ok(())
     }
 
@@ -499,8 +506,8 @@ impl PrintC<'_> {
         self.push_op(&ASSIGNMENT)?;
         self.check_array_deref(ptr)?;
         self.push_op(&DEREFERENCE)?;
-        self.push_vn(val, op, self.mods);
-        self.push_vn(ptr, op, self.mods);
+        self.push_vn(val, self.mods);
+        self.push_vn(ptr, self.mods);
         Ok(())
     }
 
@@ -520,15 +527,20 @@ impl PrintC<'_> {
         // fc->getName(), else genericFunctionName; pushSymbolScope: depth 0 in the global scope
         let name = match call.callee().and_then(|e| self.arch.functions.get(&e)) {
             Some(f) if !f.name.is_empty() => f.name.clone(),
-            _ => format!("func_0x{:08x}", call.entry.unwrap_or_default()),
+            _ => {
+                let entry =
+                    call.entry.ok_or_else(|| LowlevelError("print C: a call without a target address".into()))?;
+                format!("func_{}", self.raw_addr(self.arch.sleigh.code_space(), entry)?)
+            }
         };
+        self.check_scope_depth(&name)?;
         self.push_atom(Atom::Text(name))?;
         if ins.len() > 1 {
             for _ in 0..ins.len() - 2 {
                 self.push_op(&COMMA)?;
             }
             for &vn in ins[1..].iter().rev() {
-                self.push_vn(vn, op, self.mods);
+                self.push_vn(vn, self.mods);
             }
         } else {
             self.push_atom(Atom::Blank)?;
@@ -545,7 +557,7 @@ impl PrintC<'_> {
                 self.emit.print_str("return");
                 if let Some(&v) = ins.get(1) {
                     self.emit.spaces(1, 0);
-                    self.push_vn(v, op, self.mods);
+                    self.push_vn(v, self.mods);
                 }
                 return Ok(());
             }
@@ -562,7 +574,7 @@ impl PrintC<'_> {
         let input = self.fd.op(op).ins[0];
         if self.is_set(modifier::NEGATETOKEN) {
             self.mods &= !modifier::NEGATETOKEN;
-            self.push_vn(input, op, self.mods);
+            self.push_vn(input, self.mods);
             return Ok(());
         }
         // checkPrintNegation
@@ -570,17 +582,17 @@ impl PrintC<'_> {
         let flips = v.has(VnFlags::IMPLIED)
             && v.def.is_some_and(|d| super::rules::boolean::boolean_flip(self.fd.op(d).opc).is_some());
         if flips {
-            self.push_vn(input, op, self.mods | modifier::NEGATETOKEN);
+            self.push_vn(input, self.mods | modifier::NEGATETOKEN);
         } else {
             self.push_op(&BOOLEAN_NOT)?;
-            self.push_vn(input, op, self.mods);
+            self.push_vn(input, self.mods);
         }
         Ok(())
     }
 
     /// Port of `PrintLanguage::pushSymbolDetail` for a varnode that is a whole symbol or has
     /// none.
-    pub(crate) fn push_symbol_detail(&mut self, vn: VarnodeId, _op: OpId, _is_read: bool) -> Result<()> {
+    pub(crate) fn push_symbol_detail(&mut self, vn: VarnodeId) -> Result<()> {
         let h = super::variable::high(self.fd, vn)?;
         let Some((sym, _, _)) = super::namevars::high_symbol(self.fd, h) else {
             let rep = super::namevars::name_representative(self.fd, h)?;
@@ -595,12 +607,35 @@ impl PrintC<'_> {
             return err("print C: part of a symbol (pushPartialSymbol) is not ported");
         }
         let s = self.fd.symtab.symbol(sym);
-        if s.ty.is_some_and(|t| self.fd.types.meta(t) == Meta::Union) {
-            return err("print C: a union symbol (needsResolution) is not ported");
+        if s.ty.is_some_and(|t| self.fd.types.needs_resolution(t)) {
+            return err("print C: a symbol whose data-type needs resolution (union, one-element array or one-field structure) is not ported");
         }
-        // pushSymbol: no merge problems (mergeMultiEntry is not ported), no scope prefix
-        let name = s.name.clone();
+        // pushSymbol: no merge problems (mergeMultiEntry is not ported)
+        let (name, global) = (s.name.clone(), s.scope == super::scope::GLOBAL);
+        if global {
+            self.check_scope_depth(&name)?;
+        }
         self.push_atom(Atom::Text(name))
+    }
+
+    /// Port of `AddrSpace::printRaw` (wordsize 1, as every x86 space): `0x` and the offset in hex,
+    /// padded to the address size (a wide space's small offset to 4 or 6 bytes).
+    fn raw_addr(&self, space: u32, off: u64) -> Result<String> {
+        let sp =
+            self.arch.sleigh.spaces.get(space as usize).ok_or_else(|| LowlevelError("print C: bad space".into()))?;
+        Ok(raw_offset(sp.size, off))
+    }
+
+    /// `Symbol::getResolutionDepth` of a global name used in the local scope: 0 unless the
+    /// local scope holds the same name (`isNameUsed`), which would print a `::` prefix (not
+    /// ported).
+    fn check_scope_depth(&self, name: &str) -> Result<()> {
+        if self.fd.symtab.find_first_by_name(LOCAL, name).is_some() {
+            return err(format!(
+                "print C: the global {name} is hidden by a local name (a scope prefix) and is not ported"
+            ));
+        }
+        Ok(())
     }
 
     /// Port of `PrintC::pushUnnamedLocation`: the space name and the register name, or the
@@ -613,16 +648,19 @@ impl PrintC<'_> {
         let sp = self.arch.sleigh.spaces.get(i as usize).ok_or_else(|| LowlevelError("print C: bad space".into()))?;
         let text = match self.arch.register_name(i, v.offset, size) {
             Some((reg, base, regsize)) if base == v.offset && regsize == size => format!("{}_{reg}", sp.name),
-            _ => format!("{}0x{:0w$x}", sp.name, v.offset, w = 2 * sp.size as usize),
+            _ => format!("{}{}", sp.name, self.raw_addr(i, v.offset)?),
         };
         self.push_atom(Atom::Text(text))
     }
 
     /// Port of `PrintC::pushConstant` with the constant's high type
     /// (`getHighTypeReadFacing`).
-    pub(crate) fn push_constant_vn(&mut self, vn: VarnodeId, _op: OpId) -> Result<()> {
+    pub(crate) fn push_constant_vn(&mut self, vn: VarnodeId) -> Result<()> {
         let h = super::variable::high(self.fd, vn)?;
         let (ty, _) = super::variable::h_type(self.fd, h);
+        if self.fd.types.needs_resolution(ty) {
+            return err("print C: a constant whose data-type needs resolution (getHighTypeReadFacing) is not ported");
+        }
         let (val, size) = (self.fd.vn(vn).offset, self.fd.types.size(ty));
         let meta = self.fd.types.meta(ty);
         match meta {
@@ -663,7 +701,9 @@ impl PrintC<'_> {
         Ok(())
     }
 
-    /// Port of `PrintC::push_integer` (display format 0: no ported type or symbol forces one).
+    /// Port of `PrintC::push_integer` with display format 0: a ported data-type has no display
+    /// format (`getDisplayFormat`; neither `parse line` nor the core types set one), and a
+    /// constant with a symbol, which could set one, fails.
     fn push_integer(&mut self, mut val: u64, size: u32, sign: bool, vn: Option<VarnodeId>) -> Result<()> {
         if let Some(vn) = vn.filter(|&v| !self.fd.vn(v).is_annotation()) {
             let h = super::variable::high(self.fd, vn)?;
@@ -725,6 +765,14 @@ mod tests {
         assert!(negate(&BINARY_PLUS).is_none());
         // two tokens with the same text are still different tokens
         assert!(!std::ptr::eq(&SHIFT_RIGHT, &SHIFT_SRIGHT));
+    }
+
+    #[test]
+    fn raw_offsets() {
+        assert_eq!(raw_offset(4, 0x17200), "0x00017200");
+        assert_eq!(raw_offset(8, 0x401000), "0x00401000");
+        assert_eq!(raw_offset(8, 0x1_0000_0000), "0x000100000000");
+        assert_eq!(raw_offset(8, 0x1_0000_0000_0000), "0x0001000000000000");
     }
 
     #[test]

@@ -62,12 +62,6 @@ pub(crate) struct EmitPrettyPrint {
     error: Option<String>,
 }
 
-impl Default for EmitPrettyPrint {
-    fn default() -> EmitPrettyPrint {
-        EmitPrettyPrint::new(100)
-    }
-}
-
 impl EmitPrettyPrint {
     /// `EmitPrettyPrint` with `setMaxLineSize(width)` (100 by default) and an indent
     /// increment of 2.

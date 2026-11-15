@@ -33,10 +33,10 @@ pub(crate) struct OpToken {
 
 /// `PrintLanguage::modifiers` (the ones ported).
 pub(crate) mod modifier {
-    pub(crate) const NO_BRANCH: u32 = 0x8;
-    pub(crate) const FORCE_HEX: u32 = 0x40;
-    pub(crate) const FORCE_DEC: u32 = 0x80;
-    pub(crate) const NEGATETOKEN: u32 = 0x400;
+    pub(crate) const NO_BRANCH: u32 = 0x80;
+    pub(crate) const FORCE_HEX: u32 = 1;
+    pub(crate) const FORCE_DEC: u32 = 2;
+    pub(crate) const NEGATETOKEN: u32 = 0x2000;
 }
 
 /// Port of `PrintLanguage::ReversePolish`.
@@ -51,7 +51,6 @@ struct ReversePolish {
 #[derive(Debug, Clone, Copy)]
 struct NodePending {
     vn: VarnodeId,
-    op: OpId,
     mods: u32,
 }
 
@@ -143,10 +142,11 @@ impl<'a> PrintC<'a> {
         Ok(())
     }
 
-    /// Port of `PrintLanguage::pushVn`: the expression of `vn` (read by `op`) is pushed later,
+    /// Port of `PrintLanguage::pushVn`: the expression of `vn` is pushed later (the reading op is
+    /// not kept: no ported op prints by its reader),
     /// by `recurse`; inputs are pushed last first.
-    pub(crate) fn push_vn(&mut self, vn: VarnodeId, op: OpId, mods: u32) {
-        self.nodepend.push(NodePending { vn, op, mods });
+    pub(crate) fn push_vn(&mut self, vn: VarnodeId, mods: u32) {
+        self.nodepend.push(NodePending { vn, mods });
     }
 
     /// Port of `PrintLanguage::recurse`: push every pending varnode's expression.
@@ -162,9 +162,9 @@ impl<'a> PrintC<'a> {
                 let Some(def) = self.fd.vn(n.vn).def else {
                     return err("print C: an implied varnode without a defining op");
                 };
-                self.push_opcode(def, Some(n.op))?;
+                self.push_opcode(def)?;
             } else {
-                self.push_vn_explicit(n.vn, n.op)?;
+                self.push_vn_explicit(n.vn)?;
             }
             self.pending = self.nodepend.len();
         }
@@ -183,15 +183,15 @@ impl<'a> PrintC<'a> {
         self.push_op(tok)?;
         let ins = &self.fd.op(op).ins;
         let (a, b) = (ins[0], ins[1]);
-        self.push_vn(b, op, self.mods);
-        self.push_vn(a, op, self.mods);
+        self.push_vn(b, self.mods);
+        self.push_vn(a, self.mods);
         Ok(())
     }
 
     /// Port of `PrintLanguage::opUnary`.
     pub(crate) fn op_unary(&mut self, tok: &'static OpToken, op: OpId) -> Result<()> {
         self.push_op(tok)?;
-        self.push_vn(self.fd.op(op).ins[0], op, self.mods);
+        self.push_vn(self.fd.op(op).ins[0], self.mods);
         Ok(())
     }
 
@@ -288,15 +288,15 @@ impl<'a> PrintC<'a> {
     }
 
     /// Port of `PrintLanguage::pushVnExplicit`.
-    fn push_vn_explicit(&mut self, vn: VarnodeId, op: OpId) -> Result<()> {
+    fn push_vn_explicit(&mut self, vn: VarnodeId) -> Result<()> {
         let v = self.fd.vn(vn);
         if v.is_annotation() {
             return err("print C: an annotation varnode (pushAnnotation) is not ported");
         }
         if v.is_constant() {
-            return self.push_constant_vn(vn, op);
+            return self.push_constant_vn(vn);
         }
-        self.push_symbol_detail(vn, op, true)
+        self.push_symbol_detail(vn)
     }
 }
 

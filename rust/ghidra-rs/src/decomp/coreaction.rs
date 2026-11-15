@@ -2791,7 +2791,7 @@ pub(crate) fn map_globals(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         }
     }
     if inconsistent {
-        fd.warnings.push("Globals starting with '_' overlap smaller symbols at the same address".into());
+        fd.warning_header("Globals starting with '_' overlap smaller symbols at the same address");
     }
     Ok(0)
 }

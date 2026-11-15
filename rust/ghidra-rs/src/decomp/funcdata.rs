@@ -1147,17 +1147,35 @@ impl Funcdata {
         self.seqs.range((addr, 0)..=(addr, u32::MAX)).map(|(_, &id)| id).collect()
     }
 
-    /// Port of `Funcdata::warning`: a warning comment at an address (`Comment::warning`, kept
-    /// for `print C`), not stored twice (`addCommentNoDuplicate`).
-    pub(crate) fn warning(&mut self, msg: &str, addr: u64) {
-        if !self.comments.iter().any(|(a, m)| *a == addr && m == msg) {
-            self.comments.push((addr, msg.to_string()));
+    /// `WARNING: `, or `WARNING (jumptable): ` in jump-table recovery's partial function.
+    fn warning_prefix(&self) -> &'static str {
+        if self.jumptablerecovery_on {
+            "WARNING (jumptable): "
+        } else {
+            "WARNING: "
         }
     }
 
-    /// Port of `Funcdata::warningHeader`.
+    /// Port of `Funcdata::warning`: a warning comment at an address (`Comment::warning`, kept
+    /// for `print C`, with its prefix), not stored twice (`addCommentNoDuplicate`).
+    pub(crate) fn warning(&mut self, msg: &str, addr: u64) {
+        let msg = format!("{}{msg}", self.warning_prefix());
+        self.add_comment(addr, msg);
+    }
+
+    /// `addCommentNoDuplicate` of a warning at an address.
+    pub(crate) fn add_comment(&mut self, addr: u64, msg: String) {
+        if !self.comments.iter().any(|(a, m)| *a == addr && *m == msg) {
+            self.comments.push((addr, msg));
+        }
+    }
+
+    /// Port of `Funcdata::warningHeader`: the header comment with its prefix, not stored twice.
     pub(crate) fn warning_header(&mut self, msg: impl Into<String>) {
-        self.warnings.push(msg.into());
+        let msg = format!("{}{}", self.warning_prefix(), msg.into());
+        if !self.warnings.contains(&msg) {
+            self.warnings.push(msg);
+        }
     }
 }
 
