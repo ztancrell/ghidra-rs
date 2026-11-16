@@ -4,18 +4,24 @@
 //! conditions, switch with its case labels, gotos, labels, break and continue), and statements
 //! of assignments, loads, stores, direct calls, returns and branches over the arithmetic, logic
 //! and comparison operators, casts (`opTypeCast`), extensions and SUBPIECE (cast, hidden or
-//! `ZEXT14(x)` style), constants and variables.
+//! `ZEXT14(x)` style), direct and indirect calls (`(*fn)(args)`), the float operators and
+//! conversions, constants (float constants as `printDecimal` prints them, character constants)
+//! and variables, array and field access (`PTRADD`, `PTRSUB`, LOAD and STORE through them, parts
+//! of symbols; slice 3A), the names of anonymous data-types (`genericTypeName`), and the body
+//! comments (the warnings at an address, placed by `CommentSorter`, comment.rs; slice 3B).
 //!
 //! Every construct the C++ would print that is not ported fails with an error naming it, so a
-//! function prints identically or not at all. Not ported yet: comments inside the body, the
-//! long suffix of a constant, a cast to a pointer to an array (`checkAddressOfCast`), labels of
-//! spliced blocks, strings and characters, floats, field and array access, anonymous types and
-//! the remaining operators. (Slice 1 had no casts or structured blocks; superseded.)
+//! function prints identically or not at all. Not ported yet: the long suffix of a constant, a
+//! cast to a pointer to an array (`checkAddressOfCast`), labels of spliced blocks, strings,
+//! unions, `TypePointerRel` and the remaining operators. (Slice 1 had no casts or structured
+//! blocks, slice 2 no field and array access, characters, comments, floats, indirect calls or
+//! anonymous types; superseded.)
 
 use super::finalstructure::{
     case_label_list, switch_leaf, switch_table, CaseOrder, F_BREAK_GOTO, F_CONTINUE_GOTO, F_GOTO_GOTO, F_LABEL_BUMPUP,
     F_UNSTRUCTURED_TARG,
 };
+use super::namevars::SymRef;
 use super::op::{Halt, OpFlags, OpId};
 use super::opcode::Opcode;
 use super::prettyprint::BraceStyle;
@@ -76,6 +82,10 @@ token!(TYPE_EXPR_SPACE, "", "", 2, 10, false, Space, 1, 0);
 token!(TYPE_EXPR_NOSPACE, "", "", 2, 10, false, Space, 0, 0);
 token!(PTR_EXPR, "*", "", 1, 62, false, UnaryPrefix, 0, 0);
 token!(ARRAY_EXPR, "[", "]", 2, 66, false, Postsurround, 1, 0);
+token!(OBJECT_MEMBER, ".", "", 2, 66, true, Binary, 0, 0);
+token!(POINTER_MEMBER, "->", "", 2, 66, true, Binary, 0, 0);
+token!(SUBSCRIPT, "[", "]", 2, 66, false, Postsurround, 0, 0);
+token!(ADDRESSOF, "&", "", 1, 62, false, UnaryPrefix, 0, 0);
 
 /// `OpToken::negate` (set in the `PrintC` constructor): the flipped comparison.
 pub(crate) fn negate(tok: &'static OpToken) -> Option<&'static OpToken> {
@@ -119,12 +129,106 @@ fn calc_mask(size: u32) -> u64 {
     }
 }
 
+/// Port of `PrintC::genericTypeName`: the name printed for a data-type without one.
+fn generic_type_name(meta: Meta, size: u32) -> String {
+    let base = match meta {
+        Meta::Int => "unkint",
+        Meta::Uint => "unkuint",
+        Meta::Unknown => "unkbyte",
+        Meta::Float => "unkfloat",
+        Meta::Spacebase => return "BADSPACEBASE".into(),
+        _ => return "BADTYPE".into(),
+    };
+    format!("{base}{size}")
+}
+
+/// The token of `PrintC::push_float`: `INFINITY`, `NAN` (signed), or the shortest decimal
+/// that reads back as the value, with `.0` when it would look like an integer. The x86
+/// translator has float formats for sizes 4 and 8 only (`getFloatFormat`); any other size is
+/// `FLOAT_UNKNOWN`. (`force_scinote` is never set.)
+fn float_token(val: u64, size: u32) -> String {
+    let (host, neg) = match size {
+        4 => {
+            let f = f32::from_bits(val as u32);
+            (f64::from(f), f.is_sign_negative())
+        }
+        8 => {
+            let f = f64::from_bits(val);
+            (f, f.is_sign_negative())
+        }
+        _ => return "FLOAT_UNKNOWN".into(),
+    };
+    let sign = if neg { "-" } else { "" };
+    if host.is_infinite() {
+        return format!("{sign}INFINITY");
+    }
+    if host.is_nan() {
+        return format!("{sign}NAN");
+    }
+    let mut t = print_decimal(host, size);
+    if !t.contains(['.', 'e']) {
+        t.push_str(".0");
+    }
+    t
+}
+
+/// Port of `FloatFormat::printDecimal` (not in scientific notation): `ostream << double` at
+/// rising precision, from `decimalMinPrecision` until the text reads back as the value (as a
+/// float for size 4), at most `decimalMaxPrecision`.
+fn print_decimal(host: f64, size: u32) -> String {
+    // floor(frac_size * 0.30103) and ceil((frac_size + 1) * 0.30103) + 1, frac_size 23 or 52
+    let (min, max) = if size <= 4 { (6, 9) } else { (15, 17) };
+    let mut res = String::new();
+    for prec in min..=max {
+        let s = format_g(host, prec);
+        if prec == max {
+            return s;
+        }
+        // `istream >> float` leaves 0.0 when it cannot read the text and the largest finite value
+        // on overflow (libstdc++'s `__convert_to_v`)
+        let back = if size <= 4 {
+            s.parse::<f32>().map(|f| f64::from(if f.is_infinite() { f32::MAX.copysign(f) } else { f }))
+        } else {
+            s.parse::<f64>().map(|f| if f.is_infinite() { f64::MAX.copysign(f) } else { f })
+        };
+        let same = back.unwrap_or(0.0) == host;
+        res = s;
+        if same {
+            break;
+        }
+    }
+    res
+}
+
+/// `printf("%.*g", prec, v)`, as `ostream << double` prints in the default float field:
+/// `prec` significant digits, scientific when the exponent is below -4 or at least `prec`,
+/// trailing zeros removed.
+fn format_g(v: f64, prec: usize) -> String {
+    let p = prec.max(1);
+    if v == 0.0 {
+        return if v.is_sign_negative() { "-0" } else { "0" }.into();
+    }
+    let sci = format!("{:.*e}", p - 1, v);
+    let Some((mant, exp)) = sci.split_once('e') else { return sci };
+    let exp: i32 = exp.parse().unwrap_or(0);
+    let strip = |s: &str| -> String {
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            s.to_string()
+        }
+    };
+    if exp < -4 || exp >= p as i32 {
+        format!("{}e{}{:02}", strip(mant), if exp < 0 { '-' } else { '+' }, exp.unsigned_abs())
+    } else {
+        strip(&format!("{:.*}", (p as i32 - 1 - exp) as usize, v))
+    }
+}
+
 impl PrintC<'_> {
     /// Port of `PrintC::docFunction`.
     fn doc_function(&mut self, name: &str) -> Result<()> {
-        if !self.fd.comments.is_empty() {
-            return err("print C: comments inside the body (warnings at an address) are not ported");
-        }
+        self.commsorter = super::comment::CommentSorter::setup_function_list(self.fd)?;
         if self.fd.proto.locked.is_some() {
             return err("print C: the declaration of a locked prototype is not ported");
         }
@@ -316,8 +420,9 @@ impl PrintC<'_> {
         let stack = self.type_stack(ty)?;
         let base = *stack.last().ok_or_else(|| LowlevelError("print C: empty type stack".into()))?;
         let tok = if noident && stack.len() == 1 { &TYPE_EXPR_NOSPACE } else { &TYPE_EXPR_SPACE };
-        let Some(name) = self.fd.types.name(base).filter(|n| !n.is_empty()).map(str::to_string) else {
-            return err("print C: an anonymous data-type (genericTypeName) is not ported");
+        let name = match self.fd.types.name(base).filter(|n| !n.is_empty()) {
+            Some(n) => n.to_string(),
+            None => generic_type_name(self.fd.types.meta(base), self.fd.types.size(base)),
         };
         self.push_op(tok)?;
         self.push_atom(Atom::Text(name))?;
@@ -478,7 +583,7 @@ impl PrintC<'_> {
         let cond = self.component(b, 0)?;
         self.emit_block(cond)?;
         self.pop_mod();
-        // emitCommentBlockTree: no comment reaches the body (docFunction fails on one)
+        self.emit_comment_block_tree(cond)?;
         match pending {
             Some(id) if self.emit.has_pending_brace(id) => {
                 // the brace was not printed: "else if"
@@ -532,6 +637,7 @@ impl PrintC<'_> {
         self.unset_mod(modifier::NO_BRANCH | modifier::ONLY_BRANCH);
         self.emit_any_label_statement(b)?;
         let cond = self.component(b, 0)?;
+        self.emit_comment_block_tree(cond)?;
         self.emit.tag_line();
         self.emit.print_str("for");
         self.emit.spaces(1, 0);
@@ -588,6 +694,7 @@ impl PrintC<'_> {
             self.set_mod(modifier::NO_BRANCH);
             self.emit_block(cond)?;
             self.pop_mod();
+            self.emit_comment_block_tree(cond)?;
             self.emit.tag_line();
             self.emit.print_str("if");
             self.emit.spaces(1, 0);
@@ -598,6 +705,7 @@ impl PrintC<'_> {
             self.emit.spaces(1, 0);
             self.emit_goto_statement(None, F_BREAK_GOTO)?;
         } else {
+            self.emit_comment_block_tree(cond)?;
             self.emit.tag_line();
             self.emit.print_str("while");
             self.emit.spaces(1, 0);
@@ -808,11 +916,52 @@ impl PrintC<'_> {
         }
     }
 
-    /// Port of `PrintC::emitBlockBasic` (structured printing, no comments): with
-    /// `only_branch` just the branch, else the statements, comma separated inside a condition.
-    /// (`emitLabelStatement` of the basic block itself prints nothing: it is not a copy.)
+    /// Port of `PrintC::emitCommentGroup`: the comments the sorter holds up to the statement
+    /// rooted at `inst` (none: the rest of the block), each at the comment indent
+    /// (`line_commentindent`, 20). Every body comment is a warning, a type
+    /// `instr_comment_type` shows.
+    fn emit_comment_group(&mut self, inst: Option<OpId>) -> Result<()> {
+        let key = match inst {
+            Some(op) => {
+                let o = self.fd.op(op);
+                let bb = o.parent.ok_or_else(|| LowlevelError("print C: a statement outside a block".into()))?;
+                Some((self.fd.blocks.block(bb).index, o.order))
+            }
+            None => None,
+        };
+        self.commsorter.setup_op_list(key);
+        while let Some(c) = self.commsorter.next() {
+            if self.commsorter.is_emitted(c) {
+                continue;
+            }
+            let text = self.fd.comments[c].1.clone();
+            self.emit_line_comment(20, &text);
+            self.commsorter.set_emitted(c);
+        }
+        Ok(())
+    }
+
+    /// Port of `PrintC::emitCommentBlockTree`: the comments of every basic block under `b`,
+    /// before a line that prints statements of several blocks.
+    fn emit_comment_block_tree(&mut self, b: SId) -> Result<()> {
+        if let Kind::Copy(bb) = self.fd.structure.b(b).kind {
+            let index = self.fd.blocks.block(bb).index;
+            self.commsorter.setup_block_list(index);
+            return self.emit_comment_group(None);
+        }
+        for sub in self.fd.structure.b(b).list.clone() {
+            self.emit_comment_block_tree(sub)?;
+        }
+        Ok(())
+    }
+
+    /// Port of `PrintC::emitBlockBasic` (structured printing): with `only_branch` just the
+    /// branch, else the statements, comma separated inside a condition, each after its
+    /// comments. (`emitLabelStatement` of the basic block itself prints nothing: it is not a
+    /// copy.)
     fn emit_block_basic(&mut self, bb: super::block::BlockId) -> Result<()> {
         let ops = self.fd.blocks.block(bb).ops.clone();
+        self.commsorter.setup_block_list(self.fd.blocks.block(bb).index);
         if self.is_set(modifier::ONLY_BRANCH) {
             if let Some(&last) = ops.last() {
                 if self.fd.op(last).is_branch() {
@@ -839,12 +988,13 @@ impl PrintC<'_> {
                     self.emit.spaces(1, 0);
                 }
             } else {
+                self.emit_comment_group(Some(op))?;
                 self.emit.tag_line();
             }
             self.emit_statement(op)?;
             separator = true;
         }
-        Ok(())
+        self.emit_comment_group(None) // any remaining comments
     }
 
     /// Port of `PrintC::emitStatement`.
@@ -872,7 +1022,7 @@ impl PrintC<'_> {
         }
         if let Some(out) = o.out {
             self.push_op(&ASSIGNMENT)?;
-            self.push_symbol_detail(out)?;
+            self.push_symbol_detail(out, false)?;
         }
         self.push_opcode(op, None)?;
         self.recurse()
@@ -896,7 +1046,18 @@ impl PrintC<'_> {
             Branchind => return self.op_branchind(op),
             Load => return self.op_load(op),
             Store => return self.op_store(op),
+            Ptradd => return self.op_ptradd(op),
+            Ptrsub => return self.op_ptrsub(op),
             Call => return self.op_call(op),
+            Callind => return self.op_callind(op),
+            FloatNan => return self.op_func_named(op, "NAN"),
+            FloatAbs => return self.op_func_named(op, "ABS"),
+            FloatSqrt => return self.op_func_named(op, "SQRT"),
+            FloatCeil => return self.op_func_named(op, "CEIL"),
+            FloatFloor => return self.op_func_named(op, "FLOOR"),
+            FloatRound => return self.op_func_named(op, "ROUND"),
+            FloatInt2float => return self.op_float_int2float(op),
+            FloatFloat2float | FloatTrunc => return self.op_type_cast(op),
             Return => return self.op_return(op),
             BoolNegate => return self.op_bool_negate(op),
             Int2comp | FloatNeg => return self.op_unary(&UNARY_MINUS, op),
@@ -925,35 +1086,31 @@ impl PrintC<'_> {
         self.op_binary(tok, op)
     }
 
-    /// Port of `PrintC::checkArrayDeref`; true would print array syntax, not ported.
-    fn check_array_deref(&self, vn: VarnodeId) -> Result<()> {
-        let v = self.fd.vn(vn);
-        let Some(def) = v.def.filter(|_| v.has(VnFlags::IMPLIED)) else { return Ok(()) };
-        match self.fd.op(def).opc {
-            Opcode::Ptrsub | Opcode::Ptradd | Opcode::Segmentop => {
-                err("print C: array or field access through a pointer is not ported")
-            }
-            _ => Ok(()),
-        }
-    }
-
-    /// Port of `PrintC::opLoad`.
+    /// Port of `PrintC::opLoad`: `*p`, or the value of an array or field expression.
     fn op_load(&mut self, op: OpId) -> Result<()> {
-        let ptr = self.fd.op(op).ins[1];
-        self.check_array_deref(ptr)?;
-        self.push_op(&DEREFERENCE)?;
-        self.push_vn(ptr, op, self.mods);
+        let ptr = self.fd.input(op, 1)?;
+        let mut m = self.mods;
+        if self.check_array_deref(ptr) && !self.is_set(modifier::FORCE_POINTER) {
+            m |= modifier::PRINT_LOAD_VALUE;
+        } else {
+            self.push_op(&DEREFERENCE)?;
+        }
+        self.push_vn(ptr, op, m);
         Ok(())
     }
 
     /// Port of `PrintC::opStore`.
     fn op_store(&mut self, op: OpId) -> Result<()> {
-        let (ptr, val) = (self.fd.op(op).ins[1], self.fd.op(op).ins[2]);
+        let (ptr, val) = (self.fd.input(op, 1)?, self.fd.input(op, 2)?);
+        let mut m = self.mods;
         self.push_op(&ASSIGNMENT)?;
-        self.check_array_deref(ptr)?;
-        self.push_op(&DEREFERENCE)?;
+        if self.check_array_deref(ptr) && !self.is_set(modifier::FORCE_POINTER) {
+            m |= modifier::PRINT_STORE_VALUE;
+        } else {
+            self.push_op(&DEREFERENCE)?;
+        }
         self.push_vn(val, op, self.mods);
-        self.push_vn(ptr, op, self.mods);
+        self.push_vn(ptr, op, m);
         Ok(())
     }
 
@@ -991,6 +1148,57 @@ impl PrintC<'_> {
         } else {
             self.push_atom(Atom::Blank)?;
         }
+        Ok(())
+    }
+
+    /// Port of `PrintC::opCallind`: `(*fn)(args)`, the function pointer under a dereference
+    /// (`getHiddenThisSlot` is -1: `hide_thisparam` is set only by the Java printer).
+    fn op_callind(&mut self, op: OpId) -> Result<()> {
+        self.push_op(&FUNCTION_CALL)?;
+        self.push_op(&DEREFERENCE)?;
+        if self.fd.call_of(op).is_none() {
+            return err("Missing indirect function callspec");
+        }
+        let ins = self.fd.op(op).ins.clone();
+        let m = self.mods;
+        match ins.len() {
+            0 => return err("print C: a CALLIND without inputs"),
+            1 => {
+                self.push_vn(ins[0], op, m);
+                self.push_atom(Atom::Blank)?;
+            }
+            2 => {
+                self.push_vn(ins[1], op, m);
+                self.push_vn(ins[0], op, m);
+            }
+            n => {
+                self.push_vn(ins[0], op, m);
+                for _ in 0..n - 2 {
+                    self.push_op(&COMMA)?;
+                }
+                for &vn in ins[1..].iter().rev() {
+                    self.push_vn(vn, op, m);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Port of `PrintC::opFloatInt2Float`: a cast of the input, or of the input of the
+    /// implied INT_ZEXT the conversion absorbs (`TypeOpFloatInt2Float::absorbZext`).
+    fn op_float_int2float(&mut self, op: OpId) -> Result<()> {
+        let in0 = self.fd.input(op, 0)?;
+        let v = self.fd.vn(in0);
+        let zext = v.def.filter(|&d| v.has(VnFlags::IMPLIED) && self.fd.op(d).opc == Opcode::IntZext);
+        let vn0 = match zext {
+            Some(z) => self.fd.input(z, 0)?,
+            None => in0,
+        };
+        let out = self.fd.op(op).out.ok_or_else(|| LowlevelError("print C: an INT2FLOAT without output".into()))?;
+        let dt = super::cast::print_facing(self.fd, out)?;
+        self.push_op(&TYPECAST)?;
+        self.push_type(dt)?;
+        self.push_vn(vn0, op, self.mods);
         Ok(())
     }
 
@@ -1138,12 +1346,18 @@ impl PrintC<'_> {
     /// Port of `PrintC::opFunc`: functional syntax, the operator's name
     /// (`getOperatorName`: `name`, the input and the output size) and the inputs.
     fn op_func(&mut self, op: OpId, name: &str) -> Result<()> {
-        self.push_op(&FUNCTION_CALL)?;
         let o = self.fd.op(op);
-        let ins = o.ins.clone();
         let outsize = o.out.map_or(0, |v| self.fd.vn(v).size);
-        let insize = ins.first().map_or(0, |&v| self.fd.vn(v).size);
-        self.push_atom(Atom::Text(format!("{name}{insize}{outsize}")))?;
+        let insize = o.ins.first().map_or(0, |&v| self.fd.vn(v).size);
+        self.op_func_named(op, &format!("{name}{insize}{outsize}"))
+    }
+
+    /// Port of `PrintC::opFunc` for an operator whose name has no sizes (`TypeOp::getOperatorName`:
+    /// `NAN`, `ABS`, `SQRT`, `CEIL`, `FLOOR`, `ROUND`).
+    fn op_func_named(&mut self, op: OpId, name: &str) -> Result<()> {
+        self.push_op(&FUNCTION_CALL)?;
+        let ins = self.fd.op(op).ins.clone();
+        self.push_atom(Atom::Text(name.to_string()))?;
         if ins.is_empty() {
             return self.push_atom(Atom::Blank);
         }
@@ -1156,9 +1370,9 @@ impl PrintC<'_> {
         Ok(())
     }
 
-    /// Port of `PrintLanguage::pushSymbolDetail` for a varnode that is a whole symbol or has
-    /// none.
-    pub(crate) fn push_symbol_detail(&mut self, vn: VarnodeId) -> Result<()> {
+    /// Port of `PrintLanguage::pushSymbolDetail`: a whole symbol, a part of one (`is_read`: the
+    /// varnode is read, not written) or the unnamed location.
+    pub(crate) fn push_symbol_detail(&mut self, vn: VarnodeId, is_read: bool) -> Result<()> {
         let h = super::variable::high(self.fd, vn)?;
         let Some((sym, _, _)) = super::namevars::high_symbol(self.fd, h) else {
             let rep = super::namevars::name_representative(self.fd, h)?;
@@ -1169,14 +1383,28 @@ impl PrintC<'_> {
             let size = self.fd.vn(vn).size;
             return self.push_unnamed_location(rep, size);
         };
-        if super::namevars::symbol_offset(self.fd, self.arch, h)? != -1 {
-            return err("print C: part of a symbol (pushPartialSymbol) is not ported");
-        }
-        let s = self.fd.symtab.symbol(sym);
-        if s.ty.is_some_and(|t| self.fd.types.needs_resolution(t)) {
+        let off = super::namevars::symbol_offset(self.fd, self.arch, h)?;
+        let sty = self.fd.symtab.symbol(sym).ty;
+        if sty.is_some_and(|t| self.fd.types.needs_resolution(t)) {
             return err("print C: a symbol whose data-type needs resolution (union, one-element array or one-field structure) is not ported");
         }
-        // pushSymbol: no merge problems (mergeMultiEntry is not ported)
+        if off == -1 {
+            return self.push_symbol(sym);
+        }
+        let size = self.fd.vn(vn).size;
+        let Some(sty) = sty else {
+            return err("print C: part of a symbol without a data-type is not ported");
+        };
+        if i64::from(off) + i64::from(size) > i64::from(self.fd.types.size(sty)) {
+            return err("print C: a variable past the end of its symbol (pushMismatchSymbol) is not ported");
+        }
+        self.push_partial_symbol(sym, i64::from(off), size, is_read.then_some(vn))
+    }
+
+    /// Port of `PrintC::pushSymbol` (no merge problems: `mergeMultiEntry` is not ported) with
+    /// `pushSymbolScope`.
+    fn push_symbol(&mut self, sym: SymbolId) -> Result<()> {
+        let s = self.fd.symtab.symbol(sym);
         let (name, global) = (s.name.clone(), s.scope == super::scope::GLOBAL);
         if global {
             self.check_scope_depth(&name)?;
@@ -1208,13 +1436,22 @@ impl PrintC<'_> {
     /// raw address.
     fn push_unnamed_location(&mut self, rep: VarnodeId, size: u32) -> Result<()> {
         let v = self.fd.vn(rep);
-        let Space::Sleigh(i) = v.space else {
-            return err("print C: an unnamed variable outside a SLEIGH space is not ported");
+        self.push_unnamed_addr(v.space, v.offset, size)
+    }
+
+    /// `pushUnnamedLocation` of an address: a SLEIGH space (`register_ESP`, `ram0x00401000`) or
+    /// the stack (`stack0xfffffff0`, the stack has no registers).
+    fn push_unnamed_addr(&mut self, space: Space, off: u64, size: u32) -> Result<()> {
+        let i = match space {
+            Space::Sleigh(i) => i,
+            Space::Stack => self.arch.spec.stack_container,
+            _ => return err("print C: an unnamed variable outside a SLEIGH space is not ported"),
         };
         let sp = self.arch.sleigh.spaces.get(i as usize).ok_or_else(|| LowlevelError("print C: bad space".into()))?;
-        let text = match self.arch.register_name(i, v.offset, size) {
-            Some((reg, base, regsize)) if base == v.offset && regsize == size => format!("{}_{reg}", sp.name),
-            _ => format!("{}{}", sp.name, self.raw_addr(i, v.offset)?),
+        let name = if space == Space::Stack { "stack" } else { sp.name.as_str() };
+        let text = match self.arch.register_name(i, off, size).filter(|_| space != Space::Stack) {
+            Some((reg, base, regsize)) if base == off && regsize == size => format!("{name}_{reg}"),
+            _ => format!("{name}{}", self.raw_addr(i, off)?),
         };
         self.push_atom(Atom::Text(text))
     }
@@ -1238,7 +1475,7 @@ impl PrintC<'_> {
         match meta {
             Meta::Uint | Meta::Int => {
                 if self.fd.types.is_char_print(ty) {
-                    return err("print C: character constants are not ported");
+                    return self.push_char_constant(val, ty, meta == Meta::Int, vn);
                 }
                 if matches!(self.fd.types.get(ty).kind, TKind::Enum(_)) {
                     return err("print C: enum constants are not ported");
@@ -1248,7 +1485,7 @@ impl PrintC<'_> {
             Meta::Unknown => return self.push_integer(val, size, false, vn),
             Meta::Bool => return self.push_atom(Atom::Text(if val != 0 { "true" } else { "false" }.into())),
             Meta::Void => return err("Cannot have a constant of type void"),
-            Meta::Float => return err("print C: float constants are not ported"),
+            Meta::Float => return self.push_atom(Atom::Text(float_token(val, size))),
             Meta::Ptr => {
                 if let Some(to) = self.fd.types.ptr_to(ty) {
                     if self.fd.types.is_char_print(to) {
@@ -1319,6 +1556,412 @@ impl PrintC<'_> {
     }
 }
 
+/// What the offset of a space-base PTRSUB refers to: a symbol and the offset into it, or a
+/// function by its name.
+enum SbRef {
+    Sym(SymbolId, i64),
+    Func(String),
+}
+
+/// Slice 3A: array and field access (`PTRADD`, `PTRSUB`, LOAD and STORE through them, parts of
+/// symbols) and character constants.
+impl PrintC<'_> {
+    /// Port of `PrintC::checkArrayDeref`: whether the pointer `vn` of a LOAD or STORE prints
+    /// in array or field syntax rather than with `*`.
+    fn check_array_deref(&self, mut vn: VarnodeId) -> bool {
+        let implied_def = |p: &Self, v: VarnodeId| {
+            let x = p.fd.vn(v);
+            x.def.filter(|_| x.has(VnFlags::IMPLIED))
+        };
+        let Some(mut def) = implied_def(self, vn) else { return false };
+        if self.fd.op(def).opc == Opcode::Segmentop {
+            let Some(&v) = self.fd.op(def).ins.get(2) else { return false };
+            vn = v;
+            let Some(d) = implied_def(self, vn) else { return false };
+            def = d;
+        }
+        matches!(self.fd.op(def).opc, Opcode::Ptrsub | Opcode::Ptradd)
+    }
+
+    /// `isValueFlexible` (printc.cc): `vn` is an implied PTRSUB or PTRADD, maybe through an
+    /// implied COPY, so it can take over a dereference.
+    fn is_value_flexible(&self, vn: VarnodeId) -> Result<bool> {
+        let v = self.fd.vn(vn);
+        let Some(def) = v.def.filter(|_| v.has(VnFlags::IMPLIED)) else { return Ok(false) };
+        let mut opc = self.fd.op(def).opc;
+        if opc == Opcode::Copy {
+            let inv = self.fd.vn(self.fd.input(def, 0)?);
+            let Some(d) = inv.def.filter(|_| inv.has(VnFlags::IMPLIED)) else { return Ok(false) };
+            opc = self.fd.op(d).opc;
+        }
+        Ok(matches!(opc, Opcode::Ptrsub | Opcode::Ptradd))
+    }
+
+    /// Port of `PrintC::opPtradd`: `p[i]` when the value is printed, else `p + i`.
+    fn op_ptradd(&mut self, op: OpId) -> Result<()> {
+        let value = modifier::PRINT_LOAD_VALUE | modifier::PRINT_STORE_VALUE;
+        let printval = self.is_set(value);
+        let m = self.mods & !value;
+        self.push_op(if printval { &SUBSCRIPT } else { &BINARY_PLUS })?;
+        self.push_vn(self.fd.input(op, 1)?, op, m);
+        self.push_vn(self.fd.input(op, 0)?, op, m);
+        Ok(())
+    }
+
+    /// Port of `PrintC::opPtrsub` (no `TypePointerRel` is ported, so the relative-pointer parts
+    /// never apply): a field of a structure (`&p->x`, `p->x`, `&(..).x`, `(..).x`, `[0]` for an
+    /// array field), a symbol of a space (`&name`, `name`, `name[0]`, the unnamed location) or
+    /// the first element of an array (`*p`, `p[0]`).
+    fn op_ptrsub(&mut self, op: OpId) -> Result<()> {
+        let in0 = self.fd.input(op, 0)?;
+        let in1const = self.fd.vn(self.fd.input(op, 1)?).offset;
+        let ptype = super::cast::print_facing(self.fd, in0)?;
+        let ct = match self.fd.types.ptr_to(ptype) {
+            Some(to) if self.fd.types.meta(ptype) == Meta::Ptr => to,
+            _ => return err("PTRSUB off of non-pointer type"),
+        };
+        let value = modifier::PRINT_LOAD_VALUE | modifier::PRINT_STORE_VALUE;
+        let m = self.mods & !value;
+        let mut valueon = self.is_set(value);
+        let flex = self.is_value_flexible(in0)?;
+        match self.fd.types.meta(ct) {
+            Meta::Union => err("print C: a PTRSUB into a union (getUnionField) is not ported"),
+            Meta::Struct => {
+                let suboff = i64::from(in1const as i32);
+                let (fieldname, fieldtype) = match self.find_field(ct, suboff) {
+                    Some((name, _, ty)) => (name, Some(ty)),
+                    None if i64::from(self.fd.types.size(ct)) <= suboff || suboff < 0 => {
+                        return err("PTRSUB out of bounds into struct");
+                    }
+                    None => (format!("field_0x{suboff:x}"), None),
+                };
+                let mut arrayvalue = false;
+                // the '&' is dropped if the field is an array
+                if fieldtype.is_some_and(|t| self.fd.types.meta(t) == Meta::Array) {
+                    arrayvalue = valueon;
+                    valueon = true;
+                }
+                if !valueon {
+                    self.push_op(&ADDRESSOF)?;
+                } else if arrayvalue {
+                    self.push_op(&SUBSCRIPT)?;
+                }
+                if flex {
+                    // ( ).name
+                    self.push_op(&OBJECT_MEMBER)?;
+                    self.push_vn(in0, op, m | modifier::PRINT_LOAD_VALUE);
+                } else {
+                    // ( )->name
+                    self.push_op(&POINTER_MEMBER)?;
+                    self.push_vn(in0, op, m);
+                }
+                self.push_atom(Atom::Text(fieldname))?;
+                if arrayvalue {
+                    self.push_integer(0, 4, false, None)?;
+                }
+                Ok(())
+            }
+            Meta::Spacebase => {
+                let r = self.spacebase_ref(op)?;
+                let mut arrayvalue = false;
+                if let Some(SbRef::Func(_)) = r {
+                    valueon = true; // a function symbol has a code data-type
+                } else if let Some(SbRef::Sym(sym, _)) = r {
+                    let sct =
+                        self.fd.symtab.symbol(sym).ty.ok_or_else(|| {
+                            LowlevelError("print C: a symbol without a data-type under a PTRSUB".into())
+                        })?;
+                    match self.fd.types.meta(sct) {
+                        Meta::Array => {
+                            arrayvalue = valueon;
+                            valueon = true;
+                        }
+                        Meta::Code => valueon = true,
+                        _ => {}
+                    }
+                }
+                if !valueon {
+                    self.push_op(&ADDRESSOF)?;
+                } else if arrayvalue {
+                    self.push_op(&SUBSCRIPT)?;
+                }
+                match r {
+                    None => {
+                        let (space, addr) = self.spacebase_addr(op, ct)?;
+                        self.push_unnamed_addr(space, addr, 1)?;
+                    }
+                    Some(SbRef::Func(name)) => {
+                        self.check_scope_depth(&name)?;
+                        self.push_atom(Atom::Text(name))?;
+                    }
+                    Some(SbRef::Sym(sym, 0)) => self.push_symbol(sym)?,
+                    Some(SbRef::Sym(sym, off)) => self.push_partial_symbol(sym, off, 0, None)?,
+                }
+                if arrayvalue {
+                    self.push_integer(0, 4, false, None)?;
+                }
+                Ok(())
+            }
+            Meta::Array => {
+                if in1const != 0 {
+                    return err("PTRSUB with non-zero offset into array type");
+                }
+                // the array as a structure: PTRSUB(*,0) turns it into a pointer to its element
+                if valueon {
+                    // ( )[0] or (* )[0]
+                    self.push_op(&SUBSCRIPT)?;
+                }
+                if flex {
+                    self.push_vn(in0, op, m | modifier::PRINT_LOAD_VALUE);
+                } else {
+                    self.push_op(&DEREFERENCE)?;
+                    self.push_vn(in0, op, m);
+                }
+                if valueon {
+                    self.push_integer(0, 4, false, None)?;
+                }
+                Ok(())
+            }
+            _ => err("PTRSUB off of non structured pointer type"),
+        }
+    }
+
+    /// `TypeStruct::getFieldIter` and the field `findTruncation(off, 0)` returns: the field
+    /// holding byte `off`: its name, offset and type.
+    fn find_field(&self, ct: TypeId, off: i64) -> Option<(String, i64, TypeId)> {
+        let TKind::Fields(fields) = &self.fd.types.get(ct).kind else { return None };
+        let (mut min, mut max) = (0i64, fields.len() as i64 - 1);
+        while min <= max {
+            let mid = (min + max) / 2;
+            let (name, foff, fty) = &fields[mid as usize];
+            let foff = i64::from(*foff);
+            if foff > off {
+                max = mid - 1;
+            } else if foff + i64::from(self.fd.types.size(*fty)) > off {
+                return Some((name.clone(), foff, *fty));
+            } else {
+                min = mid + 1;
+            }
+        }
+        None
+    }
+
+    /// `TypeSpacebase::getAddress` of the offset of the PTRSUB `op` off the space-base type
+    /// `sb` (`resolveConstant`: no segmented space, so the offset wrapped to the space).
+    fn spacebase_addr(&self, op: OpId, sb: TypeId) -> Result<(Space, u64)> {
+        let TKind::Spacebase { space, .. } = self.fd.types.get(sb).kind else {
+            return err("print C: a space-base PTRSUB without a space-base type");
+        };
+        let off = self.fd.vn(self.fd.input(op, 1)?).offset;
+        Ok((space, off & super::heritage::space_mask(self.arch, space)))
+    }
+
+    /// What the offset of the PTRSUB `op` refers to: the link `namevars` made
+    /// (`linkSymbolReference`, `Funcdata::symref`; none prints the unnamed location). A function
+    /// is its name (the `FunctionSymbol`: `fc->getName()`, else `genericFunctionName`); an
+    /// external reference fails loudly.
+    fn spacebase_ref(&self, op: OpId) -> Result<Option<SbRef>> {
+        Ok(match self.fd.symref.get(&self.fd.input(op, 1)?).copied() {
+            None => None,
+            Some(SymRef::Sym(sym, off)) => Some(SbRef::Sym(sym, off)),
+            Some(SymRef::ExternRef) => return err("print C: a PTRSUB into an external reference is not ported"),
+            Some(SymRef::Function(addr)) => Some(SbRef::Func(match self.arch.functions.get(&addr) {
+                Some(f) if !f.name.is_empty() => f.name.clone(),
+                _ => format!("func_{}", self.raw_addr(self.arch.sleigh.code_space(), addr)?),
+            })),
+        })
+    }
+
+    /// Port of `PrintC::pushPartialSymbol`: the part of `sym` at `off` of `sz` bytes (0: to the
+    /// end) as `sym.field`, `sym[i]` or `sym._off_size_`; `vn` is the varnode read (none for a
+    /// write or a PTRSUB), whose type may print as a cast of the part (`isSubpieceCastEndian`).
+    fn push_partial_symbol(&mut self, sym: SymbolId, mut off: i64, mut sz: u32, vn: Option<VarnodeId>) -> Result<()> {
+        enum Part {
+            Field(&'static OpToken, String),
+            Index(i64),
+            Unnamed(i64, i64),
+        }
+        let mut stack = Vec::new();
+        let mut finalcast = None;
+        let mut ct = self.fd.symtab.symbol(sym).ty;
+        while let Some(t) = ct {
+            let tsize = self.fd.types.size(t);
+            let tmeta = self.fd.types.meta(t);
+            if off == 0 && (sz == 0 || (sz == tsize && (!self.fd.types.needs_resolution(t) || tmeta == Meta::Ptr))) {
+                break;
+            }
+            let mut succeeded = false;
+            match tmeta {
+                Meta::Struct => {
+                    if self.fd.types.needs_resolution(t) && tsize == sz {
+                        return err("print C: part of a symbol through a structure that needs resolution (findResolve) is not ported");
+                    }
+                    // findTruncation(off, sz)
+                    if let Some((name, foff, fty)) = self.find_field(t, off) {
+                        let noff = off - foff;
+                        if noff + i64::from(sz) <= i64::from(self.fd.types.size(fty)) {
+                            off = noff;
+                            stack.push(Part::Field(&OBJECT_MEMBER, name));
+                            ct = Some(fty);
+                            succeeded = true;
+                        }
+                    }
+                }
+                Meta::Array => {
+                    // TypeArray::getSubEntry
+                    let TKind::Array { elem, .. } = self.fd.types.get(t).kind else {
+                        return err("print C: an array data-type without an element");
+                    };
+                    let a = i64::from(self.fd.types.align_size(elem));
+                    if a == 0 {
+                        return err("print C: an array of zero-size elements");
+                    }
+                    let (noff, el) = (off % a, off / a);
+                    if noff + i64::from(sz) <= a {
+                        off = noff;
+                        stack.push(Part::Index(el));
+                        ct = Some(elem);
+                        succeeded = true;
+                    }
+                }
+                Meta::Union => return err("print C: part of a symbol through a union is not ported"),
+                _ => {
+                    if let Some(vn) = vn {
+                        // isSubpieceCastEndian, little-endian
+                        let h = super::variable::high(self.fd, vn)?;
+                        let outtype = super::variable::h_type(self.fd, h).0;
+                        if off >= 0 && super::cast::is_subpiece_cast(&self.fd.types, outtype, t, off as u64) {
+                            finalcast = Some(outtype);
+                            ct = None;
+                            succeeded = true;
+                        }
+                    }
+                }
+            }
+            if !succeeded {
+                if sz == 0 {
+                    sz = (i64::from(tsize) - off) as u32;
+                }
+                stack.push(Part::Unnamed(off, i64::from(sz as i32)));
+                ct = None;
+            }
+        }
+        if let Some(t) = finalcast {
+            self.push_op(&TYPECAST)?;
+            self.push_type(t)?;
+        }
+        for p in stack.iter().rev() {
+            self.push_op(match p {
+                Part::Field(tok, _) => tok,
+                Part::Index(_) => &SUBSCRIPT,
+                Part::Unnamed(..) => &OBJECT_MEMBER,
+            })?;
+        }
+        self.push_symbol(sym)?;
+        for p in stack {
+            match p {
+                Part::Field(_, name) => self.push_atom(Atom::Text(name))?,
+                Part::Index(el) => self.push_integer(el as u64, 0, el < 0, None)?,
+                Part::Unnamed(o, s) if s <= 0 => self.push_integer(o as u64, s as u32, o < 0, None)?,
+                Part::Unnamed(o, s) => self.push_atom(Atom::Text(format!("_{o}_{s}_")))?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Port of `PrintC::pushCharConstant` with display format 0 (no ported data-type or
+    /// symbol has one): a byte of 0x80 or more as an integer, else the quoted character.
+    fn push_char_constant(&mut self, val: u64, ty: TypeId, signed: bool, vn: Option<VarnodeId>) -> Result<()> {
+        if let Some(v) = vn.filter(|&v| !self.fd.vn(v).is_annotation()) {
+            let h = super::variable::high(self.fd, v)?;
+            if super::namevars::high_symbol(self.fd, h).is_some() {
+                return err("print C: a character constant with a symbol (equate) is not ported");
+            }
+        }
+        let size = self.fd.types.size(ty);
+        if size == 1 && val >= 0x80 {
+            return self.push_integer(val, 1, signed, vn);
+        }
+        self.push_atom(Atom::Text(char_constant(val, size)?))
+    }
+}
+
+/// The text `pushCharConstant` prints for the code point `val` in a character of `size` bytes:
+/// `L` for a wide character, the character in single quotes, escaped by `printUnicode`.
+fn char_constant(val: u64, size: u32) -> Result<String> {
+    let mut t = String::new();
+    if size > 1 {
+        t.push('L');
+    }
+    t.push('\'');
+    let cp = val as i32;
+    if unicode_needs_escape(cp) {
+        let special = match cp {
+            0 => "\\0",
+            7 => "\\a",
+            8 => "\\b",
+            9 => "\\t",
+            10 => "\\n",
+            11 => "\\v",
+            12 => "\\f",
+            13 => "\\r",
+            92 => "\\\\",
+            34 => "\\\"",
+            39 => "\\'",
+            _ => "",
+        };
+        if special.is_empty() {
+            t += &char_hex_escape(cp);
+        } else {
+            t += special;
+        }
+    } else {
+        // StringManager::writeUtf8: every code point left is a valid character
+        let c = char::from_u32(cp as u32).ok_or_else(|| LowlevelError("Illegal unicode codepoint".into()))?;
+        t.push(c);
+    }
+    t.push('\'');
+    Ok(t)
+}
+
+/// Port of `PrintC::printCharHexEscape`: `\x` and 2, 4 or 8 hex digits (a negative value
+/// prints as its unsigned 32 bits, as the C++ stream does).
+fn char_hex_escape(val: i32) -> String {
+    let u = val as u32;
+    if val < 256 {
+        format!("\\x{u:02x}")
+    } else if val < 65536 {
+        format!("\\x{u:04x}")
+    } else {
+        format!("\\x{u:08x}")
+    }
+}
+
+/// Port of `PrintLanguage::unicodeNeedsEscape`.
+fn unicode_needs_escape(cp: i32) -> bool {
+    match cp {
+        _ if cp < 0x20 => true,
+        _ if cp < 0x7f => matches!(cp, 92 | 34 | 39),
+        _ if cp < 0x100 => cp <= 0xa0,
+        _ if cp >= 0x2fa20 => true,
+        _ if cp < 0x2000 => (0x180b..=0x180e).contains(&cp) || cp == 0x61c || cp == 0x1680,
+        _ if cp < 0x3000 => {
+            cp < 0x2010
+                || (0x2028..=0x202f).contains(&cp)
+                || cp == 0x205f
+                || cp == 0x2060
+                || (0x2066..=0x206f).contains(&cp)
+        }
+        _ if cp < 0xe000 => cp == 0x3000 || cp >= 0xd7fc,
+        _ if cp < 0xf900 => true,
+        _ => {
+            (0xfe00..=0xfe0f).contains(&cp)
+                || cp == 0xfeff
+                || ((0xfff0..=0xffff).contains(&cp) && cp != 0xfffc && cp != 0xfffd)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1338,6 +1981,85 @@ mod tests {
         assert_eq!(raw_offset(8, 0x401000), "0x00401000");
         assert_eq!(raw_offset(8, 0x1_0000_0000), "0x000100000000");
         assert_eq!(raw_offset(8, 0x1_0000_0000_0000), "0x0001000000000000");
+    }
+
+    /// The tokens of the C++ `printDecimal` (libstdc++ `ostream << double`), printed by a
+    /// small C++ program for these encodings.
+    #[test]
+    fn float_tokens_match_the_cpp() {
+        let cases: &[(u32, u64, &str)] = &[
+            (4, 0x3f80_0000, "1.0"),
+            (4, 0x3dcc_cccd, "0.1"),
+            (4, 0xbf00_0000, "-0.5"),
+            (4, 0, "0.0"),
+            (4, 0x8000_0000, "-0.0"),
+            (4, 0x4b18_9680, "1e+07"),
+            (4, 0x3e99_999a, "0.3"),
+            (4, 0x461c_4000, "10000.0"),
+            (4, 1, "1.4013e-45"),
+            (4, 0x7f7f_ffff, "3.4028235e+38"),
+            (4, 0x3a83_126f, "0.001"),
+            (4, 0x4974_2400, "1e+06"),
+            (4, 0x4cbe_bc20, "1e+08"),
+            (8, 0x3ff0_0000_0000_0000, "1.0"),
+            (8, 0x3fb9_9999_9999_999a, "0.1"),
+            (8, 0x4009_21fb_5444_2d18, "3.141592653589793"),
+            (8, 1, "4.94065645841247e-324"),
+            (8, 0x7fef_ffff_ffff_ffff, "1.79769313486232e+308"),
+            (8, 0x3f50_624d_d2f1_a9fc, "0.001"),
+            (8, 0x412e_8480_0000_0000, "1000000.0"),
+            (8, 0x4415_af1d_78b5_8c40, "1e+20"),
+            (8, 0xc08f_4000_0000_0000, "-1000.0"),
+            (8, 0x3fe0_0000_0000_0000, "0.5"),
+            (8, 0x3eb0_c6f7_a0b5_ed8d, "1e-06"),
+            (8, 0x4202_a05f_2000_0000, "10000000000.0"),
+        ];
+        for &(size, enc, want) in cases {
+            assert_eq!(float_token(enc, size), want, "size {size} encoding {enc:#x}");
+        }
+        assert_eq!(float_token(0x7f80_0000, 4), "INFINITY");
+        assert_eq!(float_token(0xfff0_0000_0000_0000, 8), "-INFINITY");
+        assert_eq!(float_token(0x7fc0_0000, 4), "NAN");
+        assert_eq!(float_token(0xffc0_0000, 4), "-NAN");
+        assert_eq!(float_token(0, 10), "FLOAT_UNKNOWN");
+    }
+
+    #[test]
+    fn format_g_rounds_as_printf() {
+        assert_eq!(format_g(2.5, 1), "2"); // ties to even, as glibc
+        assert_eq!(format_g(0.000123456, 3), "0.000123");
+        assert_eq!(format_g(123456.0, 3), "1.23e+05");
+        assert_eq!(format_g(9.9999996, 6), "10");
+        assert_eq!(format_g(-1e-300, 2), "-1e-300");
+    }
+
+    #[test]
+    fn generic_type_names() {
+        assert_eq!(generic_type_name(Meta::Unknown, 3), "unkbyte3");
+        assert_eq!(generic_type_name(Meta::Int, 16), "unkint16");
+        assert_eq!(generic_type_name(Meta::Float, 2), "unkfloat2");
+        assert_eq!(generic_type_name(Meta::Spacebase, 4), "BADSPACEBASE");
+        assert_eq!(generic_type_name(Meta::Struct, 8), "BADTYPE");
+    }
+
+    #[test]
+    fn character_constants() {
+        let c = |v, s| char_constant(v, s).unwrap();
+        assert_eq!(c(0x41, 1), "'A'");
+        assert_eq!(c(0, 1), "'\\0'");
+        assert_eq!(c(10, 1), "'\\n'");
+        assert_eq!(c(0x27, 1), "'\\''");
+        assert_eq!(c(0x22, 1), "'\\\"'");
+        assert_eq!(c(0x5c, 1), "'\\\\'");
+        assert_eq!(c(0x1b, 1), "'\\x1b'");
+        assert_eq!(c(0x7f, 2), "L'\\x7f'");
+        assert_eq!(c(0xe9, 2), "L'\u{e9}'");
+        assert_eq!(c(0x2000, 2), "L'\\x2000'");
+        assert_eq!(c(0x4e2d, 2), "L'\u{4e2d}'");
+        assert_eq!(c(0xd800, 2), "L'\\xd800'");
+        assert_eq!(c(0x30000, 4), "L'\\x00030000'");
+        assert_eq!(c(0xffff_ffff, 4), "L'\\xffffffff'");
+        assert!(!unicode_needs_escape(0xa1) && unicode_needs_escape(0xa0) && !unicode_needs_escape(0xfffd));
     }
 
     #[test]

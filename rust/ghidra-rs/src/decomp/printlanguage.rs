@@ -40,6 +40,9 @@ pub(crate) mod modifier {
     pub(crate) const PENDING_BRACE: u32 = 0x8000;
     pub(crate) const FORCE_HEX: u32 = 1;
     pub(crate) const FORCE_DEC: u32 = 2;
+    pub(crate) const FORCE_POINTER: u32 = 0x10;
+    pub(crate) const PRINT_LOAD_VALUE: u32 = 0x20;
+    pub(crate) const PRINT_STORE_VALUE: u32 = 0x40;
     pub(crate) const NEGATETOKEN: u32 = 0x2000;
 }
 
@@ -82,6 +85,8 @@ pub(crate) struct PrintC<'a> {
     modstack: Vec<u32>,
     /// the block nesting being printed
     pub(crate) depth: u32,
+    /// the body comments (`commsorter`)
+    pub(crate) commsorter: super::comment::CommentSorter,
 }
 
 impl<'a> PrintC<'a> {
@@ -98,6 +103,7 @@ impl<'a> PrintC<'a> {
             mods: 0,
             modstack: Vec::new(),
             depth: 0,
+            commsorter: Default::default(),
         }
     }
 
@@ -339,7 +345,7 @@ impl<'a> PrintC<'a> {
         if v.is_constant() {
             return self.push_constant_vn(vn);
         }
-        self.push_symbol_detail(vn)
+        self.push_symbol_detail(vn, true)
     }
 }
 

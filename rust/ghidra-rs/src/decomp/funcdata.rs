@@ -96,6 +96,9 @@ pub struct Funcdata {
     /// `Varnode::mapentry`: the symbol and entry a varnode is linked to (`setSymbolEntry`,
     /// from `ActionNameVars` on)
     pub(crate) mapentry: BTreeMap<VarnodeId, (super::scope::SymbolId, usize)>,
+    /// `Varnode::setSymbolReference`: what the offset of a space-base PTRSUB refers to
+    /// (`linkSymbolReference`, from `ActionNameVars` on)
+    pub(crate) symref: BTreeMap<VarnodeId, super::namevars::SymRef>,
     /// warnings at an address (`Funcdata::warning`), for `print C`
     pub(crate) comments: Vec<(u64, String)>,
     /// the space the global scope owns (ram): its varnodes are `persist` and `addrtied`
@@ -176,6 +179,7 @@ impl Funcdata {
             next_unique: UNIQUE_ANALYSIS,
             warnings: Vec::new(),
             mapentry: BTreeMap::new(),
+            symref: BTreeMap::new(),
             comments: Vec::new(),
             ram: None,
             global: Vec::new(),
@@ -592,6 +596,7 @@ impl Funcdata {
         // Varnode::~Varnode: out of its high variable, and its symbol link goes with it
         super::variable::high_remove(self, vn);
         self.mapentry.remove(&vn);
+        self.symref.remove(&vn);
         self.loc_del(vn);
         let v = self.vn(vn);
         if v.is_input() {
@@ -794,6 +799,16 @@ impl Funcdata {
 
     pub(crate) fn find_op(&self, seq: SeqNum) -> Option<OpId> {
         self.seqs.get(&(seq.addr, seq.time)).copied()
+    }
+
+    /// `beginOpMain(addr)` and the op before it (`CommentSorter::findPosition`): the first op at
+    /// or after `addr` and the last op before it in sequence order. INDIRECTs are left out: the
+    /// C++ keeps the ones `newIndirect` makes in `alttree`, not `optree`, and no op becomes one.
+    pub(crate) fn main_ops_around(&self, addr: u64) -> (Option<OpId>, Option<OpId>) {
+        let main = |id: &OpId| self.op(*id).opc != Opcode::Indirect;
+        let next = self.seqs.range((addr, 0)..).map(|(_, &id)| id).find(main);
+        let prev = self.seqs.range(..(addr, 0)).rev().map(|(_, &id)| id).find(main);
+        (next, prev)
     }
 
     /// Port of `PcodeOpBank::findLastOp`: the live op at `addr` created last.
@@ -1163,9 +1178,11 @@ impl Funcdata {
         self.add_comment(addr, msg);
     }
 
-    /// `addCommentNoDuplicate` of a warning at an address.
+    /// `addCommentNoDuplicate` of a warning at an address: a header warning (at the entry) with
+    /// the same text counts as the same comment, as the C++ database holds both.
     pub(crate) fn add_comment(&mut self, addr: u64, msg: String) {
-        if !self.comments.iter().any(|(a, m)| *a == addr && *m == msg) {
+        let header = addr == self.entry && self.warnings.contains(&msg);
+        if !header && !self.comments.iter().any(|(a, m)| *a == addr && *m == msg) {
             self.comments.push((addr, msg));
         }
     }
@@ -1173,7 +1190,13 @@ impl Funcdata {
     /// Port of `Funcdata::warningHeader`: the header comment with its prefix, not stored twice.
     pub(crate) fn warning_header(&mut self, msg: impl Into<String>) {
         let msg = format!("{}{}", self.warning_prefix(), msg.into());
-        if !self.warnings.contains(&msg) {
+        self.add_header(msg);
+    }
+
+    /// `addCommentNoDuplicate` of a header warning (its prefix included): not stored when the
+    /// entry already has a header or body warning with the same text.
+    pub(crate) fn add_header(&mut self, msg: String) {
+        if !self.warnings.contains(&msg) && !self.comments.iter().any(|(a, m)| *a == self.entry && *m == msg) {
             self.warnings.push(msg);
         }
     }
