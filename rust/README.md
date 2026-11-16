@@ -702,7 +702,11 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
 - Output, all under `rust/target/`: `bars/summary.out` (the printed lines, appended),
   `bars/<check>-<corpus>.log` (the `decomp-diff.sh` output) and `.miss` (one line per
   differing function: `loud` with ghidra-rs's error, `silent` with the first differing line,
-  `timeout`; and the `reference failed` lines).
+  `timeout` when ghidra-rs printed nothing or was killed at `TIMEOUT`; and the `reference failed`
+  lines, a reference killed at `TIMEOUT` among them with the reason `decomp-diff.sh: timed out
+  after N s`). `decomp-diff.sh` checks `timeout`'s exit status (124 or 137) and replaces a
+  killed engine's cut-off output with that one line, so a run cut off mid-print never counts as
+  finished or as a `silent` difference.
 - The summary line is `<check>-<corpus>: reference finished F / N, identical I / F (loud L,
   silent S, timeout T), all outputs identical A / N`. `I / F` counts only the functions the
   reference finishes, which is how the README's bars are given. `A / N` is `decomp-diff.sh`'s
@@ -1147,7 +1151,8 @@ Ported (`coreaction.rs`, plus `heritage.rs`, `fspec.rs`, `block.rs`, `funcdata.r
   return recovery. Branch and call targets are code references (`newCodeRef`: one byte,
   annotation), so heritage never links them.
 - `decomp-diff.sh`: `TIMEOUT` (default 120 s per engine and function), and a reference that
-  printed nothing no longer stops the summary.
+  printed nothing no longer stops the summary. (Superseded: a killed run no longer prints
+  nothing but the line `decomp-diff.sh: timed out after N s`; see "Every check at once".)
 
 | corpus | identical at `break start assignhigh` (S4 options) | at `paramdouble` |
 |---|---|---|

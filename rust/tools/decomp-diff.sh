@@ -20,7 +20,9 @@
 #   ORDER=easy run the corpus simplest first (decomp-rank.sh, cached at rust/target/decomp-check/<corpus>.ranked)
 #   STOP=1     one function at a time, in corpus order, stopping at the first mismatch the reference ran
 #   OUT        output directory (default: rust/target/decomp-check/<corpus>)
-#   TIMEOUT    seconds each engine may take per function (default 120; a killed run prints nothing)
+#   TIMEOUT    seconds each engine may take per function (default 120). A killed run (timeout's
+#              status 124 or 137) keeps only the line `decomp-diff.sh: timed out after N s`, so a
+#              reference cut off mid-print counts as failed, never as finished
 #   BIN        the game binary (default ~/projects/mercs/mercs2-decomp/orig/Mercenaries2.analysis.exe)
 # Each function is selected with `load function <name>`, its name taken from the prelude (which maps
 # every function, FID names included; `load addr` for one it lacks). Outputs are compared from that
@@ -97,11 +99,18 @@ one() {
         for ((i = 0; i < CONTINUES; i++)); do echo continue; echo "$PRINT"; done
         echo quit
     } > "$s"
-    timeout "$TIMEOUT" "$DECOMP" -i "$s" </dev/null 2>&1 | sed -n '/^init> load \(function\|addr\)/,$p' > "$out/ref/$a"
-    timeout "$TIMEOUT" "$GHIDRA_RS" decompile -i "$s" 2>&1 | sed -n '/^init> load \(function\|addr\)/,$p' > "$out/rust/$a"
+    eng "$out/ref/$a" "$DECOMP" -i "$s"
+    eng "$out/rust/$a" "$GHIDRA_RS" decompile -i "$s"
 }
-export -f one
-# the reference failed: an error, or no decompile result
+# eng <output> <engine command...>: run one engine under TIMEOUT, keep its output from the load line;
+# when timeout killed it, replace the cut-off output with the one timed-out line
+eng() {
+    local o=$1; shift
+    timeout "$TIMEOUT" "$@" </dev/null 2>&1 | sed -n '/^init> load \(function\|addr\)/,$p' > "$o"
+    case ${PIPESTATUS[0]} in 124|137) echo "decomp-diff.sh: timed out after $TIMEOUT s" > "$o" ;; esac
+}
+export -f one eng
+# the reference failed: an error, or no decompile result (a timed-out run has none)
 refbad() {
     grep -q 'Low-level ERROR\|Unable to proceed\|Execution error\|parsing error' "$1" ||
         ! grep -q '^Decompilation complete\|^Break at' "$1"
@@ -120,7 +129,7 @@ for f in "$out"/ref/*; do
     a=$(basename "$f")
     total=$((total + 1))
     if refbad "$f"; then
-        echo "reference failed $a: $(grep -m1 'ERROR\|Unable\|error' "$f")"
+        echo "reference failed $a: $(grep -m1 'ERROR\|Unable\|error\|^decomp-diff.sh: timed out' "$f")"
     else
         refok=$((refok + 1))
     fi
