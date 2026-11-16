@@ -2562,11 +2562,15 @@ unchanged by construction: no struct or union reaches them), the `simple` and sw
   (`setPendingPrint`, emitted by the next line break).
 - `flow.rs`: `FlowInfo::reinterpreted` gives its header warning (once a function).
 - The basic blocks keep `f_joined_block` (`nodeJoinCreateBlock`) and `f_duplicate_block`
-  (`nodeSplitBlockEdge`) for the labels (superseded: "not kept, only printing reads it").
+  (`nodeSplitBlockEdge`, which also copies the spliced mark with the cover) for the labels;
+  `spliceBlock` clears both, as block.cc keeps only `f_unstructured_targ`, `f_entry_point` and
+  `f_switch_out` (superseded: "not kept, only printing reads it").
 - Fail loudly: a cast to a pointer to an array (`checkAddressOfCast`), a SUBPIECE with special
   printing (a field extraction), the label of a block `spliceBlockBasic` merged (the C++ cover
   may hold two ranges, and `getEntryAddr` picks the one of the first op: ghidra-rs keeps one
-  range), block nesting deeper than 1000 (the printer recurses as the C++ does). Comments in the
+  range), block nesting deeper than 1000: an addition of ghidra-rs (the C++ recurses without a limit), so
+  a deep function fails loudly instead of overflowing the stack; the front leaf of a label that is
+  not a block copy. Comments in the
   body, anonymous data-types, the long suffix and the operators of slice 1 stay loud.
 - `bars.sh`: `pcc-r` and `pcc-t` also run on the switch corpus, with the `sw` options there
   (`switchnorm` on: the case labels come from it; with it off the reference fails on every

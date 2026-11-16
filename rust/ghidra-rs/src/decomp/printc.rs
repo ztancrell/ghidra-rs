@@ -367,7 +367,14 @@ impl PrintC<'_> {
             return err(format!("print C: blocks nested deeper than {MAX_DEPTH} are not supported"));
         }
         self.depth += 1;
-        let res = match self.fd.structure.b(b).kind.clone() {
+        let res = self.emit_block_kind(b);
+        self.depth -= 1;
+        res
+    }
+
+    /// The dispatch of [`Self::emit_block`].
+    fn emit_block_kind(&mut self, b: SId) -> Result<()> {
+        match self.fd.structure.b(b).kind.clone() {
             Kind::Graph => self.emit_block_graph(b),
             Kind::Copy(bb) => {
                 // emitBlockCopy
@@ -384,9 +391,7 @@ impl PrintC<'_> {
             Kind::DoWhile => self.emit_block_do_while(b),
             Kind::InfLoop => self.emit_block_inf_loop(b),
             Kind::Switch => self.emit_block_switch(b),
-        };
-        self.depth -= 1;
-        res
+        }
     }
 
     /// Component `i` of a structured block (`getBlock(i)`).
@@ -750,7 +755,9 @@ impl PrintC<'_> {
     /// ported: the checks declare none).
     fn emit_label(&mut self, b: SId) -> Result<()> {
         let Some(leaf) = front_leaf(&self.fd.structure, b) else { return Ok(()) };
-        let Kind::Copy(bb) = self.fd.structure.b(leaf).kind else { return Ok(()) };
+        let Kind::Copy(bb) = self.fd.structure.b(leaf).kind else {
+            return err("print C: the front leaf of a label is not a block copy");
+        };
         let block = self.fd.blocks.block(bb);
         if block.spliced {
             return err(

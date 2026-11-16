@@ -194,9 +194,11 @@ fn node_split(fd: &mut Funcdata, b: BlockId, inedge: usize) -> Result<()> {
     if bl.ins.len() <= 1 {
         return err("Cannot nodesplit block with only 1 in edge");
     }
-    let (a, start, stop) = (bl.ins[inedge].point, bl.start, bl.stop);
+    let (a, start, stop, spliced) = (bl.ins[inedge].point, bl.start, bl.stop, bl.spliced);
     let bprime = fd.blocks.new_block(start);
     fd.blocks.block_mut(bprime).duplicated = true;
+    // copyRange: the copy has the same cover, so the same unknown entry address when spliced
+    fd.blocks.block_mut(bprime).spliced = spliced;
     fd.blocks.block_mut(bprime).stop = stop;
     fd.blocks.switch_edge(a, b, bprime);
     clone_block(fd, b, bprime, inedge)?;

@@ -66,11 +66,11 @@ pub(crate) struct EmitPrettyPrint {
     needbreak: bool,
     commentmode: bool,
     commentfill: String,
-    /// the first error (`LowlevelError` in the C++), reported by [`EmitPrettyPrint::flush`]
     /// the pending brace (`pendPrint`), by id
     pending: Option<usize>,
     /// per pending brace id: whether it was printed
     braces: Vec<bool>,
+    /// the first error (`LowlevelError` in the C++), reported by [`EmitPrettyPrint::flush`]
     error: Option<String>,
 }
 

@@ -325,13 +325,16 @@ impl BlockGraph {
         self.remove_block(outbl);
         // `bl->flags = fl1 | fl2`: of the flags kept, only the entry point is a field here (a
         // basic block's `f_switch_out` is read from its last op, `f_unstructured_targ` lives in
-        // the hierarchy); `f_flip_path`, the mark and the do-nothing flags are cleared
+        // the hierarchy); `f_flip_path`, the mark, the do-nothing, joined and duplicate flags are
+        // cleared (block.cc keeps only f_unstructured_targ, f_entry_point, f_switch_out)
         let b = self.block_mut(bl);
         b.entry_point = entry;
         b.flip_path = false;
         b.mark = false;
         b.delayed_donothing = false;
         b.donothing_loop = false;
+        b.joined = false;
+        b.duplicated = false;
     }
 
     /// Port of `FlowBlock::swapEdges` on a two-way block (stage S8); `f_flip_path` flips with
