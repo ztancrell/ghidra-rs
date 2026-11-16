@@ -114,6 +114,12 @@ impl VnFlags {
     /// `stack_store` (an additional flag in C++): written by a COPY that was a STORE
     /// (`RuleStoreVarnode`, stage R5)
     pub(crate) const STACK_STORE: VnFlags = VnFlags(1 << 29);
+    /// `unsignedprint` (an additional flag in C++): a constant printed as an unsigned token
+    /// (`CastStrategy::markExplicitUnsigned`, `setcasts`)
+    pub(crate) const UNSIGNED_PRINT: VnFlags = VnFlags(1 << 30);
+    /// `longprint` (an additional flag in C++): a constant printed as a long token
+    /// (`CastStrategy::markExplicitLongSize`, `setcasts`)
+    pub(crate) const LONG_PRINT: VnFlags = VnFlags(1 << 31);
 
     /// both sets of flags
     pub(crate) const fn with(self, f: VnFlags) -> VnFlags {

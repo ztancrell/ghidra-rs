@@ -1920,6 +1920,7 @@ fn splice_block_basic(fd: &mut Funcdata, bl: BlockId) -> Result<()> {
     let b = fd.blocks.block_mut(bl);
     b.start = b.start.min(start);
     b.stop = b.stop.max(stop);
+    b.spliced = true;
     fd.blocks.splice_block(bl);
     structure_reset(fd)
 }
@@ -2683,14 +2684,13 @@ pub(crate) fn map_globals(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     use super::scope::{NameFlags, NameRequest, SymbolEntry, UseLimit, GLOBAL};
     let ptr = u64::from(arch.spec.stack_pointer.2);
     // `Varnode::getSymbolEntry`: only a type-locked symbol holding the whole varnode links it
-    // when it is made (`setSymbolProperties`): a function (one byte) or an external reference
+    // when it is made (`setSymbolProperties` queries with the varnode's size): a function (one
+    // byte) or an external reference. Superseded: the query with one byte, which took a
+    // function at an import's slot over the external reference holding the 4-byte varnode.
     let span = |e: &super::infertypes::Entry| if e.externref { ptr } else { 1 };
     let linked = |fd: &Funcdata, vn: VarnodeId| {
         let v = fd.vn(vn);
-        query_global(arch, v.offset, 1).is_some_and(|e| {
-            v.space == Space::Sleigh(arch.spec.stack_container)
-                && v.offset.wrapping_add(u64::from(v.size)) <= e.addr.wrapping_add(span(&e))
-        })
+        v.space == Space::Sleigh(arch.spec.stack_container) && query_global(arch, v.offset, v.size).is_some()
     };
     let all = fd.loc_all();
     let mut inconsistent = false;
@@ -2792,7 +2792,7 @@ pub(crate) fn map_globals(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         }
     }
     if inconsistent {
-        fd.warnings.push("Globals starting with '_' overlap smaller symbols at the same address".into());
+        fd.warning_header("Globals starting with '_' overlap smaller symbols at the same address");
     }
     Ok(0)
 }

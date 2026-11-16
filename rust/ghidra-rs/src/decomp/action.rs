@@ -15,8 +15,8 @@ use super::{err, heritage, Arch, Funcdata, Result};
 /// `universalAction` as the `decompile` root has it, with the groups in `disabled` switched
 /// off (`option currentaction decompile <group> off`): the root `universal` (restart group,
 /// once per function), its first actions, the repeating groups `fullloop`, `mainloop` and
-/// `stackstall`, and the root's actions after `fullloop` to `stop` (ported through `mapglobals`, `namevars` and
-/// `finalstructure`, the tail; `setcasts` is not). `oppool1` holds the
+/// `stackstall`, and the root's actions after `fullloop` to `stop` (ported through `mapglobals`, `namevars`, `setcasts` and
+/// `finalstructure`, the tail; `prototypewarnings` is not). `oppool1` holds the
 /// ported rules (`rules::OPPOOL1`) less those `togglerule` switched off (`rule:<name>` in
 /// `disabled`); the actions named `action:<name>` there (`DECOMP_SKIP_ACTIONS`) are left out. An
 /// action that is not ported fails when it runs with its group on.
@@ -237,7 +237,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("mapglobals", "fixateglobals", c::map_globals),
             ("dynamicsymbols", "dynamic", not_ported),
             ("namevars", "merge", super::namevars::name_vars),
-            ("setcasts", "casts", not_ported),
+            ("setcasts", "casts", super::cast::set_casts),
             ("finalstructure", "blockrecovery", super::finalstructure::final_structure),
             ("prototypewarnings", "protorecovery", not_ported),
             ("stop", "base", c::nothing),

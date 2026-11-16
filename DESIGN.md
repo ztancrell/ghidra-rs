@@ -247,7 +247,7 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    After a review the scopes' maps follow the C++ `rangemap` order, the compiler spec's `<global>` ranges are read and the prototype checks also compare parameter names, storage and symbol attributes; the six checks are unchanged.
    `namevars` is ported (`namevars.rs`: symbols linked to the named variables, Ghidra's default names); its check (`print map`
    after `namevars`) is M8 8 / 8, M500 498 / 499 (99.8 %) rules on and 493 / 499 (98.8 %) types on.
-   Open: `setcasts` (S9). `switchnorm` and the case labels are ported but paused before full verification (2026-11-14: M8 8 / 8,
+   Open: `setcasts` (S9; superseded: ported on `m3-cast`, below). `switchnorm` and the case labels are ported but paused before full verification (2026-11-14: M8 8 / 8,
    switch corpus `finalstructure` 1,937 / 2,004 rules on; M500 and the other bars not rerun; see the plan, "Switch case labels").
    Superseded: "paused before full verification": verified on `m3-int` (2026-11-14) with every bar in one
    pass (`rust/tools/bars.sh`, 9 h 22 min alone on the machine): no bar fell; switch corpus `finalstructure`
@@ -255,6 +255,25 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    M500 498, 493, 495, 499 / 499. Open: global symbol types on new varnodes are set lazily (six
    `switchnorm` rules-on misses), 0x4f3366. Structured `printRaw` is not reachable from the
    console (`print raw` prints the basic blocks), so it waits for S9's printer.
+   S9 casts (branch `m3-cast`, 2026-11-15): `cast.cc` and `ActionSetCasts` are ported (`cast.rs`);
+   checks `cs` (`print raw` after `setcasts`), `fsc`, `swfsc` (`finalstructure` with it on): M8 `cs`, `swfsc` 8 / 8 and
+   `fsc` 7 / 7 (0x4042e0 is outside `fs`; superseded: "8 / 8 in all six"), M500 `cs` 498 / 499 and 493 / 499, `fsc` 494 / 495 and 489 / 495 (rules on, types on; no new
+   miss), `swfsc` 498 / 499 and 493 / 499 (as `swfs`); M8 all 51 checks identical. Union resolution fails loudly.
+   S9 slice 1 on branch `m3-print1` (2026-11-15): `print C` for straight-line functions in the
+   three layers (`prettyprint.rs`, `printlanguage.rs`, `printc.rs`); every construct not ported
+   (if, loops, switch, gotos, comments in the body, field and array access, the remaining
+   operators and constants) fails loudly. Casts are not printed yet (`setcasts` skipped on both
+   engines). Checks `pc-r`, `pc-t` (`tools/bars.sh`): `simple` corpus 54 / 194 and 34 / 194
+   identical, the rest loud; M500 `pc-t` 24 / 495 (loud 471, 376 of them `BlockIf`, silent 0),
+   `pc-r` 47 / 495 (loud 448, silent 0); `pg-*` and `nm-*` on M500 unchanged after its
+   `namevars` and `mapglobals` fixes;
+   M8 0 / 7, all loud.
+   Both merged on `m3-s9` (2026-11-15): M8 all 51 checks before `pc-*` identical, `pc-r` and `pc-t` 0 / 7, all loud.
+   Review fixes on `m3-s9`: `print C` with `setcasts` on (`pcc-r`, `pcc-t`) M500 10 / 495 and 8 / 495, silent 0 (a CAST op fails loudly).
+   S9 slice 2 on branch `m3-print2` (2026-11-15): every structured block (if/else, loops, switch, gotos,
+   labels) and casts in `print C` (superseded: "fails loudly" for those and for a CAST op); M500 `pcc-r` 235 / 495,
+   `pcc-t` 58 / 495, `pc-r` 244 / 495, `pc-t` 45 / 495, silent only 0x47a6b0 (differs from `r1` on); switch
+   `pcc-r` 153 / 2005 (silent 0; flow now warns of overlapping instructions); M8 the 51 other checks identical.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

@@ -45,6 +45,7 @@ mod sub {
     pub(super) const CODE: u8 = 9;
     pub(super) const FLOAT: u8 = 8;
     pub(super) const PTR: u8 = 6;
+    pub(super) const PTR_STRUCT: u8 = 4;
     pub(super) const UINT_ENUM: u8 = 13;
     pub(super) const ARRAY: u8 = 3;
     pub(super) const STRUCT: u8 = 2;
@@ -115,6 +116,8 @@ pub(crate) struct TypeFactory {
     /// `alignMap`: the alignment of a primitive by size (`setDefaultAlignmentMap` until the
     /// `.cspec`.s `<data_organization>` replaces it)
     pub(crate) align_map: Vec<u32>,
+    /// `Datatype::typedefImm`: the type each typedef names
+    typedefs: HashMap<TypeId, TypeId>,
 }
 
 impl Default for TypeFactory {
@@ -133,6 +136,7 @@ impl TypeFactory {
             cache: HashMap::new(),
             nochar: None,
             align_map: vec![1, 1, 2, 2, 4, 4, 4, 4, 8],
+            typedefs: HashMap::new(),
         };
         let core: &[(&'static str, u32, Meta, u8)] = &[
             ("void", 1, Meta::Void, sub::VOID),
@@ -188,6 +192,23 @@ impl TypeFactory {
 
     pub(crate) fn get(&self, id: TypeId) -> &Datatype {
         &self.types[id.0 as usize]
+    }
+    /// `Datatype::needsResolution`: a union, a one-element array, a structure with one field
+    /// filling it, or a pointer to one of those (not through another pointer).
+    pub(crate) fn needs_resolution(&self, id: TypeId) -> bool {
+        let t = self.get(id);
+        match &t.kind {
+            _ if t.meta == Meta::Union => true,
+            Kind::Array { count, .. } => *count == 1,
+            Kind::Fields(f) if t.meta == Meta::Struct => f.len() == 1 && self.size(f[0].2) == t.size,
+            Kind::Pointer { to, .. } => self.meta(*to) != Meta::Ptr && self.needs_resolution(*to),
+            _ => false,
+        }
+    }
+
+    /// `Datatype::getName` (empty for a pointer or an array).
+    pub(crate) fn name(&self, id: TypeId) -> Option<&str> {
+        self.get(id).name.as_deref()
     }
     pub(crate) fn meta(&self, id: TypeId) -> Meta {
         self.get(id).meta
@@ -266,13 +287,14 @@ impl TypeFactory {
 
     /// Port of `TypeFactory::getTypePointer`.
     pub(crate) fn pointer(&mut self, size: u32, to: TypeId, wordsize: u32) -> TypeId {
-        self.intern(Datatype {
-            meta: Meta::Ptr,
-            submeta: sub::PTR,
-            size,
-            name: None,
-            kind: Kind::Pointer { to, wordsize },
-        })
+        // TypePointer::calcSubmeta: a pointer to a struct (unless it needs resolution) or to a
+        // union compares as a pointer into a struct
+        let submeta = match self.meta(to) {
+            Meta::Struct if !self.needs_resolution(to) => sub::PTR_STRUCT,
+            Meta::Union => sub::PTR_STRUCT,
+            _ => sub::PTR,
+        };
+        self.intern(Datatype { meta: Meta::Ptr, submeta, size, name: None, kind: Kind::Pointer { to, wordsize } })
     }
 
     /// Port of `TypeFactory::getTypePointerStripArray`.
@@ -401,6 +423,34 @@ impl TypeFactory {
         self.types.iter().rposition(|t| t.name.as_deref() == Some(name)).map(|i| TypeId(i as u32))
     }
 
+    /// `Datatype::getTypedef`: the type a typedef names, `None` for any other type.
+    pub(crate) fn typedef_of(&self, id: TypeId) -> Option<TypeId> {
+        self.typedefs.get(&id).copied()
+    }
+
+    /// `while (t->getTypedef() != 0) t = t->getTypedef()`.
+    pub(crate) fn strip_typedefs(&self, mut id: TypeId) -> TypeId {
+        while let Some(of) = self.typedef_of(id) {
+            id = of;
+        }
+        id
+    }
+
+    /// `Datatype::isEnumType`.
+    pub(crate) fn is_enum(&self, id: TypeId) -> bool {
+        matches!(self.get(id).kind, Kind::Enum(_))
+    }
+
+    /// `TypeStruct::beginField` and `TypeArray::getBase`: the first field of a struct (offset
+    /// and type), the element of an array.
+    pub(crate) fn first_field(&self, id: TypeId) -> Option<(u32, TypeId)> {
+        match &self.get(id).kind {
+            Kind::Fields(fs) => fs.first().map(|f| (f.1, f.2)),
+            Kind::Array { elem, .. } => Some((0, *elem)),
+            _ => None,
+        }
+    }
+
     /// `TypeFactory::getTypeArray`: `count` elements of the element's align size.
     pub(crate) fn array_of(&mut self, elem: TypeId, count: u32) -> Result<TypeId, String> {
         let size = self.align_size(elem).checked_mul(count).ok_or("array too large")?;
@@ -465,13 +515,34 @@ impl TypeFactory {
     pub(crate) fn typedef(&mut self, of: TypeId, name: &str) -> TypeId {
         let mut t = self.get(of).clone();
         t.name = Some(name.to_string());
-        self.intern(t)
+        let id = self.intern(t);
+        if id != of {
+            self.typedefs.entry(id).or_insert(of);
+        }
+        id
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn needs_resolution_kinds() {
+        let mut f = TypeFactory::new();
+        let i4 = f.base(4, Meta::Int);
+        assert!(!f.needs_resolution(i4));
+        let one = f.array_of(i4, 1).unwrap();
+        let two = f.array_of(i4, 2).unwrap();
+        assert!(f.needs_resolution(one) && !f.needs_resolution(two));
+        let s1 = f.aggregate("s1", false, vec![("a".into(), i4)]).unwrap();
+        let s2 = f.aggregate("s2", false, vec![("a".into(), i4), ("b".into(), i4)]).unwrap();
+        let u = f.aggregate("u", true, vec![("a".into(), i4), ("b".into(), i4)]).unwrap();
+        assert!(f.needs_resolution(s1) && !f.needs_resolution(s2) && f.needs_resolution(u));
+        let p = f.pointer(4, s1, 1);
+        let pp = f.pointer(4, p, 1);
+        assert!(f.needs_resolution(p) && !f.needs_resolution(pp));
+    }
 
     #[test]
     fn core_types_and_order() {
@@ -518,5 +589,45 @@ mod tests {
         let void = f.base(1, Meta::Void);
         assert!(f.aggregate("v", false, vec![("v".into(), void)]).is_err());
         assert!(f.array_of(i4, u32::MAX).is_err());
+    }
+
+    /// TypePointer::calcSubmeta: struct (not needing resolution) and union pointees give
+    /// SUB_PTR_STRUCT, which orders before a plain pointer.
+    #[test]
+    fn pointer_submeta() {
+        let mut f = TypeFactory::new();
+        let (i4, c) = (f.base(4, Meta::Int), f.base(1, Meta::Int));
+        let s2 = f.aggregate("s2", false, vec![("a".into(), i4), ("c".into(), c)]).unwrap();
+        let s1 = f.aggregate("s1", false, vec![("a".into(), i4)]).unwrap();
+        let u = f.aggregate("u", true, vec![("a".into(), i4), ("c".into(), c)]).unwrap();
+        let a1 = f.array_of(i4, 1).unwrap();
+        let sub_of = |f: &mut TypeFactory, to| {
+            let p = f.pointer(4, to, 1);
+            f.get(p).submeta
+        };
+        assert_eq!(sub_of(&mut f, s2), sub::PTR_STRUCT);
+        assert_eq!(sub_of(&mut f, u), sub::PTR_STRUCT);
+        assert_eq!(sub_of(&mut f, s1), sub::PTR);
+        assert_eq!(sub_of(&mut f, a1), sub::PTR);
+        assert_eq!(sub_of(&mut f, i4), sub::PTR);
+        let (ps, pi) = (f.pointer(4, s2, 1), f.pointer(4, i4, 1));
+        assert!(f.order(ps, pi) < 0 && f.order(pi, ps) > 0);
+    }
+
+    #[test]
+    fn typedefs_and_resolution() {
+        let mut f = TypeFactory::new();
+        let (i4, c) = (f.base(4, Meta::Int), f.base(1, Meta::Int));
+        let td = f.typedef(i4, "myint");
+        assert_eq!((f.typedef_of(td), f.strip_typedefs(td), f.typedef_of(i4)), (Some(i4), i4, None));
+        let one = f.aggregate("one", false, vec![("a".into(), i4)]).unwrap();
+        let two = f.aggregate("two", false, vec![("a".into(), i4), ("c".into(), c)]).unwrap();
+        let un = f.aggregate("u", true, vec![("a".into(), i4), ("c".into(), c)]).unwrap();
+        let a1 = f.array_of(i4, 1).unwrap();
+        let p1 = f.pointer(4, one, 1);
+        let pp = f.pointer(4, p1, 1);
+        assert!(f.needs_resolution(one) && f.needs_resolution(un) && f.needs_resolution(a1) && f.needs_resolution(p1));
+        assert!(!f.needs_resolution(two) && !f.needs_resolution(pp) && !f.needs_resolution(i4));
+        assert_eq!(f.first_field(two), Some((0, i4)));
     }
 }

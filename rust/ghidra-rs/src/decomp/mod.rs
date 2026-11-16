@@ -12,6 +12,7 @@ pub mod action;
 pub mod actiontree;
 mod block;
 mod blocktransform;
+mod cast;
 mod collapse;
 mod coreaction;
 mod cover;
@@ -35,7 +36,10 @@ mod namevars;
 mod nodejoin;
 mod op;
 mod opcode;
+mod prettyprint;
 mod print;
+mod printc;
+mod printlanguage;
 mod rangemap;
 mod rangeutil;
 mod readers;
@@ -61,6 +65,7 @@ use std::collections::{BTreeMap, HashMap};
 
 pub use funcdata::Funcdata;
 pub use print::print_raw;
+pub use printc::print_c;
 
 /// `print map` (`IfcPrintMap` without a name): the bounds and symbols of the local scope.
 pub fn print_map(fd: &Funcdata, arch: &Arch, name: &str) -> std::result::Result<String, LowlevelError> {

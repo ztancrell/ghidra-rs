@@ -53,7 +53,9 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   placement and renaming), `action.rs` (the universal
   action up to `paramdouble`), `print.rs` (`print raw`), `stdsort.rs` (libstdc++'s `std::sort`), `rangemap.rs` (the
   `rangemap` template the scopes' maps use), `scope.rs` (symbols, default names), `namevars.rs`
-  (`ActionNameVars`).
+  (`ActionNameVars`), and `print C` in three layers: `prettyprint.rs` (`EmitPrettyPrint`: tokens,
+  line breaking, indents), `printlanguage.rs` (the operator stack, parentheses, number base) and
+  `printc.rs` (`PrintC`: declarations, blocks, statements; first slice).
   See "Decompiler (Milestone 3)" below.
 - `ghidra-rs/tests/decomp.rs`, `tests/data/raw-funclink-*.txt`, `tests/data/raw-heritage-40a110.txt`,
   `tests/data/raw-paramdouble-40ad80.txt` (S2: a loop at `paramdouble`):
@@ -673,20 +675,26 @@ It is the one copy of the "run every bar" script; a stage that adds a check adds
 
 ```sh
 CORPORA=m8 rust/tools/bars.sh                          # the fast gate, about 2 minutes
-rust/tools/bars.sh                                     # everything: M8, M500, r5d-adc, switch
+rust/tools/bars.sh                                     # everything: M8, M500, r5d-adc, switch, simple
 CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
 ```
 
-- `CORPORA`: `m8`, `m500`, `r5d-adc`, `switch` (files of `tools/corpus/`) or an address file;
-  default all four. Without `CHECKS`, M8 and M500 run all 45 checks, `r5d-adc` the four
-  double-rule checks (`r5d r5dt r5dtlock r5dtlocksv`) and `switch` the S3 bar (`paramdouble`)
-  and the four switch checks.
+- `CORPORA`: `m8`, `m500`, `r5d-adc`, `switch`, `simple` (files of `tools/corpus/`) or an
+  address file; default all five. Without `CHECKS`, M8 and M500 run all 55 checks, `r5d-adc` the
+  four double-rule checks (`r5d r5dt r5dtlock r5dtlocksv`), `switch` the S3 bar (`paramdouble`),
+  the six switch checks and `pcc-r pcc-t` (with the `sw` options: `switchnorm` on, as the case
+  labels need; superseded: "and the six switch checks"), and `simple` the four `print C` checks. Superseded: "all four",
+  "all 45 checks", "all 47", "all 51", "all 53" (before the six `setcasts` checks, `pc-r pc-t`, `pcc-r pcc-t` and the
+  `simple` corpus).
 - `CHECKS`: names from the script's `case`: `stack stackhigh funclink heritage paramdouble s4
   s6 s6void s6int4 s6callee r1 subvar r4 r5 r5typed s7r s7r2 s7sub s7r4 s7r5 s7t s7t2 s8 s8r`
   (the 24 standard bars), `r5c r5d r5dt r5dtlock r5dtlocksv` (R5 slices 3 to 5), `svlock svs6
   r5slock r5s` (R5 slice 2, `stackvars` on), `pg-r pg-t nm-r nm-t ldn-r ldn-t fs-r fs-t` (tail:
   prototypes and globals, names, `latedonothing`, `finalstructure`; `-r` rules on, `-t` types
-  on) and `swfs-r swfs-t swsn-r swsn-t` (`finalstructure` with case labels and `switchnorm`).
+  on), `cs-r cs-t fsc-r fsc-t` (S9 `setcasts`: `print raw` after it, and `finalstructure`
+  with it on), `swfs-r swfs-t swsn-r swsn-t swfsc-r swfsc-t` (`finalstructure` with case
+  labels, `switchnorm`, and `finalstructure` with case labels and `setcasts` on) and
+  `pc-r pc-t pcc-r pcc-t` (`print C`, S9 slices 1 and 2, `pcc` with `setcasts` on; see "C printing").
 - `JOBS` (default `nproc`), `TIMEOUT` (seconds per function and engine, default 120 as for every bar here; 0x4c48d0 of M500 takes
   the reference about 485 s and ghidra-rs about 600 s alone, so at 120 s it counts as a function
   the reference does not finish), `OUT`
@@ -2175,7 +2183,8 @@ on); `latedonothing` 8 / 8, 498 / 499 (99.8 %) and 8 / 8, 493 / 499 (98.8 %); `f
 Existing bars on the final binary: R1/R3, subvar and R4 checks 498 / 499, R5 typed 497 / 498, S7 rules on 498 / 499 and types on 493 / 499, S8 rules off 499 / 499 and rule stage 498 / 499, S3 paramdouble 500 / 500, S4 and S6 499 / 500, switch corpus 1,947 / 2,050: all unchanged. Superseded: the switch corpus measured again on `m3-int` after `switchnorm` and the review fixes, 1,947 / 2,050, unchanged (`checkUnrolledGuard` and the empty-range stop of `findSmallestNormal` could have moved it); every bar: "Integration of `m3-tail` and `m3-r5b`" below.
 Every bar was rerun on the final binary, M8 and M500 (stack check, S1 to S8, R1 to R5, the switch
 corpus, the tail and names checks): none fell. The table is in docs/plans/m3-decompiler.md, "Tail".
-Open before S9: `setcasts`, and finishing the case labels. Superseded: "`switchnorm`, not
+Open before S9: `setcasts`, and finishing the case labels (superseded: `setcasts` is ported,
+section "Casts" below). Superseded: "`switchnorm`, not
 started" and "a switch with cases fails loudly" above: `switchnorm` and the case labels of
 `finalstructure` are ported (`jumptable.rs`, `finalstructure.rs`) but the work is paused before
 its full verification: M8 8 / 8 in the four switch checks, switch corpus `finalstructure`
@@ -2393,6 +2402,221 @@ Review fixes (same branch):
 After the fixes: M8 gate all 45 identical; M500 `r5s` 446 / 499, `r5slock` 450 / 498,
 `r5dtlocksv` 450 / 498 (the same misses by kind and count as before the fixes; 0x4c48d0 did not
 finish on the reference in 120 s this run, it was identical in the earlier one).
+
+### Casts: `setcasts` (branch `m3-cast`, 2026-11-15)
+
+- `cast.rs`: `ActionSetCasts` (`set_casts`: `castInput`, `castOutput`, `insertPtrsubZero`,
+  `testStructOffset0`, `isOpIdentical`, `checkPointerIssues`, the PTRADD and PTRSUB undo of
+  `apply`), `CastStrategyC` (`castStandard`, `arithmeticOutputStandard`, `intPromotionType`,
+  `localExtensionType`, `checkIntPromotionForCompare`/`ForExtension`, `markExplicitUnsigned`,
+  `markExplicitLongSize`) and the `getInputCast`/`getOutputToken` overrides of typeop.cc.
+- `types.rs`: `getTypedef` (the type a typedef names), `needsResolution`, `isEnumType`, the
+  first field of a struct; `varnode.rs`: `unsignedprint` and `longprint`; `opUndoPtradd` takes
+  `finalize`; `print raw` prints `(cast)`.
+- Fail loudly: union resolution (any data-type that `needsResolution`: union, one-field struct,
+  one-element array, a pointer to one), `findTruncation` of a struct or union SUBPIECE, the cast
+  rules of SEGMENTOP, INSERT, ZPULL, SPULL. Left out (printer only): `isExtensionCastImplied`,
+  `isSubpieceCast`, `isSextCast`, `isZextCast`, `CastStrategyJava`; `startCastPhase` (nothing
+  reads it); pointer space attributes (no ported pointer has one).
+- Checks (`bars.sh`): `cs-r`/`cs-t`, `print raw` with types at `BREAK=finalstructure`, the
+  tail's skipped leaves less `setcasts` (`SC`); `fsc-r`/`fsc-t` and `swfsc-r`/`swfsc-t`,
+  `fs-*`/`swfs-*` with `setcasts` on.
+
+Results (M8; M500 of the functions the reference finishes), rules on and types on: `cs` 8 / 8 and
+8 / 8, 498 / 499 (99.8 %) and 493 / 499 (98.8 %); `fsc` 7 / 7 and 7 / 7, 494 / 495 (99.8 %) and 489 / 495
+(98.8 %), the same as `fs-r`/`fs-t` with `setcasts` skipped; `swfsc` 8 / 8 and 8 / 8, M500 498 / 499 and 493 / 499 (as `swfs-r`/`swfs-t`). Every
+miss is one the earlier bars have: 0x47a6b0 (rules on) differs before `setcasts` already, the six
+types-on misses are the loud `mergeAddrTied` `VariablePiece` error. The M8 outputs have 6 to 628
+CAST ops a function. M8 gate: all 51 checks identical. Not run: the switch corpus with `setcasts`
+on, the full M500 pass of the other bars.
+### C printing, slice 1 (branch `m3-print1`, 2026-11-15)
+
+`print C` (`IfcPrintCStruct`, `PrintC::docFunction`) prints a straight-line function, ported in
+the three layers of the C++:
+
+- `decomp/prettyprint.rs`: `EmitPrettyPrint` over `EmitNoMarkup`. Tokens (strings, breaks,
+  group begins and ends, indents, comments) wait in a queue until the breaker knows whether a
+  group fits the 100-column line; a break that saves fewer than 10 columns is not taken, an
+  overflow raises the indents to half the width, comments refill with three spaces. Unit tests
+  pin a short line, a broken expression, an absolute-indent comment and the missing-group error.
+- `decomp/printlanguage.rs`: the `PrintLanguage` reverse-Polish stack (`pushOp`, `pushAtom`,
+  `pushVn`, `recurse`), `parentheses`, `emitOp`, `opBinary`/`opUnary`, the modifier stack and
+  `mostNaturalBase`.
+- `decomp/printc.rs`: the `PrintC` tokens and what a straight-line function reaches: the header
+  warnings (`emitCommentFuncHeader`, `emitLineComment`), the declaration (return type, a
+  prototype model other than the default, the parameters as declarations, `void`), the local
+  declarations (`emitScopeVarDecls` on the local scope), the root graph, lists and basic blocks
+  (`emitBlockLs`, `emitBlockBasic`), statements of assignments, `*p` loads and stores, direct
+  calls, returns and special halts, the arithmetic, logic, shift, comparison and boolean
+  operators (a negated comparison prints flipped), integer and boolean constants (a pointer
+  constant with its cast), named and unnamed variables (`register_ESP`, `unique0x00017200`),
+  pointer and array types in declarations.
+
+Every other construct fails loudly with the C++ name: `BlockIf`, `BlockDoWhile`,
+`BlockWhileDo`, `BlockInfLoop`, `BlockSwitch`, `BlockGoto` and the other block kinds, labels,
+comments inside the body (warnings at an address), array and field access (`PTRSUB`, `PTRADD`),
+the operators not listed (extensions, `SUBPIECE`, `PIECE`, `CALLIND`, `CALLOTHER`, float
+conversions, ...), float, character, string, enum and function-pointer constants, equates,
+partial symbols and symbols or constants whose data-type needs resolution (`needsResolution`:
+a union, a one-element array, a one-field structure, a pointer to one), a global name a local
+name hides (a `::` scope prefix), anonymous and function types, locked prototypes. Casts are not
+printed yet: `setcasts` (`cast.cc`) is ported separately, so the checks skip it on both engines
+and neither prints a cast. Superseded: the blocks, labels, gotos and casts are printed since slice 2
+(below, "C printing, slice 2").
+
+Checks (`tools/bars.sh`), at `break start prototypewarnings` with `print C`, `setcasts` and the
+`localrecovery` leaves skipped on both engines: `pc-r` (rules on, `tail-r-options.txt`) and `pc-t`
+(types on, `tail-t-options.txt`); corpora M8, M500 and `tools/corpus/simple.txt` (200 small
+functions: every 27th of the 5,443 mercs2 functions at most 32 bytes before the next mapped one).
+
+Older stages fixed on the way, found by silent `print C` differences or by the review
+(superseded: "two older stages"):
+
+- `namevars` now links a persistent variable to the global data symbol holding it
+  (`linkSymbol` through `queryProperties`), so globals print by name (`iRam0256f88a`) rather
+  than as `ram0x0256f88a`. As `findContainer`, the smallest entry holding the first byte wins:
+  when a function (one byte) or an external reference (a pointer), kept in `Arch` and not in
+  the global scope, is smaller, the variable stays unlinked and the printer fails on it; a
+  data symbol of the same size fails loudly in `namevars`.
+  With globals linked, `lookForBadJumpTables` renames only a symbol of the local scope to
+  `UNRECOVERED_JUMPTABLE`, as the C++ does (renaming the global target cost 18 `nm-r` functions
+  on M500 before this).
+- `mapglobals` asks whether a varnode is already linked with the varnode's size, as
+  `setSymbolProperties` does: a 4-byte varnode at an import's slot is held by the external
+  reference, not by the 1-byte function symbol there, so it no longer raises the "Globals
+  starting with '_' overlap smaller symbols" header warning the reference does not print.
+- Warnings carry their prefix where they are made (`WARNING: `, or `WARNING (jumptable): ` in
+  jump-table recovery's partial function), and the warnings the partial function adds are
+  carried over to the function, as the C++ comment database the two share keeps them; flow
+  records the bad and unimplemented instruction warnings.
+- `mergeMultiEntry` fails loudly on a local symbol with several whole entries (none is made
+  while `localrecovery` is not ported) instead of doing nothing.
+
+Numbers (functions the reference finishes):
+
+| check | M8 | M500 | simple |
+|---|---|---|---|
+| `pc-r` | 0 / 7 (loud 7) | 47 / 495 (loud 448, silent 0) | 54 / 194 (loud 140, silent 0) |
+| `pc-t` | 0 / 7 (loud 7) | 24 / 495 (loud 471, silent 0) | 34 / 194 (loud 160, silent 0) |
+
+The silent miss of both, 0x1c8c780, was the header warning of a bad instruction, which flow
+did not record; `FlowInfo` now records it (and the body warning, so the function fails loudly;; `simple` rerun after it and the review fixes).
+The loud misses on M500, `pc-t`: `BlockIf` 376, array or field access 25, comments in the body
+20, `PTRADD` 8, `BlockDoWhile` 7, `mergeAddrTied`, `SUBPIECE` and `FLOAT2FLOAT` 6 each, `PTRSUB` and
+float constants 4, `INT_ZEXT` 3, `PIECE` 2, `SQRT`, `CALLIND`, `BlockInfLoop` and an anonymous
+data-type 1 each; `pc-r`: `BlockIf` 332, an anonymous data-type 40, comments in the body 20,
+`FLOAT2FLOAT` 14, `BlockDoWhile` 12, `BlockWhileDo` 10, then 5 or fewer each. Both rerun after the
+review fixes (superseded: `pc-t` measured before the flow fix, the same 24 / 495). The checks the
+`namevars` and `mapglobals` fixes could move, on M500 after the review fixes: `pg-r` 498 / 499,
+`pg-t` 493 / 499, `nm-r` 498 / 499, `nm-t` 493 / 499, as before (the misses: 0x47a6b0 rules on,
+the six `VariablePiece` functions types on). The loud misses on `simple`, `pc-t`: `BlockIf` 83, comments in the body 30, array or field
+access 15, `INT_ZEXT` 5, `BlockDoWhile` 4, `SUBPIECE`, `PTRADD`, `FLOAT2FLOAT`, `BlockWhileDo`,
+`BlockInfLoop` and the `mergeAddrTied` error 3 each, `PTRSUB` 2, `PIECE` and `CALLOTHER` 1; `pc-r`:
+`BlockIf` 73, comments 30, an anonymous data-type 13, `INT_ZEXT` 6, then 4 or fewer each. On M8 the
+45 older checks are identical as before (8 / 8, `fs-r` and `fs-t` 7 / 7) after the fixes below,
+also after the review fixes; `pc-r` and `pc-t` are 0 / 7, all loud (superseded: "all 47 checks
+on M8 identical"). Not rerun: the older checks on M500 and the other corpora.
+
+Merged with `m3-cast` on `m3-s9` (2026-11-15): M8 the 51 checks other than `pc-r`/`pc-t` identical, those two 0 / 7, all loud; M500 not rerun on the merge.
+
+### Review fixes and `print C` with casts (branch `m3-s9`, 2026-11-15)
+
+- `checkPointerIssues` warns "Load size is inaccurate" / "Store size is inaccurate", the
+  TypeOp name with its first letter upper-cased, as coreaction.cc (superseded: "LOAD size").
+- `TypeFactory::getTypePointer` ports `TypePointer::calcSubmeta`: a pointer to a struct that
+  does not need resolution, or to a union, gets `SUB_PTR_STRUCT` (4) and orders before a plain
+  pointer (6). No check moves: no prelude, options or lock file declares a struct or union
+  (`parse line` is the only maker of one), so every pointer of the checks keeps `SUB_PTR`.
+- `getInputCast` of CPOOLREF and NEW never casts (typeop.hh); `opUndoPtradd`'s finalize branch
+  fails loudly on any type that `needsResolution`, not only a union (`getTypeReadFacing`).
+- `print C` prints the `U` of a constant `setcasts` marks `isUnsignedPrint` (cleared when
+  printed signed, as `pushConstant`); a constant marked `isLongPrint` fails loudly (the suffix
+  depends on the data organization's long size, not ported); a CAST op fails loudly. (Superseded: printed since slice 2.)
+- Checks `pcc-r`, `pcc-t` (`bars.sh`): `pc-r`, `pc-t` with `setcasts` on.
+
+Numbers (functions the reference finishes): M8 all 51 checks before `pc-*` identical, `pc-*`
+and `pcc-*` 0 / 7 loud. M500 `pcc-r` 10 / 495 (loud 485: `BlockIf` 332, CAST 86, an anonymous
+data-type 40, body comments 20; silent 0) against `pc-r` 47 / 495; `pcc-t` 8 / 495 (loud 487:
+`BlockIf` 376, CAST 66, body comments 20; silent 0) against `pc-t` 24 / 495. `cs-t` 493 / 499, `fsc-t` and `fs-t` 489 / 495, as
+before (the six `mergeAddrTied` `VariablePiece` misses).
+Not run: the other M500 type checks (`s6*`, `r5typed`, `s7t*`, `pg-t`, `nm-t`, `ldn-t`, `pc-*`,
+unchanged by construction: no struct or union reaches them), the `simple` and switch corpora.
+
+### C printing, slice 2: blocks and casts (branch `m3-print2`, 2026-11-15)
+
+- `printc.rs`: every structured block of printc.cc: `emitBlockGraph`, `emitBlockCopy`,
+  `emitBlockGoto` (`gotoPrints`), `BlockMultiGoto`, `emitBlockLs` (with `only_branch`),
+  `emitBlockCondition` (`&&`/`||` in parentheses; a condition never negated keeps the
+  `INT_AND`/`INT_OR` of `newBlockCondition` and prints `||`, as the C++), `emitBlockIf` for
+  if, if/else, if-no-exit and if-goto with the `else if` merge (`PendingBrace`),
+  `emitBlockWhileDo` (plain, `while( true )` with `if (..) break;` for `f_whiledo_overflow`,
+  and `emitForLoop`), `emitBlockDoWhile`, `emitBlockInfLoop`, `emitBlockSwitch` and
+  `emitSwitchCase` (`default:`, one `case` line per label of the case's first basic block in
+  the switch variable's type, an explicit `break` for a case that exits), `emitGotoStatement`
+  (`break`, `continue`, `goto`), `emitLabel` (`code_`, `joined_`, `dup_` and the entry
+  address), `emitLabelStatement`, `emitAnyLabelStatement` (`f_label_bumpup`). Statements in a
+  condition are comma separated (`comma_separate`); `opCbranch`, `opBranch` and `opBranchind`
+  (structured printing).
+- Casts: `opTypeCast`, and `opIntZext`, `opIntSext`, `opSubpiece` with the four printer-only
+  functions of cast.cc now in `cast.rs` (`isZextCast`, `isSextCast`, `isSubpieceCast`,
+  `isExtensionCastImplied`): an extension or SUBPIECE prints as a cast, hidden (the
+  `hiddenfunction` token, `option_hide_exts` on) when C promotes it anyway, or as
+  `ZEXT14(x)`/`SEXT14(x)`/`SUB41(x,0)` (`opFunc`). The pending varnodes now keep the op reading
+  them (`readOp`), which `isExtensionCastImplied` needs.
+- `prettyprint.rs`: the `same_line` brace style, `openBrace`, and the pending print of a brace
+  (`setPendingPrint`, emitted by the next line break).
+- `flow.rs`: `FlowInfo::reinterpreted` gives its header warning (once a function).
+- The basic blocks keep `f_joined_block` (`nodeJoinCreateBlock`) and `f_duplicate_block`
+  (`nodeSplitBlockEdge`, which also copies the spliced mark with the cover) for the labels;
+  `spliceBlock` clears both, as block.cc keeps only `f_unstructured_targ`, `f_entry_point` and
+  `f_switch_out` (superseded: "not kept, only printing reads it").
+- Fail loudly: a cast to a pointer to an array (`checkAddressOfCast`), a SUBPIECE with special
+  printing (a field extraction), the label of a block `spliceBlockBasic` merged (the C++ cover
+  may hold two ranges, and `getEntryAddr` picks the one of the first op: ghidra-rs keeps one
+  range), block nesting deeper than 1000: an addition of ghidra-rs (the C++ recurses without a limit), so
+  a deep function fails loudly instead of overflowing the stack; the front leaf of a label that is
+  not a block copy. Comments in the
+  body, anonymous data-types, the long suffix and the operators of slice 1 stay loud.
+- `bars.sh`: `pcc-r` and `pcc-t` also run on the switch corpus, with the `sw` options there
+  (`switchnorm` on: the case labels come from it; with it off the reference fails on every
+  switch in `finalizePrinting`).
+
+Numbers (functions the reference finishes; before = slice 1 with the `m3-s9` review fixes):
+
+| check | M8 | M500 before | M500 after | simple after | switch after |
+|---|---|---|---|---|---|
+| `pcc-r` | 2 / 7 | 10 / 495 | 235 / 495 (loud 259, silent 1) | 109 / 194 (loud 85) | 153 / 2005 (loud 1852, silent 0) |
+| `pcc-t` | 0 / 7 | 8 / 495 | 58 / 495 (loud 437, silent 0) | 57 / 194 (loud 137) | not finished (29 done, all loud) |
+| `pc-r` | 2 / 7 | 47 / 495 | 244 / 495 (loud 250, silent 1) | 110 / 194 (loud 84) | |
+| `pc-t` | 0 / 7 | 24 / 495 | 45 / 495 (loud 450, silent 0) | 49 / 194 (loud 145) | |
+
+On the switch corpus (`pcc-r`): comments in the body 1,453 (mostly jump-table warnings), `CALLIND` 125, an
+anonymous data-type 110, `FLOAT2FLOAT` 40, `FLOAT_NAN` 35, the label of a spliced block 30, then 13 or
+fewer each. Fixed on the way (the three silent switch misses, 0x1a7a2ac, 0x1d1472a, 0x1e9cbc6): flow
+now gives the header warning of `FlowInfo::reinterpreted`, "Instruction at (ram,..) overlaps
+instruction at (ram,..)" with its trailing newline, once a function (`reinterpreted_present`, copied
+into the jump-table partial function), as the earlier bad-instruction fix.
+No block kind is a loud miss any more. The one silent miss of `pcc-r` and `pc-r` is 0x47a6b0,
+the known rules-on miss: it differs from `r1` on (`print raw` at `assignhigh`: the block
+numbering after the rules), so `finalstructure` and the printer see another function.
+The loud misses on M500, `pcc-r`: `CALLIND` 77, an anonymous data-type 45, `FLOAT2FLOAT` 36,
+`FLOAT_NAN` 29, comments in the body 20, float constants 12, a SUBPIECE field extraction 9,
+`PIECE` 8, then 4 or fewer each (one spliced-block label); `pcc-t`: array or field access 188,
+`PTRADD` 88, character constants 33, `PIECE` 24, comments 20, `INT_SBORROW` 16, `CALLIND` 14, float
+constants 14, `FLOAT2FLOAT` 11, `PTRSUB` 8, `FLOAT_NAN` 7, the `mergeAddrTied` error 6, then 2 or
+fewer. `pc-t` (no casts): array or field access 270, `PTRADD` 34, character constants 30, `PIECE`
+23, comments 20.
+On `simple` (before: `pc-r` 54, `pc-t` 34 / 194) every miss is loud; the most: comments in the body 31,
+`CALLIND` 16 and an anonymous data-type 15 (`pcc-r`), array or field access 34 and `PTRADD` 21 (`pcc-t`).
+M8: the 51 checks other than the print checks identical (8 / 8, `fs`, `fsc` 7 / 7); `pc-r`, `pcc-r` 2 / 7,
+`pc-t`, `pcc-t` 0 / 7, all misses loud (superseded: 0 / 7 each).
+Unit tests: the `else if` brace (`pending_brace_else_if`), the switch brace
+(`switch_brace_has_no_indent`), the printer-only casts (`printer_casts`); the block kinds
+themselves are covered by the corpus checks (a printed block needs a decompiled function).
+`pcc-t` on the switch corpus was stopped after 29 of 2,050 functions (all loud, silent 0): the machine
+was loaded by the `m3-s9` queue pass. Rerun after the flow fix, the review fixes and the merge of master's `decomp-diff.sh` timeout fix
+(superseded: "not rerun after the flow fix"): M500 and `simple`, all four print checks, the same
+counts as the table; M8 all 55 checks as before. Not run: the full pass (`bars-queue.sh`), the other checks on M500, simple and switch.
 
 ## Speed
 

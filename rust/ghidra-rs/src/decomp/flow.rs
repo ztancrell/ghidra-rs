@@ -59,6 +59,8 @@ struct Flow<'a> {
     injectlist: Vec<CallId>,
     insn_count: u32,
     baddata_count: u32,
+    /// `reinterpreted_present`: the overlap warning is in the header
+    reinterpreted_present: bool,
 }
 
 /// Port of `Funcdata::followFlow` (flow over the whole code space): `FlowInfo::generateOps`
@@ -74,6 +76,7 @@ pub(crate) fn follow_flow(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
         injectlist: Vec::new(),
         insn_count: 0,
         baddata_count: 0,
+        reinterpreted_present: false,
     };
     flow.generate_ops()?;
     flow.generate_blocks()
@@ -133,7 +136,7 @@ impl Flow<'_> {
             // the injected call's callee is always known: its prototype holds the fixup
             let callee =
                 self.fd.call(call).callee().and_then(|e| arch.functions.get(&e)).map_or("", |f| f.name.as_str());
-            self.fd.warnings.push(format!("Function: {callee} replaced with injection: {}", payload.name));
+            self.fd.warning_header(format!("Function: {callee} replaced with injection: {}", payload.name));
             self.fd.qlst.retain(|&c| c != call);
         }
         Ok(())
@@ -218,12 +221,14 @@ impl Flow<'_> {
                 return Ok(None);
             }
             if addr < start + stat.size {
-                // reinterpreted: decoding into the middle of an instruction
-                self.count_bad_data(format!(
-                    "Instruction at {} overlaps instruction at {}",
-                    ram_addr(addr),
-                    ram_addr(start)
-                ))?;
+                // FlowInfo::reinterpreted: decoding into the middle of an instruction (the
+                // message ends in a newline, as the C++ `endl`)
+                let msg = format!("Instruction at {} overlaps instruction at {}\n", ram_addr(addr), ram_addr(start));
+                self.count_bad_data(msg.clone())?;
+                if !self.reinterpreted_present {
+                    self.reinterpreted_present = true;
+                    self.fd.warning_header(msg);
+                }
             }
         }
         Ok(Some(self.visited.range(addr + 1..).next().map_or(END_ADDR, |(&a, _)| a)))
@@ -250,11 +255,17 @@ impl Flow<'_> {
             Ok(len) => len,
             Err(EmitError::Unimplemented) => {
                 self.artificial_halt(addr, Some(Halt::Unimplemented))?;
+                self.fd.warning("Unimplemented instruction - Truncating control flow here", addr);
+                // `unimplemented_present`: the header warning once (`print C` prints it once)
+                self.fd.warning_header("Control flow encountered unimplemented instructions");
                 1
             }
             Err(EmitError::BadData(msg)) => {
                 self.count_bad_data(msg)?;
                 self.artificial_halt(addr, Some(Halt::BadInstruction))?;
+                self.fd.warning("Bad instruction - Truncating control flow here", addr);
+                // `baddata_present`
+                self.fd.warning_header("Control flow encountered bad instruction data");
                 1
             }
             Err(EmitError::Fatal(e)) => return Err(e),
@@ -523,10 +534,25 @@ impl Flow<'_> {
     /// Port of `Funcdata::stageJumpTable`: build the partial function on first use
     /// (`truncatedFlow`, then the `jumptable` root action) and recover the table from it.
     /// The outer `Result` is an error that ends the decompile, the inner one the recovery.
+    /// The warnings the partial function added (from `nw` header and `nc` body warnings on):
+    /// the C++ writes them, with their `WARNING (jumptable): ` prefix, to the comment database
+    /// the function shares, so they print with the function's own.
+    fn carry_warnings(&mut self, p: &Funcdata, nw: usize, nc: usize) {
+        for w in p.warnings.iter().skip(nw) {
+            if !self.fd.warnings.contains(w) {
+                self.fd.warnings.push(w.clone());
+            }
+        }
+        for (a, m) in p.comments.iter().skip(nc) {
+            self.fd.add_comment(*a, m.clone());
+        }
+    }
+
     fn stage_jump_table(&mut self, partial: &mut Option<Funcdata>, op: OpId) -> Result<Staged> {
         if partial.is_none() {
             let mut p = self.fd.clone();
             p.jumptablerecovery_on = true;
+            let (nw, nc) = (p.warnings.len(), p.comments.len());
             let mut pflow = Flow {
                 fd: &mut p,
                 arch: self.arch,
@@ -537,9 +563,13 @@ impl Flow<'_> {
                 injectlist: Vec::new(),
                 insn_count: 0,
                 baddata_count: 0,
+                // the copy constructor copies `flags`
+                reinterpreted_present: self.reinterpreted_present,
             };
             pflow.generate_blocks()?;
-            if let Err(e) = action::jumptable_partial(&mut p, self.arch) {
+            let res = action::jumptable_partial(&mut p, self.arch);
+            self.carry_warnings(&p, nw, nc);
+            if let Err(e) = res {
                 // An error of the jumptable action fails the table, as in the C++ (`stageJumpTable`
                 // catches `LowlevelError`). One from a path ghidra-rs does not port is not a
                 // failure the reference has: it is reported on stderr, always, so a check
@@ -556,6 +586,7 @@ impl Flow<'_> {
             }
             jumptable::fold_constants(&mut p, self.arch);
             jumptable::calc_nz_mask(&mut p, self.arch);
+            self.carry_warnings(&p, nw, nc);
             *partial = Some(p);
         }
         let p = partial.as_ref().unwrap();

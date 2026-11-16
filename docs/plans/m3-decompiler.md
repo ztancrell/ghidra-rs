@@ -392,6 +392,7 @@ from the table row:
   stage.
 - Left for the S6 remainder: locked prototypes (`fspec.cc` locked paths, also decision 6's
   register ABI), `cast.cc` and `ActionSetCasts` (after `assignhigh`, checked with S9),
+  (superseded: ported on `m3-cast`, "Casts: `setcasts`" below)
   `unionresolve`, partial types and `TypePointerRel`, `<data_organization>` (struct layout),
   function types with prototypes, the scopes of `database.cc`.
   Superseded: rounds two and three port locked prototypes and `<data_organization>`; see
@@ -1279,7 +1280,8 @@ would only compare a state the C++ never prints.
 After the merge with S7 the leaves between `copymarker` and `finalstructure` still block a fair
 check: `latedonothing` (needs the delayed do-nothing mark of `ActionDoNothing` and
 `removingCreatesRedundancy`; it changes the CFG, so it cannot be skipped fairly), `outputprototype`,
-`inputprototype`, `mapglobals`, `namevars`, `setcasts` (S9: CAST ops `print raw` shows), and
+`inputprototype`, `mapglobals`, `namevars`, `setcasts` (S9: CAST ops `print raw` shows; superseded:
+ported, see "Casts: `setcasts`" below), and
 `BlockSwitch::finalizePrinting` needs the case labels of `switchnorm` (`recoverLabels`, not ported).
 Bars after the S7 merge: S8 rules off M500 499 / 499, rule-stage 498 / 499 (prefercomplement,
 structuretransform, returnsplit and nodejoin on both sides); S7 checks (their own options,
@@ -1664,6 +1666,63 @@ Review fixes: locked calls register their parameters' trials (`funcLinkInput`,
 unported branches of `AncestorRealistic` and the range defaults fail loudly; the three checks
 hold (446 / 499, 450 / 498, 450 / 498). Open: the "Error processing <name> called at <seq>: "
 wrapper of `ActionActiveParam`'s errors.
+
+### Casts: `setcasts` on branch `m3-cast` (2026-11-15)
+
+`cast.cc` (`CastStrategyC`, the parts `setcasts` calls) and `ActionSetCasts`, in `cast.rs`, with
+the `getInputCast`/`getOutputToken` overrides of typeop.cc (details and numbers: rust/README.md,
+"Casts"). Checks in `bars.sh`: `cs-r`/`cs-t` (`print raw` with types at `BREAK=finalstructure`,
+skipping `inputprototype,mapglobals,namevars` and, rules on, the S3 actions) and `fsc-r`/`fsc-t`,
+`swfsc-r`/`swfsc-t` (`fs-*`, `swfs-*` with `setcasts` on). M8 `cs` and `swfsc` 8 / 8, `fsc` 7 / 7 (0x4042e0 is outside `fs`; superseded: "8 / 8 in all six"); M500 `cs`
+498 / 499 and 493 / 499, `fsc` 494 / 495 and 489 / 495 (no new miss), `swfsc` 498 / 499 and 493 / 499 (as `swfs`). Fail
+loudly: union resolution (every type that `needsResolution`), struct or union SUBPIECE truncation,
+SEGMENTOP/INSERT/ZPULL/SPULL casts. Printer-only parts of `cast.cc` (`isSubpieceCast`,
+`isSextCast`, `isZextCast`, `isExtensionCastImplied`) come with the C printer. Not run: the
+switch corpus with `setcasts` on.
+### S9 slice 1: the C printer for straight-line functions, branch `m3-print1` (2026-11-15)
+
+`print C` through the three layers (`prettyprint.rs`: `EmitPrettyPrint`; `printlanguage.rs`: the
+operator stack and parentheses; `printc.rs`: `PrintC` for the header warnings, the declaration,
+the local declarations, lists of basic blocks and the plain statements and operators). Details:
+rust/README.md, "C printing, slice 1". Checks `pc-r` and `pc-t` in `tools/bars.sh` (at
+`break start prototypewarnings`, `setcasts` skipped on both engines: no casts are printed yet)
+and the corpus `tools/corpus/simple.txt`. M8 0 / 7 loud (every M8 function has an `if` or more); M500 `pc-t` 24 / 495 identical, loud 471
+(`BlockIf` 376), silent 0; `pc-r` 47 / 495 (loud 448, silent 0); `pg-r`, `pg-t`, `nm-r`, `nm-t` on
+M500 unchanged after the fixes (498, 493, 498, 493 / 499); `simple` 54 / 194 (rules on) and
+34 / 194 (types on), no silent miss left after the fixes; M8: the 45 older checks identical, `pc-r` and `pc-t` 0 / 7
+loud (superseded: "M8 all 47 checks identical"). Fixed on the
+way: `namevars` links globals to their data symbols, `mapglobals` asks with the varnode's size
+whether a varnode is already linked, flow records the bad-instruction warnings.
+Next slices (superseded in part: blocks and casts are slice 2): if/else, loops, switch, gotos and labels; comments in the body (the comment
+sorter); casts once `setcasts` lands; field and array access; strings and characters; the rest
+of `printc.cc`.
+
+Merged with `m3-cast` on `m3-s9` (2026-11-15): M8 the 51 checks other than `pc-r`/`pc-t` identical, those two 0 / 7, all loud; M500 not rerun on the merge.
+
+Review fixes on `m3-s9` (details: rust/README.md, "Review fixes and `print C` with casts"):
+`checkPointerIssues` warns "Load size is inaccurate" as the C++; `calcSubmeta` (a pointer to a
+struct or union is `SUB_PTR_STRUCT`; no check moves, none declares a struct or union);
+CPOOLREF and NEW never cast; `opUndoPtradd` fails on every `needsResolution` type; `print C`
+prints the `U` suffix, fails loudly on the long suffix and on a CAST op. (Superseded: slice 2 prints it.) New checks `pcc-r`,
+`pcc-t` (`print C` with `setcasts` on): M500 10 / 495 and 8 / 495 identical, silent 0 (CAST 86
+and 66 loud), against `pc-r` 47 and `pc-t` 24 / 495; M500 `cs-t`, `fsc-t`, `fs-t` unchanged.
+Next for casts in the printer: `PrintC::opTypeCast` and the extension casts of `cast.cc`
+(superseded: done in slice 2, below).
+
+### S9 slice 2: structured blocks and casts in the printer, branch `m3-print2` (2026-11-15)
+
+Every structured block of printc.cc (if/else with the `else if` merge, while, for,
+`while( true )` overflow, do-while, infinite loop, `&&`/`||` conditions, switch and case labels,
+gotos, labels, break, continue), the branch ops, and casts: `opTypeCast`, `opIntZext`,
+`opIntSext`, `opSubpiece` with `isZextCast`, `isSextCast`, `isSubpieceCast` and
+`isExtensionCastImplied` (`cast.rs`). Details: rust/README.md, "C printing, slice 2". `pcc-r` and
+`pcc-t` also run on the switch corpus (with the `sw` options, `switchnorm` on). M500 `pcc-r` 235 /
+495 (was 10), `pcc-t` 58 / 495 (was 8), `pc-r` 244 / 495 (was 47), `pc-t` 45 / 495 (was 24); no
+block kind is a loud miss; silent: only 0x47a6b0 rules on, which differs from `r1` on. `simple`
+109, 57, 110, 49 / 194; switch `pcc-r` 153 / 2005 (silent 0 after the flow fix for the "overlaps instruction" header warning), `pcc-t` not finished. M8: the 51 other checks identical, `pc-r`/`pcc-r` 2 / 7.
+Next: the loud blockers left: `CALLIND`, array and field access (`PTRSUB`, `PTRADD`),
+anonymous data-types, comments in the body, float and character constants, `PIECE`,
+`FLOAT2FLOAT`, `FLOAT_NAN`; labels of spliced blocks (several cover ranges).
 
 ## Running stages in parallel
 

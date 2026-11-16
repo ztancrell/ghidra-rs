@@ -561,6 +561,12 @@ impl Database {
         Ok(s)
     }
 
+    /// The map entries of `scope` (symbol, entry index) in `MapIterator` order: by space,
+    /// then by address.
+    pub(crate) fn map_records(&self, scope: ScopeId) -> Vec<(SymbolId, usize)> {
+        self.scope(scope).maps.values().flat_map(|m| m.records()).copied().collect()
+    }
+
     /// The `attributes` line of the reference patch (`printSymbolAttributes`).
     fn attributes(&self, id: SymbolId) -> String {
         let sym = self.symbol(id);

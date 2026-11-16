@@ -247,7 +247,7 @@ fn sign_extend(v: u64, bit: u32) -> i64 {
 }
 
 /// Port of `TypePointer::downChain`. Returns the new pointer and the remaining offset.
-fn down_chain(
+pub(crate) fn down_chain(
     fd: &mut Funcdata,
     arch: &Arch,
     ptr: TypeId,

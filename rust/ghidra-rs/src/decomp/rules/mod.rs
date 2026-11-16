@@ -16,7 +16,7 @@
 mod arith;
 mod bitfield;
 mod bits;
-mod boolean;
+pub(crate) mod boolean;
 mod cleanup;
 mod compare;
 mod constseq;
@@ -30,7 +30,7 @@ mod floatrules;
 mod modulo;
 mod piece;
 mod pool;
-mod ptrarith;
+pub(crate) mod ptrarith;
 mod stackvars;
 mod subpiece;
 mod subvar;
