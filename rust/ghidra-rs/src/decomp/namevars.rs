@@ -11,7 +11,9 @@
 //!   so the action does nothing more with it; the printer reads the link. A function or an
 //!   external reference (kept in `Arch`, not in the scope) is not linked, and the printer fails
 //!   on such a variable. Superseded: "the link itself is read by the printer only (S9)" with no
-//!   link made. `PTRSUB(#0, offset)` into a global only marks the offset.
+//!   link made. A PTRSUB offset off a space base is linked to the container in the stack's or the
+//!   global scope (`linkSymbolReference`, kept in `Funcdata::symref`), a function or external
+//!   reference included. Superseded: "`PTRSUB(#0, offset)` into a global only marks the offset".
 //! - Name recommendations (`recoverNameRecommendationsForSymbols`): the scope collects them
 //!   from name-locked symbols when it is cleared, and it holds none.
 //! - CAST ops (`setcasts` runs after this action) and proto-partial varnodes do not exist.
@@ -219,24 +221,9 @@ fn link_symbol(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId) -> Result<Option<S
     let (space, offset, persist) = (v.space, v.offset, v.has(VnFlags::PERSIST));
     let usepoint = use_point(fd, arch, vn);
     if persist {
-        // queryProperties: the global scope owns the storage. `findContainer` takes the smallest
-        // entry holding the first byte among the data symbols (`ActionMapGlobals`, linked here),
-        // the functions (one byte) and the external references (a pointer), the last two kept in
-        // `Arch`: a variable they hold stays unlinked here and the printer fails on it.
-        let other = (space == Space::Sleigh(arch.spec.stack_container))
-            .then(|| super::infertypes::query_global(arch, offset, 1))
-            .flatten()
-            .map(|e| if e.externref { arch.spec.stack_pointer.2 } else { 1 });
-        let data = fd.symtab.find_container(GLOBAL, space, offset, 1, Some(usepoint))?;
-        if let Some((sym, e)) = data {
-            let size = fd.symtab.symbol(sym).entries[e].size;
-            match other {
-                Some(o) if o < size => return Ok(None),
-                Some(o) if o == size => {
-                    return err("namevars: a global data symbol the size of a function or external reference at the same address is not ported");
-                }
-                _ => {}
-            }
+        // queryProperties: the global scope owns the storage; a variable a function or an external
+        // reference holds stays unlinked here and the printer fails on it
+        if let Some(GlobalHit::Data(sym, e)) = global_container(fd, arch, space, offset, Some(usepoint))? {
             if !fd.symtab.symbol(sym).entries[e].conflict {
                 fd.mapentry.insert(vn, (sym, e));
                 return Ok(Some(sym));
@@ -302,24 +289,91 @@ fn link_symbol(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId) -> Result<Option<S
     Ok(Some(sym))
 }
 
-/// Port of `Funcdata::linkSymbolReference` for one PTRSUB off a spacebase: the symbol of the
-/// local scope at the stack address the offset refers to (`queryContainer` without a use
-/// point). A reference into a global only marks the offset (see the module comment).
-fn link_symbol_reference(fd: &mut Funcdata, in0: VarnodeId, off: VarnodeId) -> Result<Option<SymbolId>> {
+/// What the offset of a space-base PTRSUB refers to (`Varnode::setSymbolReference`, the
+/// constant's high's symbol and offset), read by the printer: a symbol and the offset into it,
+/// or the function or external reference the global scope holds there (kept in `Arch`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SymRef {
+    Sym(SymbolId, i64),
+    Function(u64),
+    ExternRef,
+}
+
+/// The container `findContainer` takes in the global scope: a data symbol (and its entry) of
+/// `ActionMapGlobals`, or a function (one byte) or an external reference (a pointer), the two kept
+/// in `Arch`.
+enum GlobalHit {
+    Data(SymbolId, usize),
+    Function,
+    ExternRef,
+}
+
+/// `Scope::queryContainer(addr, 1, usepoint)` on the global scope: the smallest entry holding
+/// byte `offset` among the data symbols, the functions and the external references; a data
+/// symbol the size of a function or external reference at the same address fails loudly.
+fn global_container(
+    fd: &Funcdata,
+    arch: &Arch,
+    space: Space,
+    offset: u64,
+    usepoint: Option<(Space, u64)>,
+) -> Result<Option<GlobalHit>> {
+    let other = (space == Space::Sleigh(arch.spec.stack_container))
+        .then(|| super::infertypes::query_global(arch, offset, 1))
+        .flatten()
+        .map(
+            |e| if e.externref { (arch.spec.stack_pointer.2, GlobalHit::ExternRef) } else { (1, GlobalHit::Function) },
+        );
+    let data = fd.symtab.find_container(GLOBAL, space, offset, 1, usepoint)?;
+    Ok(match (data, other) {
+        (Some((sym, e)), Some((osize, hit))) => {
+            let size = fd.symtab.symbol(sym).entries[e].size;
+            if osize == size {
+                return err("namevars: a global data symbol the size of a function or external reference at the same address is not ported");
+            }
+            Some(if osize < size { hit } else { GlobalHit::Data(sym, e) })
+        }
+        (Some((sym, e)), None) => Some(GlobalHit::Data(sym, e)),
+        (None, other) => other.map(|(_, hit)| hit),
+    })
+}
+
+/// Port of `Funcdata::linkSymbolReference` for one PTRSUB off a spacebase: the container of the
+/// address the offset `off` refers to (`queryContainer` without a use point) in the stack's
+/// local scope or the global scope, kept for `off` in `Funcdata::symref`
+/// (`Varnode::setSymbolReference`) with the offset into it; the symbol is returned.
+fn link_symbol_reference(fd: &mut Funcdata, arch: &Arch, in0: VarnodeId, off: VarnodeId) -> Result<Option<SymbolId>> {
     let h = high(fd, in0)?;
     let ptype = h_type(fd, h).0;
     let Some(sb) = fd.types.ptr_to(ptype).filter(|_| fd.types.meta(ptype) == Meta::Ptr) else { return Ok(None) };
     let Kind::Spacebase { space, .. } = fd.types.get(sb).kind else { return Ok(None) };
-    if space != Space::Stack {
-        return Ok(None);
-    }
-    // TypeSpacebase::getAddress: the offset wrapped to the stack space
-    let addr = fd.vn(off).offset & fd.localmap.highest();
-    Ok(fd.symtab.find_container(LOCAL, Space::Stack, addr, 1, None)?.map(|(sym, _)| sym))
+    // TypeSpacebase::getAddress: the offset wrapped to the space (`resolveConstant`)
+    let addr = fd.vn(off).offset
+        & if space == Space::Stack { fd.localmap.highest() } else { super::heritage::space_mask(arch, space) };
+    let hit = if space == Space::Stack {
+        fd.symtab.find_container(LOCAL, Space::Stack, addr, 1, None)?.map(|(s, e)| GlobalHit::Data(s, e))
+    } else {
+        global_container(fd, arch, space, addr, None)?
+    };
+    let r = match hit {
+        None => return Ok(None),
+        Some(GlobalHit::Data(sym, e)) => {
+            let entry = &fd.symtab.symbol(sym).entries[e];
+            let at = i64::from(addr.wrapping_sub(entry.offset) as i32) + i64::from(entry.piece.unwrap_or(0) as i32);
+            SymRef::Sym(sym, at)
+        }
+        Some(GlobalHit::Function) => SymRef::Function(addr),
+        Some(GlobalHit::ExternRef) => SymRef::ExternRef,
+    };
+    fd.symref.insert(off, r);
+    Ok(match r {
+        SymRef::Sym(sym, _) => Some(sym),
+        _ => None,
+    })
 }
 
 /// Port of `ActionNameVars::linkSpacebaseSymbol`.
-fn link_spacebase_symbol(fd: &mut Funcdata, vn: VarnodeId, namerec: &mut Vec<Rec>) -> Result<()> {
+fn link_spacebase_symbol(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, namerec: &mut Vec<Rec>) -> Result<()> {
     let v = fd.vn(vn);
     if !v.is_constant() && !v.is_input() {
         return Ok(());
@@ -330,7 +384,7 @@ fn link_spacebase_symbol(fd: &mut Funcdata, vn: VarnodeId, namerec: &mut Vec<Rec
             continue;
         }
         let (in0, off) = (fd.op(op).ins[0], fd.op(op).ins[1]);
-        if let Some(sym) = link_symbol_reference(fd, in0, off)? {
+        if let Some(sym) = link_symbol_reference(fd, arch, in0, off)? {
             if fd.symtab.symbol(sym).is_name_undefined() {
                 namerec.push(Rec::Ref(sym));
             }
@@ -359,7 +413,7 @@ fn link_symbols(fd: &mut Funcdata, arch: &Arch, namerec: &mut Vec<Rec>) -> Resul
     // constants: no equate symbols exist; a spacebase constant is the base of a global pointer
     for vn in fd.loc_space(CONST_SPACE) {
         if fd.vn(vn).has(VnFlags::SPACEBASE) {
-            link_spacebase_symbol(fd, vn, namerec)?;
+            link_spacebase_symbol(fd, arch, vn, namerec)?;
         }
     }
     // the other spaces in index order, each in location order
@@ -369,7 +423,7 @@ fn link_symbols(fd: &mut Funcdata, arch: &Arch, namerec: &mut Vec<Rec>) -> Resul
             continue;
         }
         if v.has(VnFlags::SPACEBASE) {
-            link_spacebase_symbol(fd, vn, namerec)?;
+            link_spacebase_symbol(fd, arch, vn, namerec)?;
         }
         let h = high(fd, vn)?;
         if name_representative(fd, h)? != vn || !has_name(fd, h)? {

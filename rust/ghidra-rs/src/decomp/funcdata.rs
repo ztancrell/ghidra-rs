@@ -96,6 +96,9 @@ pub struct Funcdata {
     /// `Varnode::mapentry`: the symbol and entry a varnode is linked to (`setSymbolEntry`,
     /// from `ActionNameVars` on)
     pub(crate) mapentry: BTreeMap<VarnodeId, (super::scope::SymbolId, usize)>,
+    /// `Varnode::setSymbolReference`: what the offset of a space-base PTRSUB refers to
+    /// (`linkSymbolReference`, from `ActionNameVars` on)
+    pub(crate) symref: BTreeMap<VarnodeId, super::namevars::SymRef>,
     /// warnings at an address (`Funcdata::warning`), for `print C`
     pub(crate) comments: Vec<(u64, String)>,
     /// the space the global scope owns (ram): its varnodes are `persist` and `addrtied`
@@ -176,6 +179,7 @@ impl Funcdata {
             next_unique: UNIQUE_ANALYSIS,
             warnings: Vec::new(),
             mapentry: BTreeMap::new(),
+            symref: BTreeMap::new(),
             comments: Vec::new(),
             ram: None,
             global: Vec::new(),
@@ -592,6 +596,7 @@ impl Funcdata {
         // Varnode::~Varnode: out of its high variable, and its symbol link goes with it
         super::variable::high_remove(self, vn);
         self.mapentry.remove(&vn);
+        self.symref.remove(&vn);
         self.loc_del(vn);
         let v = self.vn(vn);
         if v.is_input() {

@@ -18,6 +18,7 @@ use super::finalstructure::{
     case_label_list, switch_leaf, switch_table, CaseOrder, F_BREAK_GOTO, F_CONTINUE_GOTO, F_GOTO_GOTO, F_LABEL_BUMPUP,
     F_UNSTRUCTURED_TARG,
 };
+use super::namevars::SymRef;
 use super::op::{Halt, OpFlags, OpId};
 use super::opcode::Opcode;
 use super::prettyprint::BraceStyle;
@@ -1182,7 +1183,10 @@ impl PrintC<'_> {
             return self.push_symbol(sym);
         }
         let size = self.fd.vn(vn).size;
-        if i64::from(off) + i64::from(size) > i64::from(sty.map_or(0, |t| self.fd.types.size(t))) {
+        let Some(sty) = sty else {
+            return err("print C: part of a symbol without a data-type is not ported");
+        };
+        if i64::from(off) + i64::from(size) > i64::from(self.fd.types.size(sty)) {
             return err("print C: a variable past the end of its symbol (pushMismatchSymbol) is not ported");
         }
         self.push_partial_symbol(sym, i64::from(off), size, is_read.then_some(vn))
@@ -1372,16 +1376,16 @@ impl PrintC<'_> {
 
     /// `isValueFlexible` (printc.cc): `vn` is an implied PTRSUB or PTRADD, maybe through an
     /// implied COPY, so it can take over a dereference.
-    fn is_value_flexible(&self, vn: VarnodeId) -> bool {
+    fn is_value_flexible(&self, vn: VarnodeId) -> Result<bool> {
         let v = self.fd.vn(vn);
-        let Some(def) = v.def.filter(|_| v.has(VnFlags::IMPLIED)) else { return false };
+        let Some(def) = v.def.filter(|_| v.has(VnFlags::IMPLIED)) else { return Ok(false) };
         let mut opc = self.fd.op(def).opc;
         if opc == Opcode::Copy {
-            let inv = self.fd.vn(self.fd.op(def).ins[0]);
-            let Some(d) = inv.def.filter(|_| inv.has(VnFlags::IMPLIED)) else { return false };
+            let inv = self.fd.vn(self.fd.input(def, 0)?);
+            let Some(d) = inv.def.filter(|_| inv.has(VnFlags::IMPLIED)) else { return Ok(false) };
             opc = self.fd.op(d).opc;
         }
-        matches!(opc, Opcode::Ptrsub | Opcode::Ptradd)
+        Ok(matches!(opc, Opcode::Ptrsub | Opcode::Ptradd))
     }
 
     /// Port of `PrintC::opPtradd`: `p[i]` when the value is printed, else `p + i`.
@@ -1410,7 +1414,7 @@ impl PrintC<'_> {
         let value = modifier::PRINT_LOAD_VALUE | modifier::PRINT_STORE_VALUE;
         let m = self.mods & !value;
         let mut valueon = self.is_set(value);
-        let flex = self.is_value_flexible(in0);
+        let flex = self.is_value_flexible(in0)?;
         match self.fd.types.meta(ct) {
             Meta::Union => err("print C: a PTRSUB into a union (getUnionField) is not ported"),
             Meta::Struct => {
@@ -1449,7 +1453,7 @@ impl PrintC<'_> {
                 Ok(())
             }
             Meta::Spacebase => {
-                let r = self.spacebase_ref(op, ct)?;
+                let r = self.spacebase_ref(op)?;
                 let mut arrayvalue = false;
                 if let Some(SbRef::Func(_)) = r {
                     valueon = true; // a function symbol has a code data-type
@@ -1543,41 +1547,20 @@ impl PrintC<'_> {
         Ok((space, off & super::heritage::space_mask(self.arch, space)))
     }
 
-    /// The symbol `Funcdata::linkSymbolReference` links to the offset of the PTRSUB `op`
-    /// (`queryContainer` without a use point in the space's scope) and the offset into it;
-    /// ghidra-rs makes the link here, where the printer reads it (`namevars` links only the
-    /// names). A function (kept in `Arch`, not in the global scope) is its name; an external
-    /// reference holding the address fails loudly.
-    fn spacebase_ref(&self, op: OpId, sb: TypeId) -> Result<Option<SbRef>> {
-        let (space, addr) = self.spacebase_addr(op, sb)?;
-        let scope = if space == Space::Stack { LOCAL } else { super::scope::GLOBAL };
-        let found = self.fd.symtab.find_container(scope, space, addr, 1, None)?;
-        if space == Space::Sleigh(self.arch.spec.stack_container) {
-            if let Some(e) = super::infertypes::query_global(self.arch, addr, 1) {
-                let other = if e.externref { self.arch.spec.stack_pointer.2 } else { 1 };
-                match found.map(|(s, i)| self.fd.symtab.symbol(s).entries[i].size) {
-                    Some(size) if size < other => {}
-                    Some(size) if size == other => {
-                        return err("print C: a global data symbol the size of a function or external reference at the same address is not ported");
-                    }
-                    _ if e.externref => {
-                        return err("print C: a PTRSUB into an external reference is not ported");
-                    }
-                    // the FunctionSymbol: fc->getName(), else genericFunctionName
-                    _ => {
-                        let name = match self.arch.functions.get(&addr) {
-                            Some(f) if !f.name.is_empty() => f.name.clone(),
-                            _ => format!("func_{}", self.raw_addr(self.arch.sleigh.code_space(), addr)?),
-                        };
-                        return Ok(Some(SbRef::Func(name)));
-                    }
-                }
-            }
-        }
-        let Some((sym, i)) = found else { return Ok(None) };
-        let e = &self.fd.symtab.symbol(sym).entries[i];
-        let off = i64::from(addr.wrapping_sub(e.offset) as i32) + i64::from(e.piece.unwrap_or(0) as i32);
-        Ok(Some(SbRef::Sym(sym, off)))
+    /// What the offset of the PTRSUB `op` refers to: the link `namevars` made
+    /// (`linkSymbolReference`, `Funcdata::symref`; none prints the unnamed location). A function
+    /// is its name (the `FunctionSymbol`: `fc->getName()`, else `genericFunctionName`); an
+    /// external reference fails loudly.
+    fn spacebase_ref(&self, op: OpId) -> Result<Option<SbRef>> {
+        Ok(match self.fd.symref.get(&self.fd.input(op, 1)?).copied() {
+            None => None,
+            Some(SymRef::Sym(sym, off)) => Some(SbRef::Sym(sym, off)),
+            Some(SymRef::ExternRef) => return err("print C: a PTRSUB into an external reference is not ported"),
+            Some(SymRef::Function(addr)) => Some(SbRef::Func(match self.arch.functions.get(&addr) {
+                Some(f) if !f.name.is_empty() => f.name.clone(),
+                _ => format!("func_{}", self.raw_addr(self.arch.sleigh.code_space(), addr)?),
+            })),
+        })
     }
 
     /// Port of `PrintC::pushPartialSymbol`: the part of `sym` at `off` of `sz` bytes (0: to the

@@ -2631,10 +2631,16 @@ only rise). Not run: the full pass (`bars-queue.sh`), the other checks on M500, 
   (`sym.field`, `sym[i]`, `sym._off_size_`, the SUBPIECE-style cast of a read), now also reached
   from `pushSymbolDetail` for a variable that is part of its symbol; the tokens `.`, `->`,
   `[ ]` (`subscript`) and `&` with printc.cc's precedences.
-- The symbol a space-base PTRSUB points at is found where the printer reads it
-  (`linkSymbolReference`: `queryContainer` without a use point in the stack's or the global
-  scope); `namevars` still links only the names. A function there prints by its name (the
-  `FunctionSymbol`, as `opCall` names it: `*(code **)p = func_0x008244e0;`).
+- `namevars` links the offset of a space-base PTRSUB to what it refers to, as
+  `ActionNameVars::linkSpacebaseSymbol` and `linkSymbolReference` do (`queryContainer` without a
+  use point in the stack's or the global scope, in `linkSymbols`' order, kept in
+  `Funcdata::symref` with the offset into the symbol); the printer reads the link, and an offset
+  without one prints as the unnamed location. The global lookup (`global_container`: the
+  smallest of a data symbol, a function, an external reference) is shared with `linkSymbol`. A
+  function prints by its name (the `FunctionSymbol`, as `opCall` names it:
+  `*(code **)p = func_0x008244e0;`); an external reference fails loudly in the printer.
+  Superseded: "found where the printer reads it", a lookup at print time that could find a stack
+  symbol made after the link (review fix).
 - Character constants: `pushCharConstant` with display format 0 (a byte of 0x80 or more as an
   integer, `L'..'` for a wide character) and `printUnicode` (`unicodeNeedsEscape`, the named
   escapes, `printCharHexEscape` with 2, 4 or 8 digits), unit tested (`character_constants`).
@@ -2673,6 +2679,15 @@ Not run: the switch corpus, the full pass (`bars-queue.sh`), the other checks on
 other M8 numbers are from a build before one last fix (a written part of a symbol takes no
 cast, `is_read`; no check reached it: no silent miss); the four M8 print checks and `pcc-t`,
 `pc-t` on `simple` were rerun with the final build, the same counts.
+
+Review fixes (same branch): the PTRSUB symbol link moved from the printer to `namevars` (above),
+`isValueFlexible` reads the COPY input through the checked accessor, and a part of a symbol
+without a data-type fails as such. Rerun on the final build with every count as above: M8 all
+55 checks (the 51 others identical, the print checks 2 / 7 each, loud 5, silent 0); M500
+`nm-r` 498 / 499 (silent: 0x47a6b0) and `nm-t` 493 / 499 (the six loud `mergeAddrTied`
+misses), unchanged; M500 `pcc-t` and `pc-t` 143 / 495 (silent 0), `pcc-r` 235 and `pc-r` 244 / 495 (silent: 0x47a6b0);
+`simple` `pcc-t` and `pc-t` 95, `pcc-r` 109, `pc-r` 110 / 194 (silent 0). Not run: the switch corpus,
+the full pass.
 
 ## Speed
 
