@@ -16,7 +16,8 @@
 #   OUT      output directory (default rust/target/bars): summary.out (the lines printed, appended),
 #            <check>-<corpus>.log (decomp-diff.sh's output) and .miss (one line per function that
 #            differs: `loud` when ghidra-rs printed an error, `silent` otherwise, `timeout` when
-#            it printed nothing; `reference failed` lines for those the reference does not finish)
+#            it printed nothing or was killed at TIMEOUT; `reference failed` lines for those the
+#            reference does not finish, a reference killed at TIMEOUT among them)
 #   KEEP=1   keep the per-function outputs (OUT/<check>-<corpus>/), deleted otherwise
 #   LIST=1   only print the check-corpus pairs it would run, one `<check> <corpus>` per line
 #            (bars-queue.sh shares them between two machines)
@@ -46,7 +47,8 @@ run() {
         grep -q "^reference failed $a:" "$o/$name.miss" && continue
         fin=$((fin + 1))
         if cmp -s "$f" "$o/$name/rust/$a"; then same=$((same + 1)); continue; fi
-        if [ ! -s "$o/$name/rust/$a" ]; then tmo=$((tmo + 1)); echo "timeout $a"
+        if [ ! -s "$o/$name/rust/$a" ] || grep -q '^decomp-diff.sh: timed out' "$o/$name/rust/$a"; then
+            tmo=$((tmo + 1)); echo "timeout $a"
         elif grep -q 'ERROR\|error:\|panicked' "$o/$name/rust/$a"; then
             loud=$((loud + 1)); echo "loud $a: $(grep -m1 'ERROR\|error:\|panicked' "$o/$name/rust/$a" | cut -c1-160)"
         else silent=$((silent + 1)); echo "silent $a: $(grep -m1 "^different $a," "$o/$name.log" | cut -c1-200)"
