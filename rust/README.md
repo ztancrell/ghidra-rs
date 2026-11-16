@@ -2614,9 +2614,9 @@ Unit tests: the `else if` brace (`pending_brace_else_if`), the switch brace
 (`switch_brace_has_no_indent`), the printer-only casts (`printer_casts`); the block kinds
 themselves are covered by the corpus checks (a printed block needs a decompiled function).
 `pcc-t` on the switch corpus was stopped after 29 of 2,050 functions (all loud, silent 0): the machine
-was loaded by the `m3-s9` queue pass. Not rerun after the flow fix: M500 and `simple` (a function
-the fix touches had a header warning ghidra-rs lacked, so it was a miss before; the counts can
-only rise). Not run: the full pass (`bars-queue.sh`), the other checks on M500, simple and switch.
+was loaded by the `m3-s9` queue pass. Rerun after the flow fix, the review fixes and the merge of master's `decomp-diff.sh` timeout fix
+(superseded: "not rerun after the flow fix"): M500 and `simple`, all four print checks, the same
+counts as the table; M8 all 55 checks as before. Not run: the full pass (`bars-queue.sh`), the other checks on M500, simple and switch.
 
 ## Speed
 
