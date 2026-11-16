@@ -1722,8 +1722,10 @@ block kind is a loud miss; silent: only 0x47a6b0 rules on, which differs from `r
 109, 57, 110, 49 / 194; switch `pcc-r` 153 / 2005 (silent 0 after the flow fix for the "overlaps instruction" header warning), `pcc-t` not finished. M8: the 51 other checks identical, `pc-r`/`pcc-r` 2 / 7.
 Next: the loud blockers left: `CALLIND`, array and field access (`PTRSUB`, `PTRADD`),
 anonymous data-types, comments in the body, float and character constants, `PIECE`,
-`FLOAT2FLOAT`, `FLOAT_NAN`; labels of spliced blocks (several cover ranges). (Superseded: array and
-field access and character constants are slice 3A, below.)
+`FLOAT2FLOAT`, `FLOAT_NAN`; labels of spliced blocks (several cover ranges).
+(Superseded in part: slice 3A, below, does array and field access and character constants;
+slice 3B, below, does `CALLIND`, anonymous data-types, the body comments, the float operators
+and float constants; both are merged on `m3-print3`.)
 
 ### S9 slice 3A: array and field access, characters in the printer, branch `m3-print3a` (2026-11-15)
 
@@ -1738,6 +1740,37 @@ character constants (`pushCharConstant`, `printUnicode`, unit tested). Details: 
 `namevars`; `nm-r`, `nm-t` on M500 unchanged, 498 and 493 / 499); M8 the 51 other checks identical, the four print
 checks 2 / 7. Next: `INT_SBORROW` (types on: 100 on M500 `pc-t`) and `PIECE` (71), with slice 3B's
 `CALLIND`, float ops and constants, comments in the body and anonymous data-types.
+(Superseded: slice 3B is merged with it on `m3-print3`, below.)
+
+### S9 slice 3B: indirect calls, floats, body comments, anonymous types, branch `m3-print3b` (2026-11-15)
+
+`opCallind`; the float operators (`NAN`, `ABS`, `SQRT`, `CEIL`, `FLOOR`, `ROUND` as functions,
+`FLOAT2FLOAT` and `TRUNC` as casts, `opFloatInt2Float` absorbing an implied INT_ZEXT); float
+constants as `FloatFormat::printDecimal` prints them (unit tested against the C++);
+`genericTypeName`; the body comments through `CommentSorter` (`comment.rs`), `emitCommentGroup`
+and `emitCommentBlockTree`; `BlockBasic::cover` keeps the ranges of a spliced block for
+`contains`. Fixed on the way: flow records the jump-table failure warning (`stageJumpTable`), the
+cause of the 19 silent misses the comments first showed. Details: rust/README.md, "C printing,
+slice 3B". M500 `pcc-r` 441 / 495 (was 235), `pc-r` 442 (was 244), `pcc-t` 94 (was 58), `pc-t` 72
+(was 45); `simple` 174, 174, 91, 83 / 194 (were 109, 110, 57, 49); M8 `pc-r`/`pcc-r` 6 / 7, the
+51 other checks identical; silent only 0x47a6b0 (rules on). Switch `pcc-r` not finished at the commit.
+Review fixes: an unported jump-table failure (the partial action's or emulation's) fails the
+decompile instead of warning; a second table after a failed partial action fails loudly; the
+dropped warnings ("ptrarith problems", offcut call, PIC construction, jump-table truncation) are
+recorded; `fail_return` fails loudly. Rerun: the same counts.
+Next: `PIECE`, the SUBPIECE field extraction, `CALLOTHER`, `POPCOUNT`, `INT_SBORROW` and
+`INT_SCARRY`, labels of spliced blocks, and the array and field access of slice 3A.
+(Superseded: slice 3A is merged with it on `m3-print3`, below.)
+
+### S9 slices 3A and 3B merged, branch `m3-print3` (2026-11-15)
+
+Both slices, no code change in the merge (their edits to `push_constant`, the opcode dispatch
+and `funcdata.rs` sit side by side). Details: rust/README.md, "C printing, slices 3A and 3B
+merged". M500 `pcc-r` and `pc-r` 442 / 495, `pcc-t` and `pc-t` 257 / 495; `simple` 174, 174, 138,
+138 / 194; silent only 0x47a6b0 (rules on); M8 the 51 other checks identical, the print checks 6 / 7
+(`-r`) and 5 / 7 (`-t`). Next, by M500 `pcc-t` misses: `INT_SBORROW` 119, `PIECE` 96, `POPCOUNT` 8;
+with rules on, the SUBPIECE field extraction 19 and `PIECE` 14; then `CALLOTHER`, `INT_CARRY`,
+`INT_SCARRY` and labels of spliced blocks.
 
 ## Running stages in parallel
 

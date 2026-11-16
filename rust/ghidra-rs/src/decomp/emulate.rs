@@ -40,7 +40,7 @@ pub(crate) fn eval_unary(opc: Opcode, sizeout: u32, sizein: u32, in1: u64) -> Re
         Opcode::BoolNegate => in1 ^ 1,
         Opcode::Popcount => u64::from(in1.count_ones()),
         Opcode::Lzcount => u64::from((in1 & calc_mask(sizein)).leading_zeros() - (64 - 8 * sizein.min(8))),
-        _ => return Err(EmuError::Other(format!("Unsupported op in emulation: {opc:?}"))),
+        _ => return Err(EmuError::Other(format!("jump table: emulating {opc:?} is not ported"))),
     })
 }
 
@@ -157,7 +157,7 @@ pub(crate) fn eval_binary(opc: Opcode, sizeout: u32, sizein: u32, in1: u64, in2:
                 (in1 >> (in2 * 8)) & m
             }
         }
-        _ => return Err(EmuError::Other(format!("Unsupported op in emulation: {opc:?}"))),
+        _ => return Err(EmuError::Other(format!("jump table: emulating {opc:?} is not ported"))),
     })
 }
 
@@ -209,7 +209,9 @@ impl<'a> EmulateFunction<'a> {
         match o.opc {
             Opcode::Load => {
                 let off = self.get(o.ins[1])?;
-                let out = out.ok_or_else(|| EmuError::Other("LOAD without output".into()))?;
+                let out = out.ok_or_else(|| {
+                    EmuError::Other("jump table: emulating a LOAD without output is not supported".into())
+                })?;
                 let val = self.load_image_value(off, size(out))?;
                 self.set(out, val);
             }
@@ -235,7 +237,9 @@ impl<'a> EmulateFunction<'a> {
             }
             Opcode::Segmentop => return Err(EmuError::Other("Segment operand missing definition".into())),
             opc => {
-                let out = out.ok_or_else(|| EmuError::Other("op without output".into()))?;
+                let out = out.ok_or_else(|| {
+                    EmuError::Other("jump table: emulating an op without output is not supported".into())
+                })?;
                 let a = self.get(o.ins[0])?;
                 let val = if o.ins.len() == 1 {
                     eval_unary(opc, size(out), size(o.ins[0]), a)?

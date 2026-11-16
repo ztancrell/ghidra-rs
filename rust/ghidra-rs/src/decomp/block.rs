@@ -90,6 +90,9 @@ pub(crate) struct BlockBasic {
     /// `mergeRange` ran (`spliceBlockBasic`): the C++ cover may hold two ranges, which
     /// `start`/`stop` do not keep, so `getEntryAddr` is not known
     pub(crate) spliced: bool,
+    /// the ranges of the cover once spliced (`mergeRange`), which `contains` reads; empty: the
+    /// one range `start`..=`stop`
+    pub(crate) cover: Vec<(u64, u64)>,
     /// the immediate dominator (`immed_dom`), none for the entry
     pub(crate) idom: Option<BlockId>,
 }
@@ -135,6 +138,7 @@ impl BlockGraph {
             joined: false,
             duplicated: false,
             spliced: false,
+            cover: Vec::new(),
             mark: false,
             entry_point: false,
             idom: None,

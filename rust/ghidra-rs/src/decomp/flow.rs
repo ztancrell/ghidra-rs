@@ -85,6 +85,14 @@ pub(crate) fn follow_flow(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
 /// What `stageJumpTable` recovers: the table's addresses and the values of its model, or why not.
 type Staged = std::result::Result<(Vec<u64>, Option<jumptable::ValueRange>), Fail>;
 
+/// The partial function of jump-table recovery (`stageJumpTable`): not made yet, made and
+/// simplified, or made with a failed `jumptable` action.
+enum Partial {
+    None,
+    Ready(Box<Funcdata>),
+    Failed,
+}
+
 fn ram_addr(a: u64) -> String {
     format!("(ram,0x{a:08x})")
 }
@@ -496,7 +504,7 @@ impl Flow<'_> {
     /// constant, which nothing before the rule stages makes.
     fn recover_jump_tables(&mut self) -> Result<Vec<usize>> {
         let mut tables = Vec::new();
-        let mut partial: Option<Funcdata> = None;
+        let mut partial = Partial::None;
         for op in std::mem::take(&mut self.tablelist) {
             let res = match jumptable::early_fail(self.fd, op) {
                 Some(f) => Err(f),
@@ -521,6 +529,16 @@ impl Flow<'_> {
                         let why = if let Fail::Normal(m) = &f { m.as_str() } else { "likely thunk" };
                         eprintln!("jumptable in 0x{:x} at 0x{:x}: {why}", self.fd.entry, self.fd.op(op).seq.addr);
                     }
+                    if let Fail::Normal(m) = &f {
+                        // a message ghidra-rs makes on a path it does not port is not one the C++
+                        // could warn of: the function fails instead
+                        if LowlevelError(m.clone()).is_unported() {
+                            return Err(LowlevelError(m.clone()));
+                        }
+                        // stageJumpTable's catch: `warning(err.explain, op->getAddr())`
+                        let addr = self.fd.op(op).seq.addr;
+                        self.fd.warning(m, addr);
+                    }
                     self.truncate_indirect_jump(op, matches!(f, Fail::Normal(_)))?
                 }
                 Err(Fail::Callother) => {
@@ -539,57 +557,59 @@ impl Flow<'_> {
     /// the function shares, so they print with the function's own.
     fn carry_warnings(&mut self, p: &Funcdata, nw: usize, nc: usize) {
         for w in p.warnings.iter().skip(nw) {
-            if !self.fd.warnings.contains(w) {
-                self.fd.warnings.push(w.clone());
-            }
+            self.fd.add_header(w.clone());
         }
         for (a, m) in p.comments.iter().skip(nc) {
             self.fd.add_comment(*a, m.clone());
         }
     }
 
-    fn stage_jump_table(&mut self, partial: &mut Option<Funcdata>, op: OpId) -> Result<Staged> {
-        if partial.is_none() {
-            let mut p = self.fd.clone();
-            p.jumptablerecovery_on = true;
-            let (nw, nc) = (p.warnings.len(), p.comments.len());
-            let mut pflow = Flow {
-                fd: &mut p,
-                arch: self.arch,
-                parse: self.arch.sleigh.new_parse(),
-                visited: self.visited.clone(),
-                addrlist: Vec::new(),
-                tablelist: Vec::new(),
-                injectlist: Vec::new(),
-                insn_count: 0,
-                baddata_count: 0,
-                // the copy constructor copies `flags`
-                reinterpreted_present: self.reinterpreted_present,
-            };
-            pflow.generate_blocks()?;
-            let res = action::jumptable_partial(&mut p, self.arch);
-            self.carry_warnings(&p, nw, nc);
-            if let Err(e) = res {
-                // An error of the jumptable action fails the table, as in the C++ (`stageJumpTable`
-                // catches `LowlevelError`). One from a path ghidra-rs does not port is not a
-                // failure the reference has: it is reported on stderr, always, so a check
-                // cannot take it for one (`decomp-diff.sh` compares stderr too).
-                if e.is_unported() {
-                    eprintln!(
-                        "jumptable partial of 0x{:x}: unported path, table at 0x{:x} not recovered: {}",
-                        self.fd.entry,
-                        self.fd.op(op).seq.addr,
-                        e.0
-                    );
-                }
-                return Ok(Err(Fail::Normal(e.0)));
+    fn stage_jump_table(&mut self, partial: &mut Partial, op: OpId) -> Result<Staged> {
+        match partial {
+            Partial::Failed => {
+                // the C++ marks the partial function before its action runs, so after a failed
+                // action a later table skips the action and reads the half-simplified clone
+                return err("jump table: a second table after the partial function's action failed is not ported");
             }
-            jumptable::fold_constants(&mut p, self.arch);
-            jumptable::calc_nz_mask(&mut p, self.arch);
-            self.carry_warnings(&p, nw, nc);
-            *partial = Some(p);
+            Partial::None => {
+                let mut p = self.fd.clone();
+                p.jumptablerecovery_on = true;
+                let (nw, nc) = (p.warnings.len(), p.comments.len());
+                let mut pflow = Flow {
+                    fd: &mut p,
+                    arch: self.arch,
+                    parse: self.arch.sleigh.new_parse(),
+                    visited: self.visited.clone(),
+                    addrlist: Vec::new(),
+                    tablelist: Vec::new(),
+                    injectlist: Vec::new(),
+                    insn_count: 0,
+                    baddata_count: 0,
+                    // the copy constructor copies `flags`
+                    reinterpreted_present: self.reinterpreted_present,
+                };
+                pflow.generate_blocks()?;
+                let res = action::jumptable_partial(&mut p, self.arch);
+                self.carry_warnings(&p, nw, nc);
+                if let Err(e) = res {
+                    // An error of the jumptable action fails the table, as in the C++
+                    // (`stageJumpTable` catches `LowlevelError` and warns of it). One from a path
+                    // ghidra-rs does not port is not a failure the reference has: it ends the
+                    // decompile.
+                    if e.is_unported() {
+                        return Err(e);
+                    }
+                    *partial = Partial::Failed;
+                    return Ok(Err(Fail::Normal(e.0)));
+                }
+                jumptable::fold_constants(&mut p, self.arch);
+                jumptable::calc_nz_mask(&mut p, self.arch);
+                *partial = Partial::Ready(Box::new(p));
+            }
+            Partial::Ready(_) => {}
         }
-        let p = partial.as_ref().unwrap();
+        let Partial::Ready(p) = partial else { return err("jump table: no partial function") };
+        let p: &Funcdata = p;
         if std::env::var("GHIDRA_RS_JT_DEBUG").is_ok_and(|v| v == "2") {
             eprintln!("{}", super::print_raw(p, self.arch).unwrap_or_default());
         }
@@ -600,9 +620,31 @@ impl Flow<'_> {
         if partop.is_dead() {
             return Ok(Ok((Vec::new(), None)));
         }
-        // `testForReturnAddress` (fail_return) is left out: x86's return address is on the
-        // stack, which the ported heritage pass leaves as LOADs, so it cannot match yet.
-        Ok(jumptable::recover_addresses(p, self.arch, op).map(|(t, _partial, values)| (t, Some(values))))
+        // `testForReturnAddress` (fail_return, "Treating indirect jump as return") is not
+        // ported: a target traced back through COPY, INDIRECT and INT_AND with a constant to
+        // the input at stack offset 0 (x86's return address) fails loudly instead.
+        let mut vn = p.op(op).ins[0];
+        while let Some(d) = p.vn(vn).def {
+            let o = p.op(d);
+            match o.opc {
+                Opcode::Copy | Opcode::Indirect => vn = o.ins[0],
+                Opcode::IntAnd if p.vn(o.ins[1]).is_constant() => vn = o.ins[0],
+                _ => break,
+            }
+        }
+        let root = p.vn(vn);
+        if root.def.is_none() && root.space == Space::Stack && root.offset == 0 && root.is_input() {
+            return err(
+                "jump table: an indirect jump to the return address (testForReturnAddress, fail_return) is not ported",
+            );
+        }
+        let res = jumptable::recover_addresses(p, self.arch, op);
+        if let Ok((.., true)) = res {
+            // `fd->warning` on the partial function: its prefix, into the shared database
+            let addr = self.fd.op(op).seq.addr;
+            self.fd.add_comment(addr, "WARNING (jumptable): Sanity check requires truncation of jumptable".into());
+        }
+        Ok(res.map(|(t, _partial, values, _)| (t, Some(values))))
     }
 
     /// Port of `FlowInfo::truncateIndirectJump` for a failed recovery (`fail_normal`,
@@ -631,9 +673,17 @@ impl Flow<'_> {
             let (op, known) = (call.op, call.known);
             let Some(addr) = call.entry.filter(|_| !known && self.opc(op) == Opcode::Call) else { continue };
             let Some((&start, stat)) = self.visited.range(..=addr).next_back() else { continue };
-            if start != addr || start + stat.size <= addr {
-                continue; // "Call to offcut address within same function" is only a warning
+            if start + stat.size <= addr {
+                continue;
             }
+            let opaddr = self.fd.op(op).seq.addr;
+            if start != addr {
+                self.fd.warning("Call to offcut address within same function", opaddr);
+                continue;
+            }
+            // `printRaw` of a 4-byte ram address
+            let pic = format!("Possible PIC construction at 0x{opaddr:08x}: Changing call to branch");
+            self.fd.warning_header(pic);
             self.fd.op_set_opcode(op, Opcode::Branch);
             let targ = self.target(addr)?;
             self.mark(targ, OpFlags::START_BASIC);

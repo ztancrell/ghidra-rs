@@ -540,8 +540,9 @@ impl AddTree {
             newop = def(fd, o);
         }
         let Some(newop) = newop else {
-            // `data.warning("ptrarith problems", addr)`: a comment at the address, which only the C
-            // output shows (comments are stage S9); the tree is left as it is, as in the C++
+            // "This should never happen" (ruleaction.cc); the tree is left as it is, as in the C++
+            let addr = fd.op(self.base_op).seq.addr;
+            fd.warning("ptrarith problems", addr);
             return Ok(());
         };
         let o = out(fd, self.base_op)?;

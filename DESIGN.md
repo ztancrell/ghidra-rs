@@ -271,6 +271,15 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    parts of symbols) and character constants in `print C` (superseded: "fails loudly" for those);
    M500 `pcc-t` 143 / 495, `pc-t` 143 / 495, `pcc-r` 235 and `pc-r` 244 / 495 (unchanged), silent only
    0x47a6b0; `simple` `pcc-t` and `pc-t` 95 / 194; M8 the 51 other checks identical.
+   S9 slice 3B on branch `m3-print3b` (2026-11-15): indirect calls, the float operators and float
+   constants (`printDecimal`), anonymous data-types (`genericTypeName`) and the body comments
+   (`CommentSorter`, `comment.rs`) in `print C` (superseded: "fails loudly" for those); flow records
+   the jump-table failure warning. M500 `pcc-r` 441 / 495, `pc-r` 442, `pcc-t` 94, `pc-t` 72;
+   `simple` 174, 174, 91, 83 / 194; silent only 0x47a6b0; M8 the 51 other checks identical. Switch `pcc-r` not finished.
+   Review fixes on it: unported jump-table failures fail loudly, four dropped warnings recorded; same counts.
+   Slices 3A and 3B merged on branch `m3-print3` (2026-11-16): M500 `pcc-r` and `pc-r` 442 / 495, `pcc-t`
+   and `pc-t` 257 / 495; `simple` 174, 174, 138, 138 / 194; silent only 0x47a6b0; M8 the 51 other checks
+   identical, the print checks 6 / 7 (`-r`) and 5 / 7 (`-t`).
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

@@ -694,7 +694,7 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
   on), `cs-r cs-t fsc-r fsc-t` (S9 `setcasts`: `print raw` after it, and `finalstructure`
   with it on), `swfs-r swfs-t swsn-r swsn-t swfsc-r swfsc-t` (`finalstructure` with case
   labels, `switchnorm`, and `finalstructure` with case labels and `setcasts` on) and
-  `pc-r pc-t pcc-r pcc-t` (`print C`, S9 slices 1 to 3A, `pcc` with `setcasts` on; see "C printing").
+  `pc-r pc-t pcc-r pcc-t` (`print C`, S9 slices 1, 2, 3A and 3B, `pcc` with `setcasts` on; see "C printing").
 - `JOBS` (default `nproc`), `TIMEOUT` (seconds per function and engine, default 120 as for every bar here; 0x4c48d0 of M500 takes
   the reference about 485 s and ghidra-rs about 600 s alone, so at 120 s it counts as a function
   the reference does not finish), `OUT`
@@ -1090,7 +1090,8 @@ targets. 0xa4e8c2 is left out: its partial function has 780,000 ops (flow runs t
 instruction limit); ghidra-rs takes 49 s on it, the reference had not finished after 35 min.
 Not ported, and why: `fail_callother` (an address made by a CALLOTHER; ghidra-rs stops with
 an error: 2 functions in obfuscated code, 0x1c3c0d9 and 0x1c3c0fa), `fail_return`
-(`testForReturnAddress`: the return address is on the stack, not heritaged yet), the retry of
+(`testForReturnAddress`; superseded: "not heritaged yet": since slice 3B a target traced to
+the input at stack offset 0 fails loudly in flow.rs), the retry of
 a table whose switch looks unreachable (it needs a guard folded to a constant; it is taken as
 complete), `checkUnrolledGuard`, multistage tables, overrides, `JumpAssisted`.
 
@@ -2577,7 +2578,9 @@ unchanged by construction: no struct or union reaches them), the `simple` and sw
   range), block nesting deeper than 1000: an addition of ghidra-rs (the C++ recurses without a limit), so
   a deep function fails loudly instead of overflowing the stack; the front leaf of a label that is
   not a block copy. Comments in the
-  body, anonymous data-types, the long suffix and the operators of slice 1 stay loud.
+  body, anonymous data-types, the long suffix and the operators of slice 1 stay loud. (Superseded
+  in part: slice 3B, below, prints the body comments, anonymous data-types, `CALLIND` and the
+  float operators and constants.)
 - `bars.sh`: `pcc-r` and `pcc-t` also run on the switch corpus, with the `sw` options there
   (`switchnorm` on: the case labels come from it; with it off the reference fails on every
   switch in `finalizePrinting`).
@@ -2615,9 +2618,92 @@ Unit tests: the `else if` brace (`pending_brace_else_if`), the switch brace
 (`switch_brace_has_no_indent`), the printer-only casts (`printer_casts`); the block kinds
 themselves are covered by the corpus checks (a printed block needs a decompiled function).
 `pcc-t` on the switch corpus was stopped after 29 of 2,050 functions (all loud, silent 0): the machine
-was loaded by the `m3-s9` queue pass. Not rerun after the flow fix: M500 and `simple` (a function
-the fix touches had a header warning ghidra-rs lacked, so it was a miss before; the counts can
-only rise). Not run: the full pass (`bars-queue.sh`), the other checks on M500, simple and switch.
+was loaded by the `m3-s9` queue pass. Rerun after the flow fix, the review fixes and the merge of master's `decomp-diff.sh` timeout fix
+(superseded: "not rerun after the flow fix"): M500 and `simple`, all four print checks, the same
+counts as the table; M8 all 55 checks as before. Not run: the full pass (`bars-queue.sh`), the other checks on M500, simple and switch.
+
+### C printing, slice 3B: calls, floats, comments, anonymous types (branch `m3-print3b`, 2026-11-15)
+
+- `printc.rs`: `opCallind` (`(*fn)(args)`, the pointer under a dereference; `hide_thisparam`
+  is set only by the Java printer, so no `this` slot is hidden); the float operators of
+  printc.hh: `NAN`, `ABS`, `SQRT`, `CEIL`, `FLOOR`, `ROUND` in functional syntax (`opFunc` with
+  the operator name alone), `FLOAT2FLOAT` and `TRUNC` as casts, `opFloatInt2Float` (a cast of
+  the input, or of the implied INT_ZEXT's input it absorbs); the float compare and arithmetic
+  operators as before.
+- Float constants (`push_float`): `INFINITY`, `NAN` with their sign, else
+  `FloatFormat::printDecimal`: `ostream << double` (`%.*g`) at precision 6 to 9 (size 4) or 15
+  to 17 (size 8) until the text reads back as the value (as a float for size 4; libstdc++ reads
+  an overflow as the largest finite value), `.0` added to a token without `.` or `e`. Sizes
+  other than 4 and 8 print `FLOAT_UNKNOWN` (the x86 translator has no other float format).
+  Unit tests pin the tokens against the C++ (a small program printed them; 6,000 random
+  encodings also matched before the test was cut to the listed ones).
+- `genericTypeName`: a data-type without a name prints `unkbyte3`, `unkint3`, `unkuint3`,
+  `unkfloat3`, `BADSPACEBASE` or `BADTYPE`.
+- Body comments: `comment.rs` ports `CommentSorter` (`setupFunctionList`, `findPosition`,
+  `setupBlockList`, `setupOpList`) over `Funcdata::comments` in database order (address, then
+  the order added); `printc.rs` `emitCommentGroup` (before each statement and at the end of a
+  basic block, at indent 20) and `emitCommentBlockTree` (before an `if`, `for` or `while` line).
+  `Funcdata::main_ops_around` is `beginOpMain` and the op before it, INDIRECTs left out as the
+  C++ `optree`. A header warning and a body warning at the entry with the same text are one
+  comment (`addCommentNoDuplicate` checks both). The header stays `Funcdata::warnings`.
+- `BlockBasic::cover`: the ranges `spliceBlockBasic` merges (`mergeRange`), copied by
+  `nodeSplit`, so `contains` sees the gap between them (the label of a spliced block stays loud).
+- Fixed on the way (the 19 silent misses of the first run): flow now records the jump-table
+  failure warning (`stageJumpTable`'s `warning(err.explain, op->getAddr())`, "Could not recover
+  jumptable at .. Too many branches" and the other `fail_normal` messages) before "Treating
+  indirect jump as call".
+- Review fixes (second commit on the branch):
+  - A jump-table failure whose message ghidra-rs makes on a path it does not port
+    (`is_unported`) ends the decompile instead of becoming a body warning and a CALLIND: an
+    unported error of the partial function's action, and the emulation errors the C++ does
+    not have (emulating an op not ported, an op without output, the load image read after the
+    emulated path, whose C++ message is the load image's own). Superseded: "reported on
+    stderr" for the partial's unported errors.
+  - After the partial function's action failed, a second table of the same function fails
+    loudly: the C++ marks the partial before the action runs and reads the half-simplified
+    clone for the next table; ghidra-rs made a fresh one.
+  - The partial's header warnings go through `add_header`, so the header and body dedupe
+    applies to them too.
+  - Body and header warnings that were dropped: "ptrarith problems" (`RulePtrArith`),
+    "Call to offcut address within same function" and the header "Possible PIC construction at
+    ..: Changing call to branch" (`checkContainedCall`), "Sanity check requires truncation of
+    jumptable" (`JumpTable::sanityCheck`, with the jumptable prefix of the partial).
+  - `testForReturnAddress` (`fail_return`, "Treating indirect jump as return") fails loudly
+    when the jump's target traces through COPY, INDIRECT and INT_AND by a constant to the
+    input at stack offset 0.
+  - Audited and not reachable: "Subroutine does not return" and "Does not return" (ghidra-rs
+    has no non-returning prototype, and `fail_callother` fails loudly), "Function flow out of
+    bounds" (flow covers the whole space and inlining is not ported), `ActionPrototypeWarnings`
+    (the checks break before `prototypewarnings`, which is `not_ported`), "Second-stage recovery
+    error" (a table that looks unreachable is taken as complete, so `recoverMultistage` never
+    runs; a multistage restart in `matchModel` fails loudly) and "Switch is manually
+    overridden" (the console sets no override).
+
+Numbers (functions the reference finishes; before = slice 2):
+
+| check | M8 before | M8 after | M500 before | M500 after | simple before | simple after |
+|---|---|---|---|---|---|---|
+| `pcc-r` | 2 / 7 | 6 / 7 | 235 / 495 | 441 / 495 (loud 53, silent 1) | 109 / 194 | 174 / 194 (loud 20) |
+| `pc-r` | 2 / 7 | 6 / 7 | 244 / 495 | 442 / 495 (loud 52, silent 1) | 110 / 194 | 174 / 194 (loud 20) |
+| `pcc-t` | 0 / 7 | 1 / 7 | 58 / 495 | 94 / 495 (loud 401) | 57 / 194 | 91 / 194 (loud 103) |
+| `pc-t` | 0 / 7 | 1 / 7 | 45 / 495 | 72 / 495 (loud 423) | 49 / 194 | 83 / 194 (loud 111) |
+
+The four checks on M500 and `simple` and M8 every check were rerun in full after the review
+fixes, with the same counts (superseded: the first commit counted a rerun of the three functions
+the `cover` fix moves, 0x4f15d0, 0x9e0b71 and 0xa714b0).
+
+Switch corpus `pcc-r`: not finished at the commit (about 291 of 2,005 functions done after an hour on a loaded machine; none of the finished ones was a silent miss).
+
+The silent miss is 0x47a6b0 alone (rules on), the known one that differs from `r1` on. The
+loud misses, M500 `pcc-r`: a SUBPIECE field extraction 19, `PIECE` 14, `CALLOTHER` 5,
+`POPCOUNT` 4, the label of a spliced block 3, `INT_SBORROW` 3, `INT_SCARRY` 2, a variable
+linked to a function or an external reference 2, a character constant 1;
+`pcc-t`: array or field access 205, `PTRADD` 94,
+character constants 35 (with 0x4f15d0), `PIECE` 28, `INT_SBORROW` 19, `PTRSUB` 8, the `mergeAddrTied` error 6,
+then 3 or fewer. `simple` `pcc-r`: `CALLOTHER` 8, `PIECE`, `INT_SBORROW` and the field
+extraction 3 each, comments in a spliced block 2 (printed since the fix). No comment, `CALLIND`,
+float or anonymous data-type error is left. M8: the 51 other checks identical (8 / 8, `fs*`
+7 / 7); the M8 misses are `INT_SBORROW` (`pcc-r`) and array or field access (`pcc-t`).
 
 ### C printing, slice 3A: array and field access, characters (branch `m3-print3a`, 2026-11-15)
 
@@ -2688,6 +2774,38 @@ without a data-type fails as such. Rerun on the final build with every count as 
 misses), unchanged; M500 `pcc-t` and `pc-t` 143 / 495 (silent 0), `pcc-r` 235 and `pc-r` 244 / 495 (silent: 0x47a6b0);
 `simple` `pcc-t` and `pc-t` 95, `pcc-r` 109, `pc-r` 110 / 194 (silent 0). Not run: the switch corpus,
 the full pass.
+
+### C printing, slices 3A and 3B merged (branch `m3-print3`, 2026-11-16)
+
+Slice 3A (array and field access, `PTRADD`, `PTRSUB`, character constants, the `namevars` link
+of a space-base PTRSUB) and slice 3B (indirect calls, floats, body comments, anonymous types,
+the flow and jump-table warnings) together. No code changed in the merge: the two slices touch
+different arms of `push_constant` (3A the character arm, 3B the `Meta::Float` arm) and of the
+`push_opcode` dispatch (3A `Ptradd`, `Ptrsub`; 3B `Callind` and the float operators), and
+`funcdata.rs` keeps 3A's `symref` beside 3B's `add_header`. Not ported yet, still loud: the long
+suffix of a constant, `checkAddressOfCast`, labels of spliced blocks, strings, unions,
+`TypePointerRel` and the remaining operators (superseded: the "Not ported" lists and the
+"Next" lines of the two slice sections above, each written without the other slice).
+
+| check | M8 | M500 3A | M500 3B | M500 merged | simple 3A | simple 3B | simple merged |
+|---|---|---|---|---|---|---|---|
+| `pcc-r` | 6 / 7 | 235 | 441 | 442 / 495 (loud 52, silent 1) | 109 | 174 | 174 / 194 (loud 20) |
+| `pc-r` | 6 / 7 | 244 | 442 | 442 / 495 (loud 52, silent 1) | 110 | 174 | 174 / 194 (loud 20) |
+| `pcc-t` | 5 / 7 | 143 | 94 | 257 / 495 (loud 238, silent 0) | 95 | 91 | 138 / 194 (loud 56) |
+| `pc-t` | 5 / 7 | 143 | 72 | 257 / 495 (loud 238, silent 0) | 95 | 83 | 138 / 194 (loud 56) |
+
+The one silent miss is 0x47a6b0 (`pcc-r`, `pc-r`), the known rules-on miss. 0x4f15d0, which 3B
+failed with types on on a character constant, prints identically. The loud misses on M500,
+`pcc-t` and `pc-t`: `INT_SBORROW` 119, `PIECE` 96, `POPCOUNT` 8, `mergeAddrTied` 6, `CALLOTHER` 4,
+`INT_CARRY` 2, a variable linked to a function or external reference 2, `INT_SCARRY` 1; `pcc-r`
+and `pc-r`: a SUBPIECE field extraction 19, `PIECE` 14, `CALLOTHER` 5, `POPCOUNT` 4, the label of
+a spliced block 3, `INT_SBORROW` 3, `INT_SCARRY` 2, a variable linked to a function 2. `simple`
+`pcc-t`: `PIECE` 23, `INT_SBORROW` 21, `CALLOTHER` 6, `mergeAddrTied` 3, `POPCOUNT` 3. M8: the 51
+other checks identical; the print misses are loud (`PIECE` at 0x73a340 types on, `INT_SBORROW`
+at 0x9eec5e). A CALLIND through a LOAD (`(**(code **)(iVar1 + 0x50))()`) prints identically in 2 functions of
+`simple` (`pcc-t`, outputs kept for the count); every other function there with an indirect call
+is identical or loud. No call through a structure field (`(*p->fn)()`) was in the `simple` outputs searched; M500 was not searched for one.
+Not run: the switch corpus, the full pass (`bars-queue.sh`), the other checks on M500 and `simple`.
 
 ## Speed
 
