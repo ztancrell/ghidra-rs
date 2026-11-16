@@ -694,7 +694,7 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
   on), `cs-r cs-t fsc-r fsc-t` (S9 `setcasts`: `print raw` after it, and `finalstructure`
   with it on), `swfs-r swfs-t swsn-r swsn-t swfsc-r swfsc-t` (`finalstructure` with case
   labels, `switchnorm`, and `finalstructure` with case labels and `setcasts` on) and
-  `pc-r pc-t pcc-r pcc-t` (`print C`, S9 slices 1 and 2, `pcc` with `setcasts` on; see "C printing").
+  `pc-r pc-t pcc-r pcc-t` (`print C`, S9 slices 1 to 3A, `pcc` with `setcasts` on; see "C printing").
 - `JOBS` (default `nproc`), `TIMEOUT` (seconds per function and engine, default 120 as for every bar here; 0x4c48d0 of M500 takes
   the reference about 485 s and ghidra-rs about 600 s alone, so at 120 s it counts as a function
   the reference does not finish), `OUT`
@@ -2462,7 +2462,8 @@ a union, a one-element array, a one-field structure, a pointer to one), a global
 name hides (a `::` scope prefix), anonymous and function types, locked prototypes. Casts are not
 printed yet: `setcasts` (`cast.cc`) is ported separately, so the checks skip it on both engines
 and neither prints a cast. Superseded: the blocks, labels, gotos and casts are printed since slice 2
-(below, "C printing, slice 2").
+(below, "C printing, slice 2"). Superseded too: array and field access (`PTRSUB`, `PTRADD`), partial symbols and
+character constants are printed since slice 3A (below, "C printing, slice 3A").
 
 Checks (`tools/bars.sh`), at `break start prototypewarnings` with `print C`, `setcasts` and the
 `localrecovery` leaves skipped on both engines: `pc-r` (rules on, `tail-r-options.txt`) and `pc-t`
@@ -2617,6 +2618,61 @@ themselves are covered by the corpus checks (a printed block needs a decompiled 
 was loaded by the `m3-s9` queue pass. Not rerun after the flow fix: M500 and `simple` (a function
 the fix touches had a header warning ghidra-rs lacked, so it was a miss before; the counts can
 only rise). Not run: the full pass (`bars-queue.sh`), the other checks on M500, simple and switch.
+
+### C printing, slice 3A: array and field access, characters (branch `m3-print3a`, 2026-11-15)
+
+- `printc.rs` (its own `impl` block): `checkArrayDeref` (a LOAD or STORE through an implied
+  `PTRSUB` or `PTRADD`, also behind a SEGMENTOP, prints the value, `print_load_value` /
+  `print_store_value`), `opPtradd` (`p[i]`, or `p + i` for the pointer), `opPtrsub` with
+  `isValueFlexible` and its cases: a structure field (`&p->x`, `p->x`, `&(..).x`, `(..).x`,
+  `[0]` for an array field, `field_0x..` past the named fields), a symbol of a space (`&name`,
+  `name` for an array or code symbol, `name[0]`, a part of a symbol, the unnamed location
+  `ram0x..` / `stack0x..`), the first element of an array (`*p`, `p[0]`); `pushPartialSymbol`
+  (`sym.field`, `sym[i]`, `sym._off_size_`, the SUBPIECE-style cast of a read), now also reached
+  from `pushSymbolDetail` for a variable that is part of its symbol; the tokens `.`, `->`,
+  `[ ]` (`subscript`) and `&` with printc.cc's precedences.
+- The symbol a space-base PTRSUB points at is found where the printer reads it
+  (`linkSymbolReference`: `queryContainer` without a use point in the stack's or the global
+  scope); `namevars` still links only the names. A function there prints by its name (the
+  `FunctionSymbol`, as `opCall` names it: `*(code **)p = func_0x008244e0;`).
+- Character constants: `pushCharConstant` with display format 0 (a byte of 0x80 or more as an
+  integer, `L'..'` for a wide character) and `printUnicode` (`unicodeNeedsEscape`, the named
+  escapes, `printCharHexEscape` with 2, 4 or 8 digits), unit tested (`character_constants`).
+- Fail loudly: a PTRSUB into a union (`getUnionField`) or an external reference, a part of a
+  symbol through a union or a structure that needs resolution (`findResolve`), a variable past
+  the end of its symbol (`pushMismatchSymbol`), a character constant with a symbol (an equate).
+  `TypePointerRel` is not ported, so its parts of `opPtrsub` never apply. `PIECE` stays loud
+  (none of these forms needs it).
+
+Numbers (functions the reference finishes; before = slice 2 on `m3-print2`, as measured there):
+
+| check | M8 before | M8 after | M500 before | M500 after | simple before | simple after |
+|---|---|---|---|---|---|---|
+| `pcc-t` | 0 / 7 | 2 / 7 | 58 / 495 | 143 / 495 (loud 352, silent 0) | 57 / 194 | 95 / 194 (loud 99) |
+| `pc-t` | 0 / 7 | 2 / 7 | 45 / 495 | 143 / 495 (loud 352, silent 0) | 49 / 194 | 95 / 194 (loud 99) |
+| `pcc-r` | 2 / 7 | 2 / 7 | 235 / 495 | 235 / 495 (loud 259, silent 1) | 109 / 194 | 109 / 194 (loud 85) |
+| `pc-r` | 2 / 7 | 2 / 7 | 244 / 495 | 244 / 495 (loud 250, silent 1) | 110 / 194 | 110 / 194 (loud 84) |
+
+No miss of any check is an array, field or character error any more: of the slice 2 blockers
+of `pcc-t` (array or field access 188, `PTRADD` 88, character constants 33, `PTRSUB` 8) none is
+left, and no silent miss came with them. The one silent miss (`pcc-r`, `pc-r`) is 0x47a6b0, the
+known rules-on miss that differs from `r1` on. With the array forms printed, more functions
+reach the next construct: the loud misses on M500, `pcc-t`: `INT_SBORROW` 100, `PIECE` 71, `CALLIND` 60, `FLOAT2FLOAT` 34, float constants 25, comments in the body 20, `FLOAT_NAN` 17, then 6 or fewer each; `pc-t`: `INT_SBORROW` 100, `PIECE` 71,
+`CALLIND` 60, `FLOAT2FLOAT` 37, float constants 22, comments in the body 20, `FLOAT_NAN` 17,
+then 6 or fewer each. The rules-on checks do not move: an array or field miss they had in slice 2 (4 or fewer
+each there) now fails on another construct (their misses: `CALLIND` 78, an anonymous
+data-type 45, `FLOAT2FLOAT` 36, `FLOAT_NAN` 29, comments 20 for `pcc-r`). On `simple`, `pcc-t` and
+`pc-t`: comments in the body 31, `PIECE` 17, `INT_SBORROW` 17, `CALLIND` 10, `FLOAT2FLOAT` 9, then
+6 or fewer. M8: the 51 checks other than the print checks identical (8 / 8, `fs`, `fsc` 7 / 7);
+the print checks' 5 misses each are loud (`INT_SBORROW`, `FLOAT_NAN`, comments, `PIECE` or
+`CALLIND`, a float constant or an anonymous data-type).
+`INT_SBORROW` (`opFunc`, `SBORROW4(a,b)`) and `PIECE` are now the largest types-on blockers;
+neither is in this slice (`PIECE` is not needed by the array and field forms).
+Not run: the switch corpus, the full pass (`bars-queue.sh`), the other checks on M500 and
+`simple`. The `pcc-t` "before" split (slice 2) was not rerun here. The M500 and the
+other M8 numbers are from a build before one last fix (a written part of a symbol takes no
+cast, `is_read`; no check reached it: no silent miss); the four M8 print checks and `pcc-t`,
+`pc-t` on `simple` were rerun with the final build, the same counts.
 
 ## Speed
 

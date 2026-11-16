@@ -40,6 +40,9 @@ pub(crate) mod modifier {
     pub(crate) const PENDING_BRACE: u32 = 0x8000;
     pub(crate) const FORCE_HEX: u32 = 1;
     pub(crate) const FORCE_DEC: u32 = 2;
+    pub(crate) const FORCE_POINTER: u32 = 0x10;
+    pub(crate) const PRINT_LOAD_VALUE: u32 = 0x20;
+    pub(crate) const PRINT_STORE_VALUE: u32 = 0x40;
     pub(crate) const NEGATETOKEN: u32 = 0x2000;
 }
 
@@ -339,7 +342,7 @@ impl<'a> PrintC<'a> {
         if v.is_constant() {
             return self.push_constant_vn(vn);
         }
-        self.push_symbol_detail(vn)
+        self.push_symbol_detail(vn, true)
     }
 }
 

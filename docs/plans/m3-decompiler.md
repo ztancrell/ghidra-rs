@@ -1722,7 +1722,20 @@ block kind is a loud miss; silent: only 0x47a6b0 rules on, which differs from `r
 109, 57, 110, 49 / 194; switch `pcc-r` 153 / 2005 (silent 0 after the flow fix for the "overlaps instruction" header warning), `pcc-t` not finished. M8: the 51 other checks identical, `pc-r`/`pcc-r` 2 / 7.
 Next: the loud blockers left: `CALLIND`, array and field access (`PTRSUB`, `PTRADD`),
 anonymous data-types, comments in the body, float and character constants, `PIECE`,
-`FLOAT2FLOAT`, `FLOAT_NAN`; labels of spliced blocks (several cover ranges).
+`FLOAT2FLOAT`, `FLOAT_NAN`; labels of spliced blocks (several cover ranges). (Superseded: array and
+field access and character constants are slice 3A, below.)
+
+### S9 slice 3A: array and field access, characters in the printer, branch `m3-print3a` (2026-11-15)
+
+`checkArrayDeref`, `opPtradd`, `opPtrsub` (structure fields, space-base symbols and their parts,
+array elements; no `TypePointerRel`), `pushPartialSymbol`, the `.`, `->`, `[ ]`, `&` tokens, the
+symbol a space-base PTRSUB points at (found in the printer; a function prints by its name), and
+character constants (`pushCharConstant`, `printUnicode`, unit tested). Details: rust/README.md,
+"C printing, slice 3A". M500 `pcc-t` 143 / 495 (was 58), `pc-t` 143 / 495 (was 45), `pcc-r` 235 and
+`pc-r` 244 / 495 (unchanged); no array, field or character miss is left; silent only 0x47a6b0
+(rules on). `simple` 95, 95, 109, 110 / 194; M8 the 51 other checks identical, the four print
+checks 2 / 7. Next: `INT_SBORROW` (types on: 100 on M500 `pc-t`) and `PIECE` (71), with slice 3B's
+`CALLIND`, float ops and constants, comments in the body and anonymous data-types.
 
 ## Running stages in parallel
 
