@@ -287,6 +287,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    Slices 3A and 3B merged on branch `m3-print3` (2026-11-16): M500 `pcc-r` and `pc-r` 442 / 495, `pcc-t`
    and `pc-t` 257 / 495; `simple` 174, 174, 138, 138 / 194; silent only 0x47a6b0; M8 the 51 other checks
    identical, the print checks 6 / 7 (`-r`) and 5 / 7 (`-t`).
+   Slice 4 on branch `m3-print4` (2026-11-16): `INT_CARRY`, `INT_SCARRY`, `INT_SBORROW`, `PIECE`, `POPCOUNT`,
+   `LZCOUNT`, CALLOTHER of a SLEIGH user-op and the SUBPIECE field extraction. M500 `pcc-r` and `pc-r`
+   487 / 495, `pcc-t` and `pc-t` 479 / 495; silent only 0x47a6b0; M8 all 55 checks identical (print 7 / 7).
+   `simple` and switch not run.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

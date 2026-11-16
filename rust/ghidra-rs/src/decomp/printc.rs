@@ -3,8 +3,11 @@
 //! (lists, if/else with the `else if` merge, while, for, do-while, infinite loops, `&&`/`||`
 //! conditions, switch with its case labels, gotos, labels, break and continue), and statements
 //! of assignments, loads, stores, direct calls, returns and branches over the arithmetic, logic
-//! and comparison operators, casts (`opTypeCast`), extensions and SUBPIECE (cast, hidden or
-//! `ZEXT14(x)` style), direct and indirect calls (`(*fn)(args)`), the float operators and
+//! and comparison operators, casts (`opTypeCast`), extensions and SUBPIECE (cast, hidden,
+//! `ZEXT14(x)` style or a field extraction: `sym.field`, `x.field`; slice 4), the operators in
+//! functional syntax (`CARRY4`, `SCARRY4`, `SBORROW4`, `CONCAT44`, `POPCOUNT`, `LZCOUNT`) and
+//! CALLOTHER of a SLEIGH user-op under its name (slice 4), direct and indirect calls
+//! (`(*fn)(args)`), the float operators and
 //! conversions, constants (float constants as `printDecimal` prints them, character constants)
 //! and variables, array and field access (`PTRADD`, `PTRSUB`, LOAD and STORE through them, parts
 //! of symbols; slice 3A), the names of anonymous data-types (`genericTypeName`), and the body
@@ -13,7 +16,9 @@
 //! Every construct the C++ would print that is not ported fails with an error naming it, so a
 //! function prints identically or not at all. Not ported yet: the long suffix of a constant, a
 //! cast to a pointer to an array (`checkAddressOfCast`), labels of spliced blocks, strings,
-//! unions, `TypePointerRel` and the remaining operators. (Slice 1 had no casts or structured
+//! unions, `TypePointerRel`, CALLOTHER of a built-in user-op, the bit-field operators (`INSERT`,
+//! `ZPULL`, `SPULL`), `SEGMENTOP`, `CPOOLREF` and `NEW`. (Superseded: "and the remaining
+//! operators", before slice 4. Slice 1 had no casts or structured
 //! blocks, slice 2 no field and array access, characters, comments, floats, indirect calls or
 //! anonymous types; superseded.)
 
@@ -1050,6 +1055,13 @@ impl PrintC<'_> {
             Ptrsub => return self.op_ptrsub(op),
             Call => return self.op_call(op),
             Callind => return self.op_callind(op),
+            Callother => return self.op_callother(op),
+            IntCarry => return self.op_func_sized(op, "CARRY", 1),
+            IntScarry => return self.op_func_sized(op, "SCARRY", 1),
+            IntSborrow => return self.op_func_sized(op, "SBORROW", 1),
+            Piece => return self.op_func_sized(op, "CONCAT", 2),
+            Popcount => return self.op_func_named(op, "POPCOUNT"),
+            Lzcount => return self.op_func_named(op, "LZCOUNT"),
             FloatNan => return self.op_func_named(op, "NAN"),
             FloatAbs => return self.op_func_named(op, "ABS"),
             FloatSqrt => return self.op_func_named(op, "SQRT"),
@@ -1325,22 +1337,67 @@ impl PrintC<'_> {
         self.op_type_cast(op)
     }
 
-    /// Port of `PrintC::opSubpiece`: a cast of the low bytes, else `SUB41(x,0)`; special
-    /// printing (a field extraction) fails loudly.
+    /// Port of `PrintC::opSubpiece`: a field extraction (special printing of a structured input:
+    /// `sym.field` for an explicit variable with a symbol, else `x.field` for a formal structure
+    /// field), a cast of the low bytes, else `SUB41(x,0)`. A union input fails loudly (its
+    /// data-type needs resolution).
     fn op_subpiece(&mut self, op: OpId) -> Result<()> {
-        if self.fd.op(op).flags.has(OpFlags::SPECIAL_PRINT) {
-            return err("print C: a SUBPIECE printed as a field extraction (doesSpecialPrinting) is not ported");
-        }
         let out = self.fd.op(op).out.ok_or_else(|| LowlevelError("print C: a SUBPIECE without output".into()))?;
         let (input, off) = (self.fd.input(op, 0)?, self.fd.input(op, 1)?);
-        let outtype = super::cast::print_facing(self.fd, out)?;
         let intype = super::cast::print_facing(self.fd, input)?;
+        // isPieceStructured (the partial struct and union metatypes are not ported)
+        if self.fd.op(op).flags.has(OpFlags::SPECIAL_PRINT)
+            && matches!(self.fd.types.meta(intype), Meta::Array | Meta::Struct | Meta::Union)
+        {
+            // TypeOpSubpiece::computeByteOffsetForComposite, little-endian
+            let mut byte_off = i64::from(self.fd.vn(off).offset as i32);
+            let sz = self.fd.vn(out).size;
+            let h = super::variable::high(self.fd, input)?;
+            if let (Some((sym, _, _)), true) =
+                (super::namevars::high_symbol(self.fd, h), self.fd.vn(input).has(VnFlags::EXPLICIT))
+            {
+                let suboff = super::namevars::symbol_offset(self.fd, self.arch, h)?;
+                if suboff > 0 {
+                    byte_off += i64::from(suboff);
+                }
+                return self.push_partial_symbol(sym, byte_off, sz, Some(out));
+            }
+            // TypeStruct::findTruncation(byteOff, sz) giving offset 0: a formal structure field
+            if let Some((name, foff, fty)) = self.find_field(intype, byte_off) {
+                if foff == byte_off && sz <= self.fd.types.size(fty) {
+                    self.push_op(&OBJECT_MEMBER)?;
+                    self.push_vn(input, op, self.mods);
+                    return self.push_atom(Atom::Text(name));
+                }
+            }
+        }
+        let outtype = super::cast::print_facing(self.fd, out)?;
         let offset = u64::from(self.fd.vn(off).offset as u32);
         if super::cast::is_subpiece_cast(&self.fd.types, outtype, intype, offset) {
             self.op_type_cast(op)
         } else {
             self.op_func(op, "SUB")
         }
+    }
+
+    /// Port of `PrintC::opCallother` for a SLEIGH user-op (display 0: functional syntax under
+    /// the op's name, the inputs after the index). Any other user-op (the built-in ones: volatile
+    /// read and write, string data, with the other displays) fails loudly.
+    fn op_callother(&mut self, op: OpId) -> Result<()> {
+        let index = self.fd.vn(self.fd.input(op, 0)?).offset;
+        let Some(name) = self.arch.sleigh.userop_name(index) else {
+            return err("print C: a CALLOTHER of a user-op that is not a SLEIGH one (built-in) is not ported");
+        };
+        self.op_func_from(op, name, 1)
+    }
+
+    /// `getOperatorName` of the operators named after their input sizes: `SBORROW4`, `CONCAT44`.
+    fn op_func_sized(&mut self, op: OpId, name: &str, inputs: usize) -> Result<()> {
+        let mut name = name.to_string();
+        for i in 0..inputs {
+            name += &self.fd.vn(self.fd.input(op, i)?).size.to_string();
+        }
+        self.op_func_named(op, &name)
     }
 
     /// Port of `PrintC::opFunc`: functional syntax, the operator's name
@@ -1353,10 +1410,15 @@ impl PrintC<'_> {
     }
 
     /// Port of `PrintC::opFunc` for an operator whose name has no sizes (`TypeOp::getOperatorName`:
-    /// `NAN`, `ABS`, `SQRT`, `CEIL`, `FLOOR`, `ROUND`).
+    /// `NAN`, `ABS`, `SQRT`, `CEIL`, `FLOOR`, `ROUND`, `POPCOUNT`, `LZCOUNT`).
     fn op_func_named(&mut self, op: OpId, name: &str) -> Result<()> {
+        self.op_func_from(op, name, 0)
+    }
+
+    /// `opFunc` over the inputs from `first` on (`opCallother`: 1, after the user-op index).
+    fn op_func_from(&mut self, op: OpId, name: &str, first: usize) -> Result<()> {
         self.push_op(&FUNCTION_CALL)?;
-        let ins = self.fd.op(op).ins.clone();
+        let ins: Vec<VarnodeId> = self.fd.op(op).ins.iter().skip(first).copied().collect();
         self.push_atom(Atom::Text(name.to_string()))?;
         if ins.is_empty() {
             return self.push_atom(Atom::Blank);
