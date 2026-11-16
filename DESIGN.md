@@ -98,6 +98,13 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   then (b) more processors and file formats, when a second game asks for them. The 8 export
   scripts need nothing else and come first. Superseded: the open question "which breadth
   comes first" (asked 2026-11-13).
+- 2026-11-15: The edits of mercs2's five project-editing scripts (renames, types, comments) live
+  as plain text files in the mercs2 repo. Each ghidra-rs run starts from scratch (load, about
+  10 s of analysis), then applies those files; nothing is reloaded while running. Edits stay
+  readable and diffable in git, and the editing scripts can move off Java Ghidra after S10
+  instead of waiting for milestone 4's project store. User's decision (first leaning to wait
+  for the store, changed once it was clear no hot reloading is involved). Superseded: the open
+  question "where the edits live" (asked 2026-11-13).
 
 ## Milestones
 
@@ -259,6 +266,5 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
 
 ## Open questions
 
-- Where the edits of mercs2's five project-editing scripts live without a Ghidra database: plain
-  files in the mercs2 repo (re-analysis takes about 10 s) or a project database (milestone 4).
-  Asked 2026-11-13.
+None open. Superseded: "where the edits of mercs2's five project-editing scripts live", decided
+2026-11-15 (plain files, see Decided).
