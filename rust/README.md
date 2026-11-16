@@ -2834,8 +2834,14 @@ left on M500, `pcc-r` and `pc-r`: the label of a spliced block 4, a variable lin
 or external reference 3; `pcc-t` and `pc-t`: `mergeAddrTied` 6, the label of a spliced block 5, a
 variable linked to a function or external reference 3, string constants 2 (superseded: the M500
 and M8 miss lists of the merged section above). M8: all 55 checks identical on the functions the
-reference finishes. Not run: the `simple` and switch corpora, the other checks on M500, the full
-pass (`bars-queue.sh`). No unit test was added: the printer has none that builds a function; the
+reference finishes. Full pass (`bars-queue.sh`, 127 pairs on 0f53a714b9, desktop and Mac): every non-print check
+at its baseline; `simple` `pcc-r` and `pc-r` 174 -> 190 / 194 (loud 4), `pcc-t` and `pc-t` 138 -> 188 / 194 (loud
+6), silent 0; switch `pcc-r` 1734 -> 1810 / 2005 (loud 270 -> 135, silent 1 -> 60), `pcc-t` 1351 -> 1817 / 2005
+(loud 654 -> 128, silent 0 -> 60). Each switch silent is a function an older switch check already lists as
+silent (`swfs-r`, `swsn-r`, `swfs-t`; for example 0x4f3366 in `swfs-t`): slice 4 lets them print, the
+divergence is in an earlier stage. Two M500 pairs run on the Mac (`r5dtlocksv`, `r5slock`) lost
+0x6b21e0 to the 120 s reference timeout (450 / 498); rerun alone on the desktop with `TIMEOUT=600`, both are at their baseline (451 / 499;
+0x6b21e0 does not finish in the reference within 600 s, as in the baseline). No unit test was added: the printer has none that builds a function; the
 M500 misses above that now print identically are the check. Not seen in a check: `LZCOUNT` (no
 M500 function failed on it before), and which of the two field-extraction forms (`sym.field`,
 `x.field`) the 19 functions take.
