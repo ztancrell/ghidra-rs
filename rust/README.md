@@ -694,7 +694,7 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
   on), `cs-r cs-t fsc-r fsc-t` (S9 `setcasts`: `print raw` after it, and `finalstructure`
   with it on), `swfs-r swfs-t swsn-r swsn-t swfsc-r swfsc-t` (`finalstructure` with case
   labels, `switchnorm`, and `finalstructure` with case labels and `setcasts` on) and
-  `pc-r pc-t pcc-r pcc-t` (`print C`, S9 slices 1, 2, 3A and 3B, `pcc` with `setcasts` on; see "C printing").
+  `pc-r pc-t pcc-r pcc-t` (`print C`, S9 slices 1, 2, 3A, 3B and 4, `pcc` with `setcasts` on; see "C printing").
 - `JOBS` (default `nproc`), `TIMEOUT` (seconds per function and engine, default 120 as for every bar here; 0x4c48d0 of M500 takes
   the reference about 485 s and ghidra-rs about 600 s alone, so at 120 s it counts as a function
   the reference does not finish), `OUT`
@@ -2806,6 +2806,45 @@ at 0x9eec5e). A CALLIND through a LOAD (`(**(code **)(iVar1 + 0x50))()`) prints 
 `simple` (`pcc-t`, outputs kept for the count); every other function there with an indirect call
 is identical or loud. No call through a structure field (`(*p->fn)()`) was in the `simple` outputs searched; M500 was not searched for one.
 Not run: the switch corpus, the full pass (`bars-queue.sh`), the other checks on M500 and `simple`.
+
+### C printing, slice 4: functional operators, CALLOTHER, SUBPIECE fields (branch `m3-print4`, 2026-11-16)
+
+- `printc.rs`: `opIntCarry`, `opIntScarry`, `opIntSborrow` and `opPiece` (`opFunc` under
+  `getOperatorName`: the name and the input sizes, `CARRY4`, `SBORROW4`, `CONCAT44`), `opPopcountOp`
+  and `opLzcountOp` (`POPCOUNT`, `LZCOUNT`), `opCallother` for a SLEIGH user-op (display 0:
+  functional syntax under the op's name, the inputs after the index), and the field extraction
+  of `opSubpiece` (`doesSpecialPrinting` on a structured input: `pushPartialSymbol` with the cast
+  allowed for an explicit variable with a symbol, else `x.field` when `findTruncation` gives a
+  formal structure field at offset 0, else the cast or `SUB41` as before).
+- Loud: a CALLOTHER whose index is not a SLEIGH user-op (the built-in ones: volatile read and
+  write, string data, the only ones with another display); a SUBPIECE input whose data-type
+  needs resolution (a union: `findTruncation` with the artificial slot reads the union
+  resolution, not ported). `INT_CARRY` and `LZCOUNT` were not in the slice's list; they take the
+  same `opFunc` path.
+
+| check | M8 | M500 before | M500 |
+|---|---|---|---|
+| `pcc-r` | 7 / 7 | 442 / 495 (loud 52, silent 1) | 487 / 495 (loud 7, silent 1) |
+| `pc-r` | 7 / 7 | 442 / 495 (loud 52, silent 1) | 487 / 495 (loud 7, silent 1) |
+| `pcc-t` | 7 / 7 | 257 / 495 (loud 238, silent 0) | 479 / 495 (loud 16, silent 0) |
+| `pc-t` | 7 / 7 | 257 / 495 (loud 238, silent 0) | 479 / 495 (loud 16, silent 0) |
+
+The one silent miss is still 0x47a6b0 (`pcc-r`, `pc-r`), the known rules-on miss. The loud misses
+left on M500, `pcc-r` and `pc-r`: the label of a spliced block 4, a variable linked to a function
+or external reference 3; `pcc-t` and `pc-t`: `mergeAddrTied` 6, the label of a spliced block 5, a
+variable linked to a function or external reference 3, string constants 2 (superseded: the M500
+and M8 miss lists of the merged section above). M8: all 55 checks identical on the functions the
+reference finishes. Full pass (`bars-queue.sh`, 127 pairs on 0f53a714b9, desktop and Mac): every non-print check
+at its baseline; `simple` `pcc-r` and `pc-r` 174 -> 190 / 194 (loud 4), `pcc-t` and `pc-t` 138 -> 188 / 194 (loud
+6), silent 0; switch `pcc-r` 1734 -> 1810 / 2005 (loud 270 -> 135, silent 1 -> 60), `pcc-t` 1351 -> 1817 / 2005
+(loud 654 -> 128, silent 0 -> 60). Each switch silent is a function an older switch check already lists as
+silent (`swfs-r`, `swsn-r`, `swfs-t`; for example 0x4f3366 in `swfs-t`): slice 4 lets them print, the
+divergence is in an earlier stage. Two M500 pairs run on the Mac (`r5dtlocksv`, `r5slock`) lost
+0x6b21e0 to the 120 s reference timeout (450 / 498); rerun alone on the desktop with `TIMEOUT=600`, both are at their baseline (451 / 499;
+0x6b21e0 does not finish in the reference within 600 s, as in the baseline). No unit test was added: the printer has none that builds a function; the
+M500 misses above that now print identically are the check. Not seen in a check: `LZCOUNT` (no
+M500 function failed on it before), and which of the two field-extraction forms (`sym.field`,
+`x.field`) the 19 functions take.
 
 ## Speed
 

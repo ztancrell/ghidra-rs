@@ -1772,6 +1772,17 @@ merged". M500 `pcc-r` and `pc-r` 442 / 495, `pcc-t` and `pc-t` 257 / 495; `simpl
 with rules on, the SUBPIECE field extraction 19 and `PIECE` 14; then `CALLOTHER`, `INT_CARRY`,
 `INT_SCARRY` and labels of spliced blocks.
 
+### S9 slice 4, branch `m3-print4` (2026-11-16)
+
+`INT_CARRY`, `INT_SCARRY`, `INT_SBORROW`, `PIECE`, `POPCOUNT` and `LZCOUNT` in functional syntax,
+CALLOTHER of a SLEIGH user-op, and the SUBPIECE field extraction. Details: rust/README.md, "C
+printing, slice 4". M500 `pcc-r` and `pc-r` 487 / 495 (loud 7, silent 1: 0x47a6b0), `pcc-t` and
+`pc-t` 479 / 495 (loud 16); M8 all 55 checks identical, the print checks 7 / 7. Full pass: `simple`
+190, 190, 188, 188 / 194; switch `pcc-r` 1810 / 2005, `pcc-t` 1817 / 2005 (60 silent each, all already silent in
+older switch checks). Next, by M500 misses: `mergeAddrTied` (VariablePiece) 6 with types on, labels of spliced
+blocks 5, a variable linked to a function or external reference 3, string constants 2.
+(Superseded: the "Next" list of the merged section above.)
+
 ## Running stages in parallel
 
 Strict chain first: S0 → S1a → S1b → S2. After S2 the work fans out. Under the cap of two

@@ -105,6 +105,12 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   instead of waiting for milestone 4's project store. User's decision (first leaning to wait
   for the store, changed once it was clear no hot reloading is involved). Superseded: the open
   question "where the edits live" (asked 2026-11-13).
+- 2026-11-16: A printer slice that lets older silent misses reach the C output counts as progress,
+  not a regression, when each new silent function is already silent in an older check (the
+  divergence is in an earlier stage). A new silent function that no older check lists is still a
+  regression and blocks the merge. First case: slice 4 on the switch corpus (`pcc-r` and `pcc-t`
+  silent 1 and 0 -> 60, all listed by `swfs-r`, `swsn-r` or `swfs-t`). User's decision
+  ("progress that exposes bugs"); the guard against unlisted silents is Claude's wording.
 
 ## Milestones
 
@@ -287,6 +293,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    Slices 3A and 3B merged on branch `m3-print3` (2026-11-16): M500 `pcc-r` and `pc-r` 442 / 495, `pcc-t`
    and `pc-t` 257 / 495; `simple` 174, 174, 138, 138 / 194; silent only 0x47a6b0; M8 the 51 other checks
    identical, the print checks 6 / 7 (`-r`) and 5 / 7 (`-t`).
+   Slice 4 on branch `m3-print4` (2026-11-16): `INT_CARRY`, `INT_SCARRY`, `INT_SBORROW`, `PIECE`, `POPCOUNT`,
+   `LZCOUNT`, CALLOTHER of a SLEIGH user-op and the SUBPIECE field extraction. M500 `pcc-r` and `pc-r`
+   487 / 495, `pcc-t` and `pc-t` 479 / 495; silent only 0x47a6b0; M8 all 55 checks identical (print 7 / 7).
+   Full pass: `simple` 190, 190, 188, 188 / 194; switch `pcc-r` 1810 / 2005, `pcc-t` 1817 / 2005, each with 60
+   silent that older switch checks already list (see the Decided entry of 2026-11-16).
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
