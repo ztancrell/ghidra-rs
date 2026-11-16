@@ -4,13 +4,17 @@
 //! conditions, switch with its case labels, gotos, labels, break and continue), and statements
 //! of assignments, loads, stores, direct calls, returns and branches over the arithmetic, logic
 //! and comparison operators, casts (`opTypeCast`), extensions and SUBPIECE (cast, hidden or
-//! `ZEXT14(x)` style), constants and variables.
+//! `ZEXT14(x)` style), direct and indirect calls (`(*fn)(args)`), the float operators and
+//! conversions, constants (float constants as `printDecimal` prints them) and variables, the
+//! names of anonymous data-types (`genericTypeName`), and the body comments (the warnings at an
+//! address, placed by `CommentSorter`, comment.rs).
 //!
 //! Every construct the C++ would print that is not ported fails with an error naming it, so a
-//! function prints identically or not at all. Not ported yet: comments inside the body, the
-//! long suffix of a constant, a cast to a pointer to an array (`checkAddressOfCast`), labels of
-//! spliced blocks, strings and characters, floats, field and array access, anonymous types and
-//! the remaining operators. (Slice 1 had no casts or structured blocks; superseded.)
+//! function prints identically or not at all. Not ported yet: the long suffix of a constant, a
+//! cast to a pointer to an array (`checkAddressOfCast`), labels of spliced blocks,
+//! strings and characters, field and array access and the remaining operators.
+//! (Slice 1 had no casts or structured blocks, slice 2 no comments, floats, indirect calls or
+//! anonymous types; superseded.)
 
 use super::finalstructure::{
     case_label_list, switch_leaf, switch_table, CaseOrder, F_BREAK_GOTO, F_CONTINUE_GOTO, F_GOTO_GOTO, F_LABEL_BUMPUP,
@@ -119,12 +123,106 @@ fn calc_mask(size: u32) -> u64 {
     }
 }
 
+/// Port of `PrintC::genericTypeName`: the name printed for a data-type without one.
+fn generic_type_name(meta: Meta, size: u32) -> String {
+    let base = match meta {
+        Meta::Int => "unkint",
+        Meta::Uint => "unkuint",
+        Meta::Unknown => "unkbyte",
+        Meta::Float => "unkfloat",
+        Meta::Spacebase => return "BADSPACEBASE".into(),
+        _ => return "BADTYPE".into(),
+    };
+    format!("{base}{size}")
+}
+
+/// The token of `PrintC::push_float`: `INFINITY`, `NAN` (signed), or the shortest decimal
+/// that reads back as the value, with `.0` when it would look like an integer. The x86
+/// translator has float formats for sizes 4 and 8 only (`getFloatFormat`); any other size is
+/// `FLOAT_UNKNOWN`. (`force_scinote` is never set.)
+fn float_token(val: u64, size: u32) -> String {
+    let (host, neg) = match size {
+        4 => {
+            let f = f32::from_bits(val as u32);
+            (f64::from(f), f.is_sign_negative())
+        }
+        8 => {
+            let f = f64::from_bits(val);
+            (f, f.is_sign_negative())
+        }
+        _ => return "FLOAT_UNKNOWN".into(),
+    };
+    let sign = if neg { "-" } else { "" };
+    if host.is_infinite() {
+        return format!("{sign}INFINITY");
+    }
+    if host.is_nan() {
+        return format!("{sign}NAN");
+    }
+    let mut t = print_decimal(host, size);
+    if !t.contains(['.', 'e']) {
+        t.push_str(".0");
+    }
+    t
+}
+
+/// Port of `FloatFormat::printDecimal` (not in scientific notation): `ostream << double` at
+/// rising precision, from `decimalMinPrecision` until the text reads back as the value (as a
+/// float for size 4), at most `decimalMaxPrecision`.
+fn print_decimal(host: f64, size: u32) -> String {
+    // floor(frac_size * 0.30103) and ceil((frac_size + 1) * 0.30103) + 1, frac_size 23 or 52
+    let (min, max) = if size <= 4 { (6, 9) } else { (15, 17) };
+    let mut res = String::new();
+    for prec in min..=max {
+        let s = format_g(host, prec);
+        if prec == max {
+            return s;
+        }
+        // `istream >> float` leaves 0.0 when it cannot read the text and the largest finite value
+        // on overflow (libstdc++'s `__convert_to_v`)
+        let back = if size <= 4 {
+            s.parse::<f32>().map(|f| f64::from(if f.is_infinite() { f32::MAX.copysign(f) } else { f }))
+        } else {
+            s.parse::<f64>().map(|f| if f.is_infinite() { f64::MAX.copysign(f) } else { f })
+        };
+        let same = back.unwrap_or(0.0) == host;
+        res = s;
+        if same {
+            break;
+        }
+    }
+    res
+}
+
+/// `printf("%.*g", prec, v)`, as `ostream << double` prints in the default float field:
+/// `prec` significant digits, scientific when the exponent is below -4 or at least `prec`,
+/// trailing zeros removed.
+fn format_g(v: f64, prec: usize) -> String {
+    let p = prec.max(1);
+    if v == 0.0 {
+        return if v.is_sign_negative() { "-0" } else { "0" }.into();
+    }
+    let sci = format!("{:.*e}", p - 1, v);
+    let Some((mant, exp)) = sci.split_once('e') else { return sci };
+    let exp: i32 = exp.parse().unwrap_or(0);
+    let strip = |s: &str| -> String {
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            s.to_string()
+        }
+    };
+    if exp < -4 || exp >= p as i32 {
+        format!("{}e{}{:02}", strip(mant), if exp < 0 { '-' } else { '+' }, exp.unsigned_abs())
+    } else {
+        strip(&format!("{:.*}", (p as i32 - 1 - exp) as usize, v))
+    }
+}
+
 impl PrintC<'_> {
     /// Port of `PrintC::docFunction`.
     fn doc_function(&mut self, name: &str) -> Result<()> {
-        if !self.fd.comments.is_empty() {
-            return err("print C: comments inside the body (warnings at an address) are not ported");
-        }
+        self.commsorter = super::comment::CommentSorter::setup_function_list(self.fd)?;
         if self.fd.proto.locked.is_some() {
             return err("print C: the declaration of a locked prototype is not ported");
         }
@@ -316,8 +414,9 @@ impl PrintC<'_> {
         let stack = self.type_stack(ty)?;
         let base = *stack.last().ok_or_else(|| LowlevelError("print C: empty type stack".into()))?;
         let tok = if noident && stack.len() == 1 { &TYPE_EXPR_NOSPACE } else { &TYPE_EXPR_SPACE };
-        let Some(name) = self.fd.types.name(base).filter(|n| !n.is_empty()).map(str::to_string) else {
-            return err("print C: an anonymous data-type (genericTypeName) is not ported");
+        let name = match self.fd.types.name(base).filter(|n| !n.is_empty()) {
+            Some(n) => n.to_string(),
+            None => generic_type_name(self.fd.types.meta(base), self.fd.types.size(base)),
         };
         self.push_op(tok)?;
         self.push_atom(Atom::Text(name))?;
@@ -478,7 +577,7 @@ impl PrintC<'_> {
         let cond = self.component(b, 0)?;
         self.emit_block(cond)?;
         self.pop_mod();
-        // emitCommentBlockTree: no comment reaches the body (docFunction fails on one)
+        self.emit_comment_block_tree(cond)?;
         match pending {
             Some(id) if self.emit.has_pending_brace(id) => {
                 // the brace was not printed: "else if"
@@ -532,6 +631,7 @@ impl PrintC<'_> {
         self.unset_mod(modifier::NO_BRANCH | modifier::ONLY_BRANCH);
         self.emit_any_label_statement(b)?;
         let cond = self.component(b, 0)?;
+        self.emit_comment_block_tree(cond)?;
         self.emit.tag_line();
         self.emit.print_str("for");
         self.emit.spaces(1, 0);
@@ -588,6 +688,7 @@ impl PrintC<'_> {
             self.set_mod(modifier::NO_BRANCH);
             self.emit_block(cond)?;
             self.pop_mod();
+            self.emit_comment_block_tree(cond)?;
             self.emit.tag_line();
             self.emit.print_str("if");
             self.emit.spaces(1, 0);
@@ -598,6 +699,7 @@ impl PrintC<'_> {
             self.emit.spaces(1, 0);
             self.emit_goto_statement(None, F_BREAK_GOTO)?;
         } else {
+            self.emit_comment_block_tree(cond)?;
             self.emit.tag_line();
             self.emit.print_str("while");
             self.emit.spaces(1, 0);
@@ -808,11 +910,52 @@ impl PrintC<'_> {
         }
     }
 
-    /// Port of `PrintC::emitBlockBasic` (structured printing, no comments): with
-    /// `only_branch` just the branch, else the statements, comma separated inside a condition.
-    /// (`emitLabelStatement` of the basic block itself prints nothing: it is not a copy.)
+    /// Port of `PrintC::emitCommentGroup`: the comments the sorter holds up to the statement
+    /// rooted at `inst` (none: the rest of the block), each at the comment indent
+    /// (`line_commentindent`, 20). Every body comment is a warning, a type
+    /// `instr_comment_type` shows.
+    fn emit_comment_group(&mut self, inst: Option<OpId>) -> Result<()> {
+        let key = match inst {
+            Some(op) => {
+                let o = self.fd.op(op);
+                let bb = o.parent.ok_or_else(|| LowlevelError("print C: a statement outside a block".into()))?;
+                Some((self.fd.blocks.block(bb).index, o.order))
+            }
+            None => None,
+        };
+        self.commsorter.setup_op_list(key);
+        while let Some(c) = self.commsorter.next() {
+            if self.commsorter.is_emitted(c) {
+                continue;
+            }
+            let text = self.fd.comments[c].1.clone();
+            self.emit_line_comment(20, &text);
+            self.commsorter.set_emitted(c);
+        }
+        Ok(())
+    }
+
+    /// Port of `PrintC::emitCommentBlockTree`: the comments of every basic block under `b`,
+    /// before a line that prints statements of several blocks.
+    fn emit_comment_block_tree(&mut self, b: SId) -> Result<()> {
+        if let Kind::Copy(bb) = self.fd.structure.b(b).kind {
+            let index = self.fd.blocks.block(bb).index;
+            self.commsorter.setup_block_list(index);
+            return self.emit_comment_group(None);
+        }
+        for sub in self.fd.structure.b(b).list.clone() {
+            self.emit_comment_block_tree(sub)?;
+        }
+        Ok(())
+    }
+
+    /// Port of `PrintC::emitBlockBasic` (structured printing): with `only_branch` just the
+    /// branch, else the statements, comma separated inside a condition, each after its
+    /// comments. (`emitLabelStatement` of the basic block itself prints nothing: it is not a
+    /// copy.)
     fn emit_block_basic(&mut self, bb: super::block::BlockId) -> Result<()> {
         let ops = self.fd.blocks.block(bb).ops.clone();
+        self.commsorter.setup_block_list(self.fd.blocks.block(bb).index);
         if self.is_set(modifier::ONLY_BRANCH) {
             if let Some(&last) = ops.last() {
                 if self.fd.op(last).is_branch() {
@@ -839,12 +982,13 @@ impl PrintC<'_> {
                     self.emit.spaces(1, 0);
                 }
             } else {
+                self.emit_comment_group(Some(op))?;
                 self.emit.tag_line();
             }
             self.emit_statement(op)?;
             separator = true;
         }
-        Ok(())
+        self.emit_comment_group(None) // any remaining comments
     }
 
     /// Port of `PrintC::emitStatement`.
@@ -897,6 +1041,15 @@ impl PrintC<'_> {
             Load => return self.op_load(op),
             Store => return self.op_store(op),
             Call => return self.op_call(op),
+            Callind => return self.op_callind(op),
+            FloatNan => return self.op_func_named(op, "NAN"),
+            FloatAbs => return self.op_func_named(op, "ABS"),
+            FloatSqrt => return self.op_func_named(op, "SQRT"),
+            FloatCeil => return self.op_func_named(op, "CEIL"),
+            FloatFloor => return self.op_func_named(op, "FLOOR"),
+            FloatRound => return self.op_func_named(op, "ROUND"),
+            FloatInt2float => return self.op_float_int2float(op),
+            FloatFloat2float | FloatTrunc => return self.op_type_cast(op),
             Return => return self.op_return(op),
             BoolNegate => return self.op_bool_negate(op),
             Int2comp | FloatNeg => return self.op_unary(&UNARY_MINUS, op),
@@ -991,6 +1144,57 @@ impl PrintC<'_> {
         } else {
             self.push_atom(Atom::Blank)?;
         }
+        Ok(())
+    }
+
+    /// Port of `PrintC::opCallind`: `(*fn)(args)`, the function pointer under a dereference
+    /// (`getHiddenThisSlot` is -1: `hide_thisparam` is set only by the Java printer).
+    fn op_callind(&mut self, op: OpId) -> Result<()> {
+        self.push_op(&FUNCTION_CALL)?;
+        self.push_op(&DEREFERENCE)?;
+        if self.fd.call_of(op).is_none() {
+            return err("Missing indirect function callspec");
+        }
+        let ins = self.fd.op(op).ins.clone();
+        let m = self.mods;
+        match ins.len() {
+            0 => return err("print C: a CALLIND without inputs"),
+            1 => {
+                self.push_vn(ins[0], op, m);
+                self.push_atom(Atom::Blank)?;
+            }
+            2 => {
+                self.push_vn(ins[1], op, m);
+                self.push_vn(ins[0], op, m);
+            }
+            n => {
+                self.push_vn(ins[0], op, m);
+                for _ in 0..n - 2 {
+                    self.push_op(&COMMA)?;
+                }
+                for &vn in ins[1..].iter().rev() {
+                    self.push_vn(vn, op, m);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Port of `PrintC::opFloatInt2Float`: a cast of the input, or of the input of the
+    /// implied INT_ZEXT the conversion absorbs (`TypeOpFloatInt2Float::absorbZext`).
+    fn op_float_int2float(&mut self, op: OpId) -> Result<()> {
+        let in0 = self.fd.input(op, 0)?;
+        let v = self.fd.vn(in0);
+        let zext = v.def.filter(|&d| v.has(VnFlags::IMPLIED) && self.fd.op(d).opc == Opcode::IntZext);
+        let vn0 = match zext {
+            Some(z) => self.fd.input(z, 0)?,
+            None => in0,
+        };
+        let out = self.fd.op(op).out.ok_or_else(|| LowlevelError("print C: an INT2FLOAT without output".into()))?;
+        let dt = super::cast::print_facing(self.fd, out)?;
+        self.push_op(&TYPECAST)?;
+        self.push_type(dt)?;
+        self.push_vn(vn0, op, self.mods);
         Ok(())
     }
 
@@ -1138,12 +1342,18 @@ impl PrintC<'_> {
     /// Port of `PrintC::opFunc`: functional syntax, the operator's name
     /// (`getOperatorName`: `name`, the input and the output size) and the inputs.
     fn op_func(&mut self, op: OpId, name: &str) -> Result<()> {
-        self.push_op(&FUNCTION_CALL)?;
         let o = self.fd.op(op);
-        let ins = o.ins.clone();
         let outsize = o.out.map_or(0, |v| self.fd.vn(v).size);
-        let insize = ins.first().map_or(0, |&v| self.fd.vn(v).size);
-        self.push_atom(Atom::Text(format!("{name}{insize}{outsize}")))?;
+        let insize = o.ins.first().map_or(0, |&v| self.fd.vn(v).size);
+        self.op_func_named(op, &format!("{name}{insize}{outsize}"))
+    }
+
+    /// Port of `PrintC::opFunc` for an operator whose name has no sizes (`TypeOp::getOperatorName`:
+    /// `NAN`, `ABS`, `SQRT`, `CEIL`, `FLOOR`, `ROUND`).
+    fn op_func_named(&mut self, op: OpId, name: &str) -> Result<()> {
+        self.push_op(&FUNCTION_CALL)?;
+        let ins = self.fd.op(op).ins.clone();
+        self.push_atom(Atom::Text(name.to_string()))?;
         if ins.is_empty() {
             return self.push_atom(Atom::Blank);
         }
@@ -1248,7 +1458,7 @@ impl PrintC<'_> {
             Meta::Unknown => return self.push_integer(val, size, false, vn),
             Meta::Bool => return self.push_atom(Atom::Text(if val != 0 { "true" } else { "false" }.into())),
             Meta::Void => return err("Cannot have a constant of type void"),
-            Meta::Float => return err("print C: float constants are not ported"),
+            Meta::Float => return self.push_atom(Atom::Text(float_token(val, size))),
             Meta::Ptr => {
                 if let Some(to) = self.fd.types.ptr_to(ty) {
                     if self.fd.types.is_char_print(to) {
@@ -1338,6 +1548,65 @@ mod tests {
         assert_eq!(raw_offset(8, 0x401000), "0x00401000");
         assert_eq!(raw_offset(8, 0x1_0000_0000), "0x000100000000");
         assert_eq!(raw_offset(8, 0x1_0000_0000_0000), "0x0001000000000000");
+    }
+
+    /// The tokens of the C++ `printDecimal` (libstdc++ `ostream << double`), printed by a
+    /// small C++ program for these encodings.
+    #[test]
+    fn float_tokens_match_the_cpp() {
+        let cases: &[(u32, u64, &str)] = &[
+            (4, 0x3f80_0000, "1.0"),
+            (4, 0x3dcc_cccd, "0.1"),
+            (4, 0xbf00_0000, "-0.5"),
+            (4, 0, "0.0"),
+            (4, 0x8000_0000, "-0.0"),
+            (4, 0x4b18_9680, "1e+07"),
+            (4, 0x3e99_999a, "0.3"),
+            (4, 0x461c_4000, "10000.0"),
+            (4, 1, "1.4013e-45"),
+            (4, 0x7f7f_ffff, "3.4028235e+38"),
+            (4, 0x3a83_126f, "0.001"),
+            (4, 0x4974_2400, "1e+06"),
+            (4, 0x4cbe_bc20, "1e+08"),
+            (8, 0x3ff0_0000_0000_0000, "1.0"),
+            (8, 0x3fb9_9999_9999_999a, "0.1"),
+            (8, 0x4009_21fb_5444_2d18, "3.141592653589793"),
+            (8, 1, "4.94065645841247e-324"),
+            (8, 0x7fef_ffff_ffff_ffff, "1.79769313486232e+308"),
+            (8, 0x3f50_624d_d2f1_a9fc, "0.001"),
+            (8, 0x412e_8480_0000_0000, "1000000.0"),
+            (8, 0x4415_af1d_78b5_8c40, "1e+20"),
+            (8, 0xc08f_4000_0000_0000, "-1000.0"),
+            (8, 0x3fe0_0000_0000_0000, "0.5"),
+            (8, 0x3eb0_c6f7_a0b5_ed8d, "1e-06"),
+            (8, 0x4202_a05f_2000_0000, "10000000000.0"),
+        ];
+        for &(size, enc, want) in cases {
+            assert_eq!(float_token(enc, size), want, "size {size} encoding {enc:#x}");
+        }
+        assert_eq!(float_token(0x7f80_0000, 4), "INFINITY");
+        assert_eq!(float_token(0xfff0_0000_0000_0000, 8), "-INFINITY");
+        assert_eq!(float_token(0x7fc0_0000, 4), "NAN");
+        assert_eq!(float_token(0xffc0_0000, 4), "-NAN");
+        assert_eq!(float_token(0, 10), "FLOAT_UNKNOWN");
+    }
+
+    #[test]
+    fn format_g_rounds_as_printf() {
+        assert_eq!(format_g(2.5, 1), "2"); // ties to even, as glibc
+        assert_eq!(format_g(0.000123456, 3), "0.000123");
+        assert_eq!(format_g(123456.0, 3), "1.23e+05");
+        assert_eq!(format_g(9.9999996, 6), "10");
+        assert_eq!(format_g(-1e-300, 2), "-1e-300");
+    }
+
+    #[test]
+    fn generic_type_names() {
+        assert_eq!(generic_type_name(Meta::Unknown, 3), "unkbyte3");
+        assert_eq!(generic_type_name(Meta::Int, 16), "unkint16");
+        assert_eq!(generic_type_name(Meta::Float, 2), "unkfloat2");
+        assert_eq!(generic_type_name(Meta::Spacebase, 4), "BADSPACEBASE");
+        assert_eq!(generic_type_name(Meta::Struct, 8), "BADTYPE");
     }
 
     #[test]

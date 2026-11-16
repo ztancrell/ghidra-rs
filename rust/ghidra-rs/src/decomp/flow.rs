@@ -521,6 +521,11 @@ impl Flow<'_> {
                         let why = if let Fail::Normal(m) = &f { m.as_str() } else { "likely thunk" };
                         eprintln!("jumptable in 0x{:x} at 0x{:x}: {why}", self.fd.entry, self.fd.op(op).seq.addr);
                     }
+                    if let Fail::Normal(m) = &f {
+                        // stageJumpTable's catch: `warning(err.explain, op->getAddr())`
+                        let addr = self.fd.op(op).seq.addr;
+                        self.fd.warning(m, addr);
+                    }
                     self.truncate_indirect_jump(op, matches!(f, Fail::Normal(_)))?
                 }
                 Err(Fail::Callother) => {

@@ -1723,6 +1723,24 @@ block kind is a loud miss; silent: only 0x47a6b0 rules on, which differs from `r
 Next: the loud blockers left: `CALLIND`, array and field access (`PTRSUB`, `PTRADD`),
 anonymous data-types, comments in the body, float and character constants, `PIECE`,
 `FLOAT2FLOAT`, `FLOAT_NAN`; labels of spliced blocks (several cover ranges).
+(Superseded in part: slice 3B, below, does `CALLIND`, anonymous data-types, the body comments,
+the float operators and float constants; slice 3A, branch `m3-print3a`, does array and field
+access and character constants.)
+
+### S9 slice 3B: indirect calls, floats, body comments, anonymous types, branch `m3-print3b` (2026-11-15)
+
+`opCallind`; the float operators (`NAN`, `ABS`, `SQRT`, `CEIL`, `FLOOR`, `ROUND` as functions,
+`FLOAT2FLOAT` and `TRUNC` as casts, `opFloatInt2Float` absorbing an implied INT_ZEXT); float
+constants as `FloatFormat::printDecimal` prints them (unit tested against the C++);
+`genericTypeName`; the body comments through `CommentSorter` (`comment.rs`), `emitCommentGroup`
+and `emitCommentBlockTree`; `BlockBasic::cover` keeps the ranges of a spliced block for
+`contains`. Fixed on the way: flow records the jump-table failure warning (`stageJumpTable`), the
+cause of the 19 silent misses the comments first showed. Details: rust/README.md, "C printing,
+slice 3B". M500 `pcc-r` 441 / 495 (was 235), `pc-r` 442 (was 244), `pcc-t` 94 (was 58), `pc-t` 72
+(was 45); `simple` 174, 174, 91, 83 / 194 (were 109, 110, 57, 49); M8 `pc-r`/`pcc-r` 6 / 7, the
+51 other checks identical; silent only 0x47a6b0 (rules on). Switch `pcc-r` not finished at the commit.
+Next: `PIECE`, the SUBPIECE field extraction, `CALLOTHER`, `POPCOUNT`, `INT_SBORROW` and
+`INT_SCARRY`, labels of spliced blocks, and the array and field access of slice 3A.
 
 ## Running stages in parallel
 

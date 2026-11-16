@@ -82,6 +82,8 @@ pub(crate) struct PrintC<'a> {
     modstack: Vec<u32>,
     /// the block nesting being printed
     pub(crate) depth: u32,
+    /// the body comments (`commsorter`)
+    pub(crate) commsorter: super::comment::CommentSorter,
 }
 
 impl<'a> PrintC<'a> {
@@ -98,6 +100,7 @@ impl<'a> PrintC<'a> {
             mods: 0,
             modstack: Vec::new(),
             depth: 0,
+            commsorter: Default::default(),
         }
     }
 

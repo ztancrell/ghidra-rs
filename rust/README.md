@@ -694,7 +694,7 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
   on), `cs-r cs-t fsc-r fsc-t` (S9 `setcasts`: `print raw` after it, and `finalstructure`
   with it on), `swfs-r swfs-t swsn-r swsn-t swfsc-r swfsc-t` (`finalstructure` with case
   labels, `switchnorm`, and `finalstructure` with case labels and `setcasts` on) and
-  `pc-r pc-t pcc-r pcc-t` (`print C`, S9 slices 1 and 2, `pcc` with `setcasts` on; see "C printing").
+  `pc-r pc-t pcc-r pcc-t` (`print C`, S9 slices 1, 2 and 3B, `pcc` with `setcasts` on; see "C printing").
 - `JOBS` (default `nproc`), `TIMEOUT` (seconds per function and engine, default 120 as for every bar here; 0x4c48d0 of M500 takes
   the reference about 485 s and ghidra-rs about 600 s alone, so at 120 s it counts as a function
   the reference does not finish), `OUT`
@@ -2576,7 +2576,9 @@ unchanged by construction: no struct or union reaches them), the `simple` and sw
   range), block nesting deeper than 1000: an addition of ghidra-rs (the C++ recurses without a limit), so
   a deep function fails loudly instead of overflowing the stack; the front leaf of a label that is
   not a block copy. Comments in the
-  body, anonymous data-types, the long suffix and the operators of slice 1 stay loud.
+  body, anonymous data-types, the long suffix and the operators of slice 1 stay loud. (Superseded
+  in part: slice 3B, below, prints the body comments, anonymous data-types, `CALLIND` and the
+  float operators and constants.)
 - `bars.sh`: `pcc-r` and `pcc-t` also run on the switch corpus, with the `sw` options there
   (`switchnorm` on: the case labels come from it; with it off the reference fails on every
   switch in `finalizePrinting`).
@@ -2617,6 +2619,64 @@ themselves are covered by the corpus checks (a printed block needs a decompiled 
 was loaded by the `m3-s9` queue pass. Rerun after the flow fix, the review fixes and the merge of master's `decomp-diff.sh` timeout fix
 (superseded: "not rerun after the flow fix"): M500 and `simple`, all four print checks, the same
 counts as the table; M8 all 55 checks as before. Not run: the full pass (`bars-queue.sh`), the other checks on M500, simple and switch.
+
+### C printing, slice 3B: calls, floats, comments, anonymous types (branch `m3-print3b`, 2026-11-15)
+
+- `printc.rs`: `opCallind` (`(*fn)(args)`, the pointer under a dereference; `hide_thisparam`
+  is set only by the Java printer, so no `this` slot is hidden); the float operators of
+  printc.hh: `NAN`, `ABS`, `SQRT`, `CEIL`, `FLOOR`, `ROUND` in functional syntax (`opFunc` with
+  the operator name alone), `FLOAT2FLOAT` and `TRUNC` as casts, `opFloatInt2Float` (a cast of
+  the input, or of the implied INT_ZEXT's input it absorbs); the float compare and arithmetic
+  operators as before.
+- Float constants (`push_float`): `INFINITY`, `NAN` with their sign, else
+  `FloatFormat::printDecimal`: `ostream << double` (`%.*g`) at precision 6 to 9 (size 4) or 15
+  to 17 (size 8) until the text reads back as the value (as a float for size 4; libstdc++ reads
+  an overflow as the largest finite value), `.0` added to a token without `.` or `e`. Sizes
+  other than 4 and 8 print `FLOAT_UNKNOWN` (the x86 translator has no other float format).
+  Unit tests pin the tokens against the C++ (a small program printed them; 6,000 random
+  encodings also matched before the test was cut to the listed ones).
+- `genericTypeName`: a data-type without a name prints `unkbyte3`, `unkint3`, `unkuint3`,
+  `unkfloat3`, `BADSPACEBASE` or `BADTYPE`.
+- Body comments: `comment.rs` ports `CommentSorter` (`setupFunctionList`, `findPosition`,
+  `setupBlockList`, `setupOpList`) over `Funcdata::comments` in database order (address, then
+  the order added); `printc.rs` `emitCommentGroup` (before each statement and at the end of a
+  basic block, at indent 20) and `emitCommentBlockTree` (before an `if`, `for` or `while` line).
+  `Funcdata::main_ops_around` is `beginOpMain` and the op before it, INDIRECTs left out as the
+  C++ `optree`. A header warning and a body warning at the entry with the same text are one
+  comment (`addCommentNoDuplicate` checks both). The header stays `Funcdata::warnings`.
+- `BlockBasic::cover`: the ranges `spliceBlockBasic` merges (`mergeRange`), copied by
+  `nodeSplit`, so `contains` sees the gap between them (the label of a spliced block stays loud).
+- Fixed on the way (the 19 silent misses of the first run): flow now records the jump-table
+  failure warning (`stageJumpTable`'s `warning(err.explain, op->getAddr())`, "Could not recover
+  jumptable at .. Too many branches" and the other `fail_normal` messages) before "Treating
+  indirect jump as call".
+
+Numbers (functions the reference finishes; before = slice 2):
+
+| check | M8 before | M8 after | M500 before | M500 after | simple before | simple after |
+|---|---|---|---|---|---|---|
+| `pcc-r` | 2 / 7 | 6 / 7 | 235 / 495 | 441 / 495 (loud 53, silent 1) | 109 / 194 | 174 / 194 (loud 20) |
+| `pc-r` | 2 / 7 | 6 / 7 | 244 / 495 | 442 / 495 (loud 52, silent 1) | 110 / 194 | 174 / 194 (loud 20) |
+| `pcc-t` | 0 / 7 | 1 / 7 | 58 / 495 | 94 / 495 (loud 401) | 57 / 194 | 91 / 194 (loud 103) |
+| `pc-t` | 0 / 7 | 1 / 7 | 45 / 495 | 72 / 495 (loud 423) | 49 / 194 | 83 / 194 (loud 111) |
+
+The full runs were made before the `cover` fix; the three functions it moves (0x4f15d0 on
+M500, 0x9e0b71 and 0xa714b0 on `simple`, each a loud "comment in a spliced block") were rerun
+after it with all four checks: identical with rules on, and on `simple` types on; 0x4f15d0 types
+on now fails on a character constant. The table counts that rerun.
+
+Switch corpus `pcc-r`: not finished at the commit (about 291 of 2,005 functions done after an hour on a loaded machine; none of the finished ones was a silent miss).
+
+The silent miss is 0x47a6b0 alone (rules on), the known one that differs from `r1` on. The
+loud misses, M500 `pcc-r`: a SUBPIECE field extraction 19, `PIECE` 14, `CALLOTHER` 5,
+`POPCOUNT` 4, the label of a spliced block 3, `INT_SBORROW` 3, `INT_SCARRY` 2, a variable
+linked to a function or an external reference 2, a character constant 1, a comment in a spliced
+block 1 (printed since the cover fix); `pcc-t`: array or field access 205, `PTRADD` 94,
+character constants 35 (with 0x4f15d0), `PIECE` 28, `INT_SBORROW` 19, `PTRSUB` 8, the `mergeAddrTied` error 6,
+then 3 or fewer. `simple` `pcc-r`: `CALLOTHER` 8, `PIECE`, `INT_SBORROW` and the field
+extraction 3 each, comments in a spliced block 2 (printed since the fix). No comment, `CALLIND`,
+float or anonymous data-type error is left. M8: the 51 other checks identical (8 / 8, `fs*`
+7 / 7); the M8 misses are `INT_SBORROW` (`pcc-r`) and array or field access (`pcc-t`).
 
 ## Speed
 

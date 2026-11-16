@@ -267,6 +267,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    labels) and casts in `print C` (superseded: "fails loudly" for those and for a CAST op); M500 `pcc-r` 235 / 495,
    `pcc-t` 58 / 495, `pc-r` 244 / 495, `pc-t` 45 / 495, silent only 0x47a6b0 (differs from `r1` on); switch
    `pcc-r` 153 / 2005 (silent 0; flow now warns of overlapping instructions); M8 the 51 other checks identical.
+   S9 slice 3B on branch `m3-print3b` (2026-11-15): indirect calls, the float operators and float
+   constants (`printDecimal`), anonymous data-types (`genericTypeName`) and the body comments
+   (`CommentSorter`, `comment.rs`) in `print C` (superseded: "fails loudly" for those); flow records
+   the jump-table failure warning. M500 `pcc-r` 441 / 495, `pc-r` 442, `pcc-t` 94, `pc-t` 72;
+   `simple` 174, 174, 91, 83 / 194; silent only 0x47a6b0; M8 the 51 other checks identical. Switch `pcc-r` not finished.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

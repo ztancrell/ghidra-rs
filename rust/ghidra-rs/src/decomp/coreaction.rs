@@ -1917,7 +1917,12 @@ fn splice_block_basic(fd: &mut Funcdata, bl: BlockId) -> Result<()> {
     }
     // mergeRange
     let (start, stop) = (fd.blocks.block(outbl).start, fd.blocks.block(outbl).stop);
+    let ranges =
+        |b: &super::block::BlockBasic| if b.cover.is_empty() { vec![(b.start, b.stop)] } else { b.cover.clone() };
+    let mut cover = ranges(fd.blocks.block(bl));
+    cover.extend(ranges(fd.blocks.block(outbl)));
     let b = fd.blocks.block_mut(bl);
+    b.cover = cover;
     b.start = b.start.min(start);
     b.stop = b.stop.max(stop);
     b.spliced = true;
