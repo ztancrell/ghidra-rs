@@ -59,6 +59,8 @@ struct Flow<'a> {
     injectlist: Vec<CallId>,
     insn_count: u32,
     baddata_count: u32,
+    /// `reinterpreted_present`: the overlap warning is in the header
+    reinterpreted_present: bool,
 }
 
 /// Port of `Funcdata::followFlow` (flow over the whole code space): `FlowInfo::generateOps`
@@ -74,6 +76,7 @@ pub(crate) fn follow_flow(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
         injectlist: Vec::new(),
         insn_count: 0,
         baddata_count: 0,
+        reinterpreted_present: false,
     };
     flow.generate_ops()?;
     flow.generate_blocks()
@@ -218,12 +221,14 @@ impl Flow<'_> {
                 return Ok(None);
             }
             if addr < start + stat.size {
-                // reinterpreted: decoding into the middle of an instruction
-                self.count_bad_data(format!(
-                    "Instruction at {} overlaps instruction at {}",
-                    ram_addr(addr),
-                    ram_addr(start)
-                ))?;
+                // FlowInfo::reinterpreted: decoding into the middle of an instruction (the
+                // message ends in a newline, as the C++ `endl`)
+                let msg = format!("Instruction at {} overlaps instruction at {}\n", ram_addr(addr), ram_addr(start));
+                self.count_bad_data(msg.clone())?;
+                if !self.reinterpreted_present {
+                    self.reinterpreted_present = true;
+                    self.fd.warning_header(msg);
+                }
             }
         }
         Ok(Some(self.visited.range(addr + 1..).next().map_or(END_ADDR, |(&a, _)| a)))
@@ -558,6 +563,8 @@ impl Flow<'_> {
                 injectlist: Vec::new(),
                 insn_count: 0,
                 baddata_count: 0,
+                // the copy constructor copies `flags`
+                reinterpreted_present: self.reinterpreted_present,
             };
             pflow.generate_blocks()?;
             let res = action::jumptable_partial(&mut p, self.arch);

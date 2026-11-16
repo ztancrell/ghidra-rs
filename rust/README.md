@@ -2560,6 +2560,7 @@ unchanged by construction: no struct or union reaches them), the `simple` and sw
   them (`readOp`), which `isExtensionCastImplied` needs.
 - `prettyprint.rs`: the `same_line` brace style, `openBrace`, and the pending print of a brace
   (`setPendingPrint`, emitted by the next line break).
+- `flow.rs`: `FlowInfo::reinterpreted` gives its header warning (once a function).
 - The basic blocks keep `f_joined_block` (`nodeJoinCreateBlock`) and `f_duplicate_block`
   (`nodeSplitBlockEdge`) for the labels (superseded: "not kept, only printing reads it").
 - Fail loudly: a cast to a pointer to an array (`checkAddressOfCast`), a SUBPIECE with special
@@ -2575,11 +2576,17 @@ Numbers (functions the reference finishes; before = slice 1 with the `m3-s9` rev
 
 | check | M8 | M500 before | M500 after | simple after | switch after |
 |---|---|---|---|---|---|
-| `pcc-r` | 2 / 7 | 10 / 495 | 235 / 495 (loud 259, silent 1) | 109 / 194 (loud 85) | running |
-| `pcc-t` | 0 / 7 | 8 / 495 | 58 / 495 (loud 437, silent 0) | 57 / 194 (loud 137) | running |
+| `pcc-r` | 2 / 7 | 10 / 495 | 235 / 495 (loud 259, silent 1) | 109 / 194 (loud 85) | 153 / 2005 (loud 1852, silent 0) |
+| `pcc-t` | 0 / 7 | 8 / 495 | 58 / 495 (loud 437, silent 0) | 57 / 194 (loud 137) | not finished (29 done, all loud) |
 | `pc-r` | 2 / 7 | 47 / 495 | 244 / 495 (loud 250, silent 1) | 110 / 194 (loud 84) | |
 | `pc-t` | 0 / 7 | 24 / 495 | 45 / 495 (loud 450, silent 0) | 49 / 194 (loud 145) | |
 
+On the switch corpus (`pcc-r`): comments in the body 1,453 (mostly jump-table warnings), `CALLIND` 125, an
+anonymous data-type 110, `FLOAT2FLOAT` 40, `FLOAT_NAN` 35, the label of a spliced block 30, then 13 or
+fewer each. Fixed on the way (the three silent switch misses, 0x1a7a2ac, 0x1d1472a, 0x1e9cbc6): flow
+now gives the header warning of `FlowInfo::reinterpreted`, "Instruction at (ram,..) overlaps
+instruction at (ram,..)" with its trailing newline, once a function (`reinterpreted_present`, copied
+into the jump-table partial function), as the earlier bad-instruction fix.
 No block kind is a loud miss any more. The one silent miss of `pcc-r` and `pc-r` is 0x47a6b0,
 the known rules-on miss: it differs from `r1` on (`print raw` at `assignhigh`: the block
 numbering after the rules), so `finalstructure` and the printer see another function.
@@ -2597,7 +2604,10 @@ M8: the 51 checks other than the print checks identical (8 / 8, `fs`, `fsc` 7 / 
 Unit tests: the `else if` brace (`pending_brace_else_if`), the switch brace
 (`switch_brace_has_no_indent`), the printer-only casts (`printer_casts`); the block kinds
 themselves are covered by the corpus checks (a printed block needs a decompiled function).
-Not run: the full pass (`bars-queue.sh`), the other checks on M500, simple and switch.
+`pcc-t` on the switch corpus was stopped after 29 of 2,050 functions (all loud, silent 0): the machine
+was loaded by the `m3-s9` queue pass. Not rerun after the flow fix: M500 and `simple` (a function
+the fix touches had a header warning ghidra-rs lacked, so it was a miss before; the counts can
+only rise). Not run: the full pass (`bars-queue.sh`), the other checks on M500, simple and switch.
 
 ## Speed
 

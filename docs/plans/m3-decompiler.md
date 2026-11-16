@@ -1719,7 +1719,7 @@ gotos, labels, break, continue), the branch ops, and casts: `opTypeCast`, `opInt
 `pcc-t` also run on the switch corpus (with the `sw` options, `switchnorm` on). M500 `pcc-r` 235 /
 495 (was 10), `pcc-t` 58 / 495 (was 8), `pc-r` 244 / 495 (was 47), `pc-t` 45 / 495 (was 24); no
 block kind is a loud miss; silent: only 0x47a6b0 rules on, which differs from `r1` on. `simple`
-109, 57, 110, 49 / 194; switch not measured yet. M8: the 51 other checks identical, `pc-r`/`pcc-r` 2 / 7.
+109, 57, 110, 49 / 194; switch `pcc-r` 153 / 2005 (silent 0 after the flow fix for the "overlaps instruction" header warning), `pcc-t` not finished. M8: the 51 other checks identical, `pc-r`/`pcc-r` 2 / 7.
 Next: the loud blockers left: `CALLIND`, array and field access (`PTRSUB`, `PTRADD`),
 anonymous data-types, comments in the body, float and character constants, `PIECE`,
 `FLOAT2FLOAT`, `FLOAT_NAN`; labels of spliced blocks (several cover ranges).
