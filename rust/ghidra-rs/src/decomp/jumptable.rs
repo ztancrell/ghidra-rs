@@ -26,8 +26,9 @@
 //! - Not ported: `JumpAssisted` (x86 has no `jumpassist` user op), `JumpBasicOverride`
 //!   (overrides; the console sets none), multistage tables (`matchModel` fails loudly on the
 //!   restart), LOAD collection (`record_jumploads` is off by default), `testForReturnAddress`
-//!   (x86's return address is on the stack, not heritaged yet), the reverse of a shift in
-//!   `backup2Switch` (not reachable: `findUnnormalized` steps over ADD, SUB and extensions).
+//!   (a target traced to the input at stack offset 0 fails loudly in flow.rs), the reverse of
+//!   a shift in `backup2Switch` (not reachable: `findUnnormalized` steps over ADD, SUB and
+//!   extensions).
 
 use super::block::BlockId;
 use super::coreaction::{minimal_mask, structure_reset};
@@ -1190,7 +1191,11 @@ impl<'a> JumpBasic<'a> {
                 EmuError::Other(m) => m,
             })?;
         }
-        emu.get(fd.op(p.op(0)).ins[0]).map_err(|_| "Could not emulate address calculation".into())
+        // a load image read failing here is a `DataUnavailError` the loop does not catch, with
+        // the load image's own message, which is not ported
+        emu.get(fd.op(p.op(0)).ins[0]).map_err(|_| {
+            "jump table: reading the table after emulation (DataUnavailError of the load image) is not ported".into()
+        })
     }
 
     /// `buildAddresses` (`funcptr_align` is 0 for x86: no mask)
@@ -1273,13 +1278,14 @@ fn is_thunk(fd: &Funcdata, table: &[u64]) -> bool {
 }
 
 /// Port of `JumpTable::recoverAddresses` (`recoverModel`, `buildAddresses`, `sanityCheck`) on
-/// the partial function `fd`: the targets in table order and whether the table is partial
-/// (its switch looks unreachable).
+/// the partial function `fd`: the targets in table order, whether the table is partial (its
+/// switch looks unreachable), the values kept and whether the sanity check truncated the table
+/// (the caller records the partial function's warning).
 pub(crate) fn recover_addresses(
     fd: &Funcdata,
     arch: &Arch,
     indop: OpId,
-) -> std::result::Result<(Vec<u64>, bool, ValueRange), Fail> {
+) -> std::result::Result<(Vec<u64>, bool, ValueRange, bool), Fail> {
     let addr = fd.op(indop).seq.addr;
     let mut basic = JumpBasic::new(fd, arch, indop);
     let ok = basic.recover_model();
@@ -1303,6 +1309,7 @@ pub(crate) fn recover_addresses(
         return Err(Fail::Normal(format!("Jumptable with 0 entries at 0x{addr:08x}")));
     }
     let mut table = model.build_addresses().map_err(Fail::Normal)?;
+    let size = table.len();
     let partial = !is_reachable(fd, indop);
     if is_thunk(fd, &table) {
         return Err(Fail::Thunk);
@@ -1311,7 +1318,8 @@ pub(crate) fn recover_addresses(
         return Err(Fail::Normal(format!("Jumptable at 0x{addr:08x} did not pass sanity check.")));
     }
     let kept = model.jrange.as_ref().map(JumpValues::kept).unwrap_or_default();
-    Ok((table, partial, kept))
+    let truncated = table.len() != size;
+    Ok((table, partial, kept, truncated))
 }
 
 /// Port of `Funcdata::earlyJumpTableFail`: walking back from the BRANCHIND over at most 8 ops

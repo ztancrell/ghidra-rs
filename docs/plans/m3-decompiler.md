@@ -1739,6 +1739,10 @@ cause of the 19 silent misses the comments first showed. Details: rust/README.md
 slice 3B". M500 `pcc-r` 441 / 495 (was 235), `pc-r` 442 (was 244), `pcc-t` 94 (was 58), `pc-t` 72
 (was 45); `simple` 174, 174, 91, 83 / 194 (were 109, 110, 57, 49); M8 `pc-r`/`pcc-r` 6 / 7, the
 51 other checks identical; silent only 0x47a6b0 (rules on). Switch `pcc-r` not finished at the commit.
+Review fixes: an unported jump-table failure (the partial action's or emulation's) fails the
+decompile instead of warning; a second table after a failed partial action fails loudly; the
+dropped warnings ("ptrarith problems", offcut call, PIC construction, jump-table truncation) are
+recorded; `fail_return` fails loudly. Rerun: the same counts.
 Next: `PIECE`, the SUBPIECE field extraction, `CALLOTHER`, `POPCOUNT`, `INT_SBORROW` and
 `INT_SCARRY`, labels of spliced blocks, and the array and field access of slice 3A.
 

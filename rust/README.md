@@ -1090,7 +1090,8 @@ targets. 0xa4e8c2 is left out: its partial function has 780,000 ops (flow runs t
 instruction limit); ghidra-rs takes 49 s on it, the reference had not finished after 35 min.
 Not ported, and why: `fail_callother` (an address made by a CALLOTHER; ghidra-rs stops with
 an error: 2 functions in obfuscated code, 0x1c3c0d9 and 0x1c3c0fa), `fail_return`
-(`testForReturnAddress`: the return address is on the stack, not heritaged yet), the retry of
+(`testForReturnAddress`; superseded: "not heritaged yet": since slice 3B a target traced to
+the input at stack offset 0 fails loudly in flow.rs), the retry of
 a table whose switch looks unreachable (it needs a guard folded to a constant; it is taken as
 complete), `checkUnrolledGuard`, multistage tables, overrides, `JumpAssisted`.
 
@@ -2650,6 +2651,32 @@ counts as the table; M8 all 55 checks as before. Not run: the full pass (`bars-q
   failure warning (`stageJumpTable`'s `warning(err.explain, op->getAddr())`, "Could not recover
   jumptable at .. Too many branches" and the other `fail_normal` messages) before "Treating
   indirect jump as call".
+- Review fixes (second commit on the branch):
+  - A jump-table failure whose message ghidra-rs makes on a path it does not port
+    (`is_unported`) ends the decompile instead of becoming a body warning and a CALLIND: an
+    unported error of the partial function's action, and the emulation errors the C++ does
+    not have (emulating an op not ported, an op without output, the load image read after the
+    emulated path, whose C++ message is the load image's own). Superseded: "reported on
+    stderr" for the partial's unported errors.
+  - After the partial function's action failed, a second table of the same function fails
+    loudly: the C++ marks the partial before the action runs and reads the half-simplified
+    clone for the next table; ghidra-rs made a fresh one.
+  - The partial's header warnings go through `add_header`, so the header and body dedupe
+    applies to them too.
+  - Body and header warnings that were dropped: "ptrarith problems" (`RulePtrArith`),
+    "Call to offcut address within same function" and the header "Possible PIC construction at
+    ..: Changing call to branch" (`checkContainedCall`), "Sanity check requires truncation of
+    jumptable" (`JumpTable::sanityCheck`, with the jumptable prefix of the partial).
+  - `testForReturnAddress` (`fail_return`, "Treating indirect jump as return") fails loudly
+    when the jump's target traces through COPY, INDIRECT and INT_AND by a constant to the
+    input at stack offset 0.
+  - Audited and not reachable: "Subroutine does not return" and "Does not return" (ghidra-rs
+    has no non-returning prototype, and `fail_callother` fails loudly), "Function flow out of
+    bounds" (flow covers the whole space and inlining is not ported), `ActionPrototypeWarnings`
+    (the checks break before `prototypewarnings`, which is `not_ported`), "Second-stage recovery
+    error" (a table that looks unreachable is taken as complete, so `recoverMultistage` never
+    runs; a multistage restart in `matchModel` fails loudly) and "Switch is manually
+    overridden" (the console sets no override).
 
 Numbers (functions the reference finishes; before = slice 2):
 
@@ -2660,18 +2687,17 @@ Numbers (functions the reference finishes; before = slice 2):
 | `pcc-t` | 0 / 7 | 1 / 7 | 58 / 495 | 94 / 495 (loud 401) | 57 / 194 | 91 / 194 (loud 103) |
 | `pc-t` | 0 / 7 | 1 / 7 | 45 / 495 | 72 / 495 (loud 423) | 49 / 194 | 83 / 194 (loud 111) |
 
-The full runs were made before the `cover` fix; the three functions it moves (0x4f15d0 on
-M500, 0x9e0b71 and 0xa714b0 on `simple`, each a loud "comment in a spliced block") were rerun
-after it with all four checks: identical with rules on, and on `simple` types on; 0x4f15d0 types
-on now fails on a character constant. The table counts that rerun.
+The four checks on M500 and `simple` and M8 every check were rerun in full after the review
+fixes, with the same counts (superseded: the first commit counted a rerun of the three functions
+the `cover` fix moves, 0x4f15d0, 0x9e0b71 and 0xa714b0).
 
 Switch corpus `pcc-r`: not finished at the commit (about 291 of 2,005 functions done after an hour on a loaded machine; none of the finished ones was a silent miss).
 
 The silent miss is 0x47a6b0 alone (rules on), the known one that differs from `r1` on. The
 loud misses, M500 `pcc-r`: a SUBPIECE field extraction 19, `PIECE` 14, `CALLOTHER` 5,
 `POPCOUNT` 4, the label of a spliced block 3, `INT_SBORROW` 3, `INT_SCARRY` 2, a variable
-linked to a function or an external reference 2, a character constant 1, a comment in a spliced
-block 1 (printed since the cover fix); `pcc-t`: array or field access 205, `PTRADD` 94,
+linked to a function or an external reference 2, a character constant 1;
+`pcc-t`: array or field access 205, `PTRADD` 94,
 character constants 35 (with 0x4f15d0), `PIECE` 28, `INT_SBORROW` 19, `PTRSUB` 8, the `mergeAddrTied` error 6,
 then 3 or fewer. `simple` `pcc-r`: `CALLOTHER` 8, `PIECE`, `INT_SBORROW` and the field
 extraction 3 each, comments in a spliced block 2 (printed since the fix). No comment, `CALLIND`,

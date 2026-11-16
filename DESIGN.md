@@ -272,6 +272,7 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    (`CommentSorter`, `comment.rs`) in `print C` (superseded: "fails loudly" for those); flow records
    the jump-table failure warning. M500 `pcc-r` 441 / 495, `pc-r` 442, `pcc-t` 94, `pc-t` 72;
    `simple` 174, 174, 91, 83 / 194; silent only 0x47a6b0; M8 the 51 other checks identical. Switch `pcc-r` not finished.
+   Review fixes on it: unported jump-table failures fail loudly, four dropped warnings recorded; same counts.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
