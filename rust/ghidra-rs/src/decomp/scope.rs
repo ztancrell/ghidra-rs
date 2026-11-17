@@ -330,6 +330,13 @@ impl Database {
         Ok(best)
     }
 
+    /// Port of `ScopeInternal::findOverlap`: the entry of the first sub-range of the map
+    /// overlapping `[off, off + size - 1]`, in the map's (sub-sorted) order.
+    pub(crate) fn find_overlap(&self, scope: ScopeId, space: Space, off: u64, size: u32) -> Option<(SymbolId, usize)> {
+        let end = off.wrapping_add(u64::from(size)).wrapping_sub(1);
+        self.scope(scope).maps.get(&space.index())?.find_overlap(off, end)
+    }
+
     /// Port of `ScopeInternal::findSymbolAfter` (`after`) and `findSymbolBefore` without a use
     /// point: the first entry valid everywhere among those starting after `off` (ending before
     /// it) and the entries the map holds beyond.

@@ -62,7 +62,7 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   call-fixup injection), `block.rs` (basic blocks, spanning tree, dominators), `actiontree.rs`
   (the action framework: groups, repeat, breakpoints, `continue`), `heritage.rs` (SSA: phi
   placement and renaming), `action.rs` (the universal
-  action up to `paramdouble`), `print.rs` (`print raw`), `stdsort.rs` (libstdc++'s `std::sort`), `rangemap.rs` (the
+  action up to `paramdouble`), `print.rs` (`print raw`), `stdsort.rs` (libstdc++'s `std::sort` and `std::list::sort`), `rangemap.rs` (the
   `rangemap` template the scopes' maps use), `scope.rs` (symbols, default names), `namevars.rs`
   (`ActionNameVars`), and `print C` in three layers: `prettyprint.rs` (`EmitPrettyPrint`: tokens,
   line breaking, indents), `printlanguage.rs` (the operator stack, parentheses, number base) and
@@ -77,7 +77,7 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   reads becoming constants) and `decomp/inject.rs` (the snippet parser).
 - `tools/rangemap_ref.cc`: the C++ `rangemap` template on the data of the unit tests of
   `decomp/rangemap.rs` (multiset order, record order, `find`).
-- `tools/stdsort_ref.cc`, `ghidra-rs/tests/data/stdsort-gxx.txt`: libstdc++ `std::sort` tie orders
+- `tools/stdsort_ref.cc`, `ghidra-rs/tests/data/stdsort-gxx.txt`: libstdc++ `std::sort` and `std::list::sort` tie orders
   that `decomp/stdsort.rs` must reproduce.
 - `tools/decomp-ref.sh`, `tools/decomp-ref.patch`: build the reference decompiler `decomp_dbg`.
 - `tools/decomp-diff.sh`: runs a corpus on both decompilers and compares; `tools/decomp-show.sh`,
@@ -3725,6 +3725,8 @@ Readers of the symbols that changed with them:
 - `PrintC::pushMismatchSymbol` for a variable larger than the symbol at its address
   (`_xStack00000000`).
 - `linkSymbol` fails loudly where `handleSymbolConflict` would make a dynamic symbol.
+  (Superseded: the reference, Ghidra 12.3, has no `handleSymbolConflict`; `linkSymbol` links any
+  entry that is not a conflict, see "Integration `m3-int6`: review fixes".)
 - `RuleStringCopy` fails loudly on a character copied into a symbol of `restructure_varnode`
   (`StringSequence` is not ported).
 - Fixed on the way: `subflow.rs` and `subfloat.rs` read the size of a locked varnode's type
@@ -3734,7 +3736,8 @@ Readers of the symbols that changed with them:
 Not ported, each failing with an error that names it: a structure or union among the hints, a
 locked prototype with parameters, a piece of an array symbol as a data-type
 (`getTypePartialStruct`), a reference into the stack parameters of a locked prototype, a load or
-store guard whose pointer points to a union. (Superseded: "a valid load or store guard
+store guard whose pointer points to a union (since "Integration `m3-int6`: review fixes": whose
+pointer has a data-type that `needsResolution`, or points to a union). (Superseded: "a valid load or store guard
 (`MapState::addGuard`, the value-set ranges)" in this list: the integration `m3-int6` joined
 this port with `MapState::addGuard` of "Value-set analysis and the stack guards"; in the
 `decompile` root the guard's hint takes the data-type its pointer points to, see "Integration
@@ -4538,7 +4541,7 @@ their counts are each branch's, on its own base. Where two branches met, the cod
   element of an array) when that has the step's size, else unknown bytes of the step's size, as
   the C++; in the partial function it is always the unknown type. New here, on neither branch:
   the typed case, and a loud error for a pointer to a union (`getTypeReadFacing` needs the
-  union's resolution).
+  union's resolution; widened in "review fixes" below to any type that `needsResolution`).
 - `namevars.rs`, `finalizeDatatype`: `getExactPiece` of "pieces of symbols"
   (`infertypes::exact_piece`), and the piece's type is kept as in "Local symbols"
   (`type_finalized`). The loud "changing the data-type of a variable" is gone.
@@ -4602,6 +4605,44 @@ Ghidra project). Not seen in a check: whether any function of M8 or M500 reaches
 guard hint with a pointer whose target has the step's size (the code new in this merge), and
 `ptrsubcharconstant` changing an output without facts (the checks with it on give the counts
 above, and no line of the M8 baseline moved).
+
+### Integration `m3-int6`: review fixes (2026-11-17)
+
+Six review findings on `m3-int6`, each checked against the C++ of this tree (Ghidra 12.3):
+
+- `namevars.rs`, `linkSymbol`: the reviewer read a newer Ghidra's `handleSymbolConflict`; this
+  tree's `Funcdata::linkSymbol` has none (it links any entry from `queryProperties` that is not a
+  conflict). The loud "a variable in the storage of another one's symbol (buildDynamicSymbol)"
+  (only for a symbol valid everywhere) is removed, so the port links as the reference does. It
+  fired on no M8 or M500 function.
+- `mapstate.rs`, `checkUnaliasedReturn`: the alias test is the C++ `alias <= off + (size - 1)`
+  (wrapping), not `alias < off + size`, which could overflow.
+- `getTypeReadFacing` / `getTypeDefFacing` (`infertypes::vn_type_facing`): `MapState::addGuard`,
+  `RuleStringCopy`, `RuleStringStore` and `gatherParamSpacebaseRefs` read the varnode's own
+  type, where the C++ resolves a type that `needsResolution` (a union, a pointer to one, a
+  one-element array, a one-field structure). `unionresolve.cc` is not ported, so such a type now
+  fails loudly there instead of being used unresolved.
+- `coreaction.rs`, `gatherParamSpacebaseRefs`: `refs.sort()` is `std::list::sort` with
+  `InputRef::operator<`, whose `typeOrder <= 0` holds both ways on a tie (a comparator a Rust
+  sort may panic on). `stdsort::list_sort` ports libstdc++'s bottom-up list merge sort, so the
+  order is the reference's in every case; its unit test pins g++'s order for a strict and a
+  non-strict `less` (`tools/stdsort_ref.cc`).
+- `RuleSwitchSingle`: the header warning prints the address with `AddrSpace::printRaw`
+  (`printc::raw_offset`), not a fixed eight digits.
+- `recoverNameRecommendationsForSymbols`: `findOverlap` is `ScopeInternal::findOverlap` on the
+  scope's `rangemap` (`Scope::find_overlap`): the first sub-range in the map's order, where the
+  port took the lowest entry offset and then the lowest symbol id.
+
+Counts, the desktop, `TIMEOUT` 120: `cargo test` 158 passed (157 and the new `list_sort_matches_gxx`);
+`cargo fmt` and `cargo clippy -D warnings` clean. M8, all 57 checks: every line equal to the
+`m3-int6` run. M500: `pcd` 493 / 499 (loud 6, silent 0), the same six misses; `pmd` 496 / 499
+with the reference timing out on 0x4c48d0 under load (another full pass ran on the machine),
+which rerun alone (`TIMEOUT` 600) is identical, so 497 / 500 (loud 3, silent 0) as before. No
+function changed state. Not run: the other 55 checks on M500, the switch, `simple` and
+`r5d-adc` corpora, the Mac. Not seen in a check: a type needing resolution at the four readers
+(no function failed there), a tie of `typeOrder` in `gatherParamSpacebaseRefs`, a `findOverlap`
+whose first sub-range differs from the lowest offset, a `RuleSwitchSingle` warning (the address
+format is the same for a 4-byte space).
 
 ## Speed
 
