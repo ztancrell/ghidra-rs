@@ -1455,7 +1455,10 @@ those groups are not ported and are left out of the partial's tree while they ar
 `shadowvar`, `condconst`, `mapped_local_sync`, `normalizebranches`); an entry is skipped only as
 long as its leaf is `not_ported`, so a later port runs in the partial too. Three of them can
 change which tables are recovered: `restructure_varnode` (in the partial it also runs
-`protectSwitchPaths`), `condconst` and `normalizebranches`. The partial carries
+`protectSwitchPaths`), `condconst` and `normalizebranches`. (Superseded, branch
+`m3-aliasupdate`: `restructure_varnode` runs in the partial function, see "Alias analysis of the
+jump-table partial function"; `action::PARTIAL_SKIP` holds seven actions now, `outputprototype`
+among them, and two of the seven can change the tables.) The partial carries
 `Funcdata::jumptablerecovery_on` (`isJumptableRecoveryOn`): heritage does not bump the
 dead-code delay in it, dead code skips `lastChanceLoad`, and `donothing` removes an empty block
 whatever was copied into it. An error of the partial's action fails the table, as in the C++;
@@ -2121,7 +2124,9 @@ Bars held: S4 and the four S6 checks 498 / 500, paramdouble 500 / 500, switch co
 1,947 / 2,050, r1 / subvar / r4 498 / 499. LOADs and STOREs through the stack pointer stay unconverted until R5's
 `RuleLoadVarnode`/`RuleStoreVarnode`. Not ported, fails loudly: the load-guard value-set
 analysis, revisited markers, the dead-code restart, `ActionRestructureVarnode`. Details and
-the M500 numbers in `docs/plans/m3-decompiler.md`, "Stack heritage".
+the M500 numbers in `docs/plans/m3-decompiler.md`, "Stack heritage". (Superseded for the
+partial function of jump-table recovery: it runs a port of `ActionRestructureVarnode`, branch
+`m3-aliasupdate`.)
 
 
 Review fixes and merges (2026-11-14). 0x4098c0 is fixed: the heritage location map rebuilt a
@@ -2860,6 +2865,9 @@ cause:
 | the same, and the jump reads a stack varnode through the INDIRECT of a STORE that `RuleAliasUpdate` collapses in the C++ (`ActionRestructureVarnode`, not ported) | 1 (0x1c69c5a) | loud |
 | `ActionConditionalExe` (not ported) removes a block re-testing an equal condition held in another varnode | 1 (0x5a3c30) | loud |
 
+(Superseded, branch `m3-aliasupdate`: `RuleAliasUpdate` and the action run in the partial
+function; 0x1c69c5a stays loud, on the value-set range of the store guard its STORE has.)
+
 What changed:
 
 - The partial function of jump-table recovery runs with `RuleLoadVarnode` and `RuleStoreVarnode`,
@@ -2916,6 +2924,9 @@ above.
   retry on the partial function without the stack rules any more. Not proven: that removing only
   some of them (what the C++ alias analysis may do) gives the same table when removing all or none
   does.
+  Superseded (branch `m3-aliasupdate`): both run in the partial function; this test is left for
+  the partial function made without them, see "Alias analysis of the jump-table partial
+  function".
 - The partial function without the stack rules (the fallback when the stack heritage is not
   ported): a table from it also fails loudly when a guard (`analyzeGuards`,
   `jumptable::guard_conditions`) reads the stack through a LOAD the jump does not read.
@@ -3053,7 +3064,111 @@ slice 5 above, which were derived or from single checks.) Varies with load: the 
 identical" count of `s6void-m500` is 499 / 500 here and 500 / 500 in the baseline (a reference
 timeout; identical 499 / 499 in both).
 
-## Speed
+### Alias analysis of the jump-table partial function (branch `m3-aliasupdate`, 2026-11-17)
+
+`RuleAliasUpdate` itself is three lines: it runs `Funcdata::opCollapseIndirectsForAlias` on a
+STORE or call marked `store_aliasupdate`. What it collapses is decided elsewhere, by
+`ActionRestructureVarnode` (the `nolocalalias` flag of a stack varnode) and by the value-set
+range of a store guard. In the partial function the C++ runs all of it (`aliasyes` from the
+second pass on), and after it `protectSwitchPaths` keeps one INDIRECT on a path from a constant
+to the switch. Ported, for the partial function only:
+
+- `rules/copy.rs`, `rules/mod.rs`: `RuleAliasUpdate` (`aliasupdate`, group `analysis`, after
+  `multicollapse` in `oppool1`).
+- `mapstate.rs` (new): `opCollapseIndirectsForAlias`, `syncVarnodesWithSymbols` with
+  `markIndirectAliasUpdate`, `ScopeLocal::restructureVarnode` (`MapState::gatherVarnodes`,
+  `gatherOpen`, `initialize` with `reconcileDatatypes`, `RangeHint::merge`, `absorb`,
+  `attemptJoin`, `adjustFit`, `createEntry`, `fakeInputSymbols`, `markUnaliased`) and
+  `protectSwitchPaths`. The partial function has no data-types, so a hint's type is the unknown
+  type of its size, and a symbol is a bare entry (`varmap::LocalSym`: offset, size,
+  `nolocalalias`, the `fake_input` category) in a `RangeMap` (`rangemap.rs` gains
+  `find_overlap`).
+- `varnode.rs`, `op.rs`: the varnode flags `mapped` and `nolocalalias` (`VnFlags` is 64 bits
+  wide now), the op flags `store_aliasupdate` and `no_indirect_collapse`.
+  `heritage_guard.rs` marks a STORE that gets a store guard (`analyzeNewLoadGuards`).
+- `funcdata.rs`, `heritage.rs`: a new stack varnode inside one of these symbols takes no
+  property from the scope (`setSymbolProperties` on an unlocked symbol), and the heritage
+  guard reads `addrtied` from the symbol.
+- `varmap.rs`: `AliasChecker::gatherAdditiveBase` keeps the index term (`AddBase::index`).
+
+Not ported, each failing with an error that names it: a valid load or store guard
+(`MapState::addGuard` and `LoadGuard::isGuarded` read the value-set ranges; `ValueSetSolver`
+is not ported), an open hint outside the local ranges and the parameter range
+(`adjustOutOfRange` with `getNearestRange`), a locked prototype, a typed stack varnode or one
+above `max_basetype_size`, a RETURN of a stack varnode (`checkUnaliasedReturn`),
+`annotateRawStackPtr` once type recovery has started. The action of the `decompile` root
+stays unported (`restructure_varnode` fails there as before), and `r1-options.sh` keeps
+`aliasupdate` off in the function itself: there the rule fails on the INDIRECTs of an indexed
+stack STORE.
+
+`flow.rs` makes the partial function three ways (`Mode`): as the C++ does (`Exact`); without the
+action and the rule when they reach one of the paths above (`NoAlias`), where the test of
+`m3-swsilent` on the INDIRECTs of stack varnodes still decides, its error now naming the path
+that was not ported; and without the `stackvars` rules as before (`NoStack`). In `Exact` no test
+is made: the table is the one the partial function gives. The reference patch skips an action by
+name in every root, so with `DECOMP_SKIP_ACTIONS=restructure_varnode` (the print checks) its
+partial function runs without the action; ghidra-rs then leaves it out too
+(`action::jumptable_partial`), and only the rule runs.
+
+The 17 functions of the switch corpus that were loud on master (`paramdouble`, `swsn-r`,
+`swfs-r`), before and after:
+
+| functions | cause | now |
+|---|---|---|
+| 0x1cdbf0e, 0x7913d0, 0x7bb710, 0x7bf170, 0x831db0, 0x898690, 0x898850 | the test on the INDIRECTs of stack varnodes: the C++ collapses them all but the one `protectSwitchPaths` keeps, and the table fails on that one | identical |
+| 0x1c69c5a | an indexed stack STORE in the partial function: its INDIRECTs go by the value-set range of the store guard | loud |
+| 0x546d40, 0x5629d0, 0x78e7d0, 0x1b0c190, 0x502b80, 0x5c37f0 | an indexed stack LOAD on an address-tied range in the partial function (`guardLoads` needs the value-set range) | loud |
+| 0x5a3c30, 0x807a80 | `ActionConditionalExe` is not ported | loud |
+| 0x23f4238 | a multistage table (`switchnorm`); identical in `paramdouble`, loud from `swsn-r` on | loud |
+
+What is left needs three ports: `ValueSetSolver` with the guard ranges (rangeutil.cc, about
+1,500 lines; 7 functions), `ActionConditionalExe` (condexe.cc; 2) and the multistage recovery
+(1).
+
+Checks. The master build stands in the reference's place (`decomp-diff.sh` with `DECOMP` set
+to a wrapper of it), so a run lists the functions whose output the branch changes; the checks
+against the reference then run on those. Nothing outside the partial function changes in the
+function itself (the symbols exist only there, and in the `decompile` root of every check the
+rule or its group is off, or the check stops before the stack is heritaged), so a function with
+the same output at `paramdouble` has the same tables.
+
+- Switch corpus, 2,050 functions at `paramdouble`, once with the action on and once with
+  `DECOMP_SKIP_ACTIONS=restructure_varnode,mapped_local_sync` (what `pcc-r` and `pcc-t` set): 10
+  outputs change in each run, the same 10. They are the seven of the first row above,
+  0x2285c9b and 0x7c1f30, which the reference does not finish with the action on, and
+  0x1c69c5a, still loud, with the new wording of its error.
+- The first 9 against the reference: `paramdouble`, `swfs-r`, `swfs-t`, `swsn-r`, `swsn-t`,
+  `swfsc-r`, `swfsc-t` 7 / 7 identical; `pcc-r` and `pcc-t` 8 / 8 (the reference finishes
+  0x7c1f30 there). The 17 of the table in `paramdouble`, `swfs-r`, `swsn-r`, `pcc-r`, `pcc-t`:
+  8, 7, 7, 7, 7 identical, the rest loud as the table says.
+- Counts from that and the `m3-int5` pass, not from a run of the whole corpus against the
+  reference: `paramdouble` 1988 -> 1995 / 2004 (loud 9), `swfs-r`, `swfs-t`, `swfsc-r`,
+  `swfsc-t` and `swsn-t` 1987 -> 1994 (loud 10), `swsn-r` 1984 -> 1991 (loud 10, silent 3 as
+  before), `pcc-r` 1987 -> 1995 / 2005 (loud 10), `pcc-t` 1986 -> 1994 / 2005 (loud 11). No
+  function identical on master changes, none becomes silent.
+- The two the reference does not finish. 0x7c1f30 now ends in the reference's error ("Unable to
+  load 512 bytes at r0x5310ec83"; the reference meets it at `load function`, ghidra-rs at
+  `decompile`). 0x2285c9b was loud and now prints a function, while the reference fails with
+  "Unable to load 512 bytes at r0xc6bb1000": both engines fail the first table the same way,
+  then the reference recovers the table at 0x2286023 and follows it out of the image, and
+  ghidra-rs fails that table ("Could not emulate address calculation"). The loud test hid this
+  difference; it is open and not traced.
+- M8: all 55 checks against the reference, every summary line equal to the `m3-int5`
+  baseline's (identical in each; in `fs-*`, `fsc-*`, `pc-*` and `pcc-*` the reference finishes 7
+  of the 8, as before), and old against new 8 / 8 outputs equal in all 55. M500, old against new, `s8r`,
+  `swfs-r`, `swfs-t`, `fs-t`, `paramdouble`, `pcc-r`, `pcc-t`, `r5s`, `r5slock`: 500 / 500
+  outputs equal in each, so their counts are those of the `m3-int5` pass.
+- The partial function against the reference's (`DECOMP_JT_RAW`, the INDIRECT ops of both), a
+  sample of 140 switch functions: 125 equal; 8 made without the action (an indexed stack LOAD
+  or a guard); 7 differ as
+  they did on master, by fewer lines (the reference has `AL` for `EAX`, one byte of a stack
+  slot; not traced, the partial function still runs without `multicse`, `shadowvar`,
+  `condconst` and `normalizebranches`). Of 700 functions of the corpus, 672 are made
+  the C++ way and 28 fall back (25 on an indexed stack LOAD in the stack heritage, 3 on a
+  guard in the action).
+- Not run: the full pass, the switch checks on the whole corpus and M500 against the
+  reference, the Mac. One unit test (`mapstate.rs`): overlapping hints merge into an open
+  range, and an alias offset reaches the symbols at and above it.
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The
 input was the whole `.text` of `/usr/lib/libLLVM.so.21.1`: 97 MB, 21,830,419 instructions,

@@ -319,6 +319,13 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    Integration `m3-int5` (2026-11-17), full pass clean against the slice 4 baseline: switch `pcc-r` 1987 / 2005,
    `pcc-t` 1986 / 2005, silent 0; the other switch checks 1984 to 1988 of 2004; `simple` print 194 / 194; the only
    silent misses left are in `swsn-r` (3 on switch, 3 on M500). Superseded: the switch counts in the lines above.
+   Branch `m3-aliasupdate` (2026-11-17): `RuleAliasUpdate` and `ActionRestructureVarnode` (untyped) run in the
+   jump-table partial function, so its table is taken as it is; the older test on INDIRECTs of stack varnodes is
+   left for the partial function made without them (a load or store guard, a locked prototype). 7 functions
+   loud -> identical in every switch check, 8 in `pcc-r` and `pcc-t`. Derived from the 9 changed functions and
+   the `m3-int5` pass: `paramdouble` 1995, `swsn-r` 1991 (silent 3), the other switch checks 1994 of 2004;
+   `pcc-r` 1995, `pcc-t` 1994 of 2005. Superseded: the switch counts of the line above, and "the unported
+   `RuleAliasUpdate`" in the `m3-swsilent` lines.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

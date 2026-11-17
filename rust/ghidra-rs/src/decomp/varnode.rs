@@ -49,7 +49,7 @@ pub(crate) const CONST_SPACE: Space = Space::Sleigh(0);
 /// Port of the `Varnode::flags` bits the stages so far use. `written` is kept as
 /// [`Varnode::def`]; `insert` is `written` or `input`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct VnFlags(u32);
+pub(crate) struct VnFlags(u64);
 
 impl VnFlags {
     /// `input`: an input of the function
@@ -120,10 +120,19 @@ impl VnFlags {
     /// `longprint` (an additional flag in C++): a constant printed as a long token
     /// (`CastStrategy::markExplicitLongSize`, `setcasts`)
     pub(crate) const LONG_PRINT: VnFlags = VnFlags(1 << 31);
+    /// `mapped`: the scope gave the varnode its properties (a symbol, or an address in scope)
+    pub(crate) const MAPPED: VnFlags = VnFlags(1 << 32);
+    /// `nolocalalias`: no pointer into the stack can reach the varnode (`ScopeLocal::markUnaliased`)
+    pub(crate) const NOLOCALALIAS: VnFlags = VnFlags(1 << 33);
 
     /// both sets of flags
     pub(crate) const fn with(self, f: VnFlags) -> VnFlags {
         VnFlags(self.0 | f.0)
+    }
+
+    /// the flags of `self` that are in `mask`
+    pub(crate) const fn and(self, mask: VnFlags) -> VnFlags {
+        VnFlags(self.0 & mask.0)
     }
 
     pub(crate) fn has(self, f: VnFlags) -> bool {

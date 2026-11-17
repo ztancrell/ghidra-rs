@@ -32,6 +32,7 @@ mod jumptable;
 mod lanedivide;
 mod lateres;
 mod locked;
+mod mapstate;
 mod merge;
 mod namevars;
 mod nodejoin;

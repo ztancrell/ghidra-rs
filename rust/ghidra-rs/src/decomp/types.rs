@@ -243,7 +243,7 @@ impl TypeFactory {
     }
 
     /// `TypeFactory::getPrimitiveAlignSize`: the size rounded up to its alignment.
-    fn primitive_align_size(&self, size: u32) -> u32 {
+    pub(crate) fn primitive_align_size(&self, size: u32) -> u32 {
         let a = self.align_of_size(size);
         size.div_ceil(a) * a
     }
