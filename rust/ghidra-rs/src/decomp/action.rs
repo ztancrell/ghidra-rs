@@ -322,14 +322,17 @@ fn default_params(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     let evalfp = models.eval_called.unwrap_or(models.default);
     for i in 0..fd.qlst.len() {
         let c = fd.qlst[i];
-        let callee = fd.call(c).callee().and_then(|e| arch.functions.get(&e));
-        let proto = &mut fd.call_mut(c).proto;
-        if proto.model.is_some() {
+        if fd.call(c).proto.model.is_some() {
             continue;
         }
+        let callee = match fd.call(c).callee() {
+            Some(e) => arch.callee_proto(&mut fd.types, e)?,
+            None => None,
+        };
+        let proto = &mut fd.call_mut(c).proto;
         match callee {
             Some(f) => {
-                proto.copy(&f.proto);
+                proto.copy(&f);
                 if !proto.model_locked && !proto.has_matching_model(evalfp) {
                     proto.set_model(models, evalfp);
                 }

@@ -4,8 +4,8 @@
 //! (ruleaction.cc) and `RuleDumptyHumpLate` (subflow.cc), with `Funcdata::opDestroyRecursive`,
 //! `opUnlink` and `Datatype::findSmallestContainer`.
 //!
-//! Not ported: `RulePtrsubCharConstant` (it needs string detection, `StringManager::isString` of
-//! stringmanage.cc, stage S9; three M500 functions reach it, so it stays switched off by the check).
+//! `RulePtrsubCharConstant` came with stage S10 (the strings of the facts, `load facts`); the
+//! option files of the checks against `decomp_dbg` switch it off, so none of them runs it.
 //! Failing loudly where reached: the tree rewrite of
 //! `RulePieceStructure` (`PieceNode::gatherPieces` onward: proto-partial varnodes, which only
 //! `VariablePiece` groups); join addresses in `RuleAndStructure`; struct sub-types (`TypeStruct::getSubType`, through
@@ -343,6 +343,79 @@ pub(super) fn expand_load(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> 
         fd.op_set_input(sub, zero, 1)?;
         fd.op_set_output(sub, out_vn)?;
         fd.op_insert_after(sub, op)?;
+    }
+    Ok(1)
+}
+
+/// Port of `RulePtrsubCharConstant::pushConstFurther`: a PTRADD of a constant to the collapsed
+/// string pointer becomes a COPY of the sum.
+fn push_const_further(fd: &mut Funcdata, outtype: TypeId, op: OpId, slot: usize, val: u64) -> Result<bool> {
+    if fd.op(op).opc != Ptradd || slot != 0 {
+        return Ok(false);
+    }
+    let vn = inp(fd, op, 1)?;
+    if !fd.vn(vn).is_constant() {
+        return Ok(false);
+    }
+    let addval = off(fd, vn).wrapping_mul(off(fd, inp(fd, op, 2)?));
+    let size = sz(fd, vn);
+    let newconst = fd.new_constant(size, val.wrapping_add(addval) & calc_mask(size));
+    fd.vn_mut(newconst).ty = Some(outtype);
+    fd.op_remove_input(op, 2);
+    fd.op_remove_input(op, 1);
+    fd.op_set_opcode(op, Copy);
+    fd.op_set_input(op, newconst, 0)?;
+    Ok(true)
+}
+
+/// Port of `RulePtrsubCharConstant`: a PTRSUB off the global space-base whose output points at
+/// characters, to a string in read-only memory (`StringManager::isString`), becomes the
+/// constant pointer, which prints as the string. Only a symbol with a character data-type
+/// gives such a PTRSUB: the data symbols of the facts (stage S10). (The read-facing and
+/// def-facing types are the varnodes' own: no union is involved.)
+pub(super) fn ptrsub_char_constant(fd: &mut Funcdata, op: OpId, arch: &Arch) -> Result<i32> {
+    let sb = inp(fd, op, 0)?;
+    let sb_type = vn_type(fd, sb);
+    let Some(dt) = fd.types.ptr_to(sb_type) else { return Ok(0) };
+    let Kind::Spacebase { space, .. } = fd.types.get(dt).kind else { return Ok(0) };
+    let vn1 = inp(fd, op, 1)?;
+    if !fd.vn(vn1).is_constant() {
+        return Ok(0);
+    }
+    let outvn = out(fd, op)?;
+    let outtype = vn_type(fd, outvn);
+    let Some(basetype) = fd.types.ptr_to(outtype) else { return Ok(0) };
+    if !fd.types.is_char_print(basetype) {
+        return Ok(0);
+    }
+    // the local scope holds nothing read-only
+    let val = off(fd, vn1);
+    if Some(space) != fd.ram.map(Space::Sleigh) || !arch.is_readonly(val, 1) {
+        return Ok(0);
+    }
+    if !crate::decomp::is_string(arch, val, fd.types.size(basetype))? {
+        return Ok(0);
+    }
+    let mut remove_copy = false;
+    if !fd.vn(outvn).has(VnFlags::ADDRFORCE) {
+        remove_copy = true;
+        let readers: Vec<OpId> = fd.vn(outvn).descend.iter().copied().collect();
+        for sub in readers {
+            let Some(slot) = fd.slot_of(sub, outvn) else { continue };
+            if !push_const_further(fd, outtype, sub, slot, val)? {
+                remove_copy = false;
+            }
+        }
+    }
+    if remove_copy {
+        fd.op_destroy(op);
+    } else {
+        let size = sz(fd, outvn);
+        let newvn = fd.new_constant(size, val);
+        fd.vn_mut(newvn).ty = Some(outtype);
+        fd.op_remove_input(op, 1);
+        fd.op_set_input(op, newvn, 0)?;
+        fd.op_set_opcode(op, Copy);
     }
     Ok(1)
 }

@@ -74,6 +74,8 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   easy-first order, first differing step; see "Debugging tools").
 - `tools/ghidra-diff.sh`, `tools/ghidra/DecompileRef.java`: the stage S10 check, `print C` against
   the C of Java Ghidra (see "Stage S10").
+- `tools/ghidra-facts.sh`, `tools/ghidra/ExportFacts.java`: the facts of the Java project for
+  `load facts` (see "Stage S10, slice 1").
 - `tools/decomp-corpus.sh`, `tools/corpus/m8.txt`, `tools/corpus/m500.txt`: the mercs2 corpora.
 
 ## Build
@@ -582,7 +584,8 @@ rust/tools/decomp-diff.sh --script <file>      # one script on both engines, ful
   runs up to the `break start` action (stage S4: at most `assignhigh`, see "Stage S4") and
   `continue` resumes it; a function mapped `nocode` prints `No code for <name>` instead. `print
   C|tree block` fail with "not implemented in ghidra-rs yet (milestone 3, later stages)";
-  `parse line` defines types and locks `extern` prototypes (stage S6); any other command fails with "not implemented in ghidra-rs".
+  `parse line` defines types and locks `extern` prototypes (stage S6); `load facts <file>` (stage S10, not a
+  command of `decomp_dbg`) reads the facts of a Ghidra project in place of the prelude; any other command fails with "not implemented in ghidra-rs".
   Superseded: until S6, `parse line` failed like `print C`.
   Superseded: until S2, `decompile` stopped at most at `heritage` and `continue` failed. Of the options
   `option readonly on|off` and `option currentaction decompile <group> on|off` have an
@@ -1917,6 +1920,9 @@ R5 slices 4 and 5 (branch `m3-r5b`, 2026-11-13). Superseded: "constseq.cc, bitfi
   `StringManager::isString`, S9: three M500 functions reach it, 0x4bff10, 0x74d520, 0x766350),
   so the check still switches it off. `threewaycomp`, `conditionalmove`, `orpredicate` (oppool1)
   are not in the plan's R5 row and stay off.
+  Superseded: "Not ported: `ptrsubcharconstant`". Stage S10, slice 1 ports it
+  (`rules/typecleanup.rs`, `printc::is_string`) for the strings of the facts; the option files
+  of the checks still switch it off, and no check against `decomp_dbg` runs it.
 - Slice 5, `rules/constseq.rs`, `rules/bitfield.rs`: the groups `constsequence` and `bitfields`
   as far as they run without scopes and bit-field types. `stringcopy` never matches (no local
   symbols), `stringstore` fails at `HeapSequence` (not ported); no type has bit-fields, so the four
@@ -3130,6 +3136,153 @@ proper, none of it ported:
 Not run: the checks of `bars.sh` (no Rust source changed), `ghidra-diff.sh` on the other
 corpora. Not decided: how ghidra-rs gets the Java project's facts (names, prototypes, data
 types, listing data), and the name of the output mode.
+
+Superseded: "none of it ported" and "Not decided" above. The next slice ports the list (see
+"Stage S10, slice 1"); the facts come from an export of the Ghidra project and the mode is the
+console command `load facts`. The eight actions are still not ported, so the gate is still out
+of reach.
+
+### Stage S10, slice 1: the facts of a Ghidra project and `load facts`, branch `worktree-agent-af954dab401167074` (2026-11-17)
+
+Java Ghidra's decompiler is the same C++ as `decomp_dbg`; what differs is what Java feeds it.
+This slice records those answers once and lets ghidra-rs read them, so the list of the slice
+above comes out of the ported C++ paths rather than out of new printing code.
+
+**The facts** (where they come from is not the user's decision yet; this is the choice made
+here). `tools/ghidra/ExportFacts.java`, run headless by `tools/ghidra-facts.sh` on the copy of
+the Java project (`-readOnly`), calls `DecompileCallback` and `PcodeDataTypeManager` as
+`DecompInterface` does and writes each answer as the XML Java would send, one record per line,
+fields separated by tabs, to `$GHIDRA_REF/mercs2.facts` (123 MB for mercs2, about one minute):
+
+| record | what | mercs2 |
+|---|---|---|
+| `coretypes <xml>` | `encodeCoreTypes` | 1 |
+| `block <first> <last> <r\|w>[v]` | a memory block: writable or not, volatile | 14 |
+| `wref <addr>` | an address of a non-writable block with a write reference | 265 |
+| `func <entry> <xml>` | `getMappedSymbols(entry)` while that function is decompiled | 44,990 |
+| `body <entry> <first>-<last> ...` | the ranges of the function's body | 44,990 |
+| `tracked <entry> <xml>` | `getTrackedRegisters(entry)`, written when it differs from the function before | 37 |
+| `comments <entry> <xml>` | `getComments(entry)`, when there is one | 1,613 |
+| `data <first> <length> <xml>` | `getMappedSymbols` of defined or labelled data | 271,502 |
+| `extref <addr> <xml>` | `getExternalRef` of a pointer to an external location | 1,022 |
+| `label <addr> <name>` | `getCodeLabel` of a label inside a function | 158,072 |
+| `override <addr> <kind>` | an instruction with a flow, fall-through or length override | 3,365 |
+| `type <id> <xml>` | `getDataType` of each `<typeref>` in the records | 376 |
+| `ns <id> <xml>` | `getNamespacePath` of each namespace id in the records | 798 |
+
+`load facts <file>` (`decomp/facts.rs`) indexes the file by address (about 0.5 s) and reads
+the core types and the `type` records; every other record's XML is parsed when a decompile asks
+for it. The loader is one module behind `Arch::load_facts`, `Arch::callee_proto`,
+`Arch::start_function`, `Arch::is_readonly`, `Arch::data_holds` and `facts::query_symbol`, so
+another source of facts can replace it.
+
+**What `load facts` changes** (nothing changes without it; the checks against `decomp_dbg` use
+the prelude as before):
+
+- Core types: Ghidra's (`TypeFactory::set_core`, the cache rule of `cacheCoreTypes` with
+  Ghidra's ids), so `undefined4`, `int`, `uint`, `byte`, `float`, and with them `uVar1`,
+  `puVar1`, `auStack_c0`.
+- Functions: the listing's, with their names (`FUN_00401000`, a thunk by its import's name,
+  FID names); `load addr` takes the listing's name. An external reference is the pointer's
+  record with the function Java hangs on it (the import's locked prototype).
+- Prototypes (`Facts::function`, `FuncProto::decode`): the model (`unknown` is a copy of the
+  default model, `createUnknownModel`), the model lock, the extrapop Ghidra computed, call
+  fixups, locked parameters and return value with the storage Java gives, and no-return: a
+  call to such a function is followed by an artificial halt (`checkForFlowModification`,
+  `Halt::NoReturn`, never printed) and "WARNING: Subroutine does not return".
+- Flow overrides: `CALL_RETURN` on a jump (`PcodeEmit.dumpCallOverride`): the jump is a call,
+  followed by `RETURN #0`.
+- The function's own record: its prototype, the tracked registers at its entry in place of the
+  processor spec's (`FS_OFFSET` and `DF` for mercs2), the listing's comments (the plate comment
+  at the entry is a header comment after the warnings, a pre comment is printed at its
+  address; `CommentDatabaseGhidra::fillCache`), and its stack variables as name
+  recommendations (`ScopeLocal::collectNameRecs`, `recoverNameRecommendationsForSymbols`:
+  `local_bc`).
+- Data symbols (`ScopeGhidra::removeQuery`): the symbol holding an address joins the function's
+  global scope when `mapGlobals`, `linkSymbol` or `linkSymbolReference` ask (`DAT_00cde2b0`);
+  a variable larger than the symbol at its address prints `_DAT_0256f88a` with the header
+  warning (`pushMismatchSymbol`); a locked data-type types the varnodes the symbol holds; every
+  data symbol is isolated from speculative merging (`merge="false"`).
+- Pointers to data symbols (`ActionConstantPtr`): `&PTR_FUN_00bd2f98`, an array by its name
+  (`hkpEntityListener::vftable`), a string through `RulePtrsubCharConstant` (ported here:
+  `"AimMovementNodes"`).
+- Read-only memory is the listing's (`Facts::readonly`: a symbol's flag; a block that is not
+  writable unless the address has a write reference; in a function's body past the first 8
+  bytes). Java Ghidra sends no options from `DecompileRef.java`, so read-only memory does not
+  fold to constants (`DAT_00b9b664` stays).
+- Names of symbols in namespaces: the namespace path before the name (`pushSymbolScope` from a
+  function of the global namespace).
+- Labels: the listing's label at a block (`queryCodeLabel`, `LAB_00401178`).
+
+**Fails loudly with facts** (each an error when a decompile reaches it): a data symbol of
+struct or union type, or an array read as a variable, or a pointer into one (not its start;
+strings excepted); struct, union or array symbols near an address `RulePtrArith` looks at
+(`TypeSpacebase::nearestArrayedComponent`); a string that is not plain ASCII, or of wide
+characters (Java reads strings with the listing's character sets, `getStringData`); a function
+data-type with a prototype used for an indirect call (`forceSet`); the decompile of a function
+in a namespace; a prototype with only its inputs or only its output locked, an unlocked
+varargs prototype, custom storage, hidden return parameters, `inline`, prototype and
+jump-table overrides; names recommended for register variables; locked local variables;
+every flow override but `CALL_RETURN` on a jump or a call; volatile memory; signed
+enumerations, pointer-relative data-types, bit fields, display formats. The declaration of a
+function with a locked prototype was not ported before and is not now.
+
+**The check.** `tools/ghidra-diff.sh` now gives ghidra-rs the facts (`FACTS=0`: the prelude,
+as before) and, with `CLASSIFY=<actions>`, marks each miss `skip` or `own`: `decomp_dbg` runs
+with the prelude twice, with and without those actions, and a function whose two outputs
+differ needs the actions (`skip`). It is a guide: `decomp_dbg` has no data symbols, so an
+action can matter with the facts and not without them (0x73a340: `multicse` on a read-only
+global that the prelude folded).
+
+Results (`GHIDRA_REF` holding the Java C of the slice above; "the eight skipped" is
+`SKIP=restructure_varnode,mapped_local_sync,multicse,shadowvar,condconst,directwrite,dynamicsymbols,prototypewarnings`,
+which only ghidra-rs skips here: Java runs them):
+
+| run | result |
+|---|---|
+| `ghidra-diff.sh m8` | java finished 7 / 8, identical 0 / 7, loud 7 ("action restructure_varnode is not implemented") |
+| `ghidra-diff.sh m8`, the eight skipped, `CLASSIFY` | identical 3 / 7 (0x40a110, 0x58d030, 0x9eec5e), silent 4, all four marked `skip` |
+| `ghidra-diff.sh m500` | java finished 499 / 500, identical 0 / 499, loud 499 (498 the same action; 0x403060 a function in a namespace) |
+| `ghidra-diff.sh m500`, the eight skipped | identical 192 / 499 (loud 72, silent 235) |
+| `bars.sh`, `CORPORA=m8`, every check | 55 lines, each equal to the baseline's (`m3-int5-116d9d34da.summary`) |
+| `bars.sh`, M500 `pcc-r`, `pcc-t`, `pc-r`, `pc-t`, `nm-r`, `nm-t` | `pcc-r` 494 / 495 (loud 1), equal to the baseline; the other five were still running when this was written |
+
+What is left of the four M8 misses is what the eight actions do in Java and not here: the
+store to `_DAT_0256f88a` in 0x401000 (`directwrite`), the stack variables of 0x401080 and
+0x4042e0 (`restructure_varnode`: `auStack_c0 [4]`, `local_90 [40]`; the names the facts
+recommend are there, `local_bc`), and `uVar1 = DAT_00b9b664` in 0x73a340 (`multicse`). Their
+other lines are Java's.
+
+The M500 misses with the eight skipped. Loud 72: 54 are the misses default options reach
+without facts (`ActionParamDouble` on a PIECE 26, an indexed stack LOAD 13, `getExactPiece`
+in `namevars` 8, a STORE guard in `merge` 4, `subflow` 1, `HeapSequence` 1,
+`ActionConditionalExe` 1), and 18 come with the facts: "restarting for a locked prototype the
+call cannot take" in `deindirect` 9 (imports now have locked prototypes), the decompile of a
+function in a namespace 3, type propagation into a struct or array 2, a join storage 1, and
+three fixed after this run (2 panics where a callee's data-type was read from the
+architecture's types, now 1 "locked varargs prototype" and 1 silent; 1 function counted loud
+because its C holds the word ERROR in a string, the script now looks for the engines' error
+lines). Silent 235: not classified with the final build. An earlier run of this slice
+(before namespaces, arrays and strings; `CLASSIFY` with the prelude's read-only folding)
+classified 331 of the 500: of its 196 silent misses 191 were `skip` and 5 `own`, and of
+those five 0x425020 and 0x493730 are `multicse` on a read-only global and 0x45ec20 is a
+silent default-options miss of the slice above. Seen in the silent misses, all of them the
+eight's: stores to globals removed (`directwrite`), stack variables (`restructure_varnode`,
+`mapped_local_sync`), repeated reads of a global not shared (`multicse`), parameters and
+return values of the function itself (0x402820: `void` for `undefined4 *`).
+
+Decisions made here, for the user to confirm ("Claude's call"): the facts are an export of the
+Ghidra project, as recorded answers of `DecompileCallback` (XML, one record per line), indexed
+by address and parsed on demand; the mode is the console command `load facts <file>`, no
+option; `ghidra-diff.sh` uses the facts unless `FACTS=0`; read-only memory does not fold with
+facts, because `DecompileRef.java` sends no options; only plain ASCII strings are taken as
+the same in Java; `pushMismatchSymbol` and the string rule's string test follow Java only with
+facts (without facts the old error stays, no check against `decomp_dbg` reaches it); a
+function symbol covers its entry byte (Java's covers up to 8 bytes of a small function).
+
+Not run: `bars.sh` beyond the checks named above (no full pass), the Mac, `ghidra-diff.sh` on
+the other corpora. Not done: the eight actions, the struct and union paths, and the items
+under "Fails loudly with facts".
 
 ## Speed
 

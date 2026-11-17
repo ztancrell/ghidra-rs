@@ -124,14 +124,15 @@ impl Structure {
 
     /// `FlowBlock::getHaltType` of the block's last op (the C++ flag bits). [`Halt`] holds the halts
     /// the ported flow makes (bad instruction, unimplemented; `fail_thunk` and `fail_normal` make
-    /// none). `halt` 0x200000, `noreturn` 0x1000000 (calls to non-returning functions,
-    /// `fail_callother`) and `missing` 0x2000000 (`fillinBranchStubs`) are not made yet; the match
+    /// none) and `noreturn` (a call to a function the facts of stage S10 say does not return).
+    /// `halt` 0x200000 and `missing` 0x2000000 (`fillinBranchStubs`) are not made yet; the match
     /// has no wildcard, so adding them to [`Halt`] forces their values here.
     fn halt_type(&self, fd: &Funcdata, b: SId) -> u32 {
         use super::op::Halt;
         match self.last_op(fd, b).and_then(|op| fd.op(op).halt) {
             Some(Halt::BadInstruction) => 0x400000,
             Some(Halt::Unimplemented) => 0x800000,
+            Some(Halt::NoReturn) => 0x1000000,
             None => 0,
         }
     }

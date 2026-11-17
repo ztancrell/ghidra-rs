@@ -69,6 +69,8 @@ impl OpFlags {
 pub(crate) enum Halt {
     BadInstruction,
     Unimplemented,
+    /// `noreturn`: the placeholder after a call that does not return (never printed)
+    NoReturn,
 }
 
 /// Port of `PcodeOp`, the fields the stages so far use.

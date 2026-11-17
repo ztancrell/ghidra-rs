@@ -450,6 +450,9 @@ pub(crate) struct FuncProto {
     /// the return value `ActionOutputPrototype` stores (`ProtoStoreSymbol::outparam`): storage and
     /// data-type; none is `void`. The inputs are the local scope's category-0 symbols.
     pub(crate) out_param: Option<(Space, u64, TypeId)>,
+    /// `no_return`: the function does not return to its caller (only the facts of stage S10
+    /// say so)
+    pub(crate) no_return: bool,
 }
 
 impl FuncProto {
@@ -481,6 +484,7 @@ impl FuncProto {
     /// inject id; no-return comes with prototypes that can say so).
     pub(crate) fn copy_flow_effects(&mut self, other: &FuncProto) {
         self.inject = other.inject;
+        self.no_return = other.no_return;
     }
 
     /// Port of `FuncProto::copy`: this prototype becomes `other`'s (the call site's own fields

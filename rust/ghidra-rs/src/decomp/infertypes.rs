@@ -221,9 +221,8 @@ pub(crate) fn sub_type(fd: &mut Funcdata, arch: &Arch, t: TypeId, off: i64) -> R
     if let Kind::Spacebase { scope, .. } = fd.types.get(t).kind {
         let addr = off as u64 & calc_mask(arch.spec.stack_pointer.2);
         if scope == GLOBAL_SCOPE {
-            if let Some(e) = query_global(arch, addr, 1) {
-                let ty = e.symbol_type(fd, arch);
-                return Ok(Some((ty, (addr - e.addr) as i64)));
+            if let Some(t) = global_target(fd, arch, addr)? {
+                return Ok(Some((t.ty, (addr - t.addr) as i64)));
             }
         }
         if scope != GLOBAL_SCOPE {
@@ -780,6 +779,7 @@ pub(crate) fn start_types(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
 /// Port of `ActionInferTypes::apply` (no type recommendations: `localrecovery` maps none).
 pub(crate) fn infer_types(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     symbol_types(fd, arch);
+    super::facts::symbol_types(fd, arch)?;
     if !fd.typerecovery_start {
         return Ok(0);
     }
@@ -861,6 +861,42 @@ pub(crate) fn query_global(arch: &Arch, addr: u64, size: u32) -> Option<Entry> {
     (0..slot).filter_map(|d| addr.checked_sub(d)).find(fits).map(|s| Entry { addr: s, externref: true })
 }
 
+/// The symbol of the global scope a constant may point at: where it starts, its data-type and
+/// whether that locks the pointer made to it (`Funcdata::spacebaseConstant`: a type-locked
+/// symbol whose type is not unknown).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Target {
+    pub(crate) addr: u64,
+    ty: TypeId,
+    locked: bool,
+    /// a string (an array of characters): a constant may point into the middle of it
+    chars: bool,
+}
+
+/// `Scope::queryContainer(addr, 1)` on the global scope with the symbol's data-type: a function
+/// or an external reference ([`query_global`]), or with the facts of stage S10 the data symbol
+/// holding `addr`. A data symbol of a composite data-type fails: pointers into it need the
+/// array and structure paths of `ActionConstantPtr::isPointer`, `RulePtrArith` and the printer.
+fn global_target(fd: &mut Funcdata, arch: &Arch, addr: u64) -> Result<Option<Target>> {
+    if let Some(e) = query_global(arch, addr, 1) {
+        return Ok(Some(Target { addr: e.addr, ty: e.symbol_type(fd, arch), locked: true, chars: false }));
+    }
+    let Some(facts) = &arch.facts else { return Ok(None) };
+    let Some(d) = facts.data_symbol(&mut fd.types, addr)? else { return Ok(None) };
+    let base = fd.types.strip_typedefs(d.ty);
+    // an array is pointed at by its first element (`getTypePointerStripArray`), and a string
+    // (an array of characters) anywhere inside (`ActionConstantPtr::isPointer`)
+    let array = fd.types.meta(base) == Meta::Array;
+    let chars = array && fd.types.first_field(base).is_some_and(|(_, elem)| fd.types.is_char_print(elem));
+    if !(array && (chars || d.addr == addr))
+        && (matches!(fd.types.meta(base), Meta::Struct | Meta::Union | Meta::Array) || fd.types.is_enum(base))
+    {
+        return err(format!("facts: a pointer into {}, a symbol of a composite data-type, is not ported", d.name));
+    }
+    let locked = d.type_locked && fd.types.meta(d.ty) != Meta::Unknown;
+    Ok(Some(Target { addr: d.addr, ty: d.ty, locked, chars }))
+}
+
 fn set_symcheck(fd: &mut Funcdata, vn: VarnodeId, complete: bool) {
     let f = &mut fd.vn_mut(vn).flags;
     f.clear(VnFlags::SYMCHECK_COMPLETE);
@@ -870,7 +906,20 @@ fn set_symcheck(fd: &mut Funcdata, vn: VarnodeId, complete: bool) {
 
 /// Port of `ActionConstantPtr::isPointer` (ram is the only space pointers are inferred in;
 /// `infer_pointers` is on and no call input or function output is locked in the console).
-fn is_pointer(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, op: OpId, slot: usize) -> Option<Entry> {
+fn is_pointer(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, op: OpId, slot: usize) -> Result<Option<Target>> {
+    let Some(needexact) = pointer_candidate(fd, arch, vn, op, slot) else { return Ok(None) };
+    let off = fd.vn(vn).offset;
+    let Some(target) = global_target(fd, arch, off)? else { return Ok(None) };
+    if needexact && !target.chars && target.addr != off {
+        set_symcheck(fd, vn, false);
+        return Ok(None);
+    }
+    Ok(Some(target))
+}
+
+/// The tests of `ActionConstantPtr::isPointer` before the symbol is looked up: none when the
+/// constant is no pointer, else whether it must hit a symbol exactly.
+fn pointer_candidate(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, op: OpId, slot: usize) -> Option<bool> {
     set_symcheck(fd, vn, true);
     let ty = vn_type(fd, vn);
     let (off, size) = (fd.vn(vn).offset, fd.vn(vn).size);
@@ -917,12 +966,7 @@ fn is_pointer(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, op: OpId, slot: usi
             return None;
         }
     }
-    let entry = query_global(arch, off, 1)?;
-    if needexact && entry.addr != off {
-        set_symcheck(fd, vn, false);
-        return None;
-    }
-    Some(entry)
+    Some(needexact)
 }
 
 /// Port of `Funcdata::spacebaseConstant` (the constant has the size of a ram address).
@@ -931,7 +975,7 @@ fn spacebase_constant(
     arch: &Arch,
     op: OpId,
     slot: usize,
-    entry: &Entry,
+    entry: &Target,
     rampoint: u64,
 ) -> Result<()> {
     let ram = fd.ram.ok_or_else(|| super::LowlevelError("spacebaseConstant: no ram space".into()))?;
@@ -970,9 +1014,8 @@ fn spacebase_constant(
     set_symcheck(fd, newconst, true);
     fd.op_set_input(add_op, base, 0)?;
     fd.op_set_input(add_op, newconst, 1)?;
-    let entry_type = entry.symbol_type(fd, arch);
-    let ptr_entry = fd.types.pointer_strip_array(sz, entry_type, WS);
-    update_type(fd, outvn, ptr_entry, true, false);
+    let ptr_entry = fd.types.pointer_strip_array(sz, entry.ty, WS);
+    update_type(fd, outvn, ptr_entry, entry.locked, false);
     if extra != 0 {
         let e = match extra_op {
             Some(e) => {
@@ -1035,7 +1078,7 @@ pub(crate) fn constant_ptr(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             _ => {}
         }
         let rampoint = fd.vn(vn).offset;
-        if let Some(entry) = is_pointer(fd, arch, vn, op, slot) {
+        if let Some(entry) = is_pointer(fd, arch, vn, op, slot)? {
             spacebase_constant(fd, arch, op, slot, &entry, rampoint)?;
             if opc == Opcode::IntAdd && slot == 1 {
                 fd.op_mut(op).ins.swap(0, 1);

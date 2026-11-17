@@ -523,6 +523,99 @@ impl TypeFactory {
     }
 }
 
+/// A core type as Java Ghidra sends it (`<coretypes>`, `TypeFactory::decodeCoreTypes`).
+pub(crate) struct CoreType<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) size: u32,
+    pub(crate) meta: Meta,
+    /// `char="true"`: the ASCII character type
+    pub(crate) ascii: bool,
+    /// `utf="true"`: a wide character type
+    pub(crate) utf: bool,
+    pub(crate) id: u64,
+}
+
+/// The types of a facts file (`load facts`, see [`super::facts`]): the core types Java Ghidra
+/// names and the kinds its type records hold.
+impl TypeFactory {
+    /// `TypeFactory::decodeCoreTypes` then `cacheCoreTypes`, in place of the console's core
+    /// types: among the core types of one size and metatype the lowest id is the one
+    /// `getBase` gives (the order of `DatatypeCompare`), `char` is preferred over the other
+    /// 1-byte integers and wide characters are not cached. Returns each type by its id.
+    pub(crate) fn set_core(&mut self, core: &mut [CoreType]) -> HashMap<u64, TypeId> {
+        let align_map = std::mem::take(&mut self.align_map);
+        *self = TypeFactory {
+            types: Vec::new(),
+            dedup: HashMap::new(),
+            cache: HashMap::new(),
+            nochar: None,
+            align_map,
+            typedefs: HashMap::new(),
+        };
+        core.sort_by_key(|c| c.id);
+        let mut ids = HashMap::new();
+        for c in core.iter() {
+            let submeta = match (c.meta, c.ascii, c.utf) {
+                (Meta::Int, true, _) => sub::INT_CHAR,
+                (Meta::Int, _, true) => sub::INT_UNICODE,
+                _ => base2sub(c.meta),
+            };
+            // TypeVoid has no size of its own; the console's table gives it 1
+            let size = if c.meta == Meta::Void { 1 } else { c.size };
+            let id =
+                self.intern(Datatype { meta: c.meta, submeta, size, name: Some(c.name.to_string()), kind: Kind::Base });
+            ids.insert(c.id, id);
+            // typecache holds sizes up to 8, typecache10 and typecache16 the long floats
+            if size > 8 && !(c.meta == Meta::Float && matches!(size, 10 | 16)) {
+                continue;
+            }
+            match submeta {
+                sub::INT_UNICODE => {}
+                sub::INT_CHAR => {
+                    self.cache.insert((size, c.meta), id);
+                }
+                _ => {
+                    if c.meta == Meta::Int && size == 1 {
+                        self.nochar = Some(id);
+                    }
+                    self.cache.entry((size, c.meta)).or_insert(id);
+                }
+            }
+        }
+        ids
+    }
+
+    /// A named primitive that is no core type (`TypeBase` from a `<type>` record).
+    pub(crate) fn named_base(&mut self, name: &str, size: u32, meta: Meta) -> TypeId {
+        self.intern(Datatype { meta, submeta: base2sub(meta), size, name: Some(name.to_string()), kind: Kind::Base })
+    }
+
+    /// `TypeFactory::decodeStruct`/`decodeUnion`, first half: the named aggregate without its
+    /// fields, so that the fields can point back at it.
+    pub(crate) fn declare_aggregate(&mut self, name: &str, union: bool, size: u32) -> TypeId {
+        let (meta, submeta) = if union { (Meta::Union, sub::UNION) } else { (Meta::Struct, sub::STRUCT) };
+        self.intern(Datatype { meta, submeta, size, name: Some(name.to_string()), kind: Kind::Fields(Vec::new()) })
+    }
+
+    /// `TypeFactory::setFields` of a declared aggregate: the fields (name, offset, type) at the
+    /// offsets the record states.
+    // ponytail: the alignment is the largest field's, not the record's `alignment` (a packed
+    // structure differs); read the attribute when a locked parameter of such a type shows up
+    pub(crate) fn set_fields(&mut self, id: TypeId, fields: Vec<(String, u32, TypeId)>) {
+        let old = self.types[id.0 as usize].clone();
+        self.dedup.remove(&old);
+        let t = &mut self.types[id.0 as usize];
+        t.kind = Kind::Fields(fields);
+        self.dedup.insert(t.clone(), id);
+    }
+
+    /// `TypeFactory::decodeEnum` for an unsigned enumeration of `size` bytes.
+    pub(crate) fn enumeration_sized(&mut self, name: &str, size: u32, values: Vec<(String, u64)>) -> TypeId {
+        let kind = Kind::Enum(values);
+        self.intern(Datatype { meta: Meta::Uint, submeta: sub::UINT_ENUM, size, name: Some(name.to_string()), kind })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,6 +705,37 @@ mod tests {
         assert_eq!(sub_of(&mut f, i4), sub::PTR);
         let (ps, pi) = (f.pointer(4, s2, 1), f.pointer(4, i4, 1));
         assert!(f.order(ps, pi) < 0 && f.order(pi, ps) > 0);
+    }
+
+    #[test]
+    fn ghidra_core_types() {
+        let core = |name, size, meta, ascii, id| CoreType { name, size, meta, ascii, utf: false, id };
+        let mut list = vec![
+            core("long", 4, Meta::Int, false, 0x9b),
+            core("int", 4, Meta::Int, false, 0x99),
+            core("sbyte", 1, Meta::Int, false, 0xae),
+            core("char", 1, Meta::Int, true, 0x7b),
+            core("undefined4", 4, Meta::Unknown, false, 0xc0),
+            core("uint16", 16, Meta::Uint, false, 0xc8),
+            core("float10", 10, Meta::Float, false, 0x84),
+        ];
+        let mut f = TypeFactory::new();
+        let ids = f.set_core(&mut list);
+        // the lowest id of a size and metatype is the base type; char is preferred, sbyte is
+        // the 1-byte integer that is not char; only sizes up to 8 and the long floats are cached
+        let (i4, c, nc, u4) =
+            (f.base(4, Meta::Int), f.base(1, Meta::Int), f.base_nochar(1, Meta::Int), f.base(4, Meta::Unknown));
+        assert_eq!([i4, c, nc, u4].map(|t| f.print_raw(t)), ["int", "char", "sbyte", "undefined4"]);
+        assert_eq!(f.print_raw(ids[&0x9b]), "long");
+        assert_eq!(f.print_name_base(u4), "u");
+        let (u16, f10) = (f.base(16, Meta::Uint), f.base(10, Meta::Float));
+        assert_eq!((f.name(u16), f.print_raw(f10).as_str()), (None, "float10"));
+        // a structure that points at itself
+        let s = f.declare_aggregate("node", false, 8);
+        let p = f.pointer(4, s, 1);
+        f.set_fields(s, vec![("next".into(), 0, p), ("value".into(), 4, i4)]);
+        assert_eq!((f.first_field(s), f.ptr_to(p), f.size(s)), (Some((0, p)), Some(s), 8));
+        assert_eq!(f.declare_aggregate("other", false, 8), TypeId(s.0 + 2));
     }
 
     #[test]

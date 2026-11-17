@@ -884,6 +884,8 @@ R5 slices 4 and 5 (branch `m3-r5b`, 2026-11-13). Superseded: "constseq.cc, bitfi
   `StringManager::isString`, S9: three M500 functions reach it, 0x4bff10, 0x74d520, 0x766350),
   so the check still switches it off. `threewaycomp`, `conditionalmove`, `orpredicate` (oppool1)
   are not in the plan's R5 row and stay off.
+  Superseded: "Not ported: `ptrsubcharconstant`". S10 slice 1 ports it for the strings of the
+  facts; the checks' option files still switch it off, and no check against `decomp_dbg` runs it.
 - Slice 5, `rules/constseq.rs`, `rules/bitfield.rs`: the groups `constsequence` and `bitfields`
   as far as they run without scopes and bit-field types. `stringcopy` never matches (no local
   symbols), `stringstore` fails at `HeapSequence` (not ported); no type has bit-fields, so the four
@@ -1837,6 +1839,33 @@ loud 78, silent 11, one reference timeout). So before S10 proper:
 
 Open, for the user: where ghidra-rs takes the Java project's facts from (an export of the
 Ghidra project, or its own analysis), and the name of the output mode.
+
+### S10 slice 1: the facts of the Ghidra project and `load facts` (2026-11-17)
+
+Item 3 above, done ahead of items 1 and 2 (other branches). Superseded: "Open, for the user"
+above, as far as a first choice goes: the facts are an export of the Ghidra project and the
+mode is the console command `load facts <file>`; both are choices of this slice for the user
+to confirm, and the loader is one module (`decomp/facts.rs`) that another source can replace.
+
+- `rust/tools/ghidra/ExportFacts.java` (run by `rust/tools/ghidra-facts.sh`) records what
+  Java's `DecompileCallback` answers its decompiler, as the XML it sends: functions with
+  prototypes and local symbols, data symbols, external references, data-types, namespaces,
+  comments, labels, tracked registers, flow overrides, memory blocks.
+- `load facts` makes ghidra-rs read them where the C++ asks Java: Ghidra's core types,
+  function and data names, prototypes (model, extrapop, locked parameters, no-return, call
+  fixups), `CALL_RETURN` overrides, data symbols with their data-types and the `_` prefix of
+  `pushMismatchSymbol`, pointers to data symbols and strings (`RulePtrsubCharConstant`), the
+  listing's read-only memory, plate and pre comments, labels, names recommended for stack
+  variables (`local_bc`). What the rest of the port cannot honour fails loudly when a
+  decompile reads it (list in `rust/README.md`, "Stage S10, slice 1").
+- `ghidra-diff.sh` gives ghidra-rs the facts. M8: Java finishes 7 / 8; with default options
+  identical 0 / 7, loud 7 (the eight actions); with the eight skipped identical 3 / 7
+  (0x40a110, 0x58d030, 0x9eec5e), and the other four differ where `decomp_dbg` itself
+  changes when the eight are skipped. M500 with the eight skipped: identical 192 / 499 (loud 72, silent 235).
+- The checks against `decomp_dbg` are unchanged: `pcc-r` 494 / 495 (loud 1), equal to the baseline; the other five were still running when this was written.
+
+Still before the gate: the eight actions (item 1), the misses default options reach (item 2),
+and from this slice the struct and union symbols and the other loud items.
 
 ## Running stages in parallel
 

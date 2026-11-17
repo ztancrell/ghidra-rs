@@ -1796,6 +1796,14 @@ pub(crate) fn deindirect(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             continue;
         }
         let mut vn = fd.op(op).ins[0];
+        // a function pointer with a prototype attached (`TypeCode::getPrototype`, which only
+        // the data-types of the facts of stage S10 carry) forces it on the call: not ported
+        if let Some(facts) = &arch.facts {
+            let ty = super::infertypes::vn_type(fd, vn);
+            if fd.types.ptr_to(ty).is_some_and(|to| facts.code_with_prototype(fd.types.strip_typedefs(to))) {
+                return err("deindirect: a call through a pointer to a function data-type with a prototype (forceSet) is not ported");
+            }
+        }
         while let Some(d) = fd.vn(vn).def.filter(|&d| fd.op(d).opc == Opcode::Copy) {
             vn = fd.op(d).ins[0];
         }
@@ -1807,8 +1815,8 @@ pub(crate) fn deindirect(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         } else {
             None
         };
-        let Some(entry) = target.filter(|e| arch.functions.contains_key(e)) else { continue };
-        let callee = arch.functions[&entry].proto.clone();
+        let Some(entry) = target else { continue };
+        let Some(callee) = arch.callee_proto(&mut fd.types, entry)? else { continue };
         let call = fd.call_mut(c);
         call.entry = Some(entry);
         call.known = true;
@@ -2712,9 +2720,11 @@ pub(crate) fn map_globals(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     // byte) or an external reference. Superseded: the query with one byte, which took a
     // function at an import's slot over the external reference holding the 4-byte varnode.
     let span = |e: &super::infertypes::Entry| if e.externref { ptr } else { 1 };
+    // With facts (stage S10) a data symbol holding the whole varnode links it too.
     let linked = |fd: &Funcdata, vn: VarnodeId| {
         let v = fd.vn(vn);
-        v.space == Space::Sleigh(arch.spec.stack_container) && query_global(arch, v.offset, v.size).is_some()
+        v.space == Space::Sleigh(arch.spec.stack_container)
+            && (query_global(arch, v.offset, v.size).is_some() || arch.data_holds(v.offset, v.size))
     };
     let all = fd.loc_all();
     let mut inconsistent = false;
@@ -2752,6 +2762,7 @@ pub(crate) fn map_globals(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         };
         let size = fd.types.size(ct);
         // queryProperties(addr, 1): a symbol over the first byte
+        super::facts::query_symbol(fd, arch, space, addr)?;
         let old = fd
             .symtab
             .find_container(GLOBAL, space, addr, 1, None)?
@@ -2795,6 +2806,7 @@ pub(crate) fn map_globals(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
                 if uncovered.get(k + 1).is_some_and(|&n| fd.vn(n).offset == uoff) {
                     continue;
                 }
+                super::facts::query_symbol(fd, arch, space, uoff)?;
                 if fd.symtab.find_container(GLOBAL, space, uoff, usize_, None)?.is_some() {
                     continue;
                 }

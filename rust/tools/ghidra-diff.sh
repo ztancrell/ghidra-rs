@@ -4,9 +4,19 @@
 #
 #   ghidra-diff.sh <corpus>     corpus: m8, m500, ... (tools/corpus/) or a file of addresses
 #
+# ghidra-rs reads the facts of the Java project (`load facts`, written once by ghidra-facts.sh)
+# in place of the prelude.
+#
 #   ENGINE=ref   compare Java with decomp_dbg instead of ghidra-rs (what Java Ghidra adds to the
 #                console decompiler: names, types, prototypes, comments)
+#   FACTS=0      ghidra-rs without the facts (the prelude, as decomp_dbg)
 #   SKIP         DECOMP_SKIP_ACTIONS for the console engine (actions left out; none by default)
+#   CLASSIFY=<actions>  also run decomp_dbg with the prelude (and `option readonly off`) twice,
+#                as it is and with these actions skipped, and mark each miss `skip` when the
+#                two differ (the function needs the actions, whatever else differs) and `own`
+#                when they are the same; the summary counts both. A guide only: decomp_dbg has
+#                no data symbols or prototypes, so an action can matter with the facts and not
+#                without them
 #   GHIDRA_REF   where the Java side lives (default rust/target/ghidra-ref): proj/ (a copy of the
 #                mercs2 Ghidra project, made once; the original is only read) and
 #                java/<corpus>/<address> (the captured C, kept: delete a file to capture it
@@ -40,6 +50,11 @@ export out=${OUT:-$rust/target/ghidra-diff/$name}
 if [ "$ENGINE" = ref ]; then eng="$rust/target/decomp-build/decomp_dbg"; else eng="$rust/target/release/ghidra-rs decompile"; fi
 export eng DECOMP_SKIP_ACTIONS=$SKIP
 "$rust/tools/decomp-diff.sh" --prelude
+export FACTS=
+if [ "$ENGINE" != ref ] && [ "$FACTS" != 0 ]; then
+    GHIDRA_REF=$ref "$rust/tools/ghidra-facts.sh"
+    FACTS=$ref/mercs2.facts
+fi
 
 # the Java side: capture what is missing, in one headless run
 java=$ref/java/$name
@@ -61,30 +76,68 @@ one() {
     a=$1
     {
         echo "load file $BIN"
-        echo "source $PRELUDE"
-        awk -v a="$(printf "0x%08x" "$a")" '$1 == "map" && $2 == "function" && $3 == a { n = ($4 == "" || $4 == "nocode") ? "func_" a : $4 } END { print (n == "" ? "load addr " a : "load function " n) }' "$PRELUDE"
+        if [ -n "$FACTS" ]; then
+            echo "load facts $FACTS"
+            echo "load addr $a"
+        else
+            echo "source $PRELUDE"
+            awk -v a="$(printf "0x%08x" "$a")" '$1 == "map" && $2 == "function" && $3 == a { n = ($4 == "" || $4 == "nocode") ? "func_" a : $4 } END { print (n == "" ? "load addr " a : "load function " n) }' "$PRELUDE"
+        fi
         printf 'decompile\nprint C\nquit\n'
     } > "$out/con/$a.script"
     # shellcheck disable=SC2086
     timeout "$TIMEOUT" $eng -i "$out/con/$a.script" </dev/null > "$out/con/$a.log" 2>&1 || true
     rm "$out/con/$a.script"
 }
-export -f one
+# CLASSIFY: decomp_dbg with the prelude, as it is (cls/<address>.all) and with the actions
+# skipped (cls/<address>.skip); read-only memory does not fold to constants, as in Java Ghidra
+# without options
+classify() {
+    a=$1
+    {
+        echo "load file $BIN"
+        echo "source $PRELUDE"
+        echo "option readonly off"
+        awk -v a="$(printf "0x%08x" "$a")" '$1 == "map" && $2 == "function" && $3 == a { n = ($4 == "" || $4 == "nocode") ? "func_" a : $4 } END { print (n == "" ? "load addr " a : "load function " n) }' "$PRELUDE"
+        printf 'decompile\nprint C\nquit\n'
+    } > "$out/cls/$a.script"
+    dbg=$rust/target/decomp-build/decomp_dbg
+    DECOMP_SKIP_ACTIONS='' timeout "$TIMEOUT" "$dbg" -i "$out/cls/$a.script" </dev/null 2>&1 | sed -n '/^init> print C/,$p' > "$out/cls/$a.all" || true
+    DECOMP_SKIP_ACTIONS=$CLASSIFY timeout "$TIMEOUT" "$dbg" -i "$out/cls/$a.script" </dev/null 2>&1 | sed -n '/^init> print C/,$p' > "$out/cls/$a.skip" || true
+    rm "$out/cls/$a.script"
+}
+export -f one classify
+export CLASSIFY rust
 xargs -P "${JOBS:-$(nproc)}" -I{} bash -c 'one "$1"' _ {} <<<"$list"
+if [ -n "$CLASSIFY" ]; then
+    mkdir -p "$out/cls"
+    xargs -P "${JOBS:-$(nproc)}" -I{} bash -c 'classify "$1"' _ {} <<<"$list"
+fi
+# the mark of a miss: `skip` when the function needs the CLASSIFY actions (or decomp_dbg did
+# not print it with them), `own` otherwise
+mark() {
+    [ -n "$CLASSIFY" ] || return 0
+    if [ -s "$out/cls/$1.all" ] && cmp -s "$out/cls/$1.all" "$out/cls/$1.skip"; then echo " own"; else echo " skip"; fi
+}
 
 # the function alone: blank lines before and after dropped
 body() { awk 'NF { for (; b > 0; b--) print ""; print; s = 1; next } s { b++ }' "$1"; }
 n=0 fin=0 same=0 loud=0 silent=0
+# an engine's error lines (at the start of a line: the C may hold these words in a string)
+errors='^Low-level ERROR\|^error:\|panicked at\|^Execution error\|^Command parsing error'
 for a in $list; do
     n=$((n + 1))
     grep -q '^{' "$java/$a" || { echo "java failed $a: $(head -c 160 "$java/$a" | head -1)"; continue; }
     fin=$((fin + 1))
-    if grep -q 'ERROR\|error:\|panicked' "$out/con/$a.log" || ! grep -q '^init> print C' "$out/con/$a.log"; then
-        loud=$((loud + 1)); echo "loud $a: $(grep -m1 'ERROR\|error:\|panicked' "$out/con/$a.log" | cut -c1-160)"
+    if grep -q "$errors" "$out/con/$a.log" || ! grep -q '^init> print C' "$out/con/$a.log"; then
+        loud=$((loud + 1)); echo "loud$(mark "$a") $a: $(grep -m1 "$errors" "$out/con/$a.log" | cut -c1-160)"
     elif cmp -s <(body "$java/$a") <(sed -n '/^init> print C/,/^init> quit/p' "$out/con/$a.log" | sed '1d;$d' | body /dev/stdin); then
         same=$((same + 1))
     else
-        silent=$((silent + 1)); echo "silent $a"
+        silent=$((silent + 1)); echo "silent$(mark "$a") $a"
     fi
 done > "$out/$name.miss"
 echo "$name: java finished $fin / $n, identical $same / $fin (loud $loud, silent $silent)"
+if [ -n "$CLASSIFY" ]; then
+    echo "$name: of the misses, $(grep -c '^[a-z]* own ' "$out/$name.miss") own (the CLASSIFY actions change nothing in decomp_dbg) and $(grep -c '^[a-z]* skip ' "$out/$name.miss") skip"
+fi

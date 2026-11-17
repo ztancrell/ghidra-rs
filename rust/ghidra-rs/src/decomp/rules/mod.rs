@@ -268,6 +268,7 @@ pub(crate) const CLEANUP: &[Rule] = &[
     r("subright", "cleanup", &[Subpiece], sub_right),
     r("floatsigncleanup", "cleanup", &[IntAnd, IntXor], float_sign_cleanup),
     r("expandload", "cleanup", &[Load], expand_load),
+    r("ptrsubcharconstant", "cleanup", &[Ptrsub], ptrsub_char_constant),
     r("extensionpush", "cleanup", &[IntZext, IntSext], extension_push),
     r("piecestructure", "cleanup", &[Piece, IntZext], piece_structure),
     r("andstructure", "cleanup", &[IntAnd], and_structure),

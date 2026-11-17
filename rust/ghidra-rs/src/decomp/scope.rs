@@ -655,6 +655,14 @@ impl Database {
     pub(crate) fn set_this_pointer(&mut self, sym: SymbolId) {
         self.symbols[sym.0 as usize].this_ptr = true;
     }
+
+    /// `Scope::setAttribute` of the type lock and the name lock (`Symbol::decodeHeader` sets
+    /// them from a symbol's record; `recoverNameRecommendationsForSymbols` locks a name).
+    pub(crate) fn lock_symbol(&mut self, sym: SymbolId, type_locked: bool, name_locked: bool) {
+        let f = &mut self.symbols[sym.0 as usize].flags;
+        f.type_locked |= type_locked;
+        f.name_locked |= name_locked;
+    }
 }
 
 /// A space's name and address size (the stack space has its container's size).

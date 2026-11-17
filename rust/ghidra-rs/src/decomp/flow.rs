@@ -153,6 +153,41 @@ fn ram_addr(a: u64) -> String {
     format!("(ram,0x{a:08x})")
 }
 
+/// The flow override `kind` of an instruction of the facts (stage S10) on its p-code, as Java
+/// applies it before the decompiler sees the ops (`PcodeEmit.dumpCallOverride` with
+/// `dumpNullReturn`): `CALL_RETURN` makes the final branch a call and adds `RETURN #0`. The
+/// conditional form and the other overrides are not ported.
+fn call_return_override(
+    ops: &mut Vec<crate::sleigh::PcodeOp>,
+    kind: &str,
+    ptr_size: u32,
+) -> std::result::Result<(), String> {
+    let unported = || format!("facts: the flow override {kind} is not ported");
+    if kind != "CALL_RETURN" {
+        return Err(unported());
+    }
+    // every other op must leave the flow alone, and a relative branch is not overridden
+    let (last, before) = ops.split_last_mut().ok_or_else(unported)?;
+    let is = |op: &crate::sleigh::PcodeOp, opc: Opcode| op.opc == opc as u8;
+    let flow = [Opcode::Branch, Opcode::Cbranch, Opcode::Branchind, Opcode::Call, Opcode::Callind, Opcode::Return];
+    if before.iter().any(|op| flow.iter().any(|&f| is(op, f))) {
+        return Err(unported());
+    }
+    if is(last, Opcode::Branch) {
+        if last.ins.first().is_none_or(|v| v.space == 0) {
+            return Ok(());
+        }
+        last.opc = Opcode::Call as u8;
+    } else if is(last, Opcode::Branchind) || is(last, Opcode::Return) {
+        last.opc = Opcode::Callind as u8;
+    } else if !is(last, Opcode::Call) && !is(last, Opcode::Callind) {
+        return Err(unported());
+    }
+    let null = crate::sleigh::Varnode { space: 0, offset: 0, size: ptr_size };
+    ops.push(crate::sleigh::PcodeOp { opc: Opcode::Return as u8, out: None, ins: vec![null] });
+    Ok(())
+}
+
 impl Flow<'_> {
     fn opc(&self, op: OpId) -> Opcode {
         self.fd.op(op).opc
@@ -361,10 +396,16 @@ impl Flow<'_> {
             .bytes_at(addr)
             .ok_or_else(|| EmitError::Fatal(LowlevelError(format!("Unable to load 512 bytes at r0x{addr:08x}"))))?;
         let len = sl.decode(&mut self.parse, addr, bytes).map_err(EmitError::BadData)?;
-        let ops = sl.pcode(&self.parse).map_err(|e| match e {
+        let mut ops = sl.pcode(&self.parse).map_err(|e| match e {
             PcodeError::Unimplemented => EmitError::Unimplemented,
             PcodeError::Invalid(e) => EmitError::Fatal(LowlevelError(e)),
         })?;
+        if let Some(facts) = &self.arch.facts {
+            for kind in facts.overrides(addr) {
+                call_return_override(&mut ops, kind, sl.spaces.get(sl.code_space() as usize).map_or(4, |s| s.size))
+                    .map_err(|e| EmitError::Fatal(LowlevelError(format!("{e} at r0x{addr:08x}"))))?;
+            }
+        }
         self.fd.emit_pcode(addr, &ops).map_err(EmitError::Fatal)?;
         Ok(len as u64)
     }
@@ -412,7 +453,17 @@ impl Flow<'_> {
                     self.end_instruction_at(op, i, maxtime);
                     *startbasic = true;
                 }
-                Opcode::Call => self.setup_call_specs(op)?,
+                Opcode::Call => {
+                    // checkForFlowModification: a callee that does not return is followed by
+                    // an artificial halt, which the walk picks up next
+                    if self.setup_call_specs(op)? {
+                        let addr = self.fd.op(op).seq.addr;
+                        self.artificial_halt(addr, Some(Halt::NoReturn))?;
+                        if let Some(halt) = self.fd.dead.pop() {
+                            self.fd.dead.insert(i, halt);
+                        }
+                    }
+                }
                 Opcode::Callind => {
                     self.setup_callind_specs(op);
                 }
@@ -521,23 +572,26 @@ impl Flow<'_> {
 
     /// Port of `FlowInfo::setupCallSpecs` with `queryCall` and `checkForFlowModification`: name
     /// the callee, take its flow effects, replace the target with the call's annotation and
-    /// queue a call with a fixup for injection. (The console's prototypes never say a function
-    /// does not return, so a call never ends flow.)
-    fn setup_call_specs(&mut self, op: OpId) -> Result<()> {
+    /// queue a call with a fixup for injection. Returns whether the callee does not return
+    /// (only the facts of stage S10 say so; the console's prototypes never do), having put the
+    /// warning.
+    fn setup_call_specs(&mut self, op: OpId) -> Result<bool> {
         let entry = self.fd.vn(self.fd.input(op, 0)?).offset;
-        let callee = self.arch.functions.get(&entry);
+        let callee = self.arch.callee_proto(&mut self.fd.types, entry)?;
         let mut spec = CallSpec::new(op, Some(entry), callee.is_some());
-        if let Some(f) = callee {
-            spec.proto.copy_flow_effects(&f.proto);
+        if let Some(p) = &callee {
+            spec.proto.copy_flow_effects(p);
         }
-        let inline = spec.proto.inject.is_some();
+        let (inline, no_return) = (spec.proto.inject.is_some(), spec.proto.no_return);
         let call = self.new_call(spec);
         let vn = self.fd.new_varnode_callspecs(call);
         self.fd.op_set_input(op, vn, 0)?;
         if inline {
             self.injectlist.push(call);
+        } else if no_return {
+            self.fd.warning("Subroutine does not return", self.fd.op(op).seq.addr);
         }
-        Ok(())
+        Ok(no_return)
     }
 
     /// Port of `FlowInfo::setupCallindSpecs` (without overrides, an indirect call stays one).
@@ -940,5 +994,29 @@ impl Flow<'_> {
             self.fd.op_insert(op, bl, at);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sleigh::{PcodeOp, Varnode};
+
+    #[test]
+    fn call_return_override_of_a_jump() {
+        let ram = |offset| Varnode { space: 1, offset, size: 4 };
+        let op = |opc: Opcode, ins| PcodeOp { opc: opc as u8, out: None, ins };
+        let mut ops = vec![op(Opcode::Branch, vec![ram(0x401000)])];
+        call_return_override(&mut ops, "CALL_RETURN", 4).unwrap();
+        assert_eq!(ops.len(), 2);
+        assert_eq!((ops[0].opc, ops[0].ins[0].offset), (Opcode::Call as u8, 0x401000));
+        assert_eq!((ops[1].opc, ops[1].ins[0]), (Opcode::Return as u8, Varnode { space: 0, offset: 0, size: 4 }));
+        // a relative branch is left alone; a conditional one and the other overrides fail
+        let mut rel = vec![op(Opcode::Branch, vec![Varnode { space: 0, offset: 1, size: 4 }])];
+        call_return_override(&mut rel, "CALL_RETURN", 4).unwrap();
+        assert_eq!(rel.len(), 1);
+        let mut cbr = vec![op(Opcode::Cbranch, vec![ram(0x401000), Varnode { space: 2, offset: 0, size: 1 }])];
+        assert!(call_return_override(&mut cbr, "CALL_RETURN", 4).is_err());
+        assert!(call_return_override(&mut ops, "BRANCH", 4).is_err());
     }
 }

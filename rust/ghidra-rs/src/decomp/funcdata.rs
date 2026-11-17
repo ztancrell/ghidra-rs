@@ -101,6 +101,15 @@ pub struct Funcdata {
     pub(crate) symref: BTreeMap<VarnodeId, super::namevars::SymRef>,
     /// warnings at an address (`Funcdata::warning`), for `print C`
     pub(crate) comments: Vec<(u64, String)>,
+    /// the listing's comments of the function (the facts of stage S10), until `print C` asks
+    /// for the comments ([`Funcdata::fill_comment_cache`])
+    pub(crate) listing_comments: Vec<super::facts::ListingComment>,
+    /// the ram varnodes a data symbol of the facts holds (`Varnode::mapentry` of a symbol with
+    /// `Symbol::isIsolated`): their highs take no part in speculative merging
+    pub(crate) isolated: std::collections::HashSet<VarnodeId>,
+    /// the names the facts recommend for the function's variables
+    /// (`ScopeLocal::nameRecommend`), applied by `ActionNameVars`
+    pub(crate) name_recs: Vec<super::facts::NameRec>,
     /// a read-only varnode was written before heritage: the C++ warns at such a write
     /// (`Funcdata::fillinReadOnly`), a warning that is not ported, so `print C` fails
     pub(crate) readonly_write: bool,
@@ -181,6 +190,9 @@ impl Funcdata {
             localmap: super::varmap::LocalMap::empty(),
             next_unique: UNIQUE_ANALYSIS,
             warnings: Vec::new(),
+            listing_comments: Vec::new(),
+            isolated: std::collections::HashSet::new(),
+            name_recs: Vec::new(),
             mapentry: BTreeMap::new(),
             symref: BTreeMap::new(),
             comments: Vec::new(),
@@ -1202,6 +1214,20 @@ impl Funcdata {
     pub(crate) fn add_header(&mut self, msg: String) {
         if !self.warnings.contains(&msg) && !self.comments.iter().any(|(a, m)| *a == self.entry && *m == msg) {
             self.warnings.push(msg);
+        }
+    }
+
+    /// Port of `CommentDatabaseGhidra::fillCache`: the first time the comments are asked for
+    /// (by `print C`), the listing's join them, after the warnings made so far. Of the types
+    /// the printer shows by default, a `header` comment at the entry is a header comment and
+    /// a `user2` comment is one at its address; the other types are not printed.
+    pub(crate) fn fill_comment_cache(&mut self) {
+        for c in std::mem::take(&mut self.listing_comments) {
+            match c.kind.as_str() {
+                "header" if c.addr == self.entry => self.warnings.push(c.text),
+                "user2" => self.comments.push((c.addr, c.text)),
+                _ => {}
+            }
         }
     }
 }

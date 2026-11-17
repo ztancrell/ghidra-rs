@@ -325,6 +325,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `condconst`, `directwrite`, `dynamicsymbols`, `prototypewarnings`); with them skipped on both engines and
    default options, M8 8 / 8 and M500 410 / 500 against `decomp_dbg` (loud 78, silent 11, in no `bars.sh`
    check). See `rust/README.md`, "Stage S10".
+   S10 slice 1 (2026-11-17): the facts of the Ghidra project (`tools/ghidra/ExportFacts.java`: what Java
+   answers its decompiler, recorded as XML) and the console command `load facts` (`decomp/facts.rs`): Ghidra's
+   type names, function and data names, prototypes, read-only memory, comments, labels, `local_` names. With the
+   eight actions skipped: M8 identical 3 / 7 (the other four need the eight), M500 identical 192 / 499 (loud 72, silent 235). Still
+   blocked on the eight. See `rust/README.md`, "Stage S10, slice 1".
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
@@ -336,5 +341,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
 
 ## Open questions
 
-None open. Superseded: "where the edits of mercs2's five project-editing scripts live", decided
-2026-11-15 (plain files, see Decided).
+Superseded: "None open" (until 2026-11-17) and "where the edits of mercs2's five project-editing
+scripts live", decided 2026-11-15 (plain files, see Decided).
+
+- 2026-11-17: Where does ghidra-rs take the facts of a Java Ghidra project from (function and data
+  names, prototypes, data-types, listing data)? S10 slice 1 chose, without the user: an export from
+  the Ghidra project by a headless script, read with the console command `load facts`. The
+  alternative is ghidra-rs's own analysis plus the edit files of the 2026-11-15 decision, which
+  cannot match Java's C wherever Java's analysis differs. To confirm or change.
