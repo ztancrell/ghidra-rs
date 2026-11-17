@@ -298,6 +298,12 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    487 / 495, `pcc-t` and `pc-t` 479 / 495; silent only 0x47a6b0; M8 all 55 checks identical (print 7 / 7).
    Full pass: `simple` 190, 190, 188, 188 / 194; switch `pcc-r` 1810 / 2005, `pcc-t` 1817 / 2005, each with 60
    silent that older switch checks already list (see the Decided entry of 2026-11-16).
+   Slice 5 on branch `m3-print5` (2026-11-16): labels of spliced blocks, function and external reference
+   symbols as variables, `VariablePiece` groups, string and function pointer constants. M500 `pcc-r` and `pc-r`
+   494 / 495, `pcc-t` and `pc-t` 495 / 495, no loud miss, silent only 0x47a6b0; M8 all 55 checks identical.
+   Switch `pcc-r` 1944 / 2005 (silent 61), `pcc-t` 1943 / 2005 (silent 62); all in older switch checks except
+   0x23caea8 (`pcc-t`), open: the read-only write warning of `fillinReadOnly` is not ported.
+   Superseded: the slice 4 counts above.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
