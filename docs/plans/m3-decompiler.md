@@ -1880,6 +1880,16 @@ to confirm, and the loader is one module (`decomp/facts.rs`) that another source
   mercs2 with Java's function set: `func` 80.6%, `body` 98.1%, `extref` 90.0%, `data` 47.1% equal;
   `ghidra-diff.sh` with the eight skipped: M8 identical 2 / 7 (3 / 7 with the Java facts), M500
   171 / 499 (192 / 499). The checks against `decomp_dbg` (M8, 55 lines) equal the baseline.
+- Slice 3 (2026-11-17, `rust/README.md`, "Stage S10, slice 3"), after the user's decision to port
+  Ghidra's analyzers instead of approximating them: address tables at instruction references
+  and `checkPseudoBody` (`OperandReferenceAnalyzer`, `AddressTable`, `PseudoDisassembler`),
+  call-site purges for the stack analysis (`SymbolicPropogator.getFunctionPurge`), the ASCII
+  Strings analyzer (`strings.rs`, Ghidra's trigram model file), data through an address a
+  register holds, Function ID's plate comments. mercs2 with Java's function set: `func` 81.2%,
+  `data` 84.9%, `string` 90.5%, `comments` 71.0% equal (superseded: "`func` 80.6% ... `data`
+  47.1%" above); `ghidra-diff.sh` M8 identical 2 / 7, M500 173 / 499. Not ported: the
+  demangler, Ghidra's order of analysis (its task queue), switch-case labels, the loader's and
+  RTTI structures.
 
 Still before the gate: the eight actions (item 1), the misses default options reach (item 2),
 and from this slice the struct and union symbols and the other loud items.

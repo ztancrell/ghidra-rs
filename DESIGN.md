@@ -111,6 +111,14 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   regression and blocks the merge. First case: slice 4 on the switch corpus (`pcc-r` and `pcc-t`
   silent 1 and 0 -> 60, all listed by `swfs-r`, `swsn-r` or `swfs-t`). User's decision
   ("progress that exposes bugs"); the guard against unlisted silents is Claude's wording.
+- 2026-11-17: The facts ghidra-rs derives itself (`analyze --facts`) come from faithful ports of
+  Ghidra's Java analyzers, not from approximations of them. Asked whether approximated facts
+  (stack variables, data sizes, strings and pointers at references) may silently change the
+  decompiled C, the user answered: "I would port the Ghidra analyzer next to Rust." Each record a
+  port makes exact loses its approximation; whatever is still approximated stays written and
+  measured (`tools/facts-diff.sh`) and is listed in `rust/README.md`, "Stage S10, slice 3".
+  Superseded: the part of the open question of S10 slice 2 that let "a rule of Ghidra's analyzers
+  ported with an approximation" stand as the way to go.
 
 ## Milestones
 
@@ -341,6 +349,15 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    tracked registers, flow overrides. What it does not derive is an `underived` record and fails when a
    decompile reads it. `tools/facts-diff.sh` compares with the Java facts per record kind (mercs2, with
    Java's function set: `func` 80.6%, `body` 98.1%, `extref` 90.0%, `data` 47.1%, `label` 94.9% equal; `ghidra-diff.sh` M8 identical 2 / 7 against 3 / 7 with the Java facts, M500 171 / 499 against 192 / 499). See `rust/README.md`, "Stage S10, slice 2".
+   S10 slice 3 (2026-11-17), after the decision "port the Ghidra analyzer" (see Decided): five pieces of Ghidra's
+   analyzers ported for `analyze --facts`: address tables at instruction references and the pseudo-disassembler's
+   body checks (`OperandReferenceAnalyzer`, `AddressTable`, `PseudoDisassembler`), the purges the stack analysis has
+   at a call (`SymbolicPropogator.getFunctionPurge`), the ASCII Strings analyzer with its trigram model
+   (`strings.rs`), data through an address a register holds, Function ID's plate comments. mercs2 with Java's
+   function set: `func` 81.2%, `data` 84.9%, `string` 90.5%, `undef` 95.6%, `wref` 84.9%, `comments` 71.0% equal
+   (slice 2: 80.6%, 47.1%, 51.6%, 92.6%, 62.6%, 0%); `label` 94.7% (94.9%). `ghidra-diff.sh` M8 identical 2 / 7,
+   M500 173 / 499 (171). Shadow check: same 56,003, differ 60 (55,996, 61). Still approximated: Ghidra's order of
+   analysis. See `rust/README.md`, "Stage S10, slice 3".
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
@@ -377,6 +394,14 @@ scripts live", decided 2026-11-15 (plain files, see Decided).
   script made after auto-analysis (no purge, no stack variables); the import prototypes come from a
   one-time headless export of Ghidra's archive, not from a `.gdt` reader in Rust (the 2026-11-13
   decision names data-type archives as data to read in place: not started).
+  Superseded in part: "a rule ... ported with an approximation is written and measured instead" is
+  decided (2026-11-17, see Decided): approximations give way to ports; the other choices stay open.
+- 2026-11-17: Choices of S10 slice 3 made without the user, to confirm or change (`rust/README.md`,
+  "Stage S10, slice 3"): `PseudoDisassembler.checkPseudoBody` is ported whole although, with the
+  references of all discovered code at once, it loses 452 labels of SecuROM's code that Java has
+  (Ghidra's order of analysis is not ported: its task queue would be the next port); `--facts`
+  fails without Ghidra's strings model file; a Function ID comment with a mangled name stays
+  `underived` until the demangler is ported.
 
 Superseded: "where the edits of mercs2's five project-editing scripts live", decided
 2026-11-15 (plain files, see Decided).

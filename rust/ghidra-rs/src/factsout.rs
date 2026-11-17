@@ -394,7 +394,7 @@ impl Exporter<'_> {
                     && an.insns.range(t..t + len).next().is_none()
             };
             if let Some(n) = ascii_len(bytes) {
-                if !within(&refs, n + 1) && !sec.exec && free(&defs, n + 1) {
+                if !within(&refs, n + 1) && free(&defs, n + 1) {
                     let label = string_label("s_", bytes[..n as usize].iter().map(|&b| b as char));
                     defs.insert(t, Def::Str { len: n + 1, wide: false, label });
                 }
@@ -412,7 +412,7 @@ impl Exporter<'_> {
             };
             if let Some(n) = wide(t).filter(|&n| n > 3 && wide(t.wrapping_sub(8)).is_none_or(|m| m <= n + 2)) {
                 if !within(&refs, n) {
-                    if !sec.exec && free(&defs, 2 * (n + 1)) {
+                    if free(&defs, 2 * (n + 1)) {
                         let chars = bytes[..2 * n as usize].chunks(2).map(|c| c[0] as char);
                         defs.insert(t, Def::Str { len: 2 * (n + 1), wide: true, label: string_label("u_", chars) });
                     }
@@ -445,6 +445,78 @@ impl Exporter<'_> {
         defs
     }
 
+    /// Ghidra's ASCII Strings analyzer (`StringsAnalyzer` with its defaults, `crate::strings`)
+    /// over the listing the reference analysis left: a string the search finds and the model
+    /// accepts becomes data where its bytes are undefined (no instruction, pointer, string or
+    /// import slot; `DataUtilities.isUndefinedRange`), or where only a string of its kind lies
+    /// at its end ("Create Strings Containing Existing Strings"), which it takes over. Its
+    /// length takes the zero bytes up to the next multiple of 4 ("String end alignment") when
+    /// they are undefined.
+    // ponytail: the listing is this analysis's (Ghidra's loader and RTTI structures are not
+    // derived, so a string inside one is found here and not in Java); f64 `log10` is Rust's,
+    // which can differ from Java's in the last bit of a score at its threshold
+    fn ascii_strings(&self, defs: &mut BTreeMap<u32, Def>, model: &crate::strings::Model) {
+        let (img, an) = (self.img, self.an);
+        let slots: BTreeSet<u32> = img.imports.keys().copied().collect();
+        // the first instruction or defined data that overlaps `first..=last`
+        let defined = |defs: &BTreeMap<u32, Def>, first: u32, last: u32| -> Option<u32> {
+            let ins = an.insns.range(..=last).next_back().filter(|(&a, i)| a + i.len as u32 > first).map(|(&a, _)| a);
+            let def = defs.range(..=last).next_back().filter(|(&a, d)| a + d.len() > first).map(|(&a, _)| a);
+            let slot = slots.range(..=last).next_back().filter(|&&a| a + 4 > first).copied();
+            ins.or(def).or(slot)
+        };
+        // the ranges of initialized memory: sections that follow one another without a gap
+        let mut runs: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut sections: Vec<&crate::analysis::Section> = img.sections.iter().collect();
+        sections.sort_by_key(|s| s.addr);
+        let mut open = false;
+        for s in sections {
+            let init = &s.data[..s.data.len() - (s.zero_tail as usize).min(s.data.len())];
+            match runs.last_mut() {
+                Some((base, bytes)) if open && *base + bytes.len() as u32 == s.addr => bytes.extend(init),
+                _ => runs.push((s.addr, init.to_vec())),
+            }
+            open = s.zero_tail == 0;
+        }
+        for (base, bytes) in &runs {
+            let mut found = Vec::new();
+            crate::strings::search(bytes, &mut |f| found.push(f));
+            for f in found {
+                let (start, wide) = (base + f.offset as u32, f.wide);
+                let end = start + f.len as u32 - 1;
+                let step = if wide { 2 } else { 1 };
+                let chars: Vec<u8> = bytes[f.offset..f.offset + f.len - step].iter().step_by(step).copied().collect();
+                if !model.accepts(&chars) || img.block_of(start).is_none_or(|s| end >= s.addr + s.data.len() as u32) {
+                    continue;
+                }
+                if defined(defs, start, end).is_some() {
+                    // only a string of the same kind holding the end, after the start
+                    let Some((&at, Def::Str { wide: w, .. })) = defs.range(..=end).next_back() else { continue };
+                    if *w != wide
+                        || at <= start
+                        || at + defs[&at].len() <= end
+                        || defined(defs, start, at - 1).is_some()
+                    {
+                        continue;
+                    }
+                }
+                let mut len = f.len as u32;
+                let pad = (crate::strings::END_ALIGNMENT - (end + 1) % crate::strings::END_ALIGNMENT)
+                    % crate::strings::END_ALIGNMENT;
+                let zero = |a: u32| img.block_of(a).is_some_and(|s| s.data[(a - s.addr) as usize] == 0);
+                if pad > 0 && (end + 1..=end + pad).all(zero) && defined(defs, end + 1, end + pad).is_none() {
+                    len += pad;
+                }
+                let taken: Vec<u32> = defs.range(start..start + len).map(|(&a, _)| a).collect();
+                taken.iter().for_each(|a| {
+                    defs.remove(a);
+                });
+                let label = string_label(if wide { "u_" } else { "s_" }, chars.iter().map(|&c| c as char));
+                defs.insert(start, Def::Str { len, wide, label });
+            }
+        }
+    }
+
     /// Ghidra's stack analysis (`NewFunctionStackAnalysisCmd` with its defaults: local
     /// variables, no parameters) as the `<mapsym>` list of the function's scope. Constant
     /// propagation walks the function with ESP at the entry as the stack's origin; a read or
@@ -453,8 +525,10 @@ impl Exporter<'_> {
     /// (`undefined`), and a variable that meets others becomes one over them all
     /// (`accumulateVariable`).
     // ponytail: "an operand names the address" is "not the slot a PUSH, POP or CALL uses
-    // itself" (Ghidra adds up the operand's registers and scalars, `getStackOpIndex`), and a
-    // call whose callee's purge is unknown ends the stack tracking of its path
+    // itself" (Ghidra adds up the operand's registers and scalars, `getStackOpIndex`). A call
+    // whose purge is unknown ends the stack tracking of its path; the purges are the ones
+    // `call_purges` gives the analysis for this walk, which have every function Ghidra's
+    // auto-analysis made, not only those it had made when it analysed the caller
     fn locals(&self, p: &mut Parse, f: u32) -> String {
         const PREFIXES: [u8; 10] = [0x66, 0x67, 0xf2, 0xf3, 0x26, 0x2e, 0x36, 0x3e, 0x64, 0x65];
         let (rs, _) = self.sl.registers();
@@ -612,11 +686,50 @@ pub struct Inputs<'a> {
     pub analyzed: Option<&'a BTreeSet<u32>>,
     /// the text of the compiler spec (its call fixups)
     pub cspec: &'a str,
+    /// the trigram model of Ghidra's ASCII Strings analyzer; without it that analyzer does not run
+    pub strings: Option<&'a crate::strings::Model>,
+}
+
+/// The bytes a call pops besides the return address, as Ghidra's stack analysis has them at a
+/// call site (`SymbolicPropogator.getFunctionPurge`), by function entry and by import slot: 0
+/// for a calling convention with a known extrapop (`__cdecl`), whatever the function's purge
+/// is; the prototype's for an import of the archive; else the purge
+/// `FunctionPurgeAnalysisCmd` gave the function, which only a function of auto-analysis has. A
+/// thunk has its target's.
+pub fn call_purges(img: &Image, an: &Analysis, inputs: &Inputs) -> HashMap<u32, u32> {
+    let none = Protos::default();
+    let protos = inputs.protos.unwrap_or(&none);
+    let auto = |f: u32| inputs.analyzed.is_none_or(|s| s.contains(&f));
+    // the prototype of the function itself comes after its symbols
+    let proto_purge = |name: &str| {
+        let xml = protos.by_name.get(name)?;
+        let at = xml.find("</localdb><prototype extrapop=\"")? + "</localdb><prototype extrapop=\"".len();
+        xml[at..].split('"').next()?.parse::<u32>().ok()?.checked_sub(4)
+    };
+    let mut out = HashMap::new();
+    for (&slot, (_, name)) in &img.imports {
+        if let Some(n) = proto_purge(name) {
+            out.insert(slot, n);
+        }
+    }
+    for (&f, func) in &name_functions(img, an, inputs.fid, protos) {
+        let end = func.thunked.unwrap_or(f);
+        let purge = match func.import {
+            _ if func.model == Some("__cdecl") => Some(0),
+            Some(slot) => out.get(&slot).copied(),
+            None if auto(end) => an.ret_purge(img, end, 0),
+            None => None,
+        };
+        if let Some(n) = purge {
+            out.insert(f, n);
+        }
+    }
+    out
 }
 
 /// Write the facts of `an` to `out`.
 pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mut dyn Write) -> io::Result<()> {
-    let Inputs { fid, protos, analyzed, cspec } = *inputs;
+    let Inputs { fid, protos, analyzed, cspec, strings } = *inputs;
     let none = Protos::default();
     let mut ex = Exporter {
         img,
@@ -684,6 +797,20 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         }
         code_refs.extend(i.computed);
     }
+    // SymbolicPropogator's LOAD and STORE through an address a register holds: a reference to
+    // the memory, of the bytes moved, where constant propagation ran
+    for &f in an.bodies.keys().filter(|&&f| auto(f)) {
+        an.flow_walk(img, sl, &mut p, f, false, &mut |_, fold| {
+            for &(x, size, write) in fold.data.iter().filter(|d| img.block_of(d.0).is_some()) {
+                let t = targets.entry(x).or_default();
+                t.refs += 1;
+                if (1..=8).contains(&size) {
+                    t.size = size;
+                }
+                t.write |= write && t.refs <= 100;
+            }
+        });
+    }
     let mut cases: HashSet<u32> = HashSet::new();
     for c in an.tables.values() {
         cases.extend(c.iter().copied());
@@ -746,8 +873,21 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         if func.underived || (func.import.is_some() && !cdecl && !ex.protos.by_name.contains_key(&func.name)) {
             ex.underived.insert((f, Underived::Function));
         }
-        if fid.contains_key(&f) || func.underived {
-            ex.underived.insert((f, Underived::Comments));
+        // Function ID's plate comment; the demangler's comment of a C++ name is not derived
+        match fid.get(&f).map(|a| &a.comment) {
+            Some(Some(text)) if !func.underived => writeln!(
+                out,
+                "comments\t{f:x}\t<commentdb><comment type=\"header\"><addr space=\"ram\" offset=\"0x{f:x}\"/>\
+                 <addr space=\"ram\" offset=\"0x{f:x}\"/><text>{}</text></comment></commentdb>",
+                esc(text).replace('\n', "&#10;")
+            )?,
+            Some(_) => {
+                ex.underived.insert((f, Underived::Comments));
+            }
+            None if func.underived => {
+                ex.underived.insert((f, Underived::Comments));
+            }
+            None => {}
         }
     }
 
@@ -776,7 +916,10 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         targets.remove(&slot);
     }
 
-    let defs = ex.reference_data(&mut targets, &code_refs);
+    let mut defs = ex.reference_data(&mut targets, &code_refs);
+    if let Some(model) = strings {
+        ex.ascii_strings(&mut defs, model);
+    }
 
     // labels at instructions: a function's name, `LAB_` where something refers to one
     for (&a, i) in &an.insns {
@@ -822,7 +965,11 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
                     "<type name=\"\" metatype=\"array\" size=\"{len}\" arraysize=\"{n}\">{}</type>",
                     ex.typeref(elem)
                 );
-                let plain = if *wide { "-".to_string() } else { (len - 1).to_string() };
+                // the characters before the terminator (zero bytes may follow it)
+                let chars = img.block_of(a).map_or(0, |s| {
+                    s.data[(a - s.addr) as usize..].iter().take(*len as usize).take_while(|&&b| b != 0).count()
+                });
+                let plain = if *wide { "-".to_string() } else { chars.to_string() };
                 writeln!(out, "string\t{a:x}\t{len}\t{plain}")?;
                 (format!("{label}_{a:08x}"), *len, ty)
             }

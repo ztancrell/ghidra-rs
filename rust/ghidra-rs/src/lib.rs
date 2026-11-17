@@ -10,4 +10,5 @@ pub mod scripts;
 pub mod sla;
 pub mod sleigh;
 pub mod store;
+pub mod strings;
 mod xml;

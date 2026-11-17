@@ -33,7 +33,9 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   propagation, where a vtable stored to the stack survives a call to a `RET 4` function and a
   join; ExportFunctions counting a computed call in `callees` and `callers`.
 - `ghidra-rs/src/factsout.rs`: `analyze --facts`: the facts of ghidra-rs's own analysis in the
-  format of `tools/ghidra/ExportFacts.java` (stage S10, slice 2), for `load facts`.
+  format of `tools/ghidra/ExportFacts.java` (stage S10, slices 2 and 3), for `load facts`.
+- `ghidra-rs/src/strings.rs`: Ghidra's ASCII Strings analyzer (the string search and the
+  trigram model's score), for `analyze --facts` (stage S10, slice 3).
 - `ghidra-rs/src/fid.rs`: Function ID: the FID hasher, a reader for Ghidra's `.fidbf`
   databases, and FID's matching and naming.
 - `ghidra-rs/tests/fid.rs`: the FID hash of a known CRT function, and its record in Ghidra's
@@ -153,7 +155,9 @@ ghidra-rs analyze <pe32> [--functions <csv>] [--gaps <csv>] [--abi-callers <regi
                          [--decomp-prelude <out>] [--facts <out> [--protos <file>]] [--seeds <csv> | --functions-from <csv>]... [--store <file>] [--sla <file>]
 ```
 
-`--facts` is stage S10, slice 2 (below): the facts `load facts` reads, from this analysis.
+`--facts` is stage S10, slices 2 and 3 (below): the facts `load facts` reads, from this
+analysis. It reads the strings model `Features/Base/data/stringngrams/StringModel.sng` of the
+Ghidra tree the `.sla` file is in, and fails without it.
 
 Analyzes a 32-bit x86 PE and writes the files of three headless Ghidra scripts of the mercs2
 decomp project (`mercs2-decomp/tools/ghidra`), in the same format:
@@ -382,6 +386,16 @@ ghidra-rs instead of a Ghidra project:
   is how Ghidra reaches code only a vtable names, e.g. the deleting destructor 0x752040. Not
   modelled there: the string check at the word and pointer chains. This code belongs to no
   function and does not change `--functions` or `--gaps`.
+  Superseded in part (2026-11-17, "Stage S10, slice 3"): an address table an instruction
+  refers to becomes pointers and is not disassembled (`createFlowTable`); a code constant is
+  followed only where nothing reads or writes it, the instruction is no jump or call and
+  does not compute with it; `isValidSubroutine` also has `checkPseudoBody` (no defined data in
+  the flow, no reference into the middle of an instruction, and for a code constant no
+  reference to the flow but to its entry); the entries of an address table are disassembled
+  where each is an instruction start or `isValidCode`, not wherever all lie in an executable
+  section. So "Not modelled: Ghidra's defined data" above now leaves out pointers. The shadow
+  check after it: same 56,003, differ 60, Java only 152, ghidra-rs only 819 (before: 55,996,
+  61, 158, 873).
 - Code constants also come from a local constant fold (a stand-in for Ghidra's constant
   propagation, `SymbolicPropogator`): 4-byte register values from immediates, initialised
   memory and ADD/SUB/XOR/AND/OR, along a straight line of instructions and on into the
@@ -3704,6 +3718,222 @@ prototypes, switch-case labels, the structures of the loader and of RTTI, a `.gd
 the order of Ghidra's analysis. Not fixed: `address_tables` on sections flagged as code (it
 feeds `--abi-callers` and `--functions` too, so it needs their gates). Not run: a full
 `bars.sh` pass, `ghidra-diff.sh` on the corpora other than M8 and M500, the Mac.
+
+Superseded (2026-11-17, slice 3 below): the ASCII Strings analyzer and Function ID's comments (for
+names that are not mangled) are ported, and `address_tables` no longer disassembles data of
+sections flagged as code; the counts of this section are those of slice 2's build, the current
+ones are in slice 3. Also superseded there: "at a reference target outside executable blocks"
+(the `string` row), "a call whose callee's purge the analysis does not know" for imports and
+`__cdecl` functions (Stack variables), "only a COPY's direct read counts" for an address a
+register holds (the `data` row), and `underived comments` for a Function ID name that is not
+mangled.
+
+### Stage S10, slice 3: Ghidra's analyzers ported for `analyze --facts`, branch `worktree-agent-aa1e28b7594b072e7` (2026-11-17)
+
+The user's decision of 2026-11-17 (`../DESIGN.md`, Decided): the facts ghidra-rs derives come
+from ports of Ghidra's Java analyzers, not from approximations. This slice ports five pieces
+and measures each with `tools/facts-diff.sh` against the Java facts of mercs2 (Java's
+functions, `FUNCS=java`). What is still approximated is listed at the end and stays measured.
+
+**1. Address tables and code in SecuROM's sections** (`analysis.rs`: `Analysis::disassemble`,
+`table_entry`, `make_table`, `address_tables`, `valid_subroutine`, `used_for_calculation`).
+`Srdata` and `Sdata` are data with the execute flag, in Ghidra too (`PeLoader` takes
+`IMAGE_SCN_MEM_EXECUTE`). Ghidra keeps their pointers as data by rules that were missing here:
+
+- `OperandReferenceAnalyzer.getAddressTable` and `createFlowTable`: where an instruction
+  refers to the start of a run of addresses (`AddressTable.getEntry`, at least 3, and at least
+  the analyzer's minimum), the run becomes pointers and nothing is disassembled there. A jump
+  or call that refers to one makes no table ("Switch Table References" is off) and is not
+  looked at further.
+- The "Subroutine References" test before `isValidSubroutine`: not where a memory operand
+  reads or writes the target (`hasDataAccessReferences`), not from a jump or call, not a
+  value the instruction computes with (`isUsedForCalculation`, on the p-code).
+- `PseudoDisassembler.checkPseudoBody`: no defined data in the flow (a pointer is data now,
+  and stops a later disassembly), no reference into the middle of one of its instructions,
+  and without existing code no reference to the flow but to its entry.
+- `AddressTable.getFunctionEntries` with `PseudoDisassembler.isValidCode`: Create Address
+  Tables disassembles a table's entries only when every one of them lies in an executable
+  block and is the start of an instruction or, where nothing is defined, valid code. An entry
+  at defined data (a pointer of the same or another table) is not. Superseded: "valid code is
+  in an executable section" (`ponytail` note of `address_tables`) and "Not fixed:
+  `address_tables` on sections flagged as code" (slice 2).
+
+**2. Purges at call sites** (`factsout::call_purges`, `Analysis::swap_call_purges`, the fold
+of `Analysis::decode`). The stack analysis (`NewFunctionStackAnalysisCmd` on
+`SymbolicPropogator`) moves ESP after a call by `SymbolicPropogator.getFunctionPurge`: 0 for a
+convention with a known extrapop (`__cdecl`), whatever the function's purge is; the
+prototype's for an import of the archive, also through `CALL [slot]` and through a thunk; else
+the purge `FunctionPurgeAnalysisCmd` stored (the first RET by address, `Analysis::ret_purge`),
+which only a function of auto-analysis has. Superseded: "a call whose callee's purge the
+analysis does not know ends the tracking" as far as imports and `__cdecl` functions go
+(slice 2 used the purge of functions whose RETs all agree, for every function with a body).
+
+**3. ASCII Strings analyzer** (`strings.rs`, `Exporter::ascii_strings`). A port of
+`StringsAnalyzer` with its defaults: the search of `StringSearcher`
+(`MinLengthCharSequenceMatcher`, `MultiByteCharMatcher`: ASCII and UTF-16 at both byte
+offsets, 5 characters, a terminator), `StringAndScores` (lower case, trimmed, runs of spaces
+and of tabs as one), `NGramUtils` (the trigram model
+`Ghidra/Features/Base/data/stringngrams/StringModel.sng`, read from the Ghidra tree the
+`.sla` file is in; `--facts` fails without it; the score leaves out the first trigram, as
+Java's does), `createStringIfValid` (undefined bytes, or a string of the same kind at its end
+that it takes over; the zero bytes up to the next multiple of 4 belong to it). It runs after
+the reference analysis, over each run of sections that follow one another. With it, a string
+at a reference in an executable block is made as `checkForAscii` makes it (Java's
+`isValidInstruction` is always false). Superseded: "`string` ... at a reference target
+outside executable blocks" and "Not done: the ASCII Strings analyzer" (slice 2).
+
+**4. Data through an address a register holds** (`Fold::data`, the walk in
+`factsout::export`). `SymbolicPropogator` makes a reference, and constant propagation data of
+the bytes moved, at a LOAD or STORE through a constant a register holds. `Analysis::decode`
+records these of each instruction, and the facts walk every function of auto-analysis for
+them. Before, only an instruction's own constant sized data. A write through a register into
+a block that is not writable is a `wref` now.
+
+**5. Function ID's plate comments** (`fid.rs`: `plate_comment`, the Libraries table).
+`ApplyFidEntriesCommand.generateComment` with `MatchNameAnalysis.analyzeLibraries`: the kind
+of match, up to four names, the libraries (family, version, variant; shortened from 5
+libraries on). Only where no matched name is mangled: Java shows the demangler's full form of
+a mangled name, which is not ported, and such a function keeps its `underived comments`
+record.
+
+**Against Java** (mercs2, `FUNCS=java`; equal records and their share of Java's; each row adds
+its piece to the rows above it):
+
+| | `func` | `data` | `label` | `string` | `undef` | `wref` | `comments` |
+|---|---|---|---|---|---|---|---|
+| Java has | 44,990 | 271,502 | 218,095 | 26,420 | 58,069 | 265 | 1,613 |
+| before (slice 2) | 36,282 (80.6%) | 127,777 (47.1%) | 206,920 (94.9%) | 13,635 (51.6%) | 53,779 (92.6%) | 166 (62.6%) | 0 |
+| 1. tables | 36,282 | 217,776 (80.2%) | 206,468 (94.7%) | 13,636 | 53,841 (92.7%) | 166 | 0 |
+| 2. call purges | 36,553 (81.2%) | 217,776 | 206,468 | 13,636 | 53,841 | 166 | 0 |
+| 3. strings | 36,553 | 227,804 (83.9%) | 206,468 | 23,203 (87.8%) | 54,711 (94.2%) | 166 | 0 |
+| 4. register data | 36,553 | 229,590 (84.6%) | 206,472 | 23,242 (88.0%) | 54,839 (94.4%) | 225 (84.9%) | 0 |
+| 5. FID comments | 36,553 | 229,590 | 206,472 | 23,242 | 54,839 | 225 | 1,145 (71.0%) |
+| strings at references in executable blocks | 36,553 | 230,456 (84.9%) | 206,472 | 23,918 (90.5%) | 55,514 (95.6%) | 225 | 1,145 |
+
+The whole table of the final build:
+
+| kind | Java | with Java's functions (`FUNCS=java`): equal / different / missing / extra | equal | slice 2 | plain discovery: equal / different / missing / extra | equal | slice 2 |
+|---|---|---|---|---|---|---|---|
+| `func` | 44,990 | 36,553 / 8,430 / 7 / 0 | 81.2% | 80.6% | 19,838 / 6,669 / 18,483 / 2,733 | 44.1% | 44.2% |
+| `body` | 44,990 | 44,123 / 860 / 7 / 0 | 98.1% | 98.1% | 24,380 / 2,127 / 18,483 / 2,733 | 54.2% | 54.2% |
+| `extref` | 1,022 | 920 / 102 / 0 / 0 | 90.0% | 90.0% | 920 / 102 / 0 / 0 | 90.0% | 90.0% |
+| `data` | 271,502 | 230,456 / 11,796 / 29,250 / 12,963 | 84.9% | 47.1% | 204,465 / 36,563 / 30,474 / 38,581 | 75.3% | 37.3% |
+| `label` | 218,095 | 206,472 / 1,140 / 10,483 / 7,455 | 94.7% | 94.9% | 182,399 / 22,194 / 13,502 / 7,110 | 83.6% | 83.8% |
+| `string` | 26,420 | 23,918 / 1,984 / 518 / 31 | 90.5% | 51.6% | 23,903 / 1,999 / 518 / 33 | 90.5% | 51.6% |
+| `undef` | 58,069 | 55,514 / 708 / 1,847 / 3,036 | 95.6% | 92.6% | 55,288 / 799 / 1,982 / 3,076 | 95.2% | 92.3% |
+| `block` | 14 | 14 / 0 / 0 / 0 | 100% | 100% | 14 / 0 / 0 / 0 | 100% | 100% |
+| `wref` | 265 | 225 / 0 / 40 / 3 | 84.9% | 62.6% | 242 / 0 / 23 / 10 | 91.3% | 69.1% |
+| `tracked` (per function) | 44,990 | 44,963 / 20 / 7 / 0 | 99.9% | 99.9% | 26,498 / 9 / 18,483 / 2,733 | 58.9% | 58.9% |
+| `override` | 3,365 | 2,478 / 0 / 887 / 1,008 | 73.6% | 74.6% | 2,239 / 0 / 1,126 / 2,448 | 66.5% | 67.2% |
+| `comments` | 1,613 | 1,145 / 8 / 460 / 43 | 71.0% | 0% | 1,138 / 7 / 468 / 30 | 70.6% | 0% |
+| `coretypes` | 1 | 1 / 0 / 0 / 0 | 100% | 100% | the same | 100% | 100% |
+| `type` (by name) | 365 | 263 / 0 / 102 / 2 | 72.1% | 72.1% | the same | 72.1% | 72.1% |
+| `ns` | 797 | 0 / 0 / 797 / 0 | 0% | 0% | the same | 0% | 0% |
+| `underived` | 0 | 9,209 extra | | 10,414 | 9,122 extra | | 10,306 |
+
+Three kinds lose a little: `label` (the 452 below), `override` (32 `CALL_RETURN` records, which
+piece 1 changes; not looked at one by one) and, with plain discovery only, `func` (67
+functions, not traced; there every function is one "of auto-analysis", so every callee has
+its purge at a call, see `func` below). The analysis takes about 115 to 130 s on the shared
+desktop (slice 2: 50 to 130 s) and the facts 40 to 50 s (17 s): the Strings search and the
+second walk of every function.
+
+What still differs, by cause:
+
+- **The code ghidra-rs has and Java does not, and the other way.** 7,455 labels are extra
+  and 10,483 missing (before: 13,405 and 10,026). The tables took 5,952 extra labels away
+  (code that was data of SecuROM) and 452 equal ones: 610 labels that Java has are no longer
+  reached (581 of them in SecuROM's `Stext`) and 149 others are, because `checkPseudoBody`
+  meets a reference into the flow (seen: 0x1b10da0, where an immediate of other code is an
+  address inside it). Java's reference came after its disassembly there: its analysis asks in
+  small steps from the entry points, ghidra-rs asks with the references of all the code
+  discovery found. Extra code also makes strings at its references that Java's Strings
+  analyzer makes instead (longer by the zero bytes: 0x88f47c `PUSH 0xb12ce4` lies in bytes
+  Java leaves undefined), and the other way round: 1,984 strings differ in length and nothing
+  else.
+- **`func`**: unchanged but for the stack variables. `facts-func-why.sh`: stack variables
+  differ in 1,610 functions that differ in nothing else (before 1,754): Java has variables
+  ghidra-rs lacks in 191 (before 567), ghidra-rs has variables Java lacks in 668 (before 470),
+  both in 748 (variables on one side only: Java 274 functions, before 503; ghidra-rs 280,
+  before 178). Seen in 0x49ab40: Java tracks ESP up to `CALL 0x401740` and not after it,
+  though that function has a purge in the Java facts (`RET`, extrapop 4): when Java analysed
+  the caller it did not have it. Which functions Ghidra had made when its stack analyzer ran
+  on a caller is not derived (the functions "of auto-analysis" here are those plain discovery
+  finds). `extrapop` known only in Java (1,843 + 461) or only here (1,736 + 510) is the same
+  question: which functions auto-analysis made and which the mercs2 pipeline made later.
+- **`data`**: 29,250 missing, 12,963 extra, 11,796 different. Not looked at one by one after
+  the ports; the kinds slice 2 lists remain (typed switch and loader tables, the loader's and
+  RTTI structures, pointers and labels at code only one side has).
+- **`comments`**: Java has 1,553 of Function ID (1,188 with names that are not mangled) and
+  60 of the demangler. 460 are missing: the 365 with a mangled name, the 60, and 35 with
+  plain names at functions Function ID does not mark here. 43 are extra (functions it marks
+  only here) and 8 name other libraries (seen: 0x1cdc1f5, Visual Studio 2003 here, 2017 and
+  2019 in Java; not traced: the installed Ghidra is 12.2, the repo's databases are 12.3's).
+- `ns`, `type`, `extref`, `override`, `tracked`, `body`: as slice 2.
+
+**Still approximated** (written without a mark, measured by `facts-diff.sh`):
+
+- the order of Ghidra's analysis: which references and which functions exist when an analyzer
+  asks (the code constants, `checkPseudoBody`, the purge of a callee in the stack analysis,
+  the purge of a function whose last jump goes to another function);
+- the stack analysis's "an operand names the address" (`getStackOpIndex`);
+- Create Address Tables' disassembly between one table and the next (here after a whole pass),
+  and Ghidra's defined data other than pointers, strings and switch tables;
+- the pointers at references (`checkForPointer`: the string check at the word is in the
+  facts, not in `Analysis::pointer_targets`);
+- the Strings analyzer's listing (the loader's and RTTI structures are not derived, so a
+  string inside one is made here), and `log10` of Rust's `f64` against Java's at a score that
+  equals its threshold to the last bit;
+- data sizes where two accesses disagree (the last one in the order of the functions wins).
+
+Not ported: the demangler (names, namespaces, prototypes and comments of C++ functions: `ns`
+0 of 797, `underived function` and `comments`), switch-case labels, the loader's and RTTI
+structures, a `.gdt` reader, Ghidra's task queue (the order above).
+
+**The end effect** (`tools/ghidra-diff.sh` with `FACTS=<file>`, the eight actions skipped as
+in slice 1; both rows run with this build):
+
+| own facts, Java's functions | M8 | M500 |
+|---|---|---|
+| before (the facts of slice 2) | identical 2 / 7 (loud 2, silent 3) | identical 171 / 499 (loud 71, silent 257) |
+| after | identical 2 / 7 (loud 2, silent 3) | identical 173 / 499 (loud 71, silent 255) |
+
+M500: 0x4e9230 and 0x6ee4c0 were silent and are identical; no other function changes its
+state. M8: the same seven states. 0x401080 still reads an `underived` function (an import the
+archive does not have). 0x9eec5e still reads `underived comments`: its Function ID name is
+`@__security_check_cookie@4`, and Java's comment ends with the demangler's line `__fastcall
+__security_check_cookie,4`. A name with `@` counts as mangled here; of the 23 such names in
+Java's comments 22 are `_name@N`, which Java shows as they are (so those 22 comments could be
+written; not done).
+
+**The shadow check** (mercs2's `tools/ghidra-rs-shadow.sh` logic: `analyze --functions-from
+build/functions.csv --abi-callers` against `config/abi_callers.csv`, mercs2 only read): same
+56,003, differ 60, Java only 152, ghidra-rs only 819. Before: same 55,996, differ 61, Java
+only 158, ghidra-rs only 873. Only piece 1 reaches it. Every changed row: 54 rows Java does
+not have are gone (29 `trivial`, 14 `unconcluded`, 7 `violation`, 4 `unknown`: call sites in
+bytes that are data now); 7 rows Java has are new with Java's status (4 `trivial`, 2
+`unknown`, 1 `unconcluded`); 1 row went from `ok` to Java's `unknown`; 1 row Java has is gone
+(0x56d910 called at 0x550c94, `ok` on both sides before: that code is no longer reached).
+`--functions` and `--gaps` give the same files, byte for byte.
+
+The checks against `decomp_dbg` do not read the facts: `bars.sh` with `CORPORA=m8` gives 55
+lines, each equal to the baseline's (`m3-int5-116d9d34da.summary`). `cargo fmt` and `clippy -D
+warnings` are clean. `cargo test`: 145 pass (3 new: the string search, the trigram score, an
+address table in executable data).
+
+Decisions made here, for the user to confirm ("Claude's call"): Java's `checkPseudoBody` is
+ported whole, though with the references of all discovered code it loses 452 equal labels of
+SecuROM's code while it wins the tables (the alternative, a check against flow and memory
+references only, was measured: it kept the labels and lost 86,619 equal `data` records);
+`--facts` fails when the strings
+model file is not in the Ghidra tree of the `.sla` file; a Function ID comment is written
+only where no name is mangled, any other stays `underived`; the purges of imports come from
+the archive export (`--protos`), so without it a call of an import ends the stack tracking
+as before.
+
+Not run: a full `bars.sh` pass (M8 only), `ghidra-diff.sh` on corpora other than M8 and
+M500, plain discovery under `ghidra-diff.sh`, the Mac. Not measured apart: each piece's share
+of the `ghidra-diff.sh` change.
 
 ## Speed
 

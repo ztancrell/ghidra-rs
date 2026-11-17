@@ -439,16 +439,28 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
             };
             let cspec_path = sla.with_file_name("x86win.cspec");
             let cspec = std::fs::read_to_string(&cspec_path).map_err(|e| format!("{}: {e}", cspec_path.display()))?;
+            // the model of the ASCII Strings analyzer, in the Ghidra tree the .sla file is in
+            let model_path =
+                sla.ancestors().nth(5).map(|g| g.join("Features/Base/data/stringngrams/StringModel.sng")).ok_or_else(
+                    || format!("{}: not in a Ghidra tree (the strings model is found from it)", sla.display()),
+                )?;
+            let model = std::fs::read_to_string(&model_path).map_err(|e| format!("{}: {e}", model_path.display()))?;
+            let strings =
+                ghidra_rs::strings::Model::parse(&model).map_err(|e| format!("{}: {e}", model_path.display()))?;
             let mut w = create(&p)?;
             let inputs = ghidra_rs::factsout::Inputs {
                 fid: &fid,
                 protos: protos.as_ref(),
                 analyzed: plain.as_ref(),
                 cspec: &cspec,
+                strings: Some(&strings),
             };
-            ghidra_rs::factsout::export(&img, &an, &sl, &inputs, &mut w)
-                .and_then(|()| w.flush())
-                .map_err(|e| format!("{p}: {e}"))?;
+            // the stack analysis goes by the purges Ghidra has at a call site
+            let purges = ghidra_rs::factsout::call_purges(&img, &an, &inputs);
+            let own = an.swap_call_purges(purges);
+            let done = ghidra_rs::factsout::export(&img, &an, &sl, &inputs, &mut w).and_then(|()| w.flush());
+            an.swap_call_purges(own);
+            done.map_err(|e| format!("{p}: {e}"))?;
             println!("wrote facts {p}");
             eprintln!("facts in {:.1}s", t.elapsed().as_secs_f64());
         }
