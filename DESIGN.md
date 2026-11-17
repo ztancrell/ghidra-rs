@@ -119,6 +119,13 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   measured (`tools/facts-diff.sh`) and is listed in `rust/README.md`, "Stage S10, slice 3".
   Superseded: the part of the open question of S10 slice 2 that let "a rule of Ghidra's analyzers
   ported with an approximation" stand as the way to go.
+- 2026-11-17: Functions ghidra-rs's discovery makes and Java Ghidra does not are fixed in
+  discovery, not accepted as exceptions. FoldSlotFragments stopped with "the walk from
+  0x00861190 removed that owner itself": 0x861190 is a function of ghidra-rs's own discovery
+  (reached only by jumps) where Java has none. Asked whether to change discovery or accept an
+  exception, the user said: "Fix function and any related problems so it prevents it down the
+  line." First step (`rust/README.md`, "What discovery does"): Shared Return Calls is a port of
+  SharedReturnAnalysisCmd's walk. 0x861190 itself is still made (open: see the README).
 
 ## Milestones
 

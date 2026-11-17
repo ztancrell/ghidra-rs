@@ -205,8 +205,19 @@ What discovery does, after Ghidra's analyzers:
   jump table has as many entries as its largest byte plus one;
 - Create Address Tables: runs of 2+ code pointers in data are disassembled, without making
   functions;
-- Shared Return Calls with contiguous functions: an unconditional jump past the next function
-  entry (or before the previous one) makes its target a function;
+- Shared Return Calls with contiguous functions (`Analysis::shared_returns`, a port of
+  SharedReturnAnalysisCmd's walk): the jump scan set is built per function as Java's
+  `checkAboveFunction`/`checkBelowFunction` build it, the sources are walked in address order
+  with Java's cached "function after / before the source" (whose staleness decides some
+  targets), and a target becomes a function when an unconditional jump passes the next
+  function entry or goes before the previous one, no conditional flow reaches it, no
+  instruction falls into it (a call counts, as `getFallFrom`) and it is not a lone return. The
+  functions are created after each walk, and the next walk runs on them alone. Not modelled:
+  Java runs the analyzer on each batch of functions its other analyzers add, and the batch
+  decides the scan set and the cache; here the first walk takes every function discovery made
+  at once. Superseded (2026-11-17): every unconditional jump past the next entry or before the
+  previous one made its target a function, a call did not count as falling into a target, and a
+  lone return could become a function;
 - imports are read from the import directory through the loaded image (the mercs2 image keeps
   its IAT in `.rdata` and the directory in `.securom`);
 - `callees`/`callers` count, like Ghidra's `getCalledFunctions`: direct CALLs, JMPs to a
@@ -234,6 +245,14 @@ pipeline's `build/functions*.csv` from 2026-10-14 predate those steps. Column ra
 |---|---|---|---|---|---|---|---|
 | plain discovery | `functions-analysis.csv` (import only, 23,323) | 22,388 common, 935 missing, 365 extra | 95.7% | 87.7% (87.6%) | 88.5% (88.4%) | 87.6% (80.4%) | (no reference) |
 | `--functions-from` fresh export | fresh export (functions and gaps) | 37,633 of 37,635 | 99.1% | 97.2% (94.6%) | 97.5% (97.2%) | 89.9% (83.1%) | 39,243 of 39,557 identical (ours: 39,368 rows) |
+
+With the Shared Return port (2026-11-17) plain discovery has 22,386 common, 937 missing and
+329 extra functions (`.text`, against `functions-analysis.csv`); the other columns were not
+measured again. Of the 329 extra, 153 are call targets, 98 Function Start Search hits, 76
+Shared Return targets and 2 seeds; 71 of the 98 and 45 of the 153 are functions of the final
+Java project (made there by RecoverFunctions). Superseded: 22,388 / 935 / 365 (112 of them
+Shared Return targets). Note that `functions-analysis.csv` (2026-10-14) was made by Ghidra
+12.2 (`/opt/ghidra`), the source here is 12.3.
 
 `name`, `exported`, `vtable_class` and `lua` match on 99.9% or more of the rows; `fid` is
 always 0. Superseded (branch `fid`): `fid` and the library names come from Function ID, see
@@ -757,6 +776,19 @@ fixes is therefore not comparable yet. Without `fold-slot-fragments` (`recover-f
 ghidra-rs only are 36864 / 771 / 2338 with the fixes against 36610 / 1025 / 2336 with the old
 build: `recover-functions` creates 16406 (16150 before) once it runs after the constants pass.
 The fixed store is 16488 lines (16449 `function`, 35 `code`, 3 `noreturn`).
+
+With the Shared Return port (2026-11-17) `fold-slot-fragments` still stops at 0x00861190; the
+three other commands give 36861 / 774 / 2314 (`recover-functions` creates 16417, the store has
+16498 records). Why 0x861190 is still made: 0x8614c7 (`JMP 0x861190`, in 0x8613d0) jumps back
+before 0x8613d0; nothing falls into 0x861190 (0x861183-0x86118f is INT3 padding), no
+conditional flow reaches it, and 0x8613d0's body has more than one range (it runs on through
+0x861190, 0x5110f1 and 0x86119a), so every scan set with 0x8613d0 in it holds the jump. In
+Java's plain analysis (`functions-analysis.csv`) 0x5110f1 and 0x86119a are Shared Return
+functions and 0x8613d0's body (260 bytes) holds 0x861190-0x861197, but 0x861190 is no function.
+Walking SharedReturnAnalysisCmd by hand (also with the cache stale, and with
+CreateFunctionCmd's queue and `subtractBodyFromExisting`) creates 0x861190 in every order tried,
+so the rule that leaves it out is not found; seeding discovery with all of Java's plain
+functions still creates it. Open.
 
 Not compared: flow overrides against the 3365 of the facts export (ghidra-rs derives them and
 has no export of them), functions outside `.text`, body ranges beyond their size. The shadow
