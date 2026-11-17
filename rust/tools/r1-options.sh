@@ -26,8 +26,9 @@ cpp=$rust/../Ghidra/Features/Decompiler/src/decompile/cpp
 # the ported rules: the `r(` entries of the tables (a `u(` entry is a rule not ported)
 all_ported=" $(grep -o '\br("[a-z0-9_]*", "[a-z]*", &\[' "$rust/ghidra-rs/src/decomp/rules/mod.rs" | cut -d'"' -f2 | tr '\n' ' ') "
 # `aliasupdate` is ported for the partial function of jump-table recovery, where the `decompile`
-# options do not reach. In the function itself it fails on the INDIRECTs of an indexed stack STORE
-# (the value-set range of the store guard is not ported), so the older checks keep it off there.
+# options do not reach. The older checks keep it off in the function itself, as their baselines
+# were made. (Superseded: "there it fails on the INDIRECTs of an indexed stack STORE, the value-set
+# range of the store guard is not ported"; the range is ported, valueset.rs.)
 # The default-options check (the last file) runs it.
 ported=${all_ported/ aliasupdate / }
 # class -> rule name, from the constructors `RuleX(const string &g) : Rule(g, 0, "name")`

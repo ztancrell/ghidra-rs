@@ -2113,7 +2113,9 @@ R5 slices 4 and 5 (branch `m3-r5b`, 2026-11-13). Superseded: "constseq.cc, bitfi
   Superseded: "Not ported: `ptrsubcharconstant`". Stage S10, slice 1 ports it
   (`rules/typecleanup.rs`, `printc::is_string`) for the strings of the facts; the option files
   of the checks still switch it off (`kept_off` in `tools/r1-options.sh`, which would drop the
-  line otherwise), and no check against `decomp_dbg` runs it.
+  line otherwise), and no check against `decomp_dbg` runs it. (Superseded on `m3-int6`: the
+  `kept_off` list is gone, the rule is an `r(...)` entry of `rules/mod.rs` and runs in every
+  check whose group `cleanup` is on; see "Integration `m3-int6`".)
 - Slice 5, `rules/constseq.rs`, `rules/bitfield.rs`: the groups `constsequence` and `bitfields`
   as far as they run without scopes and bit-field types. `stringcopy` never matches (no local
   symbols), `stringstore` fails at `HeapSequence` (not ported); no type has bit-fields, so the four
@@ -3304,6 +3306,7 @@ type is not set when the varnode is made, so an action that reads a symbol's typ
 with `typerecovery` off before merging would not see it (none is known to; no check shows one).
 (Superseded: "Open: set the symbol properties when a varnode is made" as the cause of a miss,
 and "the only silent misses left in the pass are in `swsn-r`" above.)
+
 ### Segment and jump-assist user ops (branch `worktree-agent-a852cab363d8d01f3`, 2026-11-17)
 
 The spec tags `<segmentop>` (`.pspec` and `.cspec`) and `<jumpassist>` (`.pspec`) are read
@@ -3365,6 +3368,7 @@ summary lines as the baseline (every function the reference finishes is identica
 `pcc-r` 494 / 495 (loud 1), `pcc-t` 495 / 495, `swfs-r` 498 / 499 (loud 1): the baseline's
 lines. `cargo test`: 138 passed. Not run: the other M500 checks, the switch and simple corpora,
 the full pass.
+
 ### Default options: the check `pcd`, five action leaves, six rules (branch `m3-default`, 2026-11-17)
 
 The check `pcd` runs `print C` with the default options: no group off and no break. Two lists
@@ -3373,9 +3377,10 @@ say what is still left out, on both engines:
 - `D` at the top of `bars.sh`: the action leaves not ported. Now empty. (Superseded: "Now
   `restructure_varnode` and `mapped_local_sync`"; both are ported, see "Local symbols" below.)
 - `tools/corpus/default-options.txt` (written by `r1-options.sh` from the rule tables): the
-  rules of the three pools not ported. Now eight: `aliasupdate`, `switchsingle`, `ptrflow`,
-  `segment`, `ptrsubcharconstant`, `splitcopy`, `splitload`, `splitstore`. (Superseded: two,
-  `segment` and `ptrsubcharconstant`; see "Pool rules" below.)
+  rules of the three pools not ported. Now none: the file is empty since `m3-int6`.
+  (Superseded: "Now eight: `aliasupdate`, `switchsingle`, `ptrflow`, `segment`,
+  `ptrsubcharconstant`, `splitcopy`, `splitload`, `splitstore`", then two, `segment` and
+  `ptrsubcharconstant`; see "Pool rules" and "Integration `m3-int6`" below.)
 
 (Superseded: the next paragraph. A `decompile` run now fails while an unported rule is on; see
 "Pool rules: every rule listed, a missing one fails" below.)
@@ -3674,6 +3679,7 @@ Counts, M500: `pcd` 474 / 497 (loud 23, silent 0; before 422, loud 75). 50 of th
 functions here; the fourth, 0x47a6b0, is identical too, and `r5c` was not run on `m3-default`,
 so where it changed is not measured). M8: the 56 summary lines unchanged.
 Not run: the switch and `simple` corpora, and the other M500 checks.
+
 ### Local symbols: `restructure_varnode` and `mapped_local_sync` in the `decompile` root (2026-11-17)
 
 The last two action leaves of the default pipeline run in the `decompile` root. `D` in
@@ -3743,6 +3749,7 @@ middle of a parameter slot, which the C++ widens (`adjustInputVarnodes`, not por
 input fails loudly there now.
 
 Counts: see the plan, "Local symbols".
+
 ### Pool rules: every rule listed, a missing one fails (branch `worktree-agent-ab53ef4e46d4bec80`, 2026-11-17)
 
 Behaviour change: a `decompile` run fails while a pool rule that is not ported is on. Before, a
@@ -3767,7 +3774,9 @@ decision in "Default options" above).
 Two rules are `u` entries, both ported on other branches and left for integration (replace the
 `u` line by the `r` line there): `segment` (branch `worktree-agent-a852cab363d8d01f3`) and
 `ptrsubcharconstant` (branch `worktree-agent-af954dab401167074`). `default-options.txt` holds
-these two (superseded: eight).
+these two (superseded: eight). (Superseded on `m3-int6`: both are `r(...)` entries now, no
+table holds a `u` rule, `default-options.txt` is empty; `u` stays for the unit test and for a
+rule the C++ pools gain.)
 
 Ported here:
 
@@ -3796,12 +3805,15 @@ Ported here:
   `m3-aliasupdate`); `default-options.txt` no longer switches it off, so `pcd` runs it on both
   engines. What the root still lacks is not in the rule: the value-set range of a store guard
   (a guarded STORE with INDIRECTs fails loudly) and `restructure_varnode` (`nolocalalias`).
-  The older rule checks keep it off (`r1-options.sh`), as before.
+  The older rule checks keep it off (`r1-options.sh`), as before. (Superseded on `m3-int6`:
+  the root has both, "Value-set analysis and the stack guards" and "Local symbols"; the older
+  rule checks still keep the rule off, as their baselines were made.)
 
 The options files of the rule checks lose `togglerule switchsingle off` (and
 `subvar-options.txt` `ptrflow off`), so those checks run `switchsingle` on both engines now.
 
 Counts: see the plan, "Pool rules".
+
 ### Stage S10 (reference and inventory only; blocked), branch `worktree-agent-a6369f440dde42a16` (2026-11-17)
 
 Nothing of the decompiler changed in this slice. It adds the S10 check and records why the S10
@@ -4025,7 +4037,8 @@ by address and parsed on demand; the mode is the console command `load facts <fi
 option; `ghidra-diff.sh` uses the facts unless `FACTS=0`; read-only memory does not fold with
 facts, because `DecompileRef.java` sends no options; only plain ASCII strings are taken as
 the same in Java; `pushMismatchSymbol` and the string rule's string test follow Java only with
-facts (without facts the old error stays, no check against `decomp_dbg` reaches it); a
+facts (without facts the old error stays, no check against `decomp_dbg` reaches it;
+superseded on `m3-int6` for `pushMismatchSymbol`, which runs without facts too, checked by `pcd`); a
 function symbol covers its entry byte (Java's covers up to 8 bytes of a small function).
 
 Not run: `bars.sh` beyond the checks named above (no full pass), the Mac, `ghidra-diff.sh` on
@@ -4072,7 +4085,9 @@ Fixed:
 - `r1-options.sh`: `ptrsubcharconstant` is in `rules/mod.rs` now, so a rerun dropped its
   `togglerule ... off` from the option files. The script keeps a list of rules that are ported
   and stay off (`kept_off`): no check against `decomp_dbg` has run with the rule on. A rerun
-  leaves the fifteen option files unchanged.
+  leaves the fifteen option files unchanged. (Superseded on `m3-int6`: `kept_off` is removed and
+  the rerun dropped the line from the option files, sixteen with `default-options.txt`; the
+  checks against `decomp_dbg` with the rule on are in "Integration `m3-int6`".)
 
 Fails loudly now (was silent):
 
@@ -4506,6 +4521,87 @@ as before.
 Not run: a full `bars.sh` pass (M8 only), `ghidra-diff.sh` on corpora other than M8 and
 M500, plain discovery under `ghidra-diff.sh`, the Mac. Not measured apart: each piece's share
 of the `ghidra-diff.sh` change.
+
+### Integration `m3-int6` (2026-11-17)
+
+Eight branches merged on `m3-int6`, in this order: the small items after `m3-int5`
+(59a40e44b5: panics counted loud, the `fillinReadOnly` warning, the `swsn-r` silents), "Segment
+and jump-assist user ops" (ef3d3c7f7e), `m3-default` (eecc410c3b), "Value-set analysis and the
+stack guards" (a8fae53df4), "pieces of symbols" (b42e25269c), "Local symbols" (24dd65cc1d),
+"Pool rules" (e9ab60a763) and the analyzers branch (e384aa0276: stage S10 with its three
+slices, and the project store). The sections above describe each branch as it was on its own;
+their counts are each branch's, on its own base. Where two branches met, the code is now:
+
+- `mapstate.rs`: the typed range hints of "Local symbols" with `MapState::addGuard` of
+  "Value-set analysis and the stack guards", instead of the loud "a load or store guard". In
+  the `decompile` root the guard's hint takes the data-type its pointer points to (down to the
+  element of an array) when that has the step's size, else unknown bytes of the step's size, as
+  the C++; in the partial function it is always the unknown type. New here, on neither branch:
+  the typed case, and a loud error for a pointer to a union (`getTypeReadFacing` needs the
+  union's resolution).
+- `namevars.rs`, `finalizeDatatype`: `getExactPiece` of "pieces of symbols"
+  (`infertypes::exact_piece`), and the piece's type is kept as in "Local symbols"
+  (`type_finalized`). The loud "changing the data-type of a variable" is gone.
+- `printc.rs`, `pushMismatchSymbol`: the unnamed location of "pieces of symbols" for a variable
+  past the end of its symbol; it runs without facts too (stage S10 had kept it behind
+  `load facts`), and S10's loud case of a symbol name in a namespace stays.
+- `variable.rs`, `testUntiedCallIntersection`: the `hasNoLocalAlias` test of "Local symbols"
+  and the store-guard test of the value-set branch.
+- `rules/ptrarith.rs`: S10's loud test of a composite data symbol near the address, then
+  `nearestArrayedComponent` over the local symbols.
+- `rules/mod.rs`: `segment` and `ptrsubcharconstant` are `r(...)` entries. No table holds a
+  `u(...)` rule now, so no default run can fail on an unported pool rule; `u` stays for its
+  unit test and for a rule the C++ pools gain.
+- `r1-options.sh`: S10's `kept_off` list is removed. Rerun, the script leaves
+  `default-options.txt` empty (`pcd` and `pmd` run the plain default options, nothing switched
+  off) and drops `togglerule ptrsubcharconstant off` from the eleven rule option files that had
+  it, so those checks run the rule on both engines.
+
+Counts on the tip of the branch, one machine (the desktop), `TIMEOUT` 120:
+
+- `cargo test`: 157 passed. `tables_list_every_rule_of_the_cpp_pools` passes. `cargo fmt
+  --check` and `cargo clippy -D warnings` are clean.
+- M8, all 57 checks: the 55 lines of the `m3-int5` baseline unchanged (every function the
+  reference finishes identical), `pcd` 8 / 8, `pmd` 8 / 8, silent 0.
+- M500, seven checks (the `m3-int5` baseline in brackets; `pcd` and `pmd` have none):
+
+  | check | identical / reference finished | loud | silent |
+  |---|---|---|---|
+  | `pcd` | 493 / 499 | 6 | 0 |
+  | `pmd` | 497 / 500 | 3 | 0 |
+  | `pcc-r` | 495 / 495 (494 / 495, loud 1) | 0 | 0 |
+  | `pcc-t` | 495 / 495 (495 / 495) | 0 | 0 |
+  | `r5s` | 498 / 498 (446 / 499, loud 53) | 0 | 0 |
+  | `paramdouble` | 500 / 500 (500 / 500) | 0 | 0 |
+  | `swsn-r` | 499 / 499 (495 / 499, loud 1, silent 3) | 0 | 0 |
+
+  The six loud of `pcd`: 0x53a040, 0x5a9b80, 0x766350 (`RuleStringCopy`: `StringSequence` is
+  not ported) and 0x5cee30, 0x5d8680, 0x5d87c0 (`subflow`: a logical value in a join varnode);
+  the three of `pmd` are the `subflow` three. 0x4c48d0 is the function the reference does not
+  finish in 120 s. In `r5s` the reference also does not finish 0x6b21e0, in 120 s or, run
+  alone, in 600 s; the `m3-int5` baseline finished it (identical there), so it is not compared
+  now. The same timeout is in the `r5s` miss lists of `m3-default`, "Pool rules" and "Local
+  symbols", so it is older than this integration; which change of the `r5s` run makes the
+  reference slow there is not traced.
+- No function identical in the baseline is loud or silent in these five baseline checks
+  (0x6b21e0 of `r5s` aside: not compared), and no silent miss is left in the checks run. Against the branches' own miss lists: all six `pcd` misses
+  were loud on "Local symbols" already, five with the same error and 0x766350 earlier, at an
+  indexed stack LOAD (it now gets as far as `StringSequence`); the other five were identical on
+  "pieces of symbols", which did not have the local symbols.
+
+Superseded by this section: `pcd` M500 415, 422, 440 and 474 / 497 and 463 / 499, `pmd` M500
+470 / 499 (the branch sections above and the plan); "`default-options.txt` holds two rules";
+"Open: `ValueSetSolver` (26 of the 36 loud)" of "Local symbols"; "Left: 16 indexed stack
+LOADs, 6 STORE guards" of "pieces of symbols"; the blocked "eight actions of the default
+`decompile` are not ported" of stage S10 (all are ported or have nothing to do; the S10 checks
+against Java Ghidra were not rerun with them on).
+
+Not run on `m3-int6`: the other 50 checks on M500, the switch, `simple` and `r5d-adc` corpora
+(the full pass), the Mac, `ghidra-diff.sh` and `facts-diff.sh` (stage S10: they need the Java
+Ghidra project). Not seen in a check: whether any function of M8 or M500 reaches the typed
+guard hint with a pointer whose target has the step's size (the code new in this merge), and
+`ptrsubcharconstant` changing an output without facts (the checks with it on give the counts
+above, and no line of the M8 baseline moved).
 
 ## Speed
 

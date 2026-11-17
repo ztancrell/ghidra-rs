@@ -407,6 +407,15 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    (slice 2: 80.6%, 47.1%, 51.6%, 92.6%, 62.6%, 0%); `label` 94.7% (94.9%). `ghidra-diff.sh` M8 identical 2 / 7,
    M500 173 / 499 (171). Shadow check: same 56,003, differ 60 (55,996, 61). Still approximated: Ghidra's order of
    analysis. See `rust/README.md`, "Stage S10, slice 3".
+   Integration `m3-int6` (2026-11-17): the eight branches of the lines above merged (small items, segment user
+   ops, `m3-default`, value sets, pieces of symbols, local symbols, pool rules, S10 with the project store). No
+   pool rule is unported and `default-options.txt` is empty, so `pcd` and `pmd` run the plain default options. M8
+   all 57 checks identical (the 55 baseline lines unchanged, `pcd` and `pmd` 8 / 8). M500: `pcd` 493 / 499 (loud 6,
+   silent 0), `pmd` 497 / 500 (loud 3), `pcc-r` and `pcc-t` 495 / 495, `r5s` 498 / 498, `paramdouble` 500 / 500,
+   `swsn-r` 499 / 499; no function of the `m3-int5` baseline got worse. Superseded: the `pcd` and `pmd` M500
+   counts of the lines above, "`default-options.txt` holds 2 rules", "Open: `ValueSetSolver`", and "Blocked: eight
+   actions" of S10 (ported; the checks against Java Ghidra not rerun). Not run: the full pass. See
+   `rust/README.md`, "Integration `m3-int6`".
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

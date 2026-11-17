@@ -891,7 +891,8 @@ R5 slices 4 and 5 (branch `m3-r5b`, 2026-11-13). Superseded: "constseq.cc, bitfi
   are not in the plan's R5 row and stay off.
   Superseded: "Not ported: `ptrsubcharconstant`". S10 slice 1 ports it for the strings of the
   facts; the checks' option files still switch it off (`kept_off` in `r1-options.sh`), and no
-  check against `decomp_dbg` runs it.
+  check against `decomp_dbg` runs it. (Superseded on `m3-int6`: `kept_off` is gone and the rule
+  runs wherever group `cleanup` is on; see "Integration `m3-int6`" below.)
 - Slice 5, `rules/constseq.rs`, `rules/bitfield.rs`: the groups `constsequence` and `bitfields`
   as far as they run without scopes and bit-field types. `stringcopy` never matches (no local
   symbols), `stringstore` fails at `HeapSequence` (not ported); no type has bit-fields, so the four
@@ -1842,6 +1843,7 @@ The six silent misses of `swsn-r` (0x8d8f40, 0x8eabe0, 0x8ead90 on switch; 0x48a
 first. `swsn-r`: switch 1987 / 2004 (loud 17, silent 0), M500 498 / 499 (loud 1, silent 0). No
 silent miss is left in the checks run. (Superseded: the "Open" bullet on `symbol_types` under
 the `m3-int` integration, for these six; "the only silent misses left" above.)
+
 ### Segment and jump-assist user ops, branch `worktree-agent-a852cab363d8d01f3` (2026-11-17)
 
 `<segmentop>` and `<jumpassist>` are read (they were ignored silently in a `.pspec`), with
@@ -1856,6 +1858,7 @@ size (now loud in the stack rules), near and far pointers (`SegmentedResolver`,
 the printer, and a way to select the language and load a raw image from the console. This is
 processor breadth, which DESIGN.md (2026-11-14) puts after the mercs2 scripts and the project
 store.
+
 ### Default options: the check `pcd`, branch `m3-default` (2026-11-17)
 
 `pcd` in `bars.sh` runs `print C` with no group or rule switched off and no break, with the
@@ -1881,7 +1884,8 @@ Progress on the branch (details: rust/README.md, "Default options"):
    `transformcpool` (fails on a CPOOLREF) and `funcptrencoding` (nothing to do on these specs).
    Eight rules stay off: `aliasupdate`, `switchsingle`, `ptrflow`, `segment`,
    `ptrsubcharconstant`, `splitcopy`, `splitload`, `splitstore`. (Superseded: two stay off,
-   `segment` and `ptrsubcharconstant`; see "Pool rules" below.)
+   `segment` and `ptrsubcharconstant`; see "Pool rules" below. Superseded on `m3-int6`: none
+   stays off, see "Integration `m3-int6`".)
 5. `ActionParamDouble` splits a stack trial that is a PIECE (35 loud functions of M500: 6
    identical in `pcd`, 29 loud later in `namevars`; all 35 identical in `print raw` at
    `break start namevars`).
@@ -2049,6 +2053,7 @@ merge. Checks:
   `switchsingle` on.
 - Not run: the other M500 checks, the other switch checks, `pcd` on the switch corpus again
   with the final build (only the four functions above), `r5d-adc`.
+
 ### S10: reference and inventory only, blocked (2026-11-17)
 
 No decompiler code. `rust/tools/ghidra-diff.sh` and `rust/tools/ghidra/DecompileRef.java` capture
@@ -2123,7 +2128,32 @@ to confirm, and the loader is one module (`decomp/facts.rs`) that another source
   RTTI structures.
 
 Still before the gate: the eight actions (item 1), the misses default options reach (item 2),
-and from this slice the struct and union symbols and the other loud items.
+and from this slice the struct and union symbols and the other loud items. (Superseded on
+`m3-int6` for item 1: the eight actions are ported or have nothing to do, see below.)
+
+### Integration `m3-int6` (2026-11-17)
+
+The eight branches above (the small items after `m3-int5`, the segment user ops, `m3-default`,
+the value sets and stack guards, the pieces of symbols, the local symbols, the pool rules, and
+the analyzers branch with S10 and the project store) are merged on `m3-int6`. What the joins
+changed in the code, and what is superseded: `rust/README.md`, "Integration `m3-int6`". In
+short: `MapState::addGuard` runs with the typed hints of the `decompile` root; no pool rule is
+unported (`segment` and `ptrsubcharconstant` are `r(...)` entries, `default-options.txt` is
+empty, `kept_off` is gone from `r1-options.sh`); `pcd` and `pmd` run the plain default options
+with no action skipped.
+
+Measured on the tip (one machine, `TIMEOUT` 120): `cargo test` 157 passed; M8 all 57 checks,
+the 55 baseline lines unchanged, `pcd` and `pmd` 8 / 8; M500 `pcd` 493 / 499 (loud 6, silent
+0), `pmd` 497 / 500 (loud 3), `pcc-r` and `pcc-t` 495 / 495, `r5s` 498 / 498, `paramdouble`
+500 / 500, `swsn-r` 499 / 499; silent 0 in each, and no function identical in the `m3-int5`
+baseline is loud or silent (0x6b21e0 of `r5s` aside: the reference no longer finishes it, as on
+the branches; not compared). (Superseded: the `pcd` and `pmd` M500 counts of the sections
+above, 415 to 474 / 497, 463 / 499 and 470 / 499.)
+
+Left loud on M500 with default options: `StringSequence` (0x53a040, 0x5a9b80, 0x766350) and a
+logical value in a join varnode in `subflow` (0x5cee30, 0x5d8680, 0x5d87c0). Not run: the
+other M500 checks, the switch, `simple` and `r5d-adc` corpora (the full pass comes next), and
+the S10 checks against Java Ghidra.
 
 ## Running stages in parallel
 
