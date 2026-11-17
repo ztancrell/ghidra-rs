@@ -1870,6 +1870,7 @@ to confirm, and the loader is one module (`decomp/facts.rs`) that another source
   extrapop overrides, `uchar` core types, unknown model names and `_ns::name` fail loudly. The
   facts file is version 2. Superseded: "loud 72, silent 235": the slice's final build gives
   M500 identical 192 / 499 (loud 70, silent 237), and the fixes change no function's state.
+  The checks against `decomp_dbg` (M8 all 55 lines, the six M500 lines) equal the baseline.
 
 Still before the gate: the eight actions (item 1), the misses default options reach (item 2),
 and from this slice the struct and union symbols and the other loud items.

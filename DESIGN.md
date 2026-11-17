@@ -333,7 +333,7 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    Review fixes (2026-11-17): panics with facts, strings read as Java reads them, labels at every instruction,
    undefined read-only bytes, `FACTS=0`; four silent cases made loud; facts file version 2. Superseded: "loud 72,
    silent 235" (the slice's final build: loud 70, silent 237; the same after the fixes). See `rust/README.md`,
-   "Stage S10, slice 1: review fixes".
+   "Stage S10, slice 1: review fixes". The checks against `decomp_dbg` (M8 all 55, M500 six) equal the baseline.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

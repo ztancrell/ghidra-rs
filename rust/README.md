@@ -3360,6 +3360,8 @@ version 1):
 |---|---|---|
 | `ghidra-diff.sh m8`, the eight skipped | identical 3 / 7 (loud 0, silent 4) | the same |
 | `ghidra-diff.sh m500`, the eight skipped | identical 192 / 499 (loud 70, silent 237) | the same; no function changed state |
+| `bars.sh`, `CORPORA=m8`, every check | 55 lines equal to the baseline (`m3-int5-116d9d34da.summary`) | the same 55 lines |
+| `bars.sh`, M500 `pcc-r`, `pcc-t`, `pc-r`, `pc-t`, `nm-r`, `nm-t` | the six lines equal the baseline | the same: `pcc-r` 494 / 495 (loud 1), `pcc-t` 495 / 495, `pc-r` 494 / 495 (loud 1), `pc-t` 495 / 495, `nm-r` 498 / 499 (loud 1), `nm-t` 499 / 499 |
 
 The console output of all 500 M500 functions is byte for byte the slice's (0x4c48d0, which
 Java does not finish, timed out in the loaded run and gave the same text alone). So no M8 or
