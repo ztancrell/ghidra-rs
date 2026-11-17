@@ -65,6 +65,7 @@ use fspec::FuncProto;
 use std::collections::{BTreeMap, HashMap};
 
 pub use funcdata::Funcdata;
+pub(crate) use infertypes::symbol_types;
 pub use print::print_raw;
 pub use printc::print_c;
 

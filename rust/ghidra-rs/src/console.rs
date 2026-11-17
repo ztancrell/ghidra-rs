@@ -303,9 +303,12 @@ impl Console {
                 self.run_actions(Ok(()), out)?;
             }
             ["print", "raw"] => {
-                let (Some(arch), Some(fd)) = (&self.arch, &self.fd) else {
+                let (Some(arch), Some(fd)) = (&self.arch, &mut self.fd) else {
                     return Err("print raw: no function decompiled".into());
                 };
+                // the C++ types a ram varnode from its global symbol when it is made; ghidra-rs before
+                // a pass reads types, and none has run at a break with `typerecovery` off
+                crate::decomp::symbol_types(fd, arch);
                 write!(out, "{}", crate::decomp::print_raw(fd, arch).map_err(|e| e.to_string())?).map_err(io)?;
             }
             // `IfcParseLine`: a C declaration (types, or a locked function prototype)

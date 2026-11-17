@@ -2316,6 +2316,8 @@ Misses explained, none new from the merge (each is in a branch's own miss list):
   inference pass and before merging), and this check is the only one that prints types, with
   `typerecovery` off, at a break (`returnsplit`) before both. At `inputprototype` the three M500
   functions are identical. Open: set the symbol properties when a varnode is made.
+  (Superseded: `print raw` applies the symbol types first and the six are identical; see the
+  end of "C printing, slice 5".)
 - switch `finalstructure` types on: 0x4f3366 keeps a call's join output (`j{EDX,EAX}`) the
   reference does not have; in `m3-tail`'s list, not traced. Open.
 - The 57 switch-corpus functions that differ at flow time (S3), `VariablePiece` (7 rules on, 15
@@ -3081,6 +3083,25 @@ switch corpus, `simple`, the full pass. Not seen: a marker writing read-only mem
 address-forced write of it that nothing reads, a second visit of a warned op (0x23caea8 is the
 only function of the corpora known to write read-only memory). Still wider than the C++: the
 zero replacement runs for a read-only varnode that is only read, or with `option readonly off`.
+
+After `m3-int5` (2026-11-17): the silent misses of `swsn-r`. All six (switch 0x8d8f40,
+0x8eabe0, 0x8ead90; M500 0x48a430, 0x5c5940, 0x6b3730) have one cause, the one named in the
+`m3-int` section: a ram varnode at an import slot (0x00b0511c, 0x00b05128, 0x00b05370,
+0x00b052ec) that outlives the call through it, here the INDIRECTs and MULTIEQUALs on the slot,
+prints `<code() *>` on the reference and `<xunknown4>` in ghidra-rs, and nothing else differs
+(435 lines in 0x8eabe0, 9 or 10 in the M500 three). The C++ types the varnode from its
+external-reference symbol when it is made; ghidra-rs applies the symbol types
+(`infertypes::symbol_types`) before each inference pass and before merging, and with
+`typerecovery` off neither has run at `break start returnsplit`. Fix: the console's `print raw`
+applies them first (`console.rs`), as merging does. `swsn-r`: switch 1987 / 2004 (loud 17,
+silent 0; before 1984, silent 3), M500 498 / 499 (loud 1: 0x47a6b0; before 495, silent 3). No
+silent miss is left in the checks run: M8 all 55 as the baseline; M500 `swsn-r`, the four
+print checks, `s6` 499 / 499 and `r5typed` 497 / 498 (loud 1); switch `swsn-r` and `pcc-t`.
+Not run: the other M500 and switch checks, `simple`, `r5d-adc`, the full pass. Still open: the
+type is not set when the varnode is made, so an action that reads a symbol's type or type lock
+with `typerecovery` off before merging would not see it (none is known to; no check shows one).
+(Superseded: "Open: set the symbol properties when a varnode is made" as the cause of a miss,
+and "the only silent misses left in the pass are in `swsn-r`" above.)
 
 ## Speed
 
