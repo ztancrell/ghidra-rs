@@ -16,7 +16,8 @@
 //! What the port leaves out fails with an error naming it ("not ported"). In the partial
 //! function flow.rs then recovers the table without this action (the older test on the
 //! INDIRECTs of stack varnodes); in the `decompile` root the decompile fails:
-//! - a load or store guard whose pointer points to a union (`getTypeReadFacing`),
+//! - a load or store guard whose pointer has a data-type needing resolution (`getTypeReadFacing`)
+//!   or points to a union,
 //! - a structure or union among the hints (`TypeStruct::getSubType`, partial structures),
 //! - a locked prototype with parameters (its symbols are not in the scope),
 //! - a piece of an array symbol as a data-type (`getTypePartialStruct`, in
@@ -26,7 +27,7 @@
 //! of `heritage_guard.rs`). (Superseded: "a valid load or store guard ... not ported".)
 
 use super::heritage_guard::{stack_pointer_input, LoadGuard};
-use super::infertypes::vn_type;
+use super::infertypes::{vn_type, vn_type_facing};
 use super::op::{OpFlags, OpId};
 use super::opcode::Opcode;
 use super::types::{Kind, Meta, TypeFactory, TypeId};
@@ -593,8 +594,8 @@ fn add_guard(fd: &mut Funcdata, guard: &LoadGuard, opc: Opcode, out: &mut Vec<Ra
     if !guard.is_valid(fd, opc) || guard.step == 0 {
         return Ok(());
     }
-    // getTypeReadFacing of the pointer; a pointer to a union needs its resolution
-    let mut ct = vn_type(fd, fd.input(guard.op, 1)?);
+    // getTypeReadFacing of the pointer (a type needing resolution fails loudly)
+    let mut ct = vn_type_facing(fd, fd.input(guard.op, 1)?, "restructure_varnode")?;
     if let Some(to) = fd.types.ptr_to(ct) {
         ct = to;
         while let Kind::Array { elem, .. } = fd.types.get(ct).kind {
@@ -775,7 +776,7 @@ fn check_unaliased_return(fd: &mut Funcdata, alias: &[u64]) -> Result<()> {
     }
     let (off, size) = (v.offset, v.size);
     let at = alias.partition_point(|&a| a < off);
-    if alias.get(at).is_some_and(|&a| a < off + u64::from(size)) {
+    if alias.get(at).is_some_and(|&a| a <= off.wrapping_add(u64::from(size) - 1)) {
         return Ok(()); // an alias into the return storage
     }
     mark_not_mapped(fd, Space::Stack, off, size, false)

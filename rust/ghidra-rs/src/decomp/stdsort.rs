@@ -139,6 +139,51 @@ fn adjust_heap<T: Copy>(v: &mut [T], mut hole: usize, len: usize, val: T, less: 
     v[hole] = val;
 }
 
+/// `std::list::sort(less)` (`bits/list.tcc`): the bottom-up merge into 64 bins. Stable for a
+/// strict weak order; for a `less` that holds both ways on a tie (e.g. `typeOrder(..) <= 0`) it
+/// gives libstdc++'s exact order, where a Rust sort may panic.
+pub(crate) fn list_sort<T: Copy>(v: &mut Vec<T>, less: impl Fn(&T, &T) -> bool) {
+    // `list::merge(x)`: an element of `x` (the later run) goes before one of `this` when less
+    let merge = |this: Vec<T>, x: Vec<T>| {
+        let mut out = Vec::with_capacity(this.len() + x.len());
+        let (mut i, mut j) = (0, 0);
+        while i < this.len() && j < x.len() {
+            if less(&x[j], &this[i]) {
+                out.push(x[j]);
+                j += 1;
+            } else {
+                out.push(this[i]);
+                i += 1;
+            }
+        }
+        out.extend_from_slice(&this[i..]);
+        out.extend_from_slice(&x[j..]);
+        out
+    };
+    if v.len() < 2 {
+        return;
+    }
+    let mut tmp: Vec<Vec<T>> = Vec::new(); // the bins up to `fill`
+    for &x in v.iter() {
+        let mut carry = vec![x];
+        let mut counter = 0;
+        while counter < tmp.len() && !tmp[counter].is_empty() {
+            carry = merge(std::mem::take(&mut tmp[counter]), carry);
+            counter += 1;
+        }
+        if counter == tmp.len() {
+            tmp.push(carry);
+        } else {
+            tmp[counter] = carry;
+        }
+    }
+    for counter in 1..tmp.len() {
+        let lower = std::mem::take(&mut tmp[counter - 1]);
+        tmp[counter] = merge(std::mem::take(&mut tmp[counter]), lower);
+    }
+    *v = tmp.pop().unwrap_or_default();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,5 +225,17 @@ mod tests {
         let mut v = input(40, 3);
         heap_sort(&mut v, &less);
         assert_eq!(ids(&v), gxx("heap40_3"));
+    }
+
+    /// `std::list::sort`: stable for a strict order, and g++'s exact order for a `less` that holds
+    /// both ways on a tie.
+    #[test]
+    fn list_sort_matches_gxx() {
+        let mut v = input(40, 3);
+        list_sort(&mut v, |a, b| a.0 < b.0);
+        assert_eq!(ids(&v), gxx("list40_3"));
+        let mut v = input(40, 3);
+        list_sort(&mut v, |a, b| a.0 <= b.0);
+        assert_eq!(ids(&v), gxx("listle40_3"));
     }
 }

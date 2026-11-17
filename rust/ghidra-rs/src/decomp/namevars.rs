@@ -88,18 +88,9 @@ fn recover_name_recommendations(fd: &mut Funcdata) -> Result<()> {
             return err("namevars: a name recommended for a variable outside the stack is not ported");
         };
         // findOverlap: the first entry overlapping the storage, whatever its use point
-        let overlap = fd.symtab.overlapping(LOCAL, Space::Stack, offset, size);
-        let first = overlap.iter().filter_map(|&sym| {
-            let s = fd.symtab.symbol(sym);
-            let end = u128::from(offset) + u128::from(size);
-            let hit = |e: &&SymbolEntry| {
-                e.space == Space::Stack && u128::from(e.offset) < end && offset < e.offset + u64::from(e.size)
-            };
-            s.entries.iter().filter(hit).map(|e| e.offset).min().map(|at| (at, sym))
-        });
-        let Some((at, sym)) = first.min() else { continue };
+        let Some((sym, e)) = fd.symtab.find_overlap(LOCAL, Space::Stack, offset, size) else { continue };
         let s = fd.symtab.symbol(sym);
-        if at != offset || !s.flags.addr_tied || !s.is_name_undefined() {
+        if s.entries[e].offset != offset || !s.flags.addr_tied || !s.is_name_undefined() {
             continue;
         }
         let name = fd.symtab.make_name_unique(LOCAL, &rec.name)?;
@@ -269,21 +260,9 @@ fn link_symbol(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId) -> Result<Option<S
         return Ok(None);
     }
     // queryProperties(addr, 1, usepoint): the local scope, then (for storage it does not own)
-    // the global one, which holds nothing outside its ranges
+    // the global one, which holds nothing outside its ranges. The reference (Ghidra 12.3) links
+    // any entry that is not a conflict; it has no `handleSymbolConflict`.
     if let Some((sym, e)) = fd.symtab.find_container(LOCAL, space, offset, 1, Some(usepoint))? {
-        // handleSymbolConflict: a varnode that is not address-tied, in a symbol valid everywhere
-        // (one of `restructure_varnode`) whose own storage holds another variable, gets a
-        // dynamic symbol instead
-        let entry = &fd.symtab.symbol(sym).entries[e];
-        let (everywhere, at) = (entry.uselimit.0.is_empty(), (entry.space, entry.offset, entry.size));
-        let v = fd.vn(vn);
-        if everywhere && !v.is_input() && !v.has(VnFlags::ADDRTIED) {
-            for other in fd.loc_at(at.0, at.1, at.2) {
-                if high(fd, other)? != h {
-                    return err("namevars: a variable in the storage of another one's symbol (buildDynamicSymbol) is not ported");
-                }
-            }
-        }
         if !fd.symtab.symbol(sym).entries[e].conflict {
             fd.mapentry.insert(vn, (sym, e));
             return Ok(Some(sym));
