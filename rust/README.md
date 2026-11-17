@@ -706,7 +706,12 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
   lines, a reference killed at `TIMEOUT` among them with the reason `decomp-diff.sh: timed out
   after N s`). `decomp-diff.sh` checks `timeout`'s exit status (124 or 137) and replaces a
   killed engine's cut-off output with that one line, so a run cut off mid-print never counts as
-  finished or as a `silent` difference.
+  finished or as a `silent` difference. A panic or stack overflow of ghidra-rs is `loud`: its
+  message (`panicked at`, `has overflowed its stack`) prints before the buffered console
+  output, and `decomp-diff.sh` keeps those lines from before the load line (everything else
+  there is the shared prelude). Checked with a stand-in engine that prints a panic message and
+  cuts its output: `loud`, where it was `silent` before. None occurs in the corpora: the
+  `m3-int5` full pass has 6 silent misses, all a type difference and none a panic, and no `timeout`.
 - The summary line is `<check>-<corpus>: reference finished F / N, identical I / F (loud L,
   silent S, timeout T), all outputs identical A / N`. `I / F` counts only the functions the
   reference finishes, which is how the README's bars are given. `A / N` is `decomp-diff.sh`'s
@@ -2899,7 +2904,9 @@ ghidra-rs) are not in the 60 and were not traced; the count says they were silen
 of the 60 + 3). M8: all 55 checks identical. Not run on the final build: `swfsc-r`, `swfs-t`, `swsn-t`, `pcc-*` on
 the switch corpus, and M500 (0x4f3366 alone is identical in `swfs-t`). No unit test was added: the
 functions above are the check. A panic of ghidra-rs prints before the buffered console output,
-so `decomp-diff.sh` cuts its message and `bars.sh` counts it as silent, not loud.
+so `decomp-diff.sh` cuts its message and `bars.sh` counts it as silent, not loud. (Superseded:
+`decomp-diff.sh` keeps a panic or stack overflow message and `bars.sh` counts it as `loud`; see
+the output notes of "Every check at once: `tools/bars.sh`".)
 
 Review fixes (second commit on `m3-swsilent`). A review of the first commit found paths that could
 still differ silently; each now fails loudly. Superseded by this paragraph: "the stack offset 0"

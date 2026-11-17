@@ -102,11 +102,14 @@ one() {
     eng "$out/ref/$a" "$DECOMP" -i "$s"
     eng "$out/rust/$a" "$GHIDRA_RS" decompile -i "$s"
 }
-# eng <output> <engine command...>: run one engine under TIMEOUT, keep its output from the load line;
-# when timeout killed it, replace the cut-off output with the one timed-out line
+# eng <output> <engine command...>: run one engine under TIMEOUT, keep its output from the load line,
+# and from before it only a panic or stack overflow message (ghidra-rs prints one ahead of the
+# buffered console output; bars.sh counts it as loud); when timeout killed it, replace the cut-off
+# output with the one timed-out line
 eng() {
     local o=$1; shift
-    timeout "$TIMEOUT" "$@" </dev/null 2>&1 | sed -n '/^init> load \(function\|addr\)/,$p' > "$o"
+    timeout "$TIMEOUT" "$@" </dev/null 2>&1 | sed -n -e '/^init> load \(function\|addr\)/,$p' \
+        -e '/^init> load \(function\|addr\)/,$!{/panicked at\|has overflowed its stack/p}' > "$o"
     case ${PIPESTATUS[0]} in 124|137) echo "decomp-diff.sh: timed out after $TIMEOUT s" > "$o" ;; esac
 }
 export -f one eng
