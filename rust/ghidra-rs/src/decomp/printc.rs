@@ -118,16 +118,13 @@ pub fn print_c(fd: &mut Funcdata, arch: &Arch, name: &str) -> Result<String> {
     if fd.structure.is_empty() {
         return err("Function not fully decompiled. No structure present.");
     }
-    if fd.readonly_write || super::action::readonly_written(fd, arch) {
-        return err("print C: the warning for a written read-only address (fillinReadOnly) is not ported");
-    }
     let mut p = PrintC::new(fd, arch);
     p.doc_function(name)?;
     p.emit.flush().map_err(LowlevelError)
 }
 
 /// `AddrSpace::printRaw` for an address size `size`, wordsize 1.
-fn raw_offset(size: u32, off: u64) -> String {
+pub(crate) fn raw_offset(size: u32, off: u64) -> String {
     let sz = match size {
         s if s > 4 && off >> 32 == 0 => 4,
         s if s > 4 && off >> 48 == 0 => 6,

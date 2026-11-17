@@ -8,7 +8,9 @@
 pub use super::actiontree::{ActionTree, Outcome};
 use super::fspec::{ExtraPop, ParamActive};
 use super::funcdata::CallId;
+use super::op::{OpFlags, OpId};
 use super::opcode::Opcode;
+use super::printc::raw_offset;
 use super::varnode::{Space, VarnodeId, VnFlags};
 use super::{err, heritage, Arch, Funcdata, Result};
 
@@ -453,35 +455,37 @@ fn unreachable(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     super::coreaction::unreachable(fd, arch)
 }
 
-/// Whether an op that is not a marker writes read-only memory, where `Funcdata::fillinReadOnly`
-/// warns "Read-only address (...) is written" (with `option readonly on`). The warning is not
-/// ported, so `print C` fails for such a function. This is wider than the C++ test: it leaves
-/// out `!isAddrForce() || !hasNoDescend()` and the one warning per op.
-pub(crate) fn readonly_written(fd: &Funcdata, arch: &Arch) -> bool {
-    let ram = Space::Sleigh(arch.sleigh.code_space());
-    arch.readonly_propagate
-        && fd.loc_all().into_iter().any(|vn| {
-            let v = fd.vn(vn);
-            v.space == ram
-                && v.def.is_some_and(|d| !matches!(fd.op(d).opc, Opcode::Indirect | Opcode::Multiequal))
-                && arch.is_readonly(v.offset, v.size)
-        })
+/// The written branch of `Funcdata::fillinReadOnly`: the op `def` writes the read-only varnode
+/// `vn`. A marker is only flagged; another op warns "Read-only address (...) is written" at
+/// its address the first time it is seen, unless the varnode is address-forced and unread.
+fn readonly_written(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, def: OpId) {
+    let warned = fd.op(def).flags.has(OpFlags::WARNING);
+    fd.op_mut(def).flags.set(OpFlags::WARNING);
+    let (v, o) = (fd.vn(vn), fd.op(def));
+    if warned || matches!(o.opc, Opcode::Indirect | Opcode::Multiequal) {
+        return;
+    }
+    if !v.has(VnFlags::ADDRFORCE) || !v.descend.is_empty() {
+        let (Space::Sleigh(s), addr) = (v.space, o.seq.addr) else { return };
+        let sp = &arch.sleigh.spaces[s as usize];
+        let msg = format!("Read-only address ({},{}) is written", sp.name, raw_offset(sp.size, v.offset));
+        fd.warning(&msg, addr);
+    }
 }
 
-/// Port of `ActionVarnodeProps::apply` on the first pass (before heritage): with
-/// `option readonly on`, each free read of read-only memory becomes the constant the image
-/// holds there (`Funcdata::fillinReadOnly`). The rest of the action needs later passes
-/// (auto-live holds) or masks that are all ones before heritage; x86 declares no volatile memory.
+/// Port of `ActionVarnodeProps::apply`: with `option readonly on`, each free read of read-only
+/// memory becomes the constant the image holds there and each write of it warns
+/// (`Funcdata::fillinReadOnly`). The rest of the action needs later passes (auto-live holds) or
+/// masks that are all ones before heritage; x86 declares no volatile memory.
 ///
 /// The C++ walks the varnodes in location order (`beginLoc`: address, size, then creation for
 /// free ones) and makes one constant per read; before heritage each free varnode has one
 /// reader, so the reads are visited in that order and the constants made in it.
 fn varnode_props(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
-    let mut changes = varnode_props_late(fd)?;
+    let mut changes = varnode_props_late(fd, arch)?;
     if !arch.readonly_propagate {
         return Ok(changes);
     }
-    fd.readonly_write |= readonly_written(fd, arch);
     let ram = Space::Sleigh(arch.sleigh.code_space());
     let mut reads = Vec::new();
     for op in fd.blocks.ops() {
@@ -558,9 +562,10 @@ fn handle_extended_zero(fd: &mut Funcdata, vn: VarnodeId) -> i32 {
 /// varnode whose non-zero mask and consume mask share no bit is replaced by zero
 /// (`totalReplaceConstant`; before `nonzeromask` first runs every mask is all ones, so only an
 /// unconsumed varnode qualifies).
-fn varnode_props_late(fd: &mut Funcdata) -> Result<i32> {
+fn varnode_props_late(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     let mut changes = 0;
     let pass = fd.heritage.pass();
+    let ram = Space::Sleigh(arch.sleigh.code_space());
     for vn in fd.loc_all() {
         let v = fd.vn(vn);
         if v.is_annotation() || v.is_dead() {
@@ -584,6 +589,13 @@ fn varnode_props_late(fd: &mut Funcdata) -> Result<i32> {
                 changes += 1;
             }
             continue;
+        }
+        // a written read-only varnode only gets a warning
+        if let Some(d) = v.def.filter(|_| arch.readonly_propagate && v.space == ram) {
+            if arch.is_readonly(v.offset, v.size) {
+                readonly_written(fd, arch, vn, d);
+                continue;
+            }
         }
         // no bit that may be non-zero is consumed: every read becomes 0
         if fd.nzmask(vn) & v.consume == 0 && !v.is_constant() {

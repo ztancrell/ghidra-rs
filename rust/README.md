@@ -706,7 +706,12 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
   lines, a reference killed at `TIMEOUT` among them with the reason `decomp-diff.sh: timed out
   after N s`). `decomp-diff.sh` checks `timeout`'s exit status (124 or 137) and replaces a
   killed engine's cut-off output with that one line, so a run cut off mid-print never counts as
-  finished or as a `silent` difference.
+  finished or as a `silent` difference. A panic or stack overflow of ghidra-rs is `loud`: its
+  message (`panicked at`, `has overflowed its stack`) prints before the buffered console
+  output, and `decomp-diff.sh` keeps those lines from before the load line (everything else
+  there is the shared prelude). Checked with a stand-in engine that prints a panic message and
+  cuts its output: `loud`, where it was `silent` before. None occurs in the corpora: the
+  `m3-int5` full pass has 6 silent misses, all a type difference and none a panic, and no `timeout`.
 - The summary line is `<check>-<corpus>: reference finished F / N, identical I / F (loud L,
   silent S, timeout T), all outputs identical A / N`. `I / F` counts only the functions the
   reference finishes, which is how the README's bars are given. `A / N` is `decomp-diff.sh`'s
@@ -882,7 +887,9 @@ Stage S1b (branch `m3-s1b`) runs the universal action up to `heritage`: after `f
   on the first pass; an unreachable block is an error until block removal is ported in S4),
   `varnodeprops` (with `option readonly on`, a free read of read-only memory becomes the
   constant the image holds there, read as `loadFill` reads: on into later sections, zero where
-  none is; the reads are taken in the varnodes' location order, as `beginLoc` walks them). `normalizesetup` and `funclinkoutonly`
+  none is; the reads are taken in the varnodes' location order, as `beginLoc` walks them; an op
+  writing read-only memory warns "Read-only address (ram,0x...) is written", see the end of
+  "C printing, slice 5"). `normalizesetup` and `funclinkoutonly`
   are not in the `decompile` root's groups and are left out.
 - Read-only memory is the loader's read-only sections (bfd's `SEC_READONLY`: PE sections
   without `IMAGE_SCN_MEM_WRITE`, `Section::readonly`) plus `readonly` commands; a varnode is
@@ -2309,6 +2316,8 @@ Misses explained, none new from the merge (each is in a branch's own miss list):
   inference pass and before merging), and this check is the only one that prints types, with
   `typerecovery` off, at a break (`returnsplit`) before both. At `inputprototype` the three M500
   functions are identical. Open: set the symbol properties when a varnode is made.
+  (Superseded: `print raw` applies the symbol types first and the six are identical; see the
+  end of "C printing, slice 5".)
 - switch `finalstructure` types on: 0x4f3366 keeps a call's join output (`j{EDX,EAX}`) the
   reference does not have; in `m3-tail`'s list, not traced. Open.
 - The 57 switch-corpus functions that differ at flow time (S3), `VariablePiece` (7 rules on, 15
@@ -2899,7 +2908,9 @@ ghidra-rs) are not in the 60 and were not traced; the count says they were silen
 of the 60 + 3). M8: all 55 checks identical. Not run on the final build: `swfsc-r`, `swfs-t`, `swsn-t`, `pcc-*` on
 the switch corpus, and M500 (0x4f3366 alone is identical in `swfs-t`). No unit test was added: the
 functions above are the check. A panic of ghidra-rs prints before the buffered console output,
-so `decomp-diff.sh` cuts its message and `bars.sh` counts it as silent, not loud.
+so `decomp-diff.sh` cuts its message and `bars.sh` counts it as silent, not loud. (Superseded:
+`decomp-diff.sh` keeps a panic or stack overflow message and `bars.sh` counts it as `loud`; see
+the output notes of "Every check at once: `tools/bars.sh`".)
 
 Review fixes (second commit on `m3-swsilent`). A review of the first commit found paths that could
 still differ silently; each now fails loudly. Superseded by this paragraph: "the stack offset 0"
@@ -3011,7 +3022,10 @@ M500 `pcc-r` and `pc-r` 494 / 495 (silent 1: 0x47a6b0), `pcc-t` and `pc-t` 495 /
 miss; M8 print checks 7 / 7. Every switch silent is now silent in an older switch check.
 (Superseded: "silent 62" of `pcc-t` in the table, "one is new" and "It is open" above.) Not
 rerun after the follow-up: the 51 other checks on M8, which the change cannot reach (only
-`print C` reads the flag).
+`print C` reads the flag). (Superseded: the warning is ported and the loud failure, the flag
+`Funcdata::readonly_write` and the whole-function test are gone; see "After `m3-int5`" at the
+end of this section. `action.rs`, `readonly_written`, is now the written branch of
+`fillinReadOnly`.)
 
 Review fixes on the same branch:
 
@@ -3052,6 +3066,42 @@ M500 (4 in the baseline); 0x47a6b0 is loud in every check. (Superseded: the swit
 slice 5 above, which were derived or from single checks.) Varies with load: the "all outputs
 identical" count of `s6void-m500` is 499 / 500 here and 500 / 500 in the baseline (a reference
 timeout; identical 499 / 499 in both).
+
+After `m3-int5` (2026-11-17): the read-only write warning. `varnodeprops` has the written branch
+of `Funcdata::fillinReadOnly` (`action.rs`, `readonly_written`). With `option readonly on`, an
+op that writes read-only memory warns `Read-only address (ram,0x...) is written` at its
+address, once (`OpFlags::WARNING`, the C++ `PcodeOp::warning`), unless the varnode is
+address-forced and nothing reads it (`!isAddrForce() || !hasNoDescend()`). A marker (INDIRECT,
+MULTIEQUAL) is only flagged. The warning goes through `Funcdata::warning`, so a jump-table
+partial function adds its own `WARNING (jumptable):` line. A written read-only varnode also
+skips the zero replacement of the same action, as in the C++, where the read-only branch comes
+first. `print C` no longer fails on the case. 0x23caea8 is identical in switch `pcc-t` and
+`pcc-r` (6 warning lines at 3 addresses). Switch `pcc-t` 1987 / 2005 (loud 18, silent 0; `m3-int5`
+1986, loud 19). M500 `pcc-r` and `pc-r` 494 / 495 (loud 1),
+`pcc-t` and `pc-t` 495 / 495; M8 all 55 checks as the baseline. Not run: `pcc-r` on the whole
+switch corpus, `simple`, the full pass. Not seen: a marker writing read-only memory, an
+address-forced write of it that nothing reads, a second visit of a warned op (0x23caea8 is the
+only function of the corpora known to write read-only memory). Still wider than the C++: the
+zero replacement runs for a read-only varnode that is only read, or with `option readonly off`.
+
+After `m3-int5` (2026-11-17): the silent misses of `swsn-r`. All six (switch 0x8d8f40,
+0x8eabe0, 0x8ead90; M500 0x48a430, 0x5c5940, 0x6b3730) have one cause, the one named in the
+`m3-int` section: a ram varnode at an import slot (0x00b0511c, 0x00b05128, 0x00b05370,
+0x00b052ec) that outlives the call through it, here the INDIRECTs and MULTIEQUALs on the slot,
+prints `<code() *>` on the reference and `<xunknown4>` in ghidra-rs, and nothing else differs
+(435 lines in 0x8eabe0, 9 or 10 in the M500 three). The C++ types the varnode from its
+external-reference symbol when it is made; ghidra-rs applies the symbol types
+(`infertypes::symbol_types`) before each inference pass and before merging, and with
+`typerecovery` off neither has run at `break start returnsplit`. Fix: the console's `print raw`
+applies them first (`console.rs`), as merging does. `swsn-r`: switch 1987 / 2004 (loud 17,
+silent 0; before 1984, silent 3), M500 498 / 499 (loud 1: 0x47a6b0; before 495, silent 3). No
+silent miss is left in the checks run: M8 all 55 as the baseline; M500 `swsn-r`, the four
+print checks, `s6` 499 / 499 and `r5typed` 497 / 498 (loud 1); switch `swsn-r` and `pcc-t`.
+Not run: the other M500 and switch checks, `simple`, `r5d-adc`, the full pass. Still open: the
+type is not set when the varnode is made, so an action that reads a symbol's type or type lock
+with `typerecovery` off before merging would not see it (none is known to; no check shows one).
+(Superseded: "Open: set the symbol properties when a varnode is made" as the cause of a miss,
+and "the only silent misses left in the pass are in `swsn-r`" above.)
 
 ## Speed
 

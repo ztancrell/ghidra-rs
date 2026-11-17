@@ -1648,7 +1648,8 @@ and the explained misses: rust/README.md, "Integration of `m3-tail` and `m3-r5b`
   count is now of the functions the reference finishes).
 - Open: the type a global symbol gives a new varnode is set lazily (`infertypes::symbol_types`),
   so `switchnorm` rules on differs in 0x48a430, 0x5c5940, 0x6b3730 (M500) and 0x8d8f40,
-  0x8eabe0, 0x8ead90 (switch corpus) at `returnsplit`; 0x4f3366 (switch `finalstructure` types
+  0x8eabe0, 0x8ead90 (switch corpus) at `returnsplit` (superseded: `print raw` applies the
+  types first, the six are identical; see "After `m3-int5`" below); 0x4f3366 (switch `finalstructure` types
   on) keeps a call's join output; ghidra-rs is about 1.25 times slower than the reference on
   0x4c48d0.
 
@@ -1814,6 +1815,19 @@ M500 (4 in the baseline); 0x47a6b0 is loud in every check. (Superseded: the swit
 slice 5 above, which were derived or from single checks.) Varies with load: the "all outputs
 identical" count of `s6void-m500` is 499 / 500 here and 500 / 500 in the baseline (a reference
 timeout; identical 499 / 499 in both).
+
+After `m3-int5` (2026-11-17): the "Read-only address is written" warning of `fillinReadOnly` is
+ported (`action.rs`, `readonly_written`: once per op, not for a marker, not for an
+address-forced varnode nothing reads) and `print C` no longer fails on the case. 0x23caea8 is
+identical; switch `pcc-t` 1987 / 2005 (loud 18, silent 0), M500 print checks at their counts, M8
+all 55 checks as the baseline. Details: rust/README.md, the end of "C printing, slice 5".
+(Superseded: "0x23caea8 is loud" and "Next: port the `fillinReadOnly` warning" above.)
+The six silent misses of `swsn-r` (0x8d8f40, 0x8eabe0, 0x8ead90 on switch; 0x48a430, 0x5c5940,
+0x6b3730 on M500) were the lazily set symbol type of an import slot, printed at
+`break start returnsplit` with `typerecovery` off; `print raw` now applies the symbol types
+first. `swsn-r`: switch 1987 / 2004 (loud 17, silent 0), M500 498 / 499 (loud 1, silent 0). No
+silent miss is left in the checks run. (Superseded: the "Open" bullet on `symbol_types` under
+the `m3-int` integration, for these six; "the only silent misses left" above.)
 
 ## Running stages in parallel
 
