@@ -1786,6 +1786,21 @@ older switch checks). Next, by M500 misses: `mergeAddrTied` (VariablePiece) 6 wi
 blocks 5, a variable linked to a function or external reference 3, string constants 2.
 (Superseded: the "Next" list of the merged section above.)
 
+### S9 slice 5, branch `m3-print5` (2026-11-16)
+
+Labels of spliced blocks (`getEntryAddr`), variables that are a whole function or external
+reference symbol, `VariablePiece` groups (`mergeAddrTied`, `groupWith`), string constants and
+function pointer constants. Details: rust/README.md, "C printing, slice 5". M500 `pcc-r` and
+`pc-r` 494 / 495 (loud 0, silent 1: 0x47a6b0), `pcc-t` and `pc-t` 495 / 495; M8 all 55 checks
+identical. Switch `pcc-r` 1944 / 2005 (loud 0, silent 61), `pcc-t` 1943 / 2005 (loud 0, silent 62);
+all silents are in older switch checks except 0x23caea8 (`pcc-t`), open: the "Read-only address
+is written" warning of `fillinReadOnly` is not ported. Not run: the full pass. Next: that warning;
+then the switch silents of the earlier stages.
+Follow-up: 0x23caea8 is loud (`print C` fails on a written read-only address, the unported
+warning): switch `pcc-t` 1943 / 2005 (loud 1, silent 61), every switch silent in an older check.
+Next: port the `fillinReadOnly` warning. (Superseded: "silent 62" and "open" above.)
+(Superseded: the counts and the "Next" list of the slice 4 section above.)
+
 ## Running stages in parallel
 
 Strict chain first: S0 → S1a → S1b → S2. After S2 the work fans out. Under the cap of two

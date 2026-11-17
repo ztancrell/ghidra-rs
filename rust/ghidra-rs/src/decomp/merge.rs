@@ -8,8 +8,13 @@
 //! Edits go through the wrappers here, which mark the varnode covers dirty where the C++
 //! `Varnode::setFlags(coverdirty)` does (descendants and definitions changing).
 //!
-//! Not ported (each fails loudly or cannot arise): `VariablePiece` groups (`groupWith`, from
-//! address-tied overlaps of different sizes and proto-partial PIECEs), symbols other than the
+//! Address-tied varnodes of different sizes that overlap are grouped (`mergeAddrTied`,
+//! `groupWith`; the `VariablePiece`s are in variable.rs), which the merge tests, `collectInputs`,
+//! `inflateTest` and `markInternalCopies` read.
+//!
+//! Not ported (each fails loudly or cannot arise): the groups of proto-partial PIECEs
+//! (`groupPartials`; superseded: "`VariablePiece` groups", all of them, before print slice 5),
+//! symbols other than the
 //! locked parameters of the function (`high_symbol`; multi-entry symbols, `mergeMultiEntry` has
 //! none), union data-types needing resolution, join padding
 //! records (`markPurePaddingCopies` has none).
@@ -23,9 +28,10 @@ use super::op::{OpFlags, OpId};
 use super::opcode::Opcode;
 use super::types::{Meta, TypeId};
 use super::variable::{
-    assign_high, copy_shadow, h_extra_out, h_has_cover, h_is, h_type, high, high_merge, high_remove, input_varnode,
-    intersection, partial_copy_shadow, set_high_level, tied_varnode, update_high, update_internal_cover, vn_cover,
-    vn_cover_dirty, vn_has_cover, vn_implied, HighId,
+    assign_high, copy_shadow, group_size, group_with, h_extra_out, h_has_cover, h_internal_cover, h_is, h_type, high,
+    high_merge, high_remove, input_varnode, intersection, partial_copy_shadow, piece_intersections, piece_of,
+    set_high_level, tied_varnode, update_cover, update_high, update_intersections, vn_cover, vn_cover_dirty,
+    vn_has_cover, vn_implied, HighId,
 };
 use super::varnode::{Space, VarnodeId, VnFlags};
 use super::Arch;
@@ -176,6 +182,12 @@ fn test_required(fd: &mut Funcdata, hout: HighId, hin: HighId) -> Result<bool> {
             return Ok(false);
         }
     }
+    if let (Some((gin, _, sin)), Some((gout, _, sout))) = (piece_of(fd, hin), piece_of(fd, hout)) {
+        // pieces of one group never merge; of two groups, one must be its whole group
+        if gin == gout || (sin != group_size(fd, gin) && sout != group_size(fd, gout)) {
+            return Ok(false);
+        }
+    }
     // the symbols (`HighVariable::getSymbol`; the symbol offsets are equal: a piece of a locked
     // parameter fails in heritage)
     if let (Some((a, _)), Some((b, _))) = (high_symbol(fd, hin), high_symbol(fd, hout)) {
@@ -216,7 +228,11 @@ fn test_adjacent(fd: &mut Funcdata, hout: HighId, hin: HighId) -> Result<bool> {
     if h_type(fd, hout).0 != h_type(fd, hin).0 {
         return Ok(false);
     }
-    Ok(!illegal_input(fd, hout)? && !illegal_input(fd, hin)?)
+    if illegal_input(fd, hout)? || illegal_input(fd, hin)? {
+        return Ok(false);
+    }
+    // no speculative merging of variables in separate overlapping collections
+    Ok(piece_of(fd, hout).is_none() || piece_of(fd, hin).is_none())
 }
 
 /// Port of `Merge::mergeTestSpeculative`.
@@ -250,7 +266,7 @@ fn merge(fd: &mut Funcdata, h1: HighId, h2: HighId, speculative: bool) -> Result
         return Ok(false);
     }
     high_merge(fd, h1, h2, true, speculative)?;
-    update_internal_cover(fd, h1);
+    update_cover(fd, h1);
     Ok(true)
 }
 
@@ -551,7 +567,13 @@ fn merge_addr_tied(fd: &mut Funcdata) -> Result<()> {
                     merge_range_must(fd, &loc[bounds[k]..bounds[k + 1]])?;
                 }
                 if max > 2 {
-                    return err("mergeAddrTied: overlapping address-tied varnodes need VariablePiece, not ported");
+                    let vn1 = loc[bounds[0]];
+                    for k in (2..max).step_by(2) {
+                        let vn2 = loc[bounds[k]];
+                        let off = fd.vn(vn2).offset.wrapping_sub(fd.vn(vn1).offset) as i32;
+                        let (h2, h1) = (high(fd, vn2)?, high(fd, vn1)?);
+                        group_with(fd, h2, off, h1)?;
+                    }
                 }
             }
             i = bounds[max];
@@ -665,12 +687,14 @@ fn merge_op(fd: &mut Funcdata, op: OpId) -> Result<()> {
 /// Port of `Merge::collectInputs`: the reads of `high` by `op` and the INDIRECTs before it.
 fn collect_inputs(fd: &mut Funcdata, h: HighId, mut op: OpId) -> Result<Vec<(OpId, usize)>> {
     let mut res = Vec::new();
+    let group = piece_of(fd, h).map(|p| p.0);
     loop {
         for (i, vn) in fd.op(op).ins.clone().into_iter().enumerate() {
             if fd.vn(vn).is_annotation() {
                 continue;
             }
-            if high(fd, vn)? == h {
+            let test = high(fd, vn)?;
+            if test == h || (group.is_some() && piece_of(fd, test).map(|p| p.0) == group) {
                 res.push((op, i));
             }
         }
@@ -1088,11 +1112,52 @@ fn shadowed_varnode(fd: &mut Funcdata, vn: VarnodeId) -> Result<bool> {
     Ok(false)
 }
 
-/// Port of `Merge::markInternalCopies` (`ActionCopyMarker`). The PIECE and SUBPIECE cases need
-/// `VariablePiece`s on all their varnodes, which never exist here.
-fn mark_internal_copies(fd: &mut Funcdata) -> Result<()> {
+/// The PIECE and SUBPIECE cases of `Merge::markInternalCopies`: a PIECE whose output is built
+/// of pieces of itself, or a SUBPIECE reading a piece of its own group, at the offsets the
+/// group gives them, does not print, and its implied inputs become explicit.
+fn mark_internal_piece(fd: &mut Funcdata, op: OpId, big_endian: bool) -> Result<()> {
+    let ins = fd.op(op).ins.clone();
+    let v1 = out_of(fd, op)?;
+    let h1 = high(fd, v1)?;
+    let Some((g1, o1, _)) = piece_of(fd, h1) else { return Ok(()) };
+    let mut inputs = Vec::new();
+    for &v in ins.iter().take(if fd.op(op).opc == Opcode::Piece { 2 } else { 1 }) {
+        let h = high(fd, v)?;
+        match piece_of(fd, h) {
+            Some((g, o, _)) if g == g1 => inputs.push((v, o, fd.vn(v).size as i32)),
+            _ => return Ok(()),
+        }
+    }
+    let fits = match inputs[..] {
+        [(_, o2, s2), (_, o3, _)] if big_endian => o2 == o1 && o3 == o1 + s2,
+        [(_, o2, _), (_, o3, s3)] => o3 == o1 && o2 == o1 + s3,
+        [(_, o2, s2)] => {
+            let val = fd.vn(fd.input(op, 1)?).offset as i32;
+            let skip = if big_endian { s2 - fd.vn(v1).size as i32 - val } else { val };
+            o2 + skip == o1
+        }
+        _ => false,
+    };
+    if !fits {
+        return Ok(());
+    }
+    fd.op_mut(op).flags.set(OpFlags::NONPRINTING);
+    for (v, _, _) in inputs {
+        if fd.vn(v).has(VnFlags::IMPLIED) {
+            fd.vn_clear(v, VnFlags::IMPLIED);
+            fd.vn_set(v, VnFlags::EXPLICIT);
+        }
+    }
+    Ok(())
+}
+
+/// Port of `Merge::markInternalCopies` (`ActionCopyMarker`).
+fn mark_internal_copies(fd: &mut Funcdata, big_endian: bool) -> Result<()> {
     let mut multi = Vec::new();
     for op in alive_ops(fd) {
+        if matches!(fd.op(op).opc, Opcode::Piece | Opcode::Subpiece) {
+            mark_internal_piece(fd, op, big_endian)?;
+        }
         if fd.op(op).opc != Opcode::Copy {
             continue;
         }
@@ -1133,13 +1198,26 @@ fn mark_internal_copies(fd: &mut Funcdata) -> Result<()> {
 fn inflate_test(fd: &mut Funcdata, a: VarnodeId, h: HighId) -> Result<bool> {
     let ahigh = high(fd, a)?;
     update_high(fd, h);
-    let hc = super::variable::h_cover(fd, h).clone();
+    // only the cover that contributes to the inflation
+    let hc = h_internal_cover(fd, h).clone();
     for b in fd.highs.get(ahigh).inst.clone() {
         if copy_shadow(fd, b, a) {
             continue;
         }
         if vn_cover(fd, b).intersect(&hc, &|o| op_uindex(fd, o)) == 2 {
             return Ok(true);
+        }
+    }
+    update_intersections(fd, ahigh);
+    for (other, off, _) in piece_intersections(fd, ahigh) {
+        for b in fd.highs.get(other).inst.clone() {
+            // an intersection with a partial shadow of a is allowed
+            if partial_copy_shadow(fd, b, a, off) {
+                continue;
+            }
+            if vn_cover(fd, b).intersect(&hc, &|o| op_uindex(fd, o)) == 2 {
+                return Ok(true);
+            }
         }
     }
     Ok(false)
@@ -1699,7 +1777,7 @@ pub(crate) fn hide_shadow(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
 
 /// `ActionCopyMarker`: `markInternalCopies` (`markPurePaddingCopies` has no join padding
 /// records: none are made).
-pub(crate) fn copy_marker(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
-    mark_internal_copies(fd)?;
+pub(crate) fn copy_marker(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
+    mark_internal_copies(fd, arch.sleigh.big_endian)?;
     Ok(0)
 }

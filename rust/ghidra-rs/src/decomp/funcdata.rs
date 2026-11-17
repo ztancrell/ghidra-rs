@@ -101,6 +101,9 @@ pub struct Funcdata {
     pub(crate) symref: BTreeMap<VarnodeId, super::namevars::SymRef>,
     /// warnings at an address (`Funcdata::warning`), for `print C`
     pub(crate) comments: Vec<(u64, String)>,
+    /// a read-only varnode was written before heritage: the C++ warns at such a write
+    /// (`Funcdata::fillinReadOnly`), a warning that is not ported, so `print C` fails
+    pub(crate) readonly_write: bool,
     /// the space the global scope owns (ram): its varnodes are `persist` and `addrtied`
     /// (`setVarnodeProperties` through `Scope::queryProperties`)
     pub(crate) ram: Option<u32>,
@@ -181,6 +184,7 @@ impl Funcdata {
             mapentry: BTreeMap::new(),
             symref: BTreeMap::new(),
             comments: Vec::new(),
+            readonly_write: false,
             ram: None,
             global: Vec::new(),
             uniq: None,

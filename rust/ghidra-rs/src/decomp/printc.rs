@@ -12,12 +12,20 @@
 //! and variables, array and field access (`PTRADD`, `PTRSUB`, LOAD and STORE through them, parts
 //! of symbols; slice 3A), the names of anonymous data-types (`genericTypeName`), and the body
 //! comments (the warnings at an address, placed by `CommentSorter`, comment.rs; slice 3B).
+//! Slice 5: the label of a spliced block (`BlockBasic::getEntryAddr` over the merged cover),
+//! a global variable that is a whole function or external reference symbol (its name), string
+//! constants (`pushPtrCharConstant`, the string read as `StringManagerUnicode` reads it) and
+//! function pointer constants (`pushPtrCodeConstant`, the function's name).
 //!
 //! Every construct the C++ would print that is not ported fails with an error naming it, so a
 //! function prints identically or not at all. Not ported yet: the long suffix of a constant, a
-//! cast to a pointer to an array (`checkAddressOfCast`), labels of spliced blocks, strings,
-//! unions, `TypePointerRel`, CALLOTHER of a built-in user-op, the bit-field operators (`INSERT`,
-//! `ZPULL`, `SPULL`), `SEGMENTOP`, `CPOOLREF` and `NEW`. (Superseded: "and the remaining
+//! cast to a pointer to an array (`checkAddressOfCast`), the label of a block of several ranges
+//! without ops, a variable that is part of an external reference or larger than the function or
+//! external reference at its address (`pushPartialSymbol` of a code pointer,
+//! `pushMismatchSymbol`), a function that writes read-only memory (the warning of
+//! `fillinReadOnly` is not ported), unions, `TypePointerRel`, CALLOTHER of a built-in user-op, the
+//! bit-field operators (`INSERT`, `ZPULL`, `SPULL`), `SEGMENTOP`, `CPOOLREF` and `NEW`.
+//! (Superseded: "labels of spliced blocks, strings", before slice 5; "and the remaining
 //! operators", before slice 4. Slice 1 had no casts or structured
 //! blocks, slice 2 no field and array access, characters, comments, floats, indirect calls or
 //! anonymous types; superseded.)
@@ -109,6 +117,9 @@ pub(crate) fn negate(tok: &'static OpToken) -> Option<&'static OpToken> {
 pub fn print_c(fd: &mut Funcdata, arch: &Arch, name: &str) -> Result<String> {
     if fd.structure.is_empty() {
         return err("Function not fully decompiled. No structure present.");
+    }
+    if fd.readonly_write || super::action::readonly_written(fd, arch) {
+        return err("print C: the warning for a written read-only address (fillinReadOnly) is not ported");
     }
     let mut p = PrintC::new(fd, arch);
     p.doc_function(name)?;
@@ -864,7 +875,7 @@ impl PrintC<'_> {
     }
 
     /// Port of `PrintC::emitLabel`: the label of a block's first basic block, `code_`,
-    /// `joined_` or `dup_` and the entry address (no code label symbol, `queryCodeLabel`, is
+    /// `joined_` or `dup_` and the entry address (`getEntryAddr`; no code label symbol, `queryCodeLabel`, is
     /// ported: the checks declare none).
     fn emit_label(&mut self, b: SId) -> Result<()> {
         let Some(leaf) = front_leaf(&self.fd.structure, b) else { return Ok(()) };
@@ -872,11 +883,6 @@ impl PrintC<'_> {
             return err("print C: the front leaf of a label is not a block copy");
         };
         let block = self.fd.blocks.block(bb);
-        if block.spliced {
-            return err(
-                "print C: the label of a spliced block (getEntryAddr of a cover with several ranges) is not ported",
-            );
-        }
         let prefix = if block.joined {
             "joined_"
         } else if block.duplicated {
@@ -884,7 +890,10 @@ impl PrintC<'_> {
         } else {
             "code_"
         };
-        let start = block.start;
+        let first_op = block.ops.first().map(|&op| self.fd.op(op).seq.addr);
+        let Some(start) = block.entry_addr(first_op) else {
+            return err("print C: the label of a block of several ranges without ops (an invalid entry address)");
+        };
         let code = self.arch.sleigh.code_space();
         let sp =
             self.arch.sleigh.spaces.get(code as usize).ok_or_else(|| LowlevelError("print C: bad space".into()))?;
@@ -1439,8 +1448,23 @@ impl PrintC<'_> {
         let Some((sym, _, _)) = super::namevars::high_symbol(self.fd, h) else {
             let rep = super::namevars::name_representative(self.fd, h)?;
             let r = self.fd.vn(rep);
-            if r.has(VnFlags::PERSIST) && super::infertypes::query_global(self.arch, r.offset, 1).is_some() {
-                return err("print C: a variable linked to a function or an external reference is not ported");
+            if r.has(VnFlags::PERSIST) {
+                let (off, size) = (r.offset, r.size);
+                // the type-locked symbol holding the whole varnode, linked when the varnode is
+                // made (`setSymbolProperties`): a function or an external reference
+                if let Some(e) = super::infertypes::query_global(self.arch, off, size) {
+                    let whole = if e.externref { self.arch.externref_size() } else { 1 };
+                    if e.addr != off || size != whole {
+                        return err("print C: part of an external reference (pushPartialSymbol of a code pointer) is not ported");
+                    }
+                    let name = if e.externref { self.externref_name(off)? } else { self.function_name(off)? };
+                    self.check_scope_depth(&name)?;
+                    return self.push_atom(Atom::Text(name));
+                }
+                // `linkSymbol` asks for the symbol at the first byte only
+                if super::infertypes::query_global(self.arch, off, 1).is_some() {
+                    return err("print C: a variable larger than the function or external reference at its address (pushMismatchSymbol) is not ported");
+                }
             }
             let size = self.fd.vn(vn).size;
             return self.push_unnamed_location(rep, size);
@@ -1551,10 +1575,14 @@ impl PrintC<'_> {
             Meta::Ptr => {
                 if let Some(to) = self.fd.types.ptr_to(ty) {
                     if self.fd.types.is_char_print(to) {
-                        return err("print C: string constants are not ported");
-                    }
-                    if self.fd.types.meta(to) == Meta::Code {
-                        return err("print C: function pointer constants are not ported");
+                        if let Some(text) = self.ptr_char_constant(val, self.fd.types.size(to))? {
+                            return self.push_atom(Atom::Text(text));
+                        }
+                    } else if self.fd.types.meta(to) == Meta::Code && self.arch.functions.contains_key(&val) {
+                        // pushPtrCodeConstant: the function at the address (`queryFunction`; the
+                        // code space has word size 1)
+                        let name = self.function_name(val)?;
+                        return self.push_atom(Atom::Text(name));
                     }
                 }
             }
@@ -1827,11 +1855,30 @@ impl PrintC<'_> {
             None => None,
             Some(SymRef::Sym(sym, off)) => Some(SbRef::Sym(sym, off)),
             Some(SymRef::ExternRef) => return err("print C: a PTRSUB into an external reference is not ported"),
-            Some(SymRef::Function(addr)) => Some(SbRef::Func(match self.arch.functions.get(&addr) {
-                Some(f) if !f.name.is_empty() => f.name.clone(),
-                _ => format!("func_{}", self.raw_addr(self.arch.sleigh.code_space(), addr)?),
-            })),
+            Some(SymRef::Function(addr)) => Some(SbRef::Func(self.function_name(addr)?)),
         })
+    }
+
+    /// The name of the function at `addr` (`FunctionSymbol`), `func_` and the address without one.
+    fn function_name(&self, addr: u64) -> Result<String> {
+        Ok(match self.arch.functions.get(&addr) {
+            Some(f) if !f.name.is_empty() => f.name.clone(),
+            _ => format!("func_{}", self.raw_addr(self.arch.sleigh.code_space(), addr)?),
+        })
+    }
+
+    /// The name of the external reference at `slot` (`ExternRefSymbol::buildNameType`): the one
+    /// `map externalref` gave, else the address it refers to and `_exref`.
+    fn externref_name(&self, slot: u64) -> Result<String> {
+        if let Some(name) = self.arch.externref_name(slot) {
+            return Ok(name.to_string());
+        }
+        let target =
+            self.arch.externref_target(slot).ok_or_else(|| LowlevelError("print C: no external reference".into()))?;
+        let code = self.arch.sleigh.code_space();
+        let sp =
+            self.arch.sleigh.spaces.get(code as usize).ok_or_else(|| LowlevelError("print C: bad space".into()))?;
+        Ok(format!("{}{}_exref", super::print::shortcut(&sp.name), self.raw_addr(code, target)?))
     }
 
     /// Port of `PrintC::pushPartialSymbol`: the part of `sym` at `off` of `sz` bytes (0: to the
@@ -1931,6 +1978,28 @@ impl PrintC<'_> {
         Ok(())
     }
 
+    /// Port of `PrintC::pushPtrCharConstant` with `printCharacterConstant`: the quoted string a
+    /// constant pointer to characters of `charsize` bytes points at, none when it is null, not
+    /// in read-only memory or not a terminated string of valid characters. `resolveConstant`
+    /// is the address itself (no segment resolver for the checks' flat space) and no ported
+    /// data-type is an opaque string. The string read at an address is kept (`stringMap`): a
+    /// later constant there prints the same characters even with another character size. The
+    /// C++ keeps it for the whole session, this for one `print C`.
+    fn ptr_char_constant(&mut self, val: u64, charsize: u32) -> Result<Option<String>> {
+        if val == 0 || !self.arch.is_readonly(val, 1) {
+            return Ok(None);
+        }
+        let arch = self.arch;
+        let data = self.strings.entry(val).or_insert_with(|| string_data(arch, val, charsize as usize));
+        let Some((chars, trunc)) = data.clone() else { return Ok(None) };
+        let mut t = String::from(if charsize > 1 { "L\"" } else { "\"" });
+        for cp in chars {
+            print_unicode(&mut t, cp)?;
+        }
+        t += if trunc { "...\" /* TRUNCATED STRING LITERAL */" } else { "\"" };
+        Ok(Some(t))
+    }
+
     /// Port of `PrintC::pushCharConstant` with display format 0 (no ported data-type or
     /// symbol has one): a byte of 0x80 or more as an integer, else the quoted character.
     fn push_char_constant(&mut self, val: u64, ty: TypeId, signed: bool, vn: Option<VarnodeId>) -> Result<()> {
@@ -1956,7 +2025,13 @@ fn char_constant(val: u64, size: u32) -> Result<String> {
         t.push('L');
     }
     t.push('\'');
-    let cp = val as i32;
+    print_unicode(&mut t, val as i32)?;
+    t.push('\'');
+    Ok(t)
+}
+
+/// Port of `PrintC::printUnicode`: the code point escaped, or as UTF-8.
+fn print_unicode(t: &mut String, cp: i32) -> Result<()> {
     if unicode_needs_escape(cp) {
         let special = match cp {
             0 => "\\0",
@@ -1973,17 +2048,107 @@ fn char_constant(val: u64, size: u32) -> Result<String> {
             _ => "",
         };
         if special.is_empty() {
-            t += &char_hex_escape(cp);
+            *t += &char_hex_escape(cp);
         } else {
-            t += special;
+            *t += special;
         }
     } else {
         // StringManager::writeUtf8: every code point left is a valid character
         let c = char::from_u32(cp as u32).ok_or_else(|| LowlevelError("Illegal unicode codepoint".into()))?;
         t.push(c);
     }
-    t.push('\'');
-    Ok(t)
+    Ok(())
+}
+
+/// `StringManagerUnicode::maximumChars` (sleigh_arch.cc: 2048).
+const MAXIMUM_CHARS: usize = 2048;
+
+/// Port of `StringManagerUnicode::getStringData` (with `checkCharacters` and
+/// `assignStringData`), read as `escapeCharacterData` reads the UTF-8 it stores: the code
+/// points of the string at `addr` up to its terminator and whether it was truncated. None:
+/// the bytes are not loaded, no terminator within `MAXIMUM_CHARS` bytes, or an invalid
+/// encoding. The bytes are read 32 at a time, a terminator looked for at each character
+/// position of the new bytes.
+fn string_data(arch: &Arch, addr: u64, charsize: usize) -> Option<(Vec<i32>, bool)> {
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        let amount = 32.min(MAXIMUM_CHARS - buf.len());
+        if amount == 0 {
+            return None;
+        }
+        let cur = buf.len();
+        buf.resize(cur + amount, 0);
+        arch.fill_bytes(addr + cur as u64, &mut buf[cur..])?;
+        // hasCharTerminator
+        if (cur..buf.len()).step_by(charsize).any(|i| buf[i..].iter().take(charsize).all(|&b| b == 0)) {
+            break;
+        }
+    }
+    let mut chars = Vec::new();
+    let mut i = 0;
+    while i < buf.len() {
+        let (cp, skip) = get_codepoint(&buf[i..], charsize, arch.sleigh.big_endian)?;
+        if cp == 0 {
+            break;
+        }
+        chars.push(cp);
+        i += skip;
+    }
+    // assignStringData: one-byte characters under the limit are kept as they are; else
+    // writeUnicode stops at the limit
+    let trunc = chars.len() >= MAXIMUM_CHARS;
+    chars.truncate(MAXIMUM_CHARS);
+    Some((chars, trunc))
+}
+
+/// Port of `StringManager::getCodepoint`: the code point at the start of `buf` and the bytes
+/// it takes, none for an invalid encoding.
+fn get_codepoint(buf: &[u8], charsize: usize, bigend: bool) -> Option<(i32, usize)> {
+    let b = |i: usize| buf.get(i).map(|&x| i32::from(x));
+    let utf16 = |i: usize| Some(if bigend { (b(i)? << 8) + b(i + 1)? } else { (b(i + 1)? << 8) + b(i)? });
+    let cont = |i: usize| b(i).filter(|v| v & 0xc0 == 0x80).map(|v| v & 0x3f);
+    let (cp, skip) = match charsize {
+        2 => {
+            let cp = utf16(0)?;
+            match cp {
+                0xd800..=0xdbff => {
+                    let trail = utf16(2).filter(|t| (0xdc00..=0xdfff).contains(t))?;
+                    ((cp << 10) + trail + (0x10000 - (0xd800 << 10) - 0xdc00), 4)
+                }
+                0xdc00..=0xdfff => return None,
+                _ => (cp, 2),
+            }
+        }
+        1 => {
+            let val = b(0)?;
+            if val & 0x80 == 0 {
+                (val, 1)
+            } else if val & 0xe0 == 0xc0 {
+                (((val & 0x1f) << 6) | cont(1)?, 2)
+            } else if val & 0xf0 == 0xe0 {
+                (((val & 0xf) << 12) | (cont(1)? << 6) | cont(2)?, 3)
+            } else if val & 0xf8 == 0xf0 {
+                (((val & 7) << 18) | (cont(1)? << 12) | (cont(2)? << 6) | cont(3)?, 4)
+            } else {
+                return None;
+            }
+        }
+        4 => {
+            let w = [b(0)?, b(1)?, b(2)?, b(3)?];
+            let cp = if bigend {
+                (w[0] << 24).wrapping_add(w[1] << 16) + (w[2] << 8) + w[3]
+            } else {
+                (w[3] << 24).wrapping_add(w[2] << 16) + (w[1] << 8) + w[0]
+            };
+            (cp, 4)
+        }
+        _ => return None,
+    };
+    // a negative UTF-32 value is invalid to every caller (`checkCharacters`)
+    if cp < 0 || (cp >= 0xd800 && (cp > 0x10ffff || cp <= 0xdfff)) {
+        return None;
+    }
+    Some((cp, skip))
 }
 
 /// Port of `PrintC::printCharHexEscape`: `\x` and 2, 4 or 8 hex digits (a negative value
@@ -2027,6 +2192,17 @@ fn unicode_needs_escape(cp: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `getCodepoint`: UTF-16 surrogate pairs, a lone trail, UTF-8 continuation bytes.
+    #[test]
+    fn codepoints() {
+        assert_eq!(get_codepoint(&[0x3d, 0xd8, 0x00, 0xde], 2, false), Some((0x1f600, 4)));
+        assert_eq!(get_codepoint(&[0x00, 0xde, 0x41, 0x00], 2, false), None);
+        assert_eq!(get_codepoint(&[0xc3, 0xa9], 1, false), Some((0xe9, 2)));
+        assert_eq!(get_codepoint(&[0xc3, 0x41], 1, false), None);
+        assert_eq!(get_codepoint(&[0xe2, 0x82], 1, false), None);
+        assert_eq!(get_codepoint(&[0, 0, 0, 0x80], 4, false), None);
+    }
 
     #[test]
     fn negation_pairs() {

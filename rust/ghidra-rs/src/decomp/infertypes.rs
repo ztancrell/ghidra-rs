@@ -843,7 +843,7 @@ impl Entry {
     /// `code` for an external reference (`ExternRefSymbol::buildNameType`). Both are type-locked.
     fn symbol_type(&self, fd: &mut Funcdata, arch: &Arch) -> TypeId {
         if self.externref {
-            code_ptr(fd, arch.spec.stack_pointer.2)
+            code_ptr(fd, arch.externref_size())
         } else {
             fd.types.code()
         }
@@ -856,7 +856,7 @@ pub(crate) fn query_global(arch: &Arch, addr: u64, size: u32) -> Option<Entry> {
     if size == 1 && arch.functions.contains_key(&addr) {
         return Some(Entry { addr, externref: false });
     }
-    let slot = u64::from(arch.spec.stack_pointer.2);
+    let slot = u64::from(arch.externref_size());
     let fits = |s: &u64| addr - s + u64::from(size) <= slot && arch.externrefs.contains_key(s);
     (0..slot).filter_map(|d| addr.checked_sub(d)).find(fits).map(|s| Entry { addr: s, externref: true })
 }

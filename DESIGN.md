@@ -308,6 +308,14 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `fail_return` uses the spec's `<returnaddress>`): `paramdouble` 1988, `swsn-r` 1984 (silent 3), `swfs-r` 1982
    (silent 0) of 2004; 12 functions identical on master are loud in `swfs-r` (14 in `swsn-r` and
    `paramdouble`). M500 `s8r`, `swfs-r`, `swfs-t`, `fs-t` at their counts, 0x47a6b0 loud instead of silent.
+   Slice 5 on branch `m3-print5` (2026-11-16): labels of spliced blocks, function and external reference
+   symbols as variables, `VariablePiece` groups, string and function pointer constants. M500 `pcc-r` and `pc-r`
+   494 / 495, `pcc-t` and `pc-t` 495 / 495, no loud miss, silent only 0x47a6b0; M8 all 55 checks identical.
+   Switch `pcc-r` 1944 / 2005 (silent 61), `pcc-t` 1943 / 2005 (silent 62); all in older switch checks except
+   0x23caea8 (`pcc-t`), open: the read-only write warning of `fillinReadOnly` is not ported.
+   Superseded: the slice 4 counts above.
+   Follow-up: that case is loud now (`print C` fails on a written read-only address); switch `pcc-t` loud 1,
+   silent 61, every switch silent in an older check. Superseded: "silent 62" and "open" in the two lines above.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
