@@ -1229,11 +1229,12 @@ pub(crate) fn dead_code(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             v.flags.clear(VnFlags::ADDRFORCE);
         }
     }
-    // the spaces that do dead code (`AddrSpace::doesDeadcode`), the stack last
+    // the spaces that do dead code (`AddrSpace::doesDeadcode`) in index order: the join space
+    // (never heritaged, but it does dead code) and the stack last
     let deadcode_spaces: Vec<Space> = (1..arch.sleigh.spaces.len() as u32)
         .filter(|&i| arch.sleigh.spaces[i as usize].delay.is_some())
         .map(Space::Sleigh)
-        .chain([Space::Stack])
+        .chain([Space::Join, Space::Stack])
         .collect();
     for &sp in &deadcode_spaces {
         if fd.heritage.dead_removal_allowed(arch, sp) {
@@ -2503,7 +2504,7 @@ pub(crate) fn node_join(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
 
 /// `ActionConditionalExe`: a block re-testing the condition of the block that decided how it
 /// was reached is removed (condexe.cc), which is not ported; finding a candidate on the same
-/// condition varnode fails loudly.
+/// condition (`BooleanMatch`, as `verifySameCondition`) fails loudly.
 pub(crate) fn conditional_exe(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
     if fd.blocks.unreachable {
         return Ok(0);
@@ -2528,7 +2529,28 @@ pub(crate) fn conditional_exe(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
             continue;
         }
         let Some(&icb) = fd.blocks.block(init).ops.last() else { continue };
-        if fd.op(icb).opc == Opcode::Cbranch && fd.op(icb).ins[1] == fd.op(cb).ins[1] {
+        // verifySameCondition: `BooleanExpressionMatch::verifyCondition`, the same or the
+        // complementary condition. The jump-table partial function keeps the narrower test (one
+        // condition varnode): it runs without `multicse` (`action::PARTIAL_SKIP`), which in the
+        // C++ merges equal conditions there.
+        if fd.op(icb).opc != Opcode::Cbranch {
+            continue;
+        }
+        let (c, ic) = (fd.op(cb).ins[1], fd.op(icb).ins[1]);
+        if c == ic || (!fd.jumptablerecovery_on && super::rules::boolean::correlated(fd, c, ic)?) {
+            // testRemovability, the part that needs no read analysis: an op of the block that
+            // can never move (a call, LOAD, STORE, INDIRECT, an address-tied output) leaves
+            // the block as it is
+            let fixed = b.ops[..b.ops.len() - 1].iter().any(|&o| {
+                let o = fd.op(o);
+                o.opc != Opcode::Multiequal
+                    && (o.is_call()
+                        || matches!(o.opc, Opcode::Load | Opcode::Store | Opcode::Indirect)
+                        || o.out.is_some_and(|v| fd.vn(v).has(VnFlags::ADDRTIED)))
+            });
+            if fixed {
+                continue;
+            }
             return err("ActionConditionalExe: removing a re-tested condition is not implemented in ghidra-rs yet");
         }
     }

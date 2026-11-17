@@ -960,6 +960,9 @@ Open, failing loudly:
 - The jump-table partial function still runs without the two rules and with
   `jumptable::fold_constants` (the C++ has `stackvars` on there and `fillinReadOnly`); the tree
   builder leaves them out of the `jumptable` root (`action.rs`).
+  Superseded (branch `m3-swsilent`): the partial function runs with the two rules; without them
+  and with `fold_constants` only as the fallback when its stack heritage reaches a path not
+  ported (`Flow::build_partial`, flow.rs).
 
 Checks, at `break start assignhigh` with types printed (`DECOMP_RAW_EXTRA=1`).
 `r1-options.sh` now also writes `rust/tools/corpus/r5s-options.txt` (`r5-options.txt` with

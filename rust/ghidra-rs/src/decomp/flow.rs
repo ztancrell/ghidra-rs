@@ -12,7 +12,7 @@ use super::funcdata::{CallId, Funcdata, JumpTable};
 use super::jumptable::{self, Fail};
 use super::op::{Halt, OpFlags, OpId, SeqNum};
 use super::opcode::Opcode;
-use super::varnode::Space;
+use super::varnode::{Space, VarnodeId};
 use super::{action, err, Arch, LowlevelError, Result};
 use crate::sleigh::{Parse, PcodeError};
 use std::collections::BTreeMap;
@@ -86,11 +86,43 @@ pub(crate) fn follow_flow(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
 type Staged = std::result::Result<(Vec<u64>, Option<jumptable::ValueRange>), Fail>;
 
 /// The partial function of jump-table recovery (`stageJumpTable`): not made yet, made and
-/// simplified, or made with a failed `jumptable` action.
+/// simplified (with the unported error of its stack rules when it was made without them), or
+/// made with a failed `jumptable` action.
 enum Partial {
     None,
-    Ready(Box<Funcdata>),
+    Ready(Box<Funcdata>, Option<LowlevelError>),
     Failed,
+}
+
+/// Whether `hit` holds for a varnode of the data flow into the BRANCHIND `op` of the partial
+/// function `p` (every input of every op on the way).
+fn jump_reads(p: &Funcdata, op: OpId, hit: impl Fn(VarnodeId) -> bool) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    let mut work = vec![p.op(op).ins[0]];
+    while let Some(vn) = work.pop() {
+        if !seen.insert(vn) {
+            continue;
+        }
+        if hit(vn) {
+            return true;
+        }
+        if let Some(d) = p.vn(vn).def {
+            work.extend(p.op(d).ins.iter().copied());
+        }
+    }
+    false
+}
+
+/// Whether the jump `op` reads a stack varnode through the INDIRECT of a STORE (see its use in
+/// `stage_jump_table`). The INDIRECT of a call is not counted: `opCollapseIndirectsForAlias`
+/// removes one only when the alias analysis clears the varnode, not by a guard's range.
+fn reads_stack_indirect(p: &Funcdata, op: OpId) -> bool {
+    jump_reads(p, op, |vn| {
+        let Some(o) = p.vn(vn).def.map(|d| p.op(d)) else { return false };
+        o.opc == Opcode::Indirect
+            && p.vn(vn).space == Space::Stack
+            && p.iop_target(o.ins[1]).is_some_and(|e| p.op(e).opc == Opcode::Store)
+    })
 }
 
 fn ram_addr(a: u64) -> String {
@@ -541,6 +573,12 @@ impl Flow<'_> {
                     }
                     self.truncate_indirect_jump(op, matches!(f, Fail::Normal(_)))?
                 }
+                Err(Fail::Return) => {
+                    // truncateIndirectJump, fail_return
+                    self.fd.op_set_opcode(op, Opcode::Return);
+                    let addr = self.fd.op(op).seq.addr;
+                    self.fd.warning("Treating indirect jump as return", addr);
+                }
                 Err(Fail::Callother) => {
                     return err("jump table: an address made by a CALLOTHER (fail_callother) is not implemented");
                 }
@@ -564,6 +602,37 @@ impl Flow<'_> {
         }
     }
 
+    /// The partial function of `stageJumpTable`: a clone with the flow so far (`truncatedFlow`),
+    /// simplified by the `jumptable` root action, and that action's result. `stack`: with the
+    /// `stackvars` rules, as in the C++; without them the constant loads are folded by
+    /// `jumptable::fold_constants` instead.
+    fn build_partial(&mut self, stack: bool) -> Result<(Funcdata, Result<()>)> {
+        let mut p = self.fd.clone();
+        p.jumptablerecovery_on = true;
+        let mut pflow = Flow {
+            fd: &mut p,
+            arch: self.arch,
+            parse: self.arch.sleigh.new_parse(),
+            visited: self.visited.clone(),
+            addrlist: Vec::new(),
+            tablelist: Vec::new(),
+            injectlist: Vec::new(),
+            insn_count: 0,
+            baddata_count: 0,
+            // the copy constructor copies `flags`
+            reinterpreted_present: self.reinterpreted_present,
+        };
+        pflow.generate_blocks()?;
+        let res = action::jumptable_partial(&mut p, self.arch, stack);
+        if res.is_ok() {
+            if !stack {
+                jumptable::fold_constants(&mut p, self.arch);
+            }
+            jumptable::calc_nz_mask(&mut p, self.arch);
+        }
+        Ok((p, res))
+    }
+
     fn stage_jump_table(&mut self, partial: &mut Partial, op: OpId) -> Result<Staged> {
         match partial {
             Partial::Failed => {
@@ -572,24 +641,19 @@ impl Flow<'_> {
                 return err("jump table: a second table after the partial function's action failed is not ported");
             }
             Partial::None => {
-                let mut p = self.fd.clone();
-                p.jumptablerecovery_on = true;
-                let (nw, nc) = (p.warnings.len(), p.comments.len());
-                let mut pflow = Flow {
-                    fd: &mut p,
-                    arch: self.arch,
-                    parse: self.arch.sleigh.new_parse(),
-                    visited: self.visited.clone(),
-                    addrlist: Vec::new(),
-                    tablelist: Vec::new(),
-                    injectlist: Vec::new(),
-                    insn_count: 0,
-                    baddata_count: 0,
-                    // the copy constructor copies `flags`
-                    reinterpreted_present: self.reinterpreted_present,
-                };
-                pflow.generate_blocks()?;
-                let res = action::jumptable_partial(&mut p, self.arch);
+                let (nw, nc) = (self.fd.warnings.len(), self.fd.comments.len());
+                let (mut p, mut res) = self.build_partial(true)?;
+                // The stack heritage of the partial function reached a path ghidra-rs does not
+                // port (the value-set ranges of an indexed stack LOAD): the table is recovered
+                // from the partial function without the `stackvars` rules instead, and the
+                // error is kept for a table that one does not give (below).
+                let mut unported = None;
+                if let Err(e) = &res {
+                    if e.is_unported() {
+                        unported = Some(LowlevelError(e.0.clone()));
+                        (p, res) = self.build_partial(false)?;
+                    }
+                }
                 self.carry_warnings(&p, nw, nc);
                 if let Err(e) = res {
                     // An error of the jumptable action fails the table, as in the C++
@@ -602,13 +666,11 @@ impl Flow<'_> {
                     *partial = Partial::Failed;
                     return Ok(Err(Fail::Normal(e.0)));
                 }
-                jumptable::fold_constants(&mut p, self.arch);
-                jumptable::calc_nz_mask(&mut p, self.arch);
-                *partial = Partial::Ready(Box::new(p));
+                *partial = Partial::Ready(Box::new(p), unported);
             }
-            Partial::Ready(_) => {}
+            Partial::Ready(..) => {}
         }
-        let Partial::Ready(p) = partial else { return err("jump table: no partial function") };
+        let Partial::Ready(p, unported) = partial else { return err("jump table: no partial function") };
         let p: &Funcdata = p;
         if std::env::var("GHIDRA_RS_JT_DEBUG").is_ok_and(|v| v == "2") {
             eprintln!("{}", super::print_raw(p, self.arch).unwrap_or_default());
@@ -620,9 +682,8 @@ impl Flow<'_> {
         if partop.is_dead() {
             return Ok(Ok((Vec::new(), None)));
         }
-        // `testForReturnAddress` (fail_return, "Treating indirect jump as return") is not
-        // ported: a target traced back through COPY, INDIRECT and INT_AND with a constant to
-        // the input at stack offset 0 (x86's return address) fails loudly instead.
+        // `testForReturnAddress` (fail_return): a target traced back through COPY, INDIRECT and
+        // INT_AND with a constant to the input at stack offset 0 (x86's 4-byte return address)
         let mut vn = p.op(op).ins[0];
         while let Some(d) = p.vn(vn).def {
             let o = p.op(d);
@@ -633,12 +694,38 @@ impl Flow<'_> {
             }
         }
         let root = p.vn(vn);
-        if root.def.is_none() && root.space == Space::Stack && root.offset == 0 && root.is_input() {
-            return err(
-                "jump table: an indirect jump to the return address (testForReturnAddress, fail_return) is not ported",
-            );
+        if root.def.is_none() && root.space == Space::Stack && root.offset == 0 && root.size == 4 && root.is_input() {
+            return Ok(Err(Fail::Return));
         }
-        let res = jumptable::recover_addresses(p, self.arch, op);
+        let mut res = jumptable::recover_addresses(p, self.arch, op);
+        if matches!(res, Err(Fail::Normal(_))) {
+            // The partial function without the stack rules gives no table either. When the jump
+            // depends on the stack pointer, the stack rules could have given one: the error of
+            // the partial function with them. Otherwise they change nothing the jump reads.
+            let (sp, off, _) = self.arch.spec.stack_pointer;
+            let on_sp = |vn: VarnodeId| p.vn(vn).space == Space::Sleigh(sp) && p.vn(vn).offset == off;
+            if let Some(e) = unported.as_ref().filter(|_| jump_reads(p, op, on_sp)) {
+                return Err(LowlevelError(e.0.clone()));
+            }
+            if unported.is_none() && reads_stack_indirect(p, op) {
+                // In the C++ partial function `ActionRestructureVarnode` and `RuleAliasUpdate`
+                // (`opCollapseIndirectsForAlias`, with the value-set ranges of the STORE
+                // guards) remove the INDIRECTs of stack varnodes nothing can alias; neither is
+                // ported, so the reference may recover this table. The partial function without
+                // the stack rules has no such INDIRECT: its table, or a loud failure.
+                // ponytail: rebuilt per failing jump, its warnings dropped; keep it beside the
+                // first partial if a function with many such jumps gets slow
+                let (p2, r2) = self.build_partial(false)?;
+                if r2.is_ok() {
+                    res = jumptable::recover_addresses(&p2, self.arch, op);
+                }
+                if matches!(res, Err(Fail::Normal(_))) {
+                    return err(
+                        "jump table: the jump reads a stack varnode through an INDIRECT that RuleAliasUpdate may collapse (ActionRestructureVarnode in the partial function): not ported",
+                    );
+                }
+            }
+        }
         if let Ok((.., true)) = res {
             // `fd->warning` on the partial function: its prefix, into the shared database
             let addr = self.fd.op(op).seq.addr;

@@ -248,8 +248,13 @@ pub(crate) fn space_delay(arch: &Arch, space: Space) -> Option<i32> {
 
 impl Heritage {
     /// Port of `Heritage::deadRemovalAllowed`: dead code may go from a space once it has been
-    /// heritaged (its dead-code delay is its heritage delay; x86 sets no other).
+    /// heritaged (its dead-code delay is its heritage delay; x86 sets no other); from the join
+    /// space, never heritaged, after the first pass.
     pub(crate) fn dead_removal_allowed(&self, arch: &Arch, space: Space) -> bool {
+        if space == Space::Join {
+            // not heritaged (`HeritageInfo` keeps its dead-code delay, 0)
+            return self.pass > 0;
+        }
         space_delay(arch, space).is_some_and(|d| self.pass > d)
     }
 

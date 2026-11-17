@@ -158,11 +158,9 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
         ],
     ));
     // oppool2 (stage R5): the `typerecovery` pointer rules and the `stackvars` rules.
-    // ponytail: the jump-table partial function still folds its constant loads itself
-    // (`jumptable::fold_constants`) and runs without the `stackvars` rules, which the C++ has
-    // on there; switch them on with `fillinReadOnly` when `fold_constants` goes.
-    let pool2 =
-        super::rules::select(super::rules::OPPOOL2, |rl| rule_on(rl) && !(jumptable && rl.group == "stackvars"));
+    // The `stackvars` rules are on in the jump-table partial function too, as in the C++
+    // (superseded: "runs without the `stackvars` rules"; see [`jumptable_partial`]).
+    let pool2 = super::rules::select(super::rules::OPPOOL2, rule_on);
     mainloop.push(t.pool("oppool2", pool2));
     mainloop.extend(leaves(
         &mut t,
@@ -275,11 +273,14 @@ const PARTIAL_SKIP: &[&str] = &[
 /// The `jumptable` root action (`buildDefaultGroups`: groups `base`, `noproto`, `analysis`, ...)
 /// run on the partial function of jump-table recovery (`Funcdata::stageJumpTable`): the tree of
 /// [`universal`] with the `jumptable` groups, every ported rule on (`togglerule` and `option
-/// currentaction` reach only the `decompile` root), less the actions of [`PARTIAL_SKIP`]. The
-/// rules of later stages (R3 to R5, with `RuleLoadVarnode`) are missing from it; `jumptable.rs`
-/// folds the read-only loads they would resolve.
-pub(crate) fn jumptable_partial(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
-    match tree(true, &std::collections::HashSet::new()).perform(fd, arch)? {
+/// currentaction` reach only the `decompile` root), less the actions of [`PARTIAL_SKIP`].
+/// `stack` false leaves out the `stackvars` rules (`RuleLoadVarnode`, `RuleStoreVarnode`), for
+/// the partial function flow.rs falls back to when the stack heritage reaches a path not
+/// ported; `jumptable::fold_constants` then folds the read-only loads. Superseded: "the rules
+/// of later stages (R3 to R5, with `RuleLoadVarnode`) are missing from it".
+pub(crate) fn jumptable_partial(fd: &mut Funcdata, arch: &Arch, stack: bool) -> Result<()> {
+    let off: &[&str] = if stack { &[] } else { &["rule:loadvarnode", "rule:storevarnode"] };
+    match tree(true, &off.iter().map(|s| s.to_string()).collect()).perform(fd, arch)? {
         super::actiontree::Outcome::Complete => Ok(()),
         super::actiontree::Outcome::Break(at) => err(format!("the jumptable action stopped at {at}")),
     }

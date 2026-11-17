@@ -11,12 +11,15 @@
 //! - The partial function is simplified by the `jumptable` root action as far as it is ported
 //!   (`action::jumptable_partial`: the main loop with dead code, heritage and the rule pool of
 //!   stages R1 and R2), so the guards are read as the C++ reads them (`analyzeGuards`: the
-//!   CBRANCH condition and two pull-backs). One stand-in is left: [`konst`] also folds what the
-//!   rules of later stages would (a load from read-only memory, `RuleLoadVarnode`, stage R5, and
-//!   the constant operations after it). Superseded (stage R2): the stand-ins reading x86 flag
-//!   logic as one comparison (`cond_range`) and a commutative op's constant in slot 0 are gone.
-//!   The stack is not heritaged, so a switch variable kept on the stack is matched through its
-//!   two LOADs (`GuardRecord::valueMatch` code 2), as the C++ does for memory it cannot heritage.
+//!   CBRANCH condition and two pull-backs). The partial function runs with the `stackvars`
+//!   rules, as in the C++, so the stack is heritaged there (superseded: "The stack is not
+//!   heritaged", "One stand-in is left"). When its stack heritage reaches a path not ported,
+//!   flow.rs falls back to the partial function without those rules (`Flow::build_partial`);
+//!   only there [`konst`] still folds what `RuleLoadVarnode` would (a load from read-only
+//!   memory and the constant operations after it), and a switch variable kept on the stack is
+//!   matched through its two LOADs (`GuardRecord::valueMatch` code 2). Superseded (stage R2):
+//!   the stand-ins reading x86 flag logic as one comparison (`cond_range`) and a commutative
+//!   op's constant in slot 0 are gone.
 //! - The second half of the file is the action `switchnorm` on the function itself
 //!   (`ActionSwitchNorm`: `JumpTable::matchModel`, `recoverLabels` with `findUnnormalized`,
 //!   `buildLabels` and `backup2Switch`, `foldInNormalization`, `foldInGuards`, and
@@ -25,10 +28,10 @@
 //!   `funcdata::JumpTable`.
 //! - Not ported: `JumpAssisted` (x86 has no `jumpassist` user op), `JumpBasicOverride`
 //!   (overrides; the console sets none), multistage tables (`matchModel` fails loudly on the
-//!   restart), LOAD collection (`record_jumploads` is off by default), `testForReturnAddress`
-//!   (a target traced to the input at stack offset 0 fails loudly in flow.rs), the reverse of
+//!   restart), LOAD collection (`record_jumploads` is off by default), the reverse of
 //!   a shift in `backup2Switch` (not reachable: `findUnnormalized` steps over ADD, SUB and
-//!   extensions).
+//!   extensions). Superseded: "`testForReturnAddress` fails loudly": flow.rs ports it
+//!   (`Fail::Return`, the jump becomes a RETURN).
 
 use super::block::BlockId;
 use super::coreaction::{minimal_mask, structure_reset};
@@ -53,6 +56,8 @@ pub(crate) enum Fail {
     Thunk,
     /// `fail_callother`
     Callother,
+    /// `fail_return`
+    Return,
 }
 
 /// `getNZMask`: from [`calc_nz_mask`], else (before it runs) a constant's value or every bit.

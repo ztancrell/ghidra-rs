@@ -1091,7 +1091,7 @@ instruction limit); ghidra-rs takes 49 s on it, the reference had not finished a
 Not ported, and why: `fail_callother` (an address made by a CALLOTHER; ghidra-rs stops with
 an error: 2 functions in obfuscated code, 0x1c3c0d9 and 0x1c3c0fa), `fail_return`
 (`testForReturnAddress`; superseded: "not heritaged yet": since slice 3B a target traced to
-the input at stack offset 0 fails loudly in flow.rs), the retry of
+the input at stack offset 0 fails loudly in flow.rs; superseded again: ported on `m3-swsilent`, see "Switch corpus silent misses"), the retry of
 a table whose switch looks unreachable (it needs a guard folded to a constant; it is taken as
 complete), `checkUnrolledGuard`, multistage tables, overrides, `JumpAssisted`.
 
@@ -2671,6 +2671,7 @@ counts as the table; M8 all 55 checks as before. Not run: the full pass (`bars-q
   - `testForReturnAddress` (`fail_return`, "Treating indirect jump as return") fails loudly
     when the jump's target traces through COPY, INDIRECT and INT_AND by a constant to the
     input at stack offset 0.
+    Superseded (branch `m3-swsilent`): ported, the jump becomes a RETURN with that warning.
   - Audited and not reachable: "Subroutine does not return" and "Does not return" (ghidra-rs
     has no non-returning prototype, and `fail_callother` fails loudly), "Function flow out of
     bounds" (flow covers the whole space and inlining is not ported), `ActionPrototypeWarnings`
@@ -2845,6 +2846,60 @@ divergence is in an earlier stage. Two M500 pairs run on the Mac (`r5dtlocksv`, 
 M500 misses above that now print identically are the check. Not seen in a check: `LZCOUNT` (no
 M500 function failed on it before), and which of the two field-extraction forms (`sym.field`,
 `x.field`) the 19 functions take.
+
+### Switch corpus silent misses (branch `m3-swsilent`, 2026-11-16)
+
+The 60 silent misses of `swfs-r` and `swfsc-r` on the switch corpus (the same 60 functions), by
+cause:
+
+| cause | functions | now |
+|---|---|---|
+| the jump-table partial function ran without the `stackvars` rules, so a jump through a stack slot (SecuROM code past 0x1000000) was not recovered ("Too many branches", the jump became a call) | 56 | identical |
+| the same, and the jump goes to the return address (`testForReturnAddress`, `fail_return`) | 1 (0x1b0d29d) | identical |
+| the same, and the stack heritage of the partial function needs the value-set range of an indexed stack LOAD (`LoadGuard`, not ported) | 1 (0x1b0c190) | loud |
+| the same, and the jump reads a stack varnode through the INDIRECT of a STORE that `RuleAliasUpdate` collapses in the C++ (`ActionRestructureVarnode`, not ported) | 1 (0x1c69c5a) | loud |
+| `ActionConditionalExe` (not ported) removes a block re-testing an equal condition held in another varnode | 1 (0x5a3c30) | loud |
+
+What changed:
+
+- The partial function of jump-table recovery runs with `RuleLoadVarnode` and `RuleStoreVarnode`,
+  as in the C++ (`action.rs`; superseded: "runs without the `stackvars` rules" in "Stage R5" and
+  the notes on `jumptable::fold_constants` above). When its stack heritage fails on a path not
+  ported, flow.rs builds the partial function without the two rules (`Flow::build_partial`, with
+  `fold_constants`, as before this branch). A table that one does not give either ends the
+  decompile with the first error when the jump depends on the stack pointer; otherwise the jump
+  fails as in the C++ (warning, the jump becomes a call).
+- A table that fails while the jump reads a stack varnode through the INDIRECT of a STORE is tried
+  on the partial function without the stack rules, and fails loudly when that gives none. The
+  INDIRECT of a call is not checked.
+- `fail_return` is ported: the jump becomes a RETURN, with "Treating indirect jump as return".
+- The loud test of `ActionConditionalExe` compares the two conditions as `verifySameCondition`
+  does (`BooleanMatch`, same or complementary), not only one shared varnode, and passes a block
+  holding an op `testRemovability` never moves (a call, LOAD, STORE, INDIRECT, an address-tied
+  output), which the C++ leaves alone. In the partial function the test stays one shared varnode.
+- `ActionDeadCode` covers the join space (never heritaged, dead code after the first pass): an
+  unused `j{EDX,EAX}:8` call output goes, as in the reference (0x4f3366 in `swfs-t`).
+
+Switch corpus, of the 2,004 functions the reference finishes (before: the full pass on
+8f3c8d178c; after: the reference outputs of one `bars.sh` run, ghidra-rs rerun on them with the
+final build):
+
+| check | before | after |
+|---|---|---|
+| `paramdouble` | 1947 (loud 0, silent 57) | 1999 (loud 5, silent 0) |
+| `swsn-r` | 1943 (loud 0, silent 61) | 1994 (loud 7, silent 3) |
+| `swfs-r` | 1937 (loud 7, silent 60) | 1991 (loud 13, silent 0) |
+
+Identical before and loud now: 0x546d40, 0x5629d0, 0x78e7d0 (no table from either partial
+function, the jump depends on the stack pointer, the indexed stack LOAD error; the reference fails
+these tables too) and 0x23f4238 in `swsn-r` (a multistage table, `switchnorm` not ported; in
+`swfs-r` it was loud before, `mergeAddrTied`). The 3 silent left in `swsn-r` (0x8d8f40, 0x8eabe0,
+0x8ead90: the global at 0x00b0511c prints as `code() *` in the reference, `xunknown4` in
+ghidra-rs) are not in the 60 and were not traced; the count says they were silent before (61 = 58
+of the 60 + 3). M8: all 55 checks identical. Not run on the final build: `swfsc-r`, `swfs-t`, `swsn-t`, `pcc-*` on
+the switch corpus, and M500 (0x4f3366 alone is identical in `swfs-t`). No unit test was added: the
+functions above are the check. A panic of ghidra-rs prints before the buffered console output,
+so `decomp-diff.sh` cuts its message and `bars.sh` counts it as silent, not loud.
 
 ## Speed
 
