@@ -33,8 +33,10 @@ cd "$(dirname "$0")/.." || exit 1
 t=$PWD/tools; c=$t/corpus; o=${OUT:-$PWD/target/bars}; l=$PWD/target/locks
 export JOBS=${JOBS:-$(nproc)} TIMEOUT=${TIMEOUT:-120}
 mkdir -p "$o"
-S3=multicse,shadowvar,condconst                   # rule-stage actions not ported, skipped on both engines
-L=restructure_varnode,mapped_local_sync           # the same for `localrecovery`
+# Rule-stage actions the older checks skip on both engines, as they did before the actions were
+# ported (branch `m3-default`); `pcd` and `pmd` run them. (Superseded: "not ported".)
+S3=multicse,shadowvar,condconst
+L=restructure_varnode,mapped_local_sync           # the same for `localrecovery` (ported: "Local symbols")
 S=inputprototype,mapglobals,namevars,setcasts     # the leaves before finalstructure
 SC=inputprototype,mapglobals,namevars          # the same with `setcasts` on (stage S9)
 # default options (`pcd`): every action leaf not ported yet, skipped on both engines. Shrinks as

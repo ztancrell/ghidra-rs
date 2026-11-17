@@ -373,6 +373,12 @@ impl AddTree {
                         return err("RulePtrArith into a locked stack parameter of struct, union or array type (TypeSpacebase::nearestArrayedComponent): not implemented in ghidra-rs yet");
                     }
                 }
+                // the data symbols of the facts (stage S10): none near may be arrayed
+                if let Some(facts) = arch.facts.as_ref().filter(|_| !local) {
+                    if facts.composite_near(&mut fd.types, addr)? {
+                        return err("RulePtrArith near a data symbol of struct, union or array type (TypeSpacebase::nearestArrayedComponent): not implemented in ghidra-rs yet");
+                    }
+                }
                 // the offset into the mapped variable: of an array symbol near it (preferring the
                 // element size of the index), else of the symbol holding it
                 use crate::decomp::infertypes::nearest_arrayed_component as nearest;

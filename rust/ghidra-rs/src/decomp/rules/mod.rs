@@ -104,7 +104,9 @@ const fn r(name: &'static str, group: &'static str, ops: &'static [Opcode], appl
 
 /// A rule of the C++ pool that is not ported. The `decompile` root refuses to run while one is
 /// on (`pool::select`); in the `jumptable` root, which no option reaches, it fails on the first op
-/// it would be tried on.
+/// it would be tried on. No table has one now (`segment` and `ptrsubcharconstant` were the last
+/// two): only the test below uses it, until the C++ pools gain a rule.
+#[cfg_attr(not(test), allow(dead_code))]
 const fn u(name: &'static str, group: &'static str, ops: &'static [Opcode]) -> Rule {
     Rule { name, group, ops, apply: rule_not_ported }
 }
@@ -308,7 +310,7 @@ pub(crate) const CLEANUP: &[Rule] = &[
     r("subright", "cleanup", &[Subpiece], sub_right),
     r("floatsigncleanup", "cleanup", &[IntAnd, IntXor], float_sign_cleanup),
     r("expandload", "cleanup", &[Load], expand_load),
-    u("ptrsubcharconstant", "cleanup", &[Ptrsub]),
+    r("ptrsubcharconstant", "cleanup", &[Ptrsub], ptrsub_char_constant),
     r("extensionpush", "cleanup", &[IntZext, IntSext], extension_push),
     r("piecestructure", "cleanup", &[Piece, IntZext], piece_structure),
     r("andstructure", "cleanup", &[IntAnd], and_structure),

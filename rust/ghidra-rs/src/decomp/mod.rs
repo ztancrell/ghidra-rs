@@ -22,6 +22,7 @@ mod cover;
 mod cparse;
 mod cspec;
 mod emulate;
+mod facts;
 mod finalstructure;
 mod flow;
 mod fspec;
@@ -72,6 +73,7 @@ use std::collections::{BTreeMap, HashMap};
 pub use funcdata::Funcdata;
 pub(crate) use infertypes::symbol_types;
 pub use print::print_raw;
+pub(crate) use printc::is_string;
 pub use printc::print_c;
 
 /// `print map` (`IfcPrintMap` without a name): the bounds and symbols of the local scope.
@@ -171,9 +173,55 @@ pub struct Arch {
     /// the program-wide data-types (`Architecture::types`): the core types and those `parse
     /// line` defines; each decompile starts from a copy
     pub(crate) types: types::TypeFactory,
+    /// `load facts` (stage S10): the facts of a Ghidra program, which stand in for the Java
+    /// side of Ghidra's decompiler (names, data symbols, prototypes, memory properties)
+    pub(crate) facts: Option<Box<facts::Facts>>,
 }
 
 impl Arch {
+    /// `load facts <file>`: from here on the program is what the facts say, as Java Ghidra
+    /// tells its decompiler: Ghidra's core types replace the console's, the functions and
+    /// external references are the listing's, and read-only memory is the listing's too.
+    pub fn load_facts(&mut self, text: String) -> Result<()> {
+        let f = facts::Facts::load(self, text)?;
+        self.facts = Some(Box::new(f));
+        Ok(())
+    }
+
+    /// What a decompile of `fd` starts from with facts (`Funcdata::decode` of the function's
+    /// record and the queries Java answers for it): its prototype, the names recommended for
+    /// its variables, the listing's comments, and the tracked registers at its entry
+    /// (`ContextGhidra::getTrackedSet`), which replace the processor spec's. Nothing without
+    /// facts.
+    pub fn start_function(&mut self, fd: &mut Funcdata) -> Result<()> {
+        let Some(facts) = &self.facts else { return Ok(()) };
+        let f = facts.function(self, &mut fd.types, fd.entry, true)?;
+        fd.proto = f.proto;
+        fd.name_recs = f.name_recs;
+        fd.listing_comments = facts.comments(fd.entry)?;
+        self.tracked = facts.tracked(self, fd.entry)?;
+        Ok(())
+    }
+
+    /// Whether a data symbol of the facts holds the whole of `size` bytes at `off`
+    /// (`Scope::queryContainer`): such a varnode is linked to the symbol when it is made, every
+    /// data symbol Java Ghidra sends being type-locked.
+    pub(crate) fn data_holds(&self, off: u64, size: u32) -> bool {
+        let range = self.facts.as_ref().and_then(|f| f.data_range(off));
+        range.is_some_and(|(first, len)| off + u64::from(size) <= first + len)
+    }
+
+    /// The prototype a call to the function at `entry` starts from (`Scope::queryFunction`
+    /// and its `FuncProto`), none without a function there. With facts it is decoded from the
+    /// function's record, its data-types into `types`.
+    pub(crate) fn callee_proto(&self, types: &mut types::TypeFactory, entry: u64) -> Result<Option<FuncProto>> {
+        let Some(f) = self.functions.get(&entry) else { return Ok(None) };
+        match &self.facts {
+            Some(facts) => Ok(Some(facts.function(self, types, entry, false)?.proto)),
+            None => Ok(Some(f.proto.clone())),
+        }
+    }
+
     /// An architecture for `image` decoded by `sleigh`, with the compiler spec `cspec` (the
     /// text of a `.cspec` file).
     pub fn new(sleigh: Sleigh, image: Image, cspec: &str) -> Result<Arch> {
@@ -228,6 +276,7 @@ impl Arch {
             readonly_propagate: false,
             nan_ignore_all: false,
             types: type_factory,
+            facts: None,
         })
     }
 
@@ -278,6 +327,11 @@ impl Arch {
     /// starts from; an unlocked one starts fresh, as every corpus script decompiles once.
     pub(crate) fn function_proto(&self, entry: u64) -> Option<FuncProto> {
         self.functions.get(&entry).filter(|f| f.proto.locked.is_some()).map(|f| f.proto.clone())
+    }
+
+    /// The name of the function at `entry`, if one is mapped there.
+    pub fn function_name(&self, entry: u64) -> Option<&str> {
+        self.functions.get(&entry).map(|f| f.name.as_str())
     }
 
     pub(crate) fn add_function(&mut self, entry: u64, name: String) {
@@ -335,6 +389,9 @@ impl Arch {
         let ptr = u64::from(self.externref_size());
         let in_externref =
             (off.saturating_sub(ptr - 1)..=off).any(|slot| self.externrefs.contains_key(&slot) && end <= slot + ptr);
+        if let Some(facts) = &self.facts {
+            return !in_externref && facts.readonly(off);
+        }
         !in_externref && self.readonly.iter().any(|&(s, e)| s <= off && off < e)
     }
 

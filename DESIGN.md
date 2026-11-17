@@ -111,6 +111,14 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   regression and blocks the merge. First case: slice 4 on the switch corpus (`pcc-r` and `pcc-t`
   silent 1 and 0 -> 60, all listed by `swfs-r`, `swsn-r` or `swfs-t`). User's decision
   ("progress that exposes bugs"); the guard against unlisted silents is Claude's wording.
+- 2026-11-17: The facts ghidra-rs derives itself (`analyze --facts`) come from faithful ports of
+  Ghidra's Java analyzers, not from approximations of them. Asked whether approximated facts
+  (stack variables, data sizes, strings and pointers at references) may silently change the
+  decompiled C, the user answered: "I would port the Ghidra analyzer next to Rust." Each record a
+  port makes exact loses its approximation; whatever is still approximated stays written and
+  measured (`tools/facts-diff.sh`) and is listed in `rust/README.md`, "Stage S10, slice 3".
+  Superseded: the part of the open question of S10 slice 2 that let "a rule of Ghidra's analyzers
+  ported with an approximation" stand as the way to go.
 
 ## Milestones
 
@@ -349,8 +357,9 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    Superseded: the switch counts and "Open" of the line above, `pcd` 415 / 497 in the `m3-default` line.
    Pieces of symbols (2026-11-17): `finalizeDatatype` through `getExactPiece`, `pushMismatchSymbol`, the validity
    test of `HeapSequence`: `pcd` M500 474 / 497 (loud 23, silent 0; was 422, loud 75), `r5c` M500 498 / 498.
-   Decided: where the C++ orders by `HighVariable` address (`snipOutputInterference` over several variables of a
-   group) ghidra-rs fails loudly; the order is the allocator's and cannot be reproduced (0x4130d0).
+   Where the C++ orders by `HighVariable` address (`snipOutputInterference` over several variables of a
+   group) ghidra-rs fails loudly (0x4130d0): Claude's call, see "Open questions". (Superseded: this was
+   written here as "Decided"; only the user decides.)
    Local symbols (2026-11-17): `restructure_varnode` and `mapped_local_sync` run in the `decompile` root (typed range
    hints, symbols of the local scope, `syncVarnodesWithSymbols` with data-types), so `pcd` skips no action: M8
    8 / 8, M500 463 / 499 (loud 36, silent 0), simple 188 / 200 (loud 12, silent 0). New check `pmd` (symbols and typed
@@ -367,6 +376,37 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    M8 56 checks unchanged; M500 rule checks equal or better, silent 0; switch `pcc-r` 1997 / 2005, `swsn-r` 1993 / 2004
    (silent 3) unchanged. First `pcd` on the switch corpus: 1788 / 1994 (loud 199, silent 7, all 7 older than the branch);
    the new rules change 81 reference outputs there, 55 identical here, 25 loud, 1 of the 7 silent.
+   S10 (2026-11-17), check and inventory only: `tools/ghidra-diff.sh` against Java Ghidra, M8 identical 0 / 7
+   (loud 7; Java has no function at 0x54c990), M500 Java finishes 499 / 500. Blocked: eight actions of the
+   default `decompile` are not ported (`restructure_varnode`, `mapped_local_sync`, `multicse`, `shadowvar`,
+   `condconst`, `directwrite`, `dynamicsymbols`, `prototypewarnings`); with them skipped on both engines and
+   default options, M8 8 / 8 and M500 410 / 500 against `decomp_dbg` (loud 78, silent 11, in no `bars.sh`
+   check). See `rust/README.md`, "Stage S10".
+   S10 slice 1 (2026-11-17): the facts of the Ghidra project (`tools/ghidra/ExportFacts.java`: what Java
+   answers its decompiler, recorded as XML) and the console command `load facts` (`decomp/facts.rs`): Ghidra's
+   type names, function and data names, prototypes, read-only memory, comments, labels, `local_` names. With the
+   eight actions skipped: M8 identical 3 / 7 (the other four need the eight), M500 identical 192 / 499 (loud 72, silent 235). Still
+   blocked on the eight. See `rust/README.md`, "Stage S10, slice 1".
+   Review fixes (2026-11-17): panics with facts, strings read as Java reads them, labels at every instruction,
+   undefined read-only bytes, `FACTS=0`; four silent cases made loud; facts file version 2. Superseded: "loud 72,
+   silent 235" (the slice's final build: loud 70, silent 237; the same after the fixes). See `rust/README.md`,
+   "Stage S10, slice 1: review fixes". The checks against `decomp_dbg` (M8 all 55, M500 six) equal the baseline.
+   S10 slice 2 (2026-11-17): `ghidra-rs analyze --facts` writes the same facts from ghidra-rs's own analysis
+   (`factsout.rs`), so `load facts` needs no Java project: functions, bodies, names, purge, stack variables,
+   imports with the prototypes of Ghidra's Windows archive (a one-time headless export,
+   `tools/ghidra-protos.sh`), data symbols, strings and pointers at references, labels, read-only blocks,
+   tracked registers, flow overrides. What it does not derive is an `underived` record and fails when a
+   decompile reads it. `tools/facts-diff.sh` compares with the Java facts per record kind (mercs2, with
+   Java's function set: `func` 80.6%, `body` 98.1%, `extref` 90.0%, `data` 47.1%, `label` 94.9% equal; `ghidra-diff.sh` M8 identical 2 / 7 against 3 / 7 with the Java facts, M500 171 / 499 against 192 / 499). See `rust/README.md`, "Stage S10, slice 2".
+   S10 slice 3 (2026-11-17), after the decision "port the Ghidra analyzer" (see Decided): five pieces of Ghidra's
+   analyzers ported for `analyze --facts`: address tables at instruction references and the pseudo-disassembler's
+   body checks (`OperandReferenceAnalyzer`, `AddressTable`, `PseudoDisassembler`), the purges the stack analysis has
+   at a call (`SymbolicPropogator.getFunctionPurge`), the ASCII Strings analyzer with its trigram model
+   (`strings.rs`), data through an address a register holds, Function ID's plate comments. mercs2 with Java's
+   function set: `func` 81.2%, `data` 84.9%, `string` 90.5%, `undef` 95.6%, `wref` 84.9%, `comments` 71.0% equal
+   (slice 2: 80.6%, 47.1%, 51.6%, 92.6%, 62.6%, 0%); `label` 94.7% (94.9%). `ghidra-diff.sh` M8 identical 2 / 7,
+   M500 173 / 499 (171). Shadow check: same 56,003, differ 60 (55,996, 61). Still approximated: Ghidra's order of
+   analysis. See `rust/README.md`, "Stage S10, slice 3".
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
@@ -375,8 +415,57 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.
+   In part on branch `worktree-agent-af1e2713bbdee8eab` (2026-11-17): the project store as one plain
+   text file (`store.rs`: created and removed functions, fixed bodies, no-return flags, flow
+   overrides, thunk marks, switch targets, laid over a fresh analysis by `analyze --store`) and
+   mercs2's five project-editing scripts as `ghidra-rs edit` commands (`edits.rs`). On
+   Mercenaries2.analysis.exe the store brings the `.text` functions shared with the Java project
+   from 20422 to 36602 of 37635 (36178 with the same body size). Not ported, failing by name:
+   ExportBindings `--recover`, AuditRecoveredFunctions `--remove-empty`. Details in
+   `rust/README.md`, "Project store and the editing scripts".
 
 ## Open questions
 
-None open. Superseded: "where the edits of mercs2's five project-editing scripts live", decided
-2026-11-15 (plain files, see Decided).
+Superseded: "None open" (until 2026-11-17) and "where the edits of mercs2's five project-editing
+scripts live", decided 2026-11-15 (plain files, see Decided).
+
+- 2026-11-17: Where does ghidra-rs take the facts of a Java Ghidra project from (function and data
+  names, prototypes, data-types, listing data)? S10 slice 1 chose, without the user: an export from
+  the Ghidra project by a headless script, read with the console command `load facts`. The
+  alternative is ghidra-rs's own analysis plus the edit files of the 2026-11-15 decision, which
+  cannot match Java's C wherever Java's analysis differs. To confirm or change.
+  S10 slice 2 built that alternative next to the export (`analyze --facts`, the same file format) and
+  measured it; both exist, the question stays open.
+- 2026-11-17: Choices of S10 slice 2 made without the user, to confirm or change: a part of the facts
+  ghidra-rs does not derive is named (`underived`) and fails the decompile that reads it, while a
+  rule of Ghidra's analyzers ported with an approximation is written and measured instead; a
+  function given by `--seeds` or `--functions-from` that discovery does not find stands for one a
+  script made after auto-analysis (no purge, no stack variables); the import prototypes come from a
+  one-time headless export of Ghidra's archive, not from a `.gdt` reader in Rust (the 2026-11-13
+  decision names data-type archives as data to read in place: not started).
+  Superseded in part: "a rule ... ported with an approximation is written and measured instead" is
+  decided (2026-11-17, see Decided): approximations give way to ports; the other choices stay open.
+- 2026-11-17: Choices of S10 slice 3 made without the user, to confirm or change (`rust/README.md`,
+  "Stage S10, slice 3"): `PseudoDisassembler.checkPseudoBody` is ported whole although, with the
+  references of all discovered code at once, it loses 452 labels of SecuROM's code that Java has
+  (Ghidra's order of analysis is not ported: its task queue would be the next port); `--facts`
+  fails without Ghidra's strings model file; a Function ID comment with a mangled name stays
+  `underived` until the demangler is ported.
+- 2026-11-17: Claude's call (1d, "Pieces of symbols"), awaiting the user: where the C++ orders by
+  `HighVariable` address (`snipOutputInterference` over reads of several variables of one group),
+  ghidra-rs fails loudly instead of guessing the snip order. The order is the C++ allocator's (a
+  new `HighVariable` reuses freed memory) and cannot be reproduced; a guess would be a silent
+  difference (0x4130d0 had two copies swapped). To confirm or change.
+
+Open (asked 2026-11-17, with the project store):
+
+- The Decided entry of 2026-11-15 describes the five editing scripts as "renames, types,
+  comments" and lets them move off Java "after S10". They edit function boundaries, no-return
+  flags and flow overrides, and the store built for them needs no S10. The entry is left as
+  written; a corrected wording waits for the user.
+- The store's choices marked "Claude's call" wait for a yes or no: one file per project, passed
+  as `--store` (not a directory); final state, not a log of edits; a function is not created
+  where nothing decodes (Java makes a one-byte function); derived flow overrides and thunks
+  with only the exceptions stored.
+- Whether ExportBindings `--recover` and AuditRecoveredFunctions `--remove-empty` get ported
+  (both fail by name now), and whether mercs2 switches its pipeline to the store.

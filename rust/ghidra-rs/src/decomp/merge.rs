@@ -220,8 +220,7 @@ fn test_adjacent(fd: &mut Funcdata, hout: HighId, hin: HighId) -> Result<bool> {
     if !test_required(fd, hout, hin)? {
         return Ok(false);
     }
-    // `isNameLock` on both: the name lock comes from the symbols (nothing sets
-    // `Symbol::isIsolated`, tested below in the C++)
+    // `isNameLock` on both: the name lock comes from the symbols
     if matches!((high_symbol(fd, hin), high_symbol(fd, hout)), (Some((_, true)), Some((_, true)))) {
         return Ok(false);
     }
@@ -230,6 +229,14 @@ fn test_adjacent(fd: &mut Funcdata, hout: HighId, hin: HighId) -> Result<bool> {
     }
     if illegal_input(fd, hout)? || illegal_input(fd, hin)? {
         return Ok(false);
+    }
+    // `Symbol::isIsolated` of either symbol: only the data symbols of the facts (stage S10)
+    if !fd.isolated.is_empty() {
+        for h in [hin, hout] {
+            if fd.highs.get(h).inst.iter().any(|vn| fd.isolated.contains(vn)) {
+                return Ok(false);
+            }
+        }
     }
     // no speculative merging of variables in separate overlapping collections
     Ok(piece_of(fd, hout).is_none() || piece_of(fd, hin).is_none())
@@ -1694,6 +1701,7 @@ pub(crate) fn assign_high_action(fd: &mut Funcdata, arch: &Arch) -> Result<i32> 
     // (`setSymbolProperties`); ghidra-rs applies it before each inference pass, which do not run
     // with `typerecovery` off, so once more here, before anything merging reads types
     super::infertypes::symbol_types(fd, arch);
+    super::facts::symbol_types(fd, arch)?;
     set_high_level(fd);
     Ok(0)
 }

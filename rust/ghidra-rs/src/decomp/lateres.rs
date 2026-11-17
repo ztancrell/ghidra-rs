@@ -144,7 +144,7 @@ fn commit_new_inputs(
     let mut trials = ParamActive::subcall(0);
     for (i, p) in locked.inputs.iter().enumerate() {
         let Some(st) = &p.storage else {
-            let size = arch.types.size(p.ty);
+            let size = fd.types.size(p.ty);
             newinput[i + 1] = Some(fd.new_constant(size, 0));
             continue;
         };

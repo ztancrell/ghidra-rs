@@ -50,6 +50,7 @@ pub(crate) fn name_vars(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     }
     let mut namerec = Vec::new();
     link_symbols(fd, arch, &mut namerec)?;
+    recover_name_recommendations(fd)?;
     look_for_bad_jump_tables(fd)?;
     look_for_func_param_names(fd, &namerec)?;
     let mut base = 1;
@@ -74,6 +75,38 @@ pub(crate) fn name_vars(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         fd.symtab.rename_symbol(sym, &name);
     }
     Ok(0)
+}
+
+/// Port of `ScopeLocal::recoverNameRecommendationsForSymbols` for the recommendations the facts
+/// of stage S10 make (`Funcdata::name_recs`: stack variables, without a use point): the
+/// address-tied symbol starting at the recommended storage, when its name is undefined, takes
+/// the name and is name-locked. (`remapVarnode` of the linked varnode changes nothing for a
+/// symbol mapped at that address without a use point.)
+fn recover_name_recommendations(fd: &mut Funcdata) -> Result<()> {
+    for rec in std::mem::take(&mut fd.name_recs) {
+        let super::fspec::Storage::Stack { offset, size } = rec.storage else {
+            return err("namevars: a name recommended for a variable outside the stack is not ported");
+        };
+        // findOverlap: the first entry overlapping the storage, whatever its use point
+        let overlap = fd.symtab.overlapping(LOCAL, Space::Stack, offset, size);
+        let first = overlap.iter().filter_map(|&sym| {
+            let s = fd.symtab.symbol(sym);
+            let end = u128::from(offset) + u128::from(size);
+            let hit = |e: &&SymbolEntry| {
+                e.space == Space::Stack && u128::from(e.offset) < end && offset < e.offset + u64::from(e.size)
+            };
+            s.entries.iter().filter(hit).map(|e| e.offset).min().map(|at| (at, sym))
+        });
+        let Some((at, sym)) = first.min() else { continue };
+        let s = fd.symtab.symbol(sym);
+        if at != offset || !s.flags.addr_tied || !s.is_name_undefined() {
+            continue;
+        }
+        let name = fd.symtab.make_name_unique(LOCAL, &rec.name)?;
+        fd.symtab.rename_symbol(sym, &name);
+        fd.symtab.lock_symbol(sym, false, true);
+    }
+    Ok(())
 }
 
 /// `HighVariable::getSymbol`: the symbol and entry of the first member linked to one, and that
@@ -226,6 +259,7 @@ fn link_symbol(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId) -> Result<Option<S
     if persist {
         // queryProperties: the global scope owns the storage; a variable a function or an external
         // reference holds stays unlinked here and the printer fails on it
+        super::facts::query_symbol(fd, arch, space, offset)?;
         if let Some(GlobalHit::Data(sym, e)) = global_container(fd, arch, space, offset, Some(usepoint))? {
             if !fd.symtab.symbol(sym).entries[e].conflict {
                 fd.mapentry.insert(vn, (sym, e));
@@ -369,6 +403,7 @@ fn link_symbol_reference(fd: &mut Funcdata, arch: &Arch, in0: VarnodeId, off: Va
     let hit = if space == Space::Stack {
         fd.symtab.find_container(LOCAL, Space::Stack, addr, 1, None)?.map(|(s, e)| GlobalHit::Data(s, e))
     } else {
+        super::facts::query_symbol(fd, arch, space, addr)?;
         global_container(fd, arch, space, addr, None)?
     };
     let r = match hit {
@@ -612,5 +647,45 @@ fn build_default_name(
     match index.as_mut() {
         Some(i) => fd.symtab.build_variable_name(LOCAL, &req, i),
         None => fd.symtab.build_variable_name(LOCAL, &req, base),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::decomp::facts::NameRec;
+    use crate::decomp::fspec::Storage;
+
+    #[test]
+    fn name_recommendations_for_stack_variables() {
+        let mut fd = Funcdata::new(0x1000);
+        let entry = |offset| SymbolEntry {
+            space: Space::Stack,
+            offset,
+            size: 4,
+            uselimit: UseLimit::default(),
+            conflict: false,
+            piece: None,
+        };
+        let a = fd.symtab.add_symbol(LOCAL, "", None, None, Some(entry(0xffffff44))).unwrap();
+        let b = fd.symtab.add_symbol(LOCAL, "", None, None, Some(entry(0xffffff48))).unwrap();
+        let c = fd.symtab.add_symbol(LOCAL, "named", None, None, Some(entry(0xffffff50))).unwrap();
+        let rec = |offset, size, name: &str| NameRec { storage: Storage::Stack { offset, size }, name: name.into() };
+        // at a symbol's start; inside one (not its address); at one that has a name; at none
+        fd.name_recs = vec![
+            rec(0xffffff44, 4, "local_bc"),
+            rec(0xffffff4a, 2, "local_b6"),
+            rec(0xffffff50, 4, "local_b0"),
+            rec(0xffffff60, 4, "local_a0"),
+        ];
+        recover_name_recommendations(&mut fd).unwrap();
+        let s = |id| fd.symtab.symbol(id);
+        assert_eq!((s(a).name.as_str(), s(a).flags.name_locked), ("local_bc", true));
+        assert!(s(b).is_name_undefined() && !s(b).flags.name_locked);
+        assert_eq!(s(c).name, "named");
+        assert!(fd.name_recs.is_empty());
+        // a recommendation outside the stack is not ported
+        fd.name_recs = vec![NameRec { storage: Storage::Space { space: 2, offset: 0, size: 4 }, name: "x".into() }];
+        assert!(recover_name_recommendations(&mut fd).is_err());
     }
 }

@@ -281,6 +281,8 @@ pub struct FidDb {
     pub functions: Vec<FidFunction>,
     by_full: HashMap<i64, Vec<usize>>,
     pub strings: HashMap<i64, String>,
+    /// LibrariesTable: family name, version and variant by library id
+    pub libraries: HashMap<i64, [String; 3]>,
     superior: HashSet<i64>,
     inferior: HashSet<i64>,
 }
@@ -306,6 +308,7 @@ impl FidDb {
             functions: Vec::new(),
             by_full: HashMap::new(),
             strings: HashMap::new(),
+            libraries: HashMap::new(),
             superior: HashSet::new(),
             inferior: HashSet::new(),
         };
@@ -326,6 +329,11 @@ impl FidDb {
         }
         bf.records(root("Strings Table")?, None, &mut |key, r| {
             db.strings.insert(key, string_field(r).0);
+        })?;
+        bf.records(root("Libraries Table")?, None, &mut |key, r| {
+            let (family, r) = string_field(r);
+            let (version, r) = string_field(r);
+            db.libraries.insert(key, [family, version, string_field(r).0]);
         })?;
         bf.records(root("Superior Table")?, Some(0), &mut |key, _| {
             db.superior.insert(key);
@@ -412,6 +420,52 @@ fn java_hashset_order(names: &[String]) -> Vec<String> {
 pub struct Applied {
     pub name: String, // raw (mangled) name, or "FID_conflict:<demangled base name>"
     pub conflict: bool,
+    /// the plate comment (`ApplyFidEntriesCommand.generateComment`); `None` where a name is
+    /// mangled, since the comment shows the demangler's full form of it
+    pub comment: Option<String>,
+}
+
+/// `ApplyFidEntriesCommand.generateComment` for matches whose names are not mangled: the kind
+/// of match, up to four of `names` (`MatchNameAnalysis`'s final list), and the libraries of
+/// the matches (`analyzeLibraries`: each as family, version and variant; without the variant,
+/// then the family alone, once there are `MAGIC_MULTIPLE_LIBRARY_LIMIT` of them).
+fn plate_comment(names: &[String], ms: &[Match]) -> String {
+    const MAGIC_MULTIPLE_LIBRARY_LIMIT: usize = 5;
+    // without demangled names the most optimistic count is that of `names`
+    let kind = if names.len() == 1 { "Single Match" } else { "Multiple Matches With Different Base Names" };
+    let mut s = format!("Library Function - {kind}\n");
+    for n in names.iter().take(4) {
+        s += &format!(" {n}\n");
+    }
+    if names.len() > 4 {
+        s += &format!("  {} names - too many to list\n", names.len());
+    }
+    let libs = |parts: usize, stop: bool| {
+        let mut set = BTreeSet::new();
+        for m in ms {
+            if let Some(l) = m.db.libraries.get(&m.f.library) {
+                set.insert(l[..parts].join(" "));
+            }
+            if stop && set.len() >= MAGIC_MULTIPLE_LIBRARY_LIMIT {
+                break;
+            }
+        }
+        set
+    };
+    let mut set = libs(3, true);
+    if set.len() >= MAGIC_MULTIPLE_LIBRARY_LIMIT {
+        set = libs(2, true);
+    }
+    if set.len() >= MAGIC_MULTIPLE_LIBRARY_LIMIT {
+        set = libs(1, false);
+    }
+    s += if set.len() == 1 { "\nLibrary: " } else { "\nLibraries: " };
+    if set.len() < MAGIC_MULTIPLE_LIBRARY_LIMIT {
+        s += &set.into_iter().collect::<Vec<_>>().join(", ");
+    } else {
+        s += &format!("{} - too many to list", set.len());
+    }
+    s
 }
 
 /// Run Function ID over every function of `an` (FidAnalyzer with default options) and
@@ -477,6 +531,7 @@ pub fn apply(
         if exports.contains(&f) {
             continue;
         }
+        let mangled = raw.iter().any(|n| n.starts_with('?') || n.contains('@'));
         let names: Vec<String> = if raw.len() == 1 || similar.len() == 1 {
             vec![raw.first().unwrap().clone()]
         } else if raw.len() > similar.len() {
@@ -484,9 +539,10 @@ pub fn apply(
         } else {
             raw.into_iter().collect()
         };
+        let comment = (!mangled).then(|| plate_comment(&names, &ms));
         if names.len() == 1 {
             primary.insert(names[0].clone());
-            out.insert(f, Applied { name: names[0].clone(), conflict: false });
+            out.insert(f, Applied { name: names[0].clone(), conflict: false, comment });
             continue;
         }
         // addFunctionLabelMultipleMatches: names no other function holds, as labels
@@ -504,13 +560,13 @@ pub fn apply(
         let unused = java_hashset_order(&unused);
         multi.extend(unused.iter().cloned());
         match unused.len() {
-            0 => out.insert(f, Applied { name: String::new(), conflict: false }),
-            1 => out.insert(f, Applied { name: unused[0].clone(), conflict: false }),
+            0 => out.insert(f, Applied { name: String::new(), conflict: false, comment }),
+            1 => out.insert(f, Applied { name: unused[0].clone(), conflict: false, comment }),
             _ => {
                 // applyConflictLabels: the first label is the primary symbol
                 let d = demangle(&unused[0]);
                 let base = d.rsplit("::").next().unwrap_or(&d).to_string();
-                out.insert(f, Applied { name: format!("FID_conflict:{base}"), conflict: true })
+                out.insert(f, Applied { name: format!("FID_conflict:{base}"), conflict: true, comment })
             }
         };
     }

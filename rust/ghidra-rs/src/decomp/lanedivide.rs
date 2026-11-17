@@ -549,7 +549,7 @@ fn process_varnode(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, laned: LanedRe
     }
     for size in check.sizes() {
         let desc = LaneDescription::new(laned.whole_size as i32, size);
-        let trace = LaneDivide::new(fd, &arch.types, vn, desc, mode != Mode::Pieces)?;
+        let trace = LaneDivide::new(fd, &fd.types, vn, desc, mode != Mode::Pieces)?;
         if let Some(tm) = trace.do_trace()? {
             tm.apply(fd, arch)?;
             return Ok(true);

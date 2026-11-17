@@ -185,7 +185,7 @@ ported, then estimated Rust lines.
 | S7 | Merge, high variables | `merge`, `variable`, merge actions, `dynamic` (hashes, needed for saved locals) | 5k → 2.5k | `print raw` with high-variable ids after `copymarker` | M500 ≥ 95% | S6 |
 | S8 | Structuring | rest of `block`, `blockaction`, CFG edits of `funcdata_block` | 5k → 3k | `print tree block` at the end, rules off and then on | M500 ≥ 98% | S4 |
 | S9 | C printing | `printc`, `printlanguage`, `prettyprint`, `comment`, `stringmanage`, naming and cast actions | 7k → 4k | `print C` | all of D passes in our runner; M500 ≥ 95% identical to `decomp_dbg` | S7, S8, R5 |
-| S10 | Ghidra-facing output | Ghidra names (`FUN_`, `DAT_`, `undefined4`), import prototypes, read-only blocks | → 1.5k | our C against `Decompile.java` | M8 identical; M500 ≥ 90% with differences listed | S9 |
+| S10 | Ghidra-facing output | Ghidra names (`FUN_`, `DAT_`, `undefined4`), import prototypes, read-only blocks | → 1.5k | our C against `Decompile.java` | M8 identical; M500 ≥ 90% with differences listed | S9, and the default `decompile` action (see "S10: reference and inventory only, blocked") |
 
 "Print raw with types" and "with high-variable ids" need a small patch to the reference copy
 (`Varnode::printRaw` in `varnode.cc`, about 20 lines), kept under `rust/tools/` and applied by the
@@ -889,6 +889,9 @@ R5 slices 4 and 5 (branch `m3-r5b`, 2026-11-13). Superseded: "constseq.cc, bitfi
   `StringManager::isString`, S9: three M500 functions reach it, 0x4bff10, 0x74d520, 0x766350),
   so the check still switches it off. `threewaycomp`, `conditionalmove`, `orpredicate` (oppool1)
   are not in the plan's R5 row and stay off.
+  Superseded: "Not ported: `ptrsubcharconstant`". S10 slice 1 ports it for the strings of the
+  facts; the checks' option files still switch it off (`kept_off` in `r1-options.sh`), and no
+  check against `decomp_dbg` runs it.
 - Slice 5, `rules/constseq.rs`, `rules/bitfield.rs`: the groups `constsequence` and `bitfields`
   as far as they run without scopes and bit-field types. `stringcopy` never matches (no local
   symbols), `stringstore` fails at `HeapSequence` (not ported); no type has bit-fields, so the four
@@ -2046,6 +2049,81 @@ merge. Checks:
   `switchsingle` on.
 - Not run: the other M500 checks, the other switch checks, `pcd` on the switch corpus again
   with the final build (only the four functions above), `r5d-adc`.
+### S10: reference and inventory only, blocked (2026-11-17)
+
+No decompiler code. `rust/tools/ghidra-diff.sh` and `rust/tools/ghidra/DecompileRef.java` capture
+Java Ghidra's C (the call of mercs2's `Decompile.java`) and compare it with `print C` under
+default options. M8: Java finishes 7 / 8 (no function at 0x54c990 in the Java project),
+ghidra-rs identical 0 / 7, loud 7. M500: Java finishes 499 / 500; `decomp_dbg` identical
+0 / 499.
+
+The gate needs the default `decompile` action, which ghidra-rs finishes for no function: eight
+leaves are not ported (`restructure_varnode`, `mapped_local_sync`, `multicse`, `shadowvar`,
+`condconst`, `directwrite`, `dynamicsymbols`, `prototypewarnings`). The S9 print checks ran with
+the `tail` options and the two `localrecovery` leaves skipped. With the eight skipped on both
+engines and default options: M8 8 / 8 against `decomp_dbg`; M500 410 / 500 (reference ran 498;
+loud 78, silent 11, one reference timeout). So before S10 proper:
+
+1. the eight actions, checked against `decomp_dbg` with default options;
+2. the loud and silent misses that default options reach (list in `rust/README.md`, "Stage S10");
+3. then the Ghidra-facing parts: type and symbol names, the project's prototypes and function
+   set, read-only data, Java's comments (the inventory in `rust/README.md`).
+
+Open, for the user: where ghidra-rs takes the Java project's facts from (an export of the
+Ghidra project, or its own analysis), and the name of the output mode.
+
+### S10 slice 1: the facts of the Ghidra project and `load facts` (2026-11-17)
+
+Item 3 above, done ahead of items 1 and 2 (other branches). Superseded: "Open, for the user"
+above, as far as a first choice goes: the facts are an export of the Ghidra project and the
+mode is the console command `load facts <file>`; both are choices of this slice for the user
+to confirm, and the loader is one module (`decomp/facts.rs`) that another source can replace.
+
+- `rust/tools/ghidra/ExportFacts.java` (run by `rust/tools/ghidra-facts.sh`) records what
+  Java's `DecompileCallback` answers its decompiler, as the XML it sends: functions with
+  prototypes and local symbols, data symbols, external references, data-types, namespaces,
+  comments, labels, tracked registers, flow overrides, memory blocks.
+- `load facts` makes ghidra-rs read them where the C++ asks Java: Ghidra's core types,
+  function and data names, prototypes (model, extrapop, locked parameters, no-return, call
+  fixups), `CALL_RETURN` overrides, data symbols with their data-types and the `_` prefix of
+  `pushMismatchSymbol`, pointers to data symbols and strings (`RulePtrsubCharConstant`), the
+  listing's read-only memory, plate and pre comments, labels, names recommended for stack
+  variables (`local_bc`). What the rest of the port cannot honour fails loudly when a
+  decompile reads it (list in `rust/README.md`, "Stage S10, slice 1").
+- `ghidra-diff.sh` gives ghidra-rs the facts. M8: Java finishes 7 / 8; with default options
+  identical 0 / 7, loud 7 (the eight actions); with the eight skipped identical 3 / 7
+  (0x40a110, 0x58d030, 0x9eec5e), and the other four differ where `decomp_dbg` itself
+  changes when the eight are skipped. M500 with the eight skipped: identical 192 / 499 (loud 72, silent 235).
+- The checks against `decomp_dbg` are unchanged: `pcc-r` 494 / 495 (loud 1), `pcc-t` 495 / 495, `pc-r` 494 / 495 (loud 1), `pc-t` 495 / 495, `nm-r` 498 / 499 (loud 1), `nm-t` 499 / 499: the six lines equal the baseline.
+- Review fixes (2026-11-17, `rust/README.md`, "Stage S10, slice 1: review fixes"): panics with
+  facts, strings as `getStringData` reads them, labels at every instruction, undefined bytes of
+  read-only blocks, `FACTS=0` in `ghidra-diff.sh`, `kept_off` in `r1-options.sh`; call-site
+  extrapop overrides, `uchar` core types, unknown model names and `_ns::name` fail loudly. The
+  facts file is version 2. Superseded: "loud 72, silent 235": the slice's final build gives
+  M500 identical 192 / 499 (loud 70, silent 237), and the fixes change no function's state.
+  The checks against `decomp_dbg` (M8 all 55 lines, the six M500 lines) equal the baseline.
+- Slice 2 (2026-11-17, `rust/README.md`, "Stage S10, slice 2"): `ghidra-rs analyze --facts`
+  writes the facts from ghidra-rs's own analysis (`factsout.rs`), in the same format, so the
+  Java project is not needed to make them; the import prototypes come from a one-time export
+  of Ghidra's Windows archive (`tools/ghidra-protos.sh`). What is not derived is an
+  `underived` record and fails the decompile that reads it. `tools/facts-diff.sh` compares the
+  two facts files per record kind; `ghidra-diff.sh` takes `FACTS=<file>`.
+  mercs2 with Java's function set: `func` 80.6%, `body` 98.1%, `extref` 90.0%, `data` 47.1% equal;
+  `ghidra-diff.sh` with the eight skipped: M8 identical 2 / 7 (3 / 7 with the Java facts), M500
+  171 / 499 (192 / 499). The checks against `decomp_dbg` (M8, 55 lines) equal the baseline.
+- Slice 3 (2026-11-17, `rust/README.md`, "Stage S10, slice 3"), after the user's decision to port
+  Ghidra's analyzers instead of approximating them: address tables at instruction references
+  and `checkPseudoBody` (`OperandReferenceAnalyzer`, `AddressTable`, `PseudoDisassembler`),
+  call-site purges for the stack analysis (`SymbolicPropogator.getFunctionPurge`), the ASCII
+  Strings analyzer (`strings.rs`, Ghidra's trigram model file), data through an address a
+  register holds, Function ID's plate comments. mercs2 with Java's function set: `func` 81.2%,
+  `data` 84.9%, `string` 90.5%, `comments` 71.0% equal (superseded: "`func` 80.6% ... `data`
+  47.1%" above); `ghidra-diff.sh` M8 identical 2 / 7, M500 173 / 499. Not ported: the
+  demangler, Ghidra's order of analysis (its task queue), switch-case labels, the loader's and
+  RTTI structures.
+
+Still before the gate: the eight actions (item 1), the misses default options reach (item 2),
+and from this slice the struct and union symbols and the other loud items.
 
 ## Running stages in parallel
 
@@ -2102,6 +2180,12 @@ Everything a person changes while reversing, so a rerun keeps it:
 
 The decompiler only reads this through one query interface (like the C++ `Scope`/`Database`),
 so milestone 3 can keep it in memory and milestone 4 swaps in the store.
+
+A first part exists (2026-11-17, `rust/ghidra-rs/src/store.rs`): a plain text file with created and
+removed functions, fixed bodies, no-return flags, flow overrides, thunk marks and switch targets,
+applied over a fresh analysis (`analyze --store`). It holds none of the other items above, and it
+does not record who set a fact: everything in the file is an edit, everything else is analysis.
+See `rust/README.md`, "Project store and the editing scripts".
 
 ## Where to diverge from Ghidra, and where not
 
