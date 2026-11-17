@@ -26,7 +26,10 @@
 //!   `JumpModelTrivial` when no model matches). A table keeps the values of the model its
 //!   addresses were recovered with ([`ValueRange`]) and its `switchOver` state on
 //!   `funcdata::JumpTable`.
-//! - Not ported: `JumpAssisted` (x86 has no `jumpassist` user op), `JumpBasicOverride`
+//! - `JumpAssisted` (the model of a switch a `<jumpassist>` user op makes; tried first when a
+//!   CALLOTHER makes the address) with its scripts on `userop::JumpAssistOp`. Superseded: "not
+//!   ported: `JumpAssisted` (x86 has no `jumpassist` user op)".
+//! - Not ported: `JumpBasicOverride`
 //!   (overrides; the console sets none), multistage tables (`matchModel` fails loudly on the
 //!   restart), LOAD collection (`record_jumploads` is off by default), the reverse of
 //!   a shift in `backup2Switch` (not reachable: `findUnnormalized` steps over ADD, SUB and
@@ -665,7 +668,7 @@ impl JumpValues {
 
     /// What `JumpBasic::clone` keeps of the model: the values.
     fn kept(&self) -> ValueRange {
-        ValueRange { range: self.range, extra: self.extra.map(|e| e.0) }
+        ValueRange { range: self.range, extra: self.extra.map(|e| e.0), assisted: None }
     }
 
     /// The values in order, each with the varnode and op the emulation starts from
@@ -1301,6 +1304,18 @@ pub(crate) fn recover_addresses(
     indop: OpId,
 ) -> std::result::Result<(Vec<u64>, bool, ValueRange, bool), Fail> {
     let addr = fd.op(indop).seq.addr;
+    // JumpTable::recoverModel: the assisted model first, when a CALLOTHER makes the address
+    let low = |e: LowlevelError| Fail::Normal(e.0);
+    if let Some(assisted) = JumpAssisted::recover_model(fd, arch, indop, None).map_err(low)? {
+        // getTableSize is never 0 (the default is an entry); JumpAssisted::sanityCheck passes
+        let table = assisted.build_addresses(fd, arch).map_err(low)?;
+        let partial = !is_reachable(fd, indop);
+        if is_thunk(fd, &table) {
+            return Err(Fail::Thunk);
+        }
+        let kept = ValueRange { assisted: Some(assisted.size_indices), ..ValueRange::default() };
+        return Ok((table, partial, kept, false));
+    }
     let mut basic = JumpBasic::new(fd, arch, indop);
     let ok = basic.recover_model();
     if std::env::var("GHIDRA_RS_JT_DEBUG").is_ok_and(|v| v == "2") {
@@ -1337,9 +1352,10 @@ pub(crate) fn recover_addresses(
 }
 
 /// Port of `Funcdata::earlyJumpTableFail`: walking back from the BRANCHIND over at most 8 ops
-/// of the dead list, an address formed by a CALLOTHER fails at once. (x86 declares no
-/// injected, `jumpassist` or segment user ops.)
-pub(crate) fn early_fail(fd: &Funcdata, op: OpId) -> Option<Fail> {
+/// of the dead list, an address formed by a CALLOTHER fails at once, unless the user op is a
+/// `jumpassist` or a segment op, which end the walk. (No spec ghidra-rs reads declares an
+/// injected user op, `<callotherfixup>`.)
+pub(crate) fn early_fail(fd: &Funcdata, arch: &Arch, op: OpId) -> Option<Fail> {
     let pos = fd.dead.iter().position(|&o| o == op)?;
     let mut vn = fd.op(op).ins[0];
     let mut count = 8;
@@ -1359,7 +1375,9 @@ pub(crate) fn early_fail(fd: &Funcdata, op: OpId) -> Option<Fail> {
                 && b.offset < a.offset.wrapping_add(u64::from(a.size))
         });
         use Opcode::*;
+        let userop = p.ins.first().map_or(0, |&v| fd.vn(v).offset);
         match p.opc {
+            Callother if arch.userops.jump_assist(userop).is_some() || arch.userops.is_segment(userop) => return None,
             Callother if outhit => return Some(Fail::Callother),
             Callother => {}
             Call | Callind | Branch | Cbranch | Branchind | Store => return None,
@@ -1407,12 +1425,17 @@ pub(crate) const NO_LABEL: u64 = 0xBAD1_ABE1_BAD1_ABE1;
 pub(crate) struct ValueRange {
     range: CircleRange,
     extra: Option<u64>,
+    /// the model was a `JumpAssisted`: its `sizeIndices` (`JumpAssisted::clone`)
+    assisted: Option<u64>,
 }
 
 impl ValueRange {
-    /// `getSize`
+    /// `getSize` (`JumpAssisted::getTableSize`: the indices and the default)
     fn size(&self) -> u64 {
-        self.range.get_size() + u64::from(self.extra.is_some())
+        match self.assisted {
+            Some(n) => n + 1,
+            None => self.range.get_size() + u64::from(self.extra.is_some()),
+        }
     }
 
     /// `contains`
@@ -1445,6 +1468,100 @@ pub(crate) struct Model {
     /// `JumpBasic2`: its guard only makes the last block the default
     basic2: bool,
     guards: Vec<(Option<OpId>, usize)>,
+    /// `JumpAssisted`: no guards, the last block is the default
+    assisted: bool,
+}
+
+/// Port of `JumpAssisted`: the model of a switch whose address a `jumpassist` user op makes.
+/// The op's inputs after the switch variable are constants; the scripts of the
+/// [`JumpAssistOp`](super::userop::JumpAssistOp) give the table from them.
+struct JumpAssisted<'a> {
+    userop: &'a super::userop::JumpAssistOp,
+    /// the `jumpassist` CALLOTHER
+    assist_op: OpId,
+    /// the switch variable (the op's first parameter)
+    switchvn: VarnodeId,
+    /// how many indices the table has, the default not counted
+    size_indices: u64,
+}
+
+impl<'a> JumpAssisted<'a> {
+    /// Port of `JumpAssisted::recoverModel`; `previous` is the table size of the model to
+    /// match. `None`: the address of `indop` is not made by a `jumpassist` op, or its table
+    /// does not fit.
+    fn recover_model(
+        fd: &Funcdata,
+        arch: &'a Arch,
+        indop: OpId,
+        previous: Option<u64>,
+    ) -> Result<Option<JumpAssisted<'a>>> {
+        let Some(assist_op) = def(fd, fd.op(indop).ins[0]).filter(|&d| fd.op(d).opc == Opcode::Callother) else {
+            return Ok(None);
+        };
+        let ins = &fd.op(assist_op).ins;
+        if ins.len() < 3 {
+            return Ok(None);
+        }
+        let Some(userop) = arch.userops.jump_assist(fd.vn(ins[0]).offset) else { return Ok(None) };
+        if ins[2..].iter().any(|&v| !fd.vn(v).is_constant()) {
+            return Ok(None); // all remaining parameters must be constant
+        }
+        let mut model = JumpAssisted { userop, assist_op, switchvn: ins[1], size_indices: 0 };
+        model.size_indices = match &userop.calc_size {
+            // without a size script the first parameter after the switch variable is the size
+            None => fd.vn(ins[2]).offset,
+            Some(script) => script.evaluate(arch, &model.inputs(fd, script, "size_pcode")?)?,
+        };
+        if previous.is_some_and(|p| p.wrapping_sub(1) != model.size_indices) || model.size_indices > MAX_JUMPTABLE_SIZE
+        {
+            return Ok(None);
+        }
+        Ok(Some(model))
+    }
+
+    /// The script inputs: the offsets of the op's parameters (the first is replaced by the index).
+    fn inputs(&self, fd: &Funcdata, script: &super::inject::ExecutablePcode, tag: &str) -> Result<Vec<u64>> {
+        let ins = &fd.op(self.assist_op).ins[1..];
+        if script.inputs.len() != ins.len() {
+            return err(format!("{}: <{tag}> has wrong number of parameters", self.userop.name));
+        }
+        Ok(ins.iter().map(|&v| fd.vn(v).offset).collect())
+    }
+
+    /// Port of `JumpAssisted::buildAddresses`: the target of each index, then the default.
+    /// (`funcptr_align` is 0 for every spec ghidra-rs reads: no mask.)
+    fn build_addresses(&self, fd: &Funcdata, arch: &Arch) -> Result<Vec<u64>> {
+        let script = &self.userop.index2addr;
+        let mut inputs = self.inputs(fd, script, "addr_pcode")?;
+        let mut table = Vec::new();
+        for index in 0..self.size_indices {
+            inputs[0] = index;
+            table.push(script.evaluate(arch, &inputs)?);
+        }
+        let script = &self.userop.default_addr;
+        let mut inputs = self.inputs(fd, script, "default_pcode")?;
+        inputs[0] = 0;
+        table.push(script.evaluate(arch, &inputs)?);
+        Ok(table)
+    }
+
+    /// Port of `JumpAssisted::buildLabels`: the label of each index, and none for the default.
+    fn build_labels(&self, fd: &Funcdata, arch: &Arch) -> Result<Vec<u64>> {
+        let mut labels: Vec<u64> = match &self.userop.index2case {
+            None => (0..self.size_indices).collect(), // the index is the label
+            Some(script) => {
+                let mut inputs = self.inputs(fd, script, "case_pcode")?;
+                let mut labels = Vec::new();
+                for index in 0..self.size_indices {
+                    inputs[0] = index;
+                    labels.push(script.evaluate(arch, &inputs)?);
+                }
+                labels
+            }
+        };
+        labels.push(NO_LABEL);
+        Ok(labels)
+    }
 }
 
 /// `std::lower_bound` / `std::upper_bound` over `block2addr` by position, as libstdc++ walks
@@ -1700,12 +1817,38 @@ struct Labelled {
     switchvn: Option<VarnodeId>,
     /// the model's table size is not the address table's
     mismatch: bool,
+    /// `JumpAssisted`: the `jumpassist` op `foldInNormalization` removes
+    assist_op: Option<OpId>,
 }
 
 /// Port of `JumpTable::matchModel` (`recoverModel` on the function itself, against the range
 /// recovered on the partial function) and `JumpTable::recoverLabels`. `None`: no model matches
 /// (`JumpModelTrivial`).
 fn match_model(fd: &Funcdata, arch: &Arch, jt: &JumpTable) -> Result<Option<Labelled>> {
+    // JumpTable::recoverModel: the assisted model first, when a CALLOTHER makes the address
+    if let Some(assisted) = JumpAssisted::recover_model(fd, arch, jt.op, jt.orig.map(|o| o.size()))? {
+        let size = assisted.size_indices + 1;
+        let mismatch = size != jt.targets.len() as u64;
+        if mismatch && jt.targets.len() == 1 && size > 1 {
+            return err("switchnorm: a multistage jump table (insertMultistageJump, restart) is not ported");
+        }
+        // JumpAssisted::buildLabels reads the saved model as a JumpAssisted
+        if jt.orig.is_some_and(|o| o.size() != 0 && o.assisted != Some(assisted.size_indices)) {
+            return err("JumpAssisted table size changed during recovery");
+        }
+        return Ok(Some(Labelled {
+            model: Model { basic2: false, guards: Vec::new(), assisted: true },
+            labels: assisted.build_labels(fd, arch)?,
+            warnings: Vec::new(),
+            switchvn: Some(assisted.switchvn),
+            mismatch,
+            assist_op: Some(assisted.assist_op),
+        }));
+    }
+    if jt.orig.is_some_and(|o| o.assisted.is_some()) {
+        // the C++ goes on to JumpBasic with the saved JumpAssisted as the model to match
+        return err("switchnorm: a jumpassist table whose op no longer matches on the function is not ported");
+    }
     let expected = jt.orig.map(|o| o.range);
     let mut basic = JumpBasic::new(fd, arch, jt.op);
     basic.expected = expected;
@@ -1733,7 +1876,8 @@ fn match_model(fd: &Funcdata, arch: &Arch, jt: &JumpTable) -> Result<Option<Labe
     let orig = jt.orig.filter(|o| o.size() != 0).unwrap_or(own);
     let (labels, warnings) = basic.build_labels(&orig, jt.targets.len())?;
     let guards = basic.guards.iter().map(|g| (g.cbranch, g.indpath)).collect();
-    Ok(Some(Labelled { model: Model { basic2, guards }, labels, warnings, switchvn: basic.switchvn, mismatch }))
+    let model = Model { basic2, guards, assisted: false };
+    Ok(Some(Labelled { model, labels, warnings, switchvn: basic.switchvn, mismatch, assist_op: None }))
 }
 
 /// `matchModel`, `recoverLabels` and `foldInNormalization` for table `i`.
@@ -1752,7 +1896,7 @@ fn recover_labels(fd: &mut Funcdata, arch: &Arch, i: usize) -> Result<()> {
         jt.default_block = None;
         jt.labels = targets.clone();
         jt.targets = targets;
-        jt.model = Some(Model { basic2: false, guards: Vec::new() });
+        jt.model = Some(Model { basic2: false, guards: Vec::new(), assisted: false });
         jt.orig = None;
         return Ok(());
     };
@@ -1771,7 +1915,18 @@ fn recover_labels(fd: &mut Funcdata, arch: &Arch, i: usize) -> Result<()> {
     if let Some(switchvn) = found.switchvn {
         // JumpTable::foldInNormalization: the BRANCHIND reads the unnormalized variable, so the
         // address calculation dies; the variable's unused high bits may be truncated
-        fd.op_set_input(indop, switchvn, 0)?;
+        match found.assist_op {
+            // JumpAssisted::foldInNormalization: every reader of the jumpassist op's output
+            // (the BRANCHIND among them) reads the switch variable, and the op goes
+            Some(assist) => {
+                let readers = fd.op(assist).out.map_or_else(Vec::new, |o| fd.vn(o).descend.to_vec());
+                for op in readers {
+                    fd.op_set_input(op, switchvn, 0)?;
+                }
+                fd.op_destroy(assist);
+            }
+            None => fd.op_set_input(indop, switchvn, 0)?,
+        }
         let v = fd.vn(switchvn);
         let mut consume = minimal_mask(fd.nzmask(switchvn));
         if consume >= calc_mask(v.size) {
@@ -1879,10 +2034,18 @@ fn fold_in_one_guard(fd: &mut Funcdata, jop: OpId, cbranch: OpId, stored: usize)
     Ok(true)
 }
 
-/// Port of `JumpBasic::foldInGuards` (with `JumpBasic2::foldInOneGuard`) for table `i`.
+/// Port of `JumpBasic::foldInGuards` (with `JumpBasic2::foldInOneGuard`) and
+/// `JumpAssisted::foldInGuards` for table `i`.
 fn fold_in_guards(fd: &mut Funcdata, i: usize) -> Result<bool> {
     let jop = fd.jumptables[i].op;
     let Some(mut model) = fd.jumptables[i].model.take() else { return Ok(false) };
+    if model.assisted {
+        // the default case is always the last block (`setLastAsDefault`)
+        let jt = &mut fd.jumptables[i];
+        let orig = jt.default_block.replace(jt.last_block);
+        jt.model = Some(model);
+        return Ok(orig != jt.default_block);
+    }
     let mut change = false;
     for g in &mut model.guards {
         let Some(cbranch) = g.0 else { continue };
@@ -1952,13 +2115,70 @@ mod tests {
     /// The values of a range with an extra value: the extra one comes last and is not reversible.
     #[test]
     fn value_range_walks_range_then_extra() {
-        let v = ValueRange { range: CircleRange::new(3, 6, 4, 1), extra: Some(9) };
+        let v = ValueRange { range: CircleRange::new(3, 6, 4, 1), extra: Some(9), assisted: None };
         assert_eq!(v.values(), [(3, true), (4, true), (5, true), (9, false)]);
         assert_eq!(v.size(), 4);
         assert!(v.contains(9) && v.contains(4) && !v.contains(6));
         let empty = ValueRange::default();
         assert_eq!((empty.size(), empty.values()), (0, vec![]));
         assert!(range_eq(&CircleRange::default(), &CircleRange { left: 5, ..CircleRange::default() }));
+    }
+
+    /// A hand-made `<jumpassist>` (no spec ghidra-rs can load declares one; the scripts follow
+    /// the shape of JVM.pspec's `switchAssist`) on x86's user op `segment`:
+    /// `BRANCHIND(segment(sw, #0x2000, #2))` over the pairs (7, +0x10), (9, +0x20) at 0x2000.
+    /// The scripts give the size, the targets with the default last, and the labels. Not
+    /// checked against decomp_dbg.
+    #[test]
+    fn jump_assisted_model_runs_the_scripts() {
+        use crate::analysis::{Image, Section};
+        use crate::sleigh::Sleigh;
+        let params = r#"<input name="index" size="4"/><input name="tbl" size="4"/><input name="n" size="4"/>"#;
+        let script = |tag: &str, out: &str, body: &str| {
+            format!("<{tag}>{params}<output name=\"{out}\" size=\"4\"/><body><![CDATA[{body}]]></body></{tag}>")
+        };
+        let spec = format!(
+            "<jumpassist name=\"segment\">{}{}{}{}</jumpassist>",
+            script("case_pcode", "case", "case = *:4 (tbl + 8*index);"),
+            script("addr_pcode", "addr", "_off:4 = tbl + 8*index + 4; addr = tbl + *:4 (_off);"),
+            script("default_pcode", "addr", "addr = tbl - 4;"),
+            script("size_pcode", "size", "size = n;"),
+        );
+        let path = Sleigh::sla_path("x86");
+        assert!(path.exists(), "{} is missing: run rust/build-sla.sh first", path.display());
+        let cspec = std::fs::read_to_string(path.with_file_name("x86win.cspec")).unwrap();
+        let table = [7u32, 0x10, 9, 0x20].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let section =
+            Section { name: ".rdata".into(), exec: false, readonly: true, zero_tail: 0, addr: 0x2000, data: table };
+        let img = Image { sections: vec![section], ..Image::default() };
+        let mut arch = Arch::new(Sleigh::load(&path).unwrap(), img, &cspec).unwrap();
+        let el = crate::xml::parse(&spec).unwrap();
+        arch.userops.decode(&el, &arch.sleigh, &super::super::cspec::SleighNames::new(&arch.sleigh)).unwrap();
+        // the user op has one meaning only
+        let again = arch.userops.decode(&el, &arch.sleigh, &super::super::cspec::SleighNames::new(&arch.sleigh));
+        assert!(again.unwrap_err().0.contains("overloads userop"));
+
+        let index = arch.sleigh.userop_index("segment").unwrap();
+        let uniq = arch.sleigh.uniq_space();
+        let mut fd = Funcdata::new(0x1000);
+        let assist = fd.new_op(Opcode::Callother, 0x1000);
+        let addr = fd.new_unique_out(4, uniq, assist);
+        let sw = fd.new_varnode(4, super::super::varnode::Space::Sleigh(arch.spec.stack_pointer.0), 0);
+        let ins = [fd.new_constant(4, index), sw, fd.new_constant(4, 0x2000), fd.new_constant(4, 2)];
+        fd.op_set_all_input(assist, &ins).unwrap();
+        let indop = fd.new_op(Opcode::Branchind, 0x1000);
+        fd.op_set_all_input(indop, &[addr]).unwrap();
+
+        let model = JumpAssisted::recover_model(&fd, &arch, indop, None).unwrap().unwrap();
+        assert_eq!((model.size_indices, model.switchvn, model.assist_op), (2, sw, assist));
+        assert_eq!(model.build_addresses(&fd, &arch).unwrap(), [0x2010, 0x2020, 0x1ffc]);
+        assert_eq!(model.build_labels(&fd, &arch).unwrap(), [7, 9, NO_LABEL]);
+        // the model to match has another size: no match
+        assert!(JumpAssisted::recover_model(&fd, &arch, indop, Some(5)).unwrap().is_none());
+        assert!(JumpAssisted::recover_model(&fd, &arch, indop, Some(3)).unwrap().is_some());
+        // walking back from the BRANCHIND, a jumpassist op is not a failure
+        fd.dead = vec![assist, indop];
+        assert!(early_fail(&fd, &arch, indop).is_none());
     }
 
     /// Reverse evaluation as `OpBehavior::recoverInput*`: `x + 5 == 7`, `9 - x == 2`,

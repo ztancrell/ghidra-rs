@@ -44,7 +44,8 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   `mod.rs` (`Arch`: image, SLEIGH engine, compiler spec, mapped functions and external
   references, read-only ranges, register names; `LowlevelError`), `cspec.rs` (reading
   `x86win.cspec`), `fspec.rs` (prototype models, `FuncProto`, `CallSpec`), `inject.rs` (call
-  fixups: the p-code snippet parser),
+  fixups and executable scripts: the p-code snippet parser), `userop.rs` (the `<segmentop>` and
+  `<jumpassist>` user ops),
   `funcdata.rs` (`Funcdata`: op/varnode arenas, readers and the location-sorted varnode set,
   op insertion and input/output edits, stack loads), `op.rs`,
   `varnode.rs`, `readers.rs` (a varnode's reader list, up to 4 inline), `opcode.rs` (opcodes and their `print raw` names), `flow.rs` (`FlowInfo`,
@@ -104,7 +105,9 @@ Ghidra's "packed" element/attribute encoding (`slaformat.cc`, `PackedDecode` in
 `ghidra-rs` finds the `.sla` at that path by default (`x86.sla` for 32-bit binaries,
 `x86-64.sla` otherwise). Override it with `--sla <file>` or the `GHIDRA_RS_SLA` environment
 variable. The context defaults (`addrsize`, `opsize`, ...) come from the `<context_set>` of the
-`.pspec` with the same name next to the `.sla`.
+`.pspec` with the same name next to the `.sla`. A language whose `.pspec` has another name (the
+16-bit x86 languages on `x86.sla`) is loaded with `Sleigh::load_with_pspec`; no command line
+option selects one yet.
 
 ## Usage
 
@@ -1100,7 +1103,8 @@ an error: 2 functions in obfuscated code, 0x1c3c0d9 and 0x1c3c0fa), `fail_return
 (`testForReturnAddress`; superseded: "not heritaged yet": since slice 3B a target traced to
 the input at stack offset 0 fails loudly in flow.rs; superseded again: ported on `m3-swsilent`, see "Switch corpus silent misses"), the retry of
 a table whose switch looks unreachable (it needs a guard folded to a constant; it is taken as
-complete), `checkUnrolledGuard`, multistage tables, overrides, `JumpAssisted`.
+complete), `checkUnrolledGuard`, multistage tables, overrides, `JumpAssisted` (superseded:
+ported, see "Segment and jump-assist user ops").
 
 Table targets against `ghidra-rs analyze` (its own MSVC switch pattern, milestone 2): of the
 619 jumps both find a table for, 610 have the same set of targets. The other 9 are 3 in
@@ -3102,6 +3106,67 @@ type is not set when the varnode is made, so an action that reads a symbol's typ
 with `typerecovery` off before merging would not see it (none is known to; no check shows one).
 (Superseded: "Open: set the symbol properties when a varnode is made" as the cause of a miss,
 and "the only silent misses left in the pass are in `swsn-r`" above.)
+### Segment and jump-assist user ops (branch `worktree-agent-a852cab363d8d01f3`, 2026-11-17)
+
+The spec tags `<segmentop>` (`.pspec` and `.cspec`) and `<jumpassist>` (`.pspec`) are read
+and their user ops ported. Before, a `.pspec` with either tag loaded with the tag ignored: the
+user op stayed a plain CALLOTHER, silently. No command could reach such a spec (the console
+loads `x86.pspec` and `x86win.cspec` only), so no output changed for 32-bit x86.
+
+Ported:
+
+- `Sleigh::load_with_pspec` loads a `.sla` with a `.pspec` of another name (16-bit x86 is
+  `x86.sla` with `x86-16-real.pspec` or `x86-16.pspec`) and keeps the two kinds of elements.
+- `decomp/userop.rs`: `SegmentOp`, `JumpAssistOp` and the part of `UserOpManage` that registers
+  them (one segment op per space, one meaning per user op), with the C++ decode errors.
+- `decomp/inject.rs`: `ExecutablePcode`, a snippet with `<input>` and `<output>` parameters run
+  on values (`EmulateSnippet`); a LOAD reads the image. The snippet parser gained `zext(e)` and
+  `sext(e)`. A script outside the parser's subset (a branch, a label) is an error when the spec
+  is read.
+- `ActionSegmentize` (`coreaction::segmentize`, once per function), `RuleSegment`
+  (`rules/segment.rs`, group `segment`), `SEGMENTOP` in `print raw`, in the jump-table emulator
+  (`executeSegmentOp`) and around a stack address made by `createStackRef` (`op_stack_load`).
+- `JumpAssisted` in `jumptable.rs`: tried first when a CALLOTHER makes the switch address, on
+  the partial function (addresses) and on the function (labels, `foldInNormalization`,
+  `foldInGuards`). `earlyJumpTableFail` stops at a `jumpassist` or segment user op.
+
+Fails loudly, on a spec with a segment op:
+
+- Type recovery and constant pointers (`ActionInferTypes`, `ActionConstantPtr`): near and far
+  pointers are not ported (`SegmentedResolver`, `markNearPointers`, `sizeOfPointer` /
+  `sizeOfAltPointer`, the far-pointer rules of PIECE and SUBPIECE).
+- The stack rules (`RuleLoadVarnode`, `RuleStoreVarnode`) when the stack space is narrower than
+  the space it lives in (16-bit x86: a 2-byte `SP` in the 4-byte `ram`): stack offsets wrap and
+  print at the container's size here. Found with the reference's `s0x0002:2(i)` against
+  ghidra-rs's `s0x00000002:2(i)`.
+- `setcasts` and `print C` on a `SEGMENTOP` (as before).
+- A `jumpassist` table whose op no longer matches on the function (the C++ goes on to
+  `JumpBasic` with the saved model); `funcptr_align` is taken as 0.
+
+So a 16-bit x86 function decompiles up to the first of these (with the default groups: type
+recovery), and no further. No console command selects a 16-bit language or loads a raw image;
+the checks below are unit tests.
+
+Checked against `decomp_dbg` (`load test file` on the same bytes, language
+`x86:LE:16:Real Mode:default`), byte-identical `print raw`:
+
+- `action::tests::segmentize_x86_16_real_mode`: a 7-instruction function at
+  `break start segmentize` and at the next `break start internalstorage`.
+- `action::tests::rule_segment_folds_constants_x86_16`: `segment(0x40, 0x6c)` becomes
+  `#0x46c` (`RuleSegment` and the script), at `break start deindirect`.
+
+Not checked against `decomp_dbg`: `JumpAssisted` and the `<jumpassist>` scripts (only JVM and
+Dalvik declare one; neither can be loaded here). `jumptable::tests::jump_assisted_model_runs_the_scripts`
+runs a hand-made `<jumpassist>` on x86's `segment` user op: size, targets, labels, by hand.
+`userop::tests::x86_16_segment_ops` checks the real and protected mode scripts' arithmetic by
+hand. Also not run: `RuleSegment`'s far-pointer branch, `createStackRef`'s SEGMENTOP,
+`executeSegmentOp`, a `<segmentop>` in a `.cspec`, and the Z80 and HCS12 specs.
+
+Gate (2026-11-17, against the baseline `m3-int5-116d9d34da`): the 55 M8 checks give the same
+summary lines as the baseline (every function the reference finishes is identical). M500
+`pcc-r` 494 / 495 (loud 1), `pcc-t` 495 / 495, `swfs-r` 498 / 499 (loud 1): the baseline's
+lines. `cargo test`: 138 passed. Not run: the other M500 checks, the switch and simple corpora,
+the full pass.
 
 ## Speed
 

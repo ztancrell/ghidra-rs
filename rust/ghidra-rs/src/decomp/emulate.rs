@@ -235,7 +235,15 @@ impl<'a> EmulateFunction<'a> {
                 let val = self.get(o.ins[0])?;
                 self.set(out.unwrap(), val);
             }
-            Opcode::Segmentop => return Err(EmuError::Other("Segment operand missing definition".into())),
+            // EmulatePcodeOp::executeSegmentOp
+            Opcode::Segmentop => {
+                let space = self.fd.vn(o.ins[0]).offset as u32; // getSpaceFromConst
+                let segdef = self.arch.userops.segment_op(space);
+                let segdef = segdef.ok_or_else(|| EmuError::Other("Segment operand missing definition".into()))?;
+                let input = [self.get(o.ins[1])?, self.get(o.ins[2])?];
+                let val = segdef.execute(self.arch, &input).map_err(|e| EmuError::Other(e.0))?;
+                self.set(out.unwrap(), val);
+            }
             opc => {
                 let out = out.ok_or_else(|| {
                     EmuError::Other("jump table: emulating an op without output is not supported".into())

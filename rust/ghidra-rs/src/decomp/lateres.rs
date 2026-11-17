@@ -153,7 +153,7 @@ fn commit_new_inputs(
         let vn = match newinput[i + 1] {
             None => {
                 let r = stackref.ok_or_else(|| LowlevelError("buildParam: no stack reference".into()))?;
-                fd.op_stack_load(spec.stack_pointer, spec.stack_container, uniq, off, size, op, Some(r))?
+                fd.op_stack_load(spec.stack_pointer, arch.stack_segment(), uniq, off, size, op, Some(r))?
             }
             Some(v) if fd.vn(v).size == size => v,
             Some(_) => {

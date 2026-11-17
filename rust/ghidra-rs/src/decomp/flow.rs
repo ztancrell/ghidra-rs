@@ -562,7 +562,7 @@ impl Flow<'_> {
         let mut tables = Vec::new();
         let mut partial = Partial::None;
         for op in std::mem::take(&mut self.tablelist) {
-            let res = match jumptable::early_fail(self.fd, op) {
+            let res = match jumptable::early_fail(self.fd, self.arch, op) {
                 Some(f) => Err(f),
                 None => self.stage_jump_table(&mut partial, op)?,
             };

@@ -134,7 +134,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("varnodeprops", "base", varnode_props),
             ("heritage", "base", heritage_pass),
             ("paramdouble", "protorecovery", super::rules::param_double),
-            ("segmentize", "base", c::nothing),
+            ("segmentize", "base", c::segmentize),
             ("internalstorage", "base", c::nothing),
             ("forcegoto", "blockrecovery", c::nothing),
             ("directwrite", "protorecovery_a", c::direct_write),
@@ -440,7 +440,7 @@ pub(crate) fn create_placeholder(fd: &mut Funcdata, arch: &Arch, c: CallId) -> R
     let slot = fd.op(op).ins.len();
     let spec = &arch.spec;
     let uniq = arch.sleigh.uniq_space();
-    let loadval = fd.op_stack_load(spec.stack_pointer, spec.stack_container, uniq, 0, 1, op, None)?;
+    let loadval = fd.op_stack_load(spec.stack_pointer, arch.stack_segment(), uniq, 0, 1, op, None)?;
     fd.op_insert_input(op, loadval, slot)?;
     fd.call_mut(c).stack_placeholder_slot = Some(slot);
     fd.vn_set(loadval, VnFlags::SPACEBASE_PLACEHOLDER);
@@ -655,6 +655,64 @@ mod tests {
         let brk = t.perform(&mut fd, arch).unwrap();
         assert_eq!(brk, Outcome::Break("universal:fullloop:mainloop:heritage start".into()));
         crate::decomp::print_raw(&fd, arch).unwrap()
+    }
+
+    /// 16-bit real mode (`x86:LE:16:Real Mode:default`: `x86.sla` with `x86-16-real.pspec`, whose
+    /// `<segmentop>` gives the user op `segment` its meaning, and `x86-16.cspec`):
+    /// `PUSH BP; MOV BP,SP; MOV BX,[BP+4]; MOV AX,[BX]; ADD AX,[0x1234]; POP BP; RET` at
+    /// `break start segmentize` and at the next `break start internalstorage`, against decomp_dbg
+    /// on the same bytes as a `load test file`: `ActionSegmentize` turns each
+    /// `segment(base, inner)` CALLOTHER into `segmentop(ram, base, inner)`.
+    #[test]
+    fn segmentize_x86_16_real_mode() {
+        let text = vec![0x55, 0x8b, 0xec, 0x8b, 0x5e, 0x04, 0x8b, 0x07, 0x03, 0x06, 0x34, 0x12, 0x5d, 0xc3];
+        let arch = arch16(text);
+        let mut fd = Funcdata::new(0x1000);
+        let mut t = universal(&Default::default());
+        t.set_break_start("segmentize").unwrap();
+        let brk = t.perform(&mut fd, &arch).unwrap();
+        assert_eq!(brk, Outcome::Break("universal:fullloop:mainloop:segmentize start".into()));
+        let raw = crate::decomp::print_raw(&fd, &arch).unwrap();
+        assert_eq!(raw, include_str!("../../tests/data/raw-segmentize-x86-16-before.txt"));
+        t.set_break_start("internalstorage").unwrap();
+        let brk = t.perform(&mut fd, &arch).unwrap();
+        assert_eq!(brk, Outcome::Break("universal:fullloop:mainloop:internalstorage start".into()));
+        let raw = crate::decomp::print_raw(&fd, &arch).unwrap();
+        assert_eq!(raw, include_str!("../../tests/data/raw-segmentize-x86-16-after.txt"));
+        // further on (the actions the checks skip on both engines off) the decompile fails
+        // loudly: the stack rules need the 2-byte stack space
+        let skip = ["multicse", "shadowvar", "condconst", "restructure_varnode", "mapped_local_sync"];
+        let mut fd = Funcdata::new(0x1000);
+        let mut t = universal(&skip.iter().map(|s| format!("action:{s}")).collect());
+        let e = t.perform(&mut fd, &arch).unwrap_err();
+        assert!(e.0.contains("a stack space of 2 bytes inside the 4-byte space ram"), "{e}");
+    }
+
+    /// The 16-bit real mode architecture with `text` at 0x1000.
+    fn arch16(text: Vec<u8>) -> Arch {
+        let path = Sleigh::sla_path("x86");
+        assert!(path.exists(), "{} is missing: run rust/build-sla.sh first", path.display());
+        let cspec = std::fs::read_to_string(path.with_file_name("x86-16.cspec")).unwrap();
+        let sleigh = Sleigh::load_with_pspec(&path, Some(&path.with_file_name("x86-16-real.pspec"))).unwrap();
+        let img = Image { sections: vec![section(".text", true, 0x1000, text)], ..Image::default() };
+        Arch::new(sleigh, img, &cspec).unwrap()
+    }
+
+    /// `MOV AX,0x40; MOV ES,AX; MOV AX,ES:[0x6c]; RET` in 16-bit real mode at
+    /// `break start deindirect` (the five actions of `skip` off on both
+    /// engines), against decomp_dbg: `RuleSegment` runs the `<segmentop>` script on the constant
+    /// base and offset, and the LOAD reads `#0x46c`.
+    #[test]
+    fn rule_segment_folds_constants_x86_16() {
+        let arch = arch16(vec![0xb8, 0x40, 0x00, 0x8e, 0xc0, 0x26, 0xa1, 0x6c, 0x00, 0xc3]);
+        let mut fd = Funcdata::new(0x1000);
+        let skip = ["multicse", "shadowvar", "condconst", "restructure_varnode", "mapped_local_sync"];
+        let mut t = universal(&skip.iter().map(|s| format!("action:{s}")).collect());
+        t.set_break_start("deindirect").unwrap();
+        let brk = t.perform(&mut fd, &arch).unwrap();
+        assert_eq!(brk, Outcome::Break("universal:fullloop:mainloop:stackstall:deindirect start".into()));
+        let raw = crate::decomp::print_raw(&fd, &arch).unwrap();
+        assert_eq!(raw, include_str!("../../tests/data/raw-rulesegment-x86-16.txt"));
     }
 
     /// `MOVSD XMM0, qword ptr [0x4020fc]; MOVSS XMM1, dword ptr [0x4020fe]; RET` with read-only

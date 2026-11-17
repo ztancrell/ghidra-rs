@@ -54,6 +54,7 @@ mod subfloat;
 mod subflow;
 mod transform;
 mod types;
+mod userop;
 mod variable;
 mod varmap;
 mod varnode;
@@ -137,6 +138,8 @@ pub struct Arch {
     pub(crate) sleigh: Sleigh,
     pub(crate) image: Image,
     pub(crate) spec: CompilerSpec,
+    /// the segment and jump-assist user ops of the specs (`Architecture::userops`)
+    pub(crate) userops: userop::UserOps,
     /// `map function`: entry -> the function
     pub(crate) functions: HashMap<u64, Function>,
     /// the register names, for `Address::printRaw`
@@ -183,7 +186,12 @@ impl Arch {
             .iter()
             .map(|(name, val)| names.register(name).map(|(s, o, z)| (s, o, z, u64::from(*val))))
             .collect::<Result<_>>()?;
-        let spec = CompilerSpec::parse(cspec, &sleigh, &names)?;
+        // `parseProcessorConfig` (the `.pspec` user ops), then `parseCompilerConfig`
+        let mut userops = userop::UserOps::default();
+        for el in &sleigh.userop_specs {
+            userops.decode(el, &sleigh, &names)?;
+        }
+        let spec = CompilerSpec::parse(cspec, &sleigh, &names, &mut userops)?;
         let mut type_factory = types::TypeFactory::new();
         if let Some(m) = &spec.align_map {
             type_factory.align_map = m.clone();
@@ -204,6 +212,7 @@ impl Arch {
             sleigh,
             image,
             spec,
+            userops,
             functions: HashMap::new(),
             registers,
             tracked,
@@ -221,6 +230,43 @@ impl Arch {
     /// `TypeFactory::getSizeOfPointer`: the size of the default code space's addresses.
     pub(crate) fn pointer_size(&self) -> u32 {
         self.sleigh.spaces.get(self.sleigh.code_space() as usize).map_or(4, |s| s.size)
+    }
+
+    /// The space the stack lives in and, when that space has a segment op, the op's base size
+    /// and the space's address size (`Funcdata::createStackRef` wraps a stack address in a
+    /// SEGMENTOP there).
+    pub(crate) fn stack_segment(&self) -> (u32, Option<(u32, u32)>) {
+        let ram = self.spec.stack_container;
+        let size = self.sleigh.spaces.get(ram as usize).map_or(0, |s| s.size);
+        (ram, self.userops.segment_op(ram).map(|s| (s.base_size, size)))
+    }
+
+    /// Fails loudly for `what` when a spec declares a segment op: near and far pointers are not
+    /// ported (`SegmentedResolver` behind `Architecture::resolveConstant`, `markNearPointers`,
+    /// and `TypeFactory`'s `sizeOfPointer` / `sizeOfAltPointer` with the far-pointer rules of
+    /// PIECE and SUBPIECE), so types and constant pointers would differ silently.
+    pub(crate) fn no_segment_resolver(&self, what: &str) -> Result<()> {
+        match self.userops.segment_ops().next() {
+            Some(s) => err(format!(
+                "{what} with the segment op {}: near and far pointers are not implemented in ghidra-rs yet",
+                s.name
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// Fails loudly when the stack space is narrower than the space it lives in (16-bit x86: a
+    /// 2-byte `SP` in the 4-byte `ram`): stack offsets wrap and print at the container's size
+    /// here, where the C++ `SpacebaseSpace` has the stack pointer's.
+    pub(crate) fn no_narrow_stack(&self) -> Result<()> {
+        let (sp, container) = (self.spec.stack_pointer.2, self.stack_segment().0);
+        match self.sleigh.spaces.get(container as usize) {
+            Some(s) if s.size != sp => err(format!(
+                "a stack space of {sp} bytes inside the {}-byte space {} is not implemented in ghidra-rs yet",
+                s.size, s.name
+            )),
+            _ => Ok(()),
+        }
     }
 
     /// `map function`: a function at `entry` with the default (empty) prototype.

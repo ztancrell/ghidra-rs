@@ -5,8 +5,9 @@
 //! semantic grammar; this is a small parser for the subset snippets use: assignments to
 //! registers and new temporaries (`name = e;`, `name:4 = e;`, `local name = e;`), stores
 //! (`*[space]:size e = e;`), and expressions of registers, integers, loads, parentheses and the
-//! integer and boolean operators. Anything else (user ops, branches, float and signed operators)
-//! is an error at load time.
+//! integer and boolean operators and `zext(e)`, `sext(e)`. Anything else (user ops, branches, float and signed operators)
+//! is an error at load time. [`ExecutablePcode`] is a snippet with named parameters that is run
+//! on values (the `<segmentop>` and `<jumpassist>` scripts of `userop.rs`).
 //!
 //! What reaches the output is kept exact: every operator and every named temporary takes the
 //! next 16-byte slot of the unique space (`PcodeSnippet::allocateTemp`), counting on from one
@@ -17,6 +18,7 @@ use super::cspec::SleighNames;
 use super::opcode::Opcode;
 use super::{err, LowlevelError, Result};
 use crate::sleigh::{PcodeOp, Sleigh, Varnode};
+use crate::xml::Element;
 use std::collections::HashMap;
 
 /// `Translate::INJECT`: where injection temporaries start, above the `.sla`'s unique base.
@@ -67,6 +69,103 @@ impl InjectLibrary {
 
     pub(crate) fn payload(&self, id: InjectId) -> &InjectPayload {
         &self.payloads[id.0 as usize]
+    }
+}
+
+/// Where `ExecutablePcode::build` puts the first parameter in the unique space, and its step.
+const EXE_PARAM_START: u64 = 0x10;
+const EXE_PARAM_STEP: u64 = 0x20;
+/// `compiler.setUniqueBase(0x2000)` of `parseInject` for an executable snippet: its
+/// temporaries do not count on from the call fixups'.
+const EXE_UNIQUE_BASE: u64 = 0x2000;
+
+/// Port of `ExecutablePcode` (`ExecutablePcodeSleigh`): a snippet with named `<input>` and
+/// `<output>` parameters that is run on concrete values (`EmulateSnippet`), as the
+/// `<segmentop>` and `<jumpassist>` scripts are. The snippet compiler's subset applies: a
+/// script with a branch or a label is an error when the spec is read.
+#[derive(Debug)]
+pub(crate) struct ExecutablePcode {
+    /// the parameters' sizes (`InjectPayload::inputlist`, `output`)
+    pub(crate) inputs: Vec<u32>,
+    pub(crate) outputs: Vec<u32>,
+    ops: Vec<PcodeOp>,
+    uniq: u32,
+}
+
+impl ExecutablePcode {
+    /// Port of `ExecutablePcodeSleigh::decode` + `PcodeInjectLibrarySleigh::parseInject`: `el`
+    /// is the `<pcode>` (`<case_pcode>`, ...) element; `what` names it in errors.
+    pub(crate) fn decode(names: &SleighNames, what: &str, el: &Element) -> Result<ExecutablePcode> {
+        let fail = |m: String| LowlevelError(format!("{what}: {m}"));
+        let uniq = names.uniq_space();
+        let mut c = Compiler::new(names, EXE_UNIQUE_BASE);
+        let (mut inputs, mut outputs) = (Vec::new(), Vec::new());
+        // `decodePayloadParams`: the parameters come first; `orderParameters` numbers the
+        // inputs, then the outputs, and `build` lays them out in that order
+        let params: Vec<&Element> = el.kids.iter().take_while(|k| k.name == "input" || k.name == "output").collect();
+        let ordered = params.iter().filter(|k| k.name == "input").chain(params.iter().filter(|k| k.name == "output"));
+        for (i, p) in ordered.enumerate() {
+            let size = u32::try_from(p.int("size").map_err(fail)?).map_err(|_| fail("bad parameter size".into()))?;
+            let offset = EXE_PARAM_START + EXE_PARAM_STEP * i as u64;
+            c.temps.insert(p.req("name").map_err(fail)?.to_string(), Vn { space: uniq, offset, size, unnamed: false });
+            if p.name == "input" { &mut inputs } else { &mut outputs }.push(size);
+        }
+        let body = el.kid("body").ok_or_else(|| fail("Missing <body> subtag in <pcode>".into()))?;
+        let ops = c.compile(&body.text).map_err(|e| fail(format!("Unable to compile pcode: {}", e.0)))?;
+        // `EmulateSnippet::checkForLegalCode` (the C++ checks at the first run): only
+        // temporaries are written, no register or memory varnode is read, no STORE
+        let legal = ops.iter().all(|o| {
+            o.opc != Opcode::Store as u8
+                && o.out.as_ref().is_none_or(|v| v.space == uniq)
+                && o.ins.iter().all(|v| v.space == 0 || v.space == uniq)
+        });
+        if !legal {
+            return Err(fail("Illegal p-code in executable snippet".into()));
+        }
+        Ok(ExecutablePcode { inputs, outputs, ops, uniq })
+    }
+
+    /// Port of `ExecutablePcode::evaluate`: run the snippet on `input` and return the first
+    /// output. A LOAD reads the load image (`EmulateSnippet::getLoadImageValue`).
+    pub(crate) fn evaluate(&self, arch: &super::Arch, input: &[u64]) -> Result<u64> {
+        use super::emulate::{eval_binary, eval_unary, EmuError};
+        if input.len() != self.inputs.len() {
+            return err("Wrong number of input parameters to executable snippet");
+        }
+        if self.outputs.is_empty() {
+            return err("No registered outputs to executable snippet");
+        }
+        let mut temps: HashMap<u64, u64> = HashMap::new();
+        for (i, &v) in input.iter().enumerate() {
+            temps.insert(EXE_PARAM_START + EXE_PARAM_STEP * i as u64, v);
+        }
+        let get = |temps: &HashMap<u64, u64>, v: &Varnode| -> Result<u64> {
+            if v.space != self.uniq {
+                return Ok(v.offset); // a constant (`decode` let nothing else through)
+            }
+            temps.get(&v.offset).copied().ok_or_else(|| LowlevelError("Read before write in snippet emulation".into()))
+        };
+        let emu = |e: EmuError| match e {
+            EmuError::DataUnavail => LowlevelError("Unable to load bytes for executable snippet".into()),
+            EmuError::Other(m) => LowlevelError(m),
+        };
+        for o in &self.ops {
+            let opc = Opcode::from_u8(o.opc).ok_or_else(|| LowlevelError("bad opcode in snippet".into()))?;
+            let Some(out) = &o.out else { return err("Illegal p-code operation in snippet") };
+            let val = match (opc, &o.ins[..]) {
+                (Opcode::Load, [_, ptr]) => {
+                    let mut buf = [0u8; 8];
+                    arch.fill_bytes(get(&temps, ptr)?, &mut buf).ok_or_else(|| emu(EmuError::DataUnavail))?;
+                    u64::from_le_bytes(buf) & super::rangeutil::calc_mask(out.size)
+                }
+                (_, [a]) => eval_unary(opc, out.size, a.size, get(&temps, a)?).map_err(emu)?,
+                (_, [a, b]) => eval_binary(opc, out.size, a.size, get(&temps, a)?, get(&temps, b)?).map_err(emu)?,
+                _ => return err("Illegal p-code operation in snippet"),
+            };
+            temps.insert(out.offset, val);
+        }
+        let out = EXE_PARAM_START + EXE_PARAM_STEP * self.inputs.len() as u64;
+        temps.get(&out).copied().ok_or_else(|| LowlevelError("Read before write in snippet emulation".into()))
     }
 }
 
@@ -362,7 +461,16 @@ impl<'a> Compiler<'a> {
             _ => {
                 let name = self.ident()?;
                 if self.peek_p("(") {
-                    return err(format!("{name}(...): user ops are not supported in snippets"));
+                    // OP_ZEXT '(' expr ')' and OP_SEXT '(' expr ')'
+                    let opc = match name.as_str() {
+                        "zext" => Opcode::IntZext,
+                        "sext" => Opcode::IntSext,
+                        _ => return err(format!("{name}(...): user ops are not supported in snippets")),
+                    };
+                    self.pos += 1;
+                    let e = self.expr(0)?;
+                    self.expect(")")?;
+                    return Ok(self.create_op1(opc, e));
                 }
                 self.symbol(&name).ok_or_else(|| LowlevelError(format!("Unknown varnode parameter: {name}")))?
             }

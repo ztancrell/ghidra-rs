@@ -26,12 +26,52 @@ fn calc_mask(size: u32) -> u64 {
     }
 }
 
-/// An action with nothing to do on x86 without locked prototypes, segment ops or overrides
-/// (`segmentize`, `internalstorage`; superseded: `paramdouble` was one until R5 slice 3, now
-/// `rules::param_double`). Superseded: `lanedivide` was one until R3
-/// (`lanedivide.rs`).
+/// An action with nothing to do on x86 without locked prototypes or overrides
+/// (`internalstorage`, `forcegoto`; superseded: `paramdouble` was one until R5 slice 3, now
+/// `rules::param_double`; `segmentize` was one until [`segmentize`]). Superseded: `lanedivide`
+/// was one until R3 (`lanedivide.rs`).
 pub(crate) fn nothing(_: &mut Funcdata, _: &Arch) -> Result<i32> {
     Ok(0)
+}
+
+/// Port of `ActionSegmentize::apply` (with `SegmentOp::unify`): once per function, every
+/// CALLOTHER of a `<segmentop>` user op becomes `SEGMENTOP(space, base, inner)`.
+pub(crate) fn segmentize(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
+    if fd.segmentize_done || arch.userops.segment_ops().next().is_none() {
+        return Ok(0);
+    }
+    fd.segmentize_done = true;
+    let mut count = 0;
+    for segdef in arch.userops.segment_ops() {
+        for segroot in fd.ops_created_with(Opcode::Callother) {
+            let ins = fd.op(segroot).ins.clone();
+            if fd.op(segroot).is_dead() || fd.vn(ins[0]).offset != segdef.index {
+                continue;
+            }
+            if ins.len() != 3 {
+                return err(format!("Segment op in wrong form at 0x{:08x}", fd.op(segroot).seq.addr));
+            }
+            // a constant input takes the size the op declares
+            let sized = |fd: &mut Funcdata, vn: VarnodeId, size: u32| match fd.vn(vn).is_constant() {
+                true => fd.new_constant(size, fd.vn(vn).offset),
+                false => vn,
+            };
+            let (base, inner) = if segdef.num_variable_terms() == 2 {
+                let base = sized(fd, ins[1], segdef.base_size);
+                (base, sized(fd, ins[2], segdef.inner_size))
+            } else {
+                let inner = sized(fd, ins[1], segdef.inner_size);
+                (fd.new_constant(4, 0), inner)
+            };
+            fd.op_set_opcode(segroot, Opcode::Segmentop);
+            let spc = fd.new_varnode_space(segdef.space);
+            fd.op_set_input(segroot, spc, 0)?;
+            fd.op_set_input(segroot, base, 1)?;
+            fd.op_set_input(segroot, inner, 2)?;
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 // ---------------------------------------------------------------------------------------
