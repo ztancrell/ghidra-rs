@@ -22,7 +22,8 @@
 //! cast to a pointer to an array (`checkAddressOfCast`), the label of a block of several ranges
 //! without ops, a variable that is part of an external reference or larger than the function or
 //! external reference at its address (`pushPartialSymbol` of a code pointer,
-//! `pushMismatchSymbol`), unions, `TypePointerRel`, CALLOTHER of a built-in user-op, the
+//! `pushMismatchSymbol`), a function that writes read-only memory (the warning of
+//! `fillinReadOnly` is not ported), unions, `TypePointerRel`, CALLOTHER of a built-in user-op, the
 //! bit-field operators (`INSERT`, `ZPULL`, `SPULL`), `SEGMENTOP`, `CPOOLREF` and `NEW`.
 //! (Superseded: "labels of spliced blocks, strings", before slice 5; "and the remaining
 //! operators", before slice 4. Slice 1 had no casts or structured
@@ -116,6 +117,9 @@ pub(crate) fn negate(tok: &'static OpToken) -> Option<&'static OpToken> {
 pub fn print_c(fd: &mut Funcdata, arch: &Arch, name: &str) -> Result<String> {
     if fd.structure.is_empty() {
         return err("Function not fully decompiled. No structure present.");
+    }
+    if fd.readonly_write || super::action::readonly_written(fd, arch) {
+        return err("print C: the warning for a written read-only address (fillinReadOnly) is not ported");
     }
     let mut p = PrintC::new(fd, arch);
     p.doc_function(name)?;

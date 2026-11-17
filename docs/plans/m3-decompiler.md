@@ -1781,6 +1781,7 @@ printing, slice 4". M500 `pcc-r` and `pc-r` 487 / 495 (loud 7, silent 1: 0x47a6b
 190, 190, 188, 188 / 194; switch `pcc-r` 1810 / 2005, `pcc-t` 1817 / 2005 (60 silent each, all already silent in
 older switch checks). Next, by M500 misses: `mergeAddrTied` (VariablePiece) 6 with types on, labels of spliced
 blocks 5, a variable linked to a function or external reference 3, string constants 2.
+(Superseded: the "Next" list of the merged section above.)
 
 ### S9 slice 5, branch `m3-print5` (2026-11-16)
 
@@ -1792,8 +1793,10 @@ identical. Switch `pcc-r` 1944 / 2005 (loud 0, silent 61), `pcc-t` 1943 / 2005 (
 all silents are in older switch checks except 0x23caea8 (`pcc-t`), open: the "Read-only address
 is written" warning of `fillinReadOnly` is not ported. Not run: the full pass. Next: that warning;
 then the switch silents of the earlier stages.
+Follow-up: 0x23caea8 is loud (`print C` fails on a written read-only address, the unported
+warning): switch `pcc-t` 1943 / 2005 (loud 1, silent 61), every switch silent in an older check.
+Next: port the `fillinReadOnly` warning. (Superseded: "silent 62" and "open" above.)
 (Superseded: the counts and the "Next" list of the slice 4 section above.)
-(Superseded: the "Next" list of the merged section above.)
 
 ## Running stages in parallel
 

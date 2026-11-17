@@ -2903,6 +2903,20 @@ a truncated string, a function symbol as a one-byte variable, a big-endian PIECE
 `markInternalCopies`. Unit tests added: `entry_addr_of_a_spliced_cover` (block.rs) and
 `codepoints` (printc.rs).
 
+Follow-up on the same branch: the written read-only address is loud. `print C` fails with "the
+warning for a written read-only address (fillinReadOnly) is not ported" when, with `option
+readonly on`, an op that is not a marker writes read-only memory, before heritage
+(`Funcdata::readonly_write`, set in `varnode_props`) or at the print (`action.rs`,
+`readonly_written`). The test is wider than the C++ one: it leaves out `!isAddrForce() ||
+!hasNoDescend()` and the one warning per op. Cost: one function, 0x23caea8 on switch `pcc-t`,
+silent before and loud now; nothing else changed. Switch `pcc-t` 1943 / 2005 (loud 1, silent 61),
+`pcc-r` 1944 / 2005 (loud 0, silent 61, as before: 0x23caea8 prints identically with rules on);
+M500 `pcc-r` and `pc-r` 494 / 495 (silent 1: 0x47a6b0), `pcc-t` and `pc-t` 495 / 495, no loud
+miss; M8 print checks 7 / 7. Every switch silent is now silent in an older switch check.
+(Superseded: "silent 62" of `pcc-t` in the table, "one is new" and "It is open" above.) Not
+rerun after the follow-up: the 51 other checks on M8, which the change cannot reach (only
+`print C` reads the flag).
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The

@@ -460,11 +460,27 @@ fn unreachable(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
 /// The C++ walks the varnodes in location order (`beginLoc`: address, size, then creation for
 /// free ones) and makes one constant per read; before heritage each free varnode has one
 /// reader, so the reads are visited in that order and the constants made in it.
+/// Whether an op that is not a marker writes read-only memory, where `Funcdata::fillinReadOnly`
+/// warns "Read-only address (...) is written" (with `option readonly on`). The warning is not
+/// ported, so `print C` fails for such a function. This is wider than the C++ test: it leaves
+/// out `!isAddrForce() || !hasNoDescend()` and the one warning per op.
+pub(crate) fn readonly_written(fd: &Funcdata, arch: &Arch) -> bool {
+    let ram = Space::Sleigh(arch.sleigh.code_space());
+    arch.readonly_propagate
+        && fd.loc_all().into_iter().any(|vn| {
+            let v = fd.vn(vn);
+            v.space == ram
+                && v.def.is_some_and(|d| !matches!(fd.op(d).opc, Opcode::Indirect | Opcode::Multiequal))
+                && arch.is_readonly(v.offset, v.size)
+        })
+}
+
 fn varnode_props(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     let mut changes = varnode_props_late(fd)?;
     if !arch.readonly_propagate {
         return Ok(changes);
     }
+    fd.readonly_write |= readonly_written(fd, arch);
     let ram = Space::Sleigh(arch.sleigh.code_space());
     let mut reads = Vec::new();
     for op in fd.blocks.ops() {

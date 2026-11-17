@@ -304,6 +304,8 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    Switch `pcc-r` 1944 / 2005 (silent 61), `pcc-t` 1943 / 2005 (silent 62); all in older switch checks except
    0x23caea8 (`pcc-t`), open: the read-only write warning of `fillinReadOnly` is not ported.
    Superseded: the slice 4 counts above.
+   Follow-up: that case is loud now (`print C` fails on a written read-only address); switch `pcc-t` loud 1,
+   silent 61, every switch silent in an older check. Superseded: "silent 62" and "open" in the two lines above.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
