@@ -8,6 +8,7 @@
 
 use super::block::BlockId;
 use super::fspec::CallSpec;
+use super::fspec::Storage;
 use super::funcdata::{CallId, Funcdata, JumpTable};
 use super::jumptable::{self, Fail};
 use super::op::{Halt, OpFlags, OpId, SeqNum};
@@ -16,6 +17,7 @@ use super::varnode::{Space, VarnodeId};
 use super::{action, err, Arch, LowlevelError, Result};
 use crate::sleigh::{Parse, PcodeError};
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 
 /// `Architecture::max_instructions`
 const MAX_INSTRUCTIONS: u32 = 100_000;
@@ -94,35 +96,57 @@ enum Partial {
     Failed,
 }
 
-/// Whether `hit` holds for a varnode of the data flow into the BRANCHIND `op` of the partial
-/// function `p` (every input of every op on the way).
-fn jump_reads(p: &Funcdata, op: OpId, hit: impl Fn(VarnodeId) -> bool) -> bool {
-    let mut seen = std::collections::HashSet::new();
-    let mut work = vec![p.op(op).ins[0]];
+/// The varnodes of the data flow into `start` in the partial function `p` (every input of every
+/// op on the way).
+fn flow_into(p: &Funcdata, start: VarnodeId) -> HashSet<VarnodeId> {
+    let mut seen = HashSet::new();
+    let mut work = vec![start];
     while let Some(vn) = work.pop() {
         if !seen.insert(vn) {
             continue;
-        }
-        if hit(vn) {
-            return true;
         }
         if let Some(d) = p.vn(vn).def {
             work.extend(p.op(d).ins.iter().copied());
         }
     }
-    false
+    seen
 }
 
-/// Whether the jump `op` reads a stack varnode through the INDIRECT of a STORE (see its use in
-/// `stage_jump_table`). The INDIRECT of a call is not counted: `opCollapseIndirectsForAlias`
-/// removes one only when the alias analysis clears the varnode, not by a guard's range.
-fn reads_stack_indirect(p: &Funcdata, op: OpId) -> bool {
-    jump_reads(p, op, |vn| {
-        let Some(o) = p.vn(vn).def.map(|d| p.op(d)) else { return false };
-        o.opc == Opcode::Indirect
-            && p.vn(vn).space == Space::Stack
-            && p.iop_target(o.ins[1]).is_some_and(|e| p.op(e).opc == Opcode::Store)
-    })
+/// Whether `op` is the INDIRECT of a stack varnode that `opCollapseIndirectsForAlias` may remove
+/// (through `RuleAliasUpdate`, on a STORE or a call): not an indirect creation.
+fn is_stack_indirect(p: &Funcdata, op: OpId) -> bool {
+    let o = p.op(op);
+    o.opc == Opcode::Indirect
+        && !o.flags.has(OpFlags::INDIRECT_CREATION)
+        && o.out.is_some_and(|v| p.vn(v).space == Space::Stack)
+}
+
+/// A copy of the partial function `p` with every INDIRECT of a stack varnode removed, as if
+/// `RuleAliasUpdate` had collapsed them all; `None` when it has none.
+fn without_stack_indirects(p: &Funcdata, arch: &Arch) -> Result<Option<Funcdata>> {
+    let ops: Vec<OpId> = p
+        .ops_created_with(Opcode::Indirect)
+        .into_iter()
+        .filter(|&o| !p.op(o).is_dead() && is_stack_indirect(p, o))
+        .collect();
+    if ops.is_empty() {
+        return Ok(None);
+    }
+    let mut q = p.clone();
+    for o in ops {
+        let (Some(out), inp) = (q.op(o).out, q.op(o).ins[0]) else { continue };
+        q.total_replace(out, inp)?;
+        q.op_destroy(o);
+    }
+    jumptable::calc_nz_mask(&mut q, arch);
+    Ok(Some(q))
+}
+
+/// The LOADs among the defining ops of `flow` whose address depends on a varnode `on_sp` holds
+/// for (the stack pointer): the stack reads of the partial function made without the stack rules.
+fn stack_loads(p: &Funcdata, flow: &HashSet<VarnodeId>, on_sp: impl Fn(&VarnodeId) -> bool) -> HashSet<OpId> {
+    let loads = flow.iter().filter_map(|&v| p.vn(v).def).filter(|&d| p.op(d).opc == Opcode::Load);
+    loads.filter(|&d| flow_into(p, p.op(d).ins[1]).iter().any(&on_sp)).collect()
 }
 
 fn ram_addr(a: u64) -> String {
@@ -683,7 +707,8 @@ impl Flow<'_> {
             return Ok(Ok((Vec::new(), None)));
         }
         // `testForReturnAddress` (fail_return): a target traced back through COPY, INDIRECT and
-        // INT_AND with a constant to the input at stack offset 0 (x86's 4-byte return address)
+        // INT_AND with a constant to the input at the spec's `<returnaddress>`
+        // (`defaultReturnAddr`; never, when the spec has none)
         let mut vn = p.op(op).ins[0];
         while let Some(d) = p.vn(vn).def {
             let o = p.op(d);
@@ -694,36 +719,65 @@ impl Flow<'_> {
             }
         }
         let root = p.vn(vn);
-        if root.def.is_none() && root.space == Space::Stack && root.offset == 0 && root.size == 4 && root.is_input() {
+        let at_retaddr = match self.arch.spec.return_address {
+            Some(Storage::Stack { offset, size }) => {
+                (root.space, root.offset, root.size) == (Space::Stack, offset, size)
+            }
+            Some(Storage::Space { space, offset, size }) => {
+                (root.space, root.offset, root.size) == (Space::Sleigh(space), offset, size)
+            }
+            _ => false,
+        };
+        if root.def.is_none() && at_retaddr && root.is_input() {
             return Ok(Err(Fail::Return));
         }
-        let mut res = jumptable::recover_addresses(p, self.arch, op);
-        if matches!(res, Err(Fail::Normal(_))) {
-            // The partial function without the stack rules gives no table either. When the jump
-            // depends on the stack pointer, the stack rules could have given one: the error of
-            // the partial function with them. Otherwise they change nothing the jump reads.
+        let res = jumptable::recover_addresses(p, self.arch, op);
+        let jump = flow_into(p, p.op(op).ins[0]);
+        if let Some(e) = unported {
+            // The partial function made without the stack rules. Its result stands only where
+            // the stack rules could not change it; otherwise the error of the partial function
+            // with them. No table: they could, when the jump depends on the stack pointer. A
+            // table: they could, when a guard (`analyzeGuards`) reads the stack through a LOAD
+            // the jump does not read, since with the stack heritaged that value may be the
+            // switch variable.
             let (sp, off, _) = self.arch.spec.stack_pointer;
-            let on_sp = |vn: VarnodeId| p.vn(vn).space == Space::Sleigh(sp) && p.vn(vn).offset == off;
-            if let Some(e) = unported.as_ref().filter(|_| jump_reads(p, op, on_sp)) {
+            let on_sp = |vn: &VarnodeId| p.vn(*vn).space == Space::Sleigh(sp) && p.vn(*vn).offset == off;
+            let loud = match &res {
+                Err(Fail::Normal(_)) => jump.iter().any(on_sp),
+                Ok(_) => {
+                    let loads = stack_loads(p, &jump, on_sp);
+                    let guards = jumptable::guard_conditions(p, self.arch, op);
+                    guards.into_iter().any(|c| !stack_loads(p, &flow_into(p, c), on_sp).is_subset(&loads))
+                }
+                Err(_) => false,
+            };
+            if loud {
                 return Err(LowlevelError(e.0.clone()));
             }
-            if unported.is_none() && reads_stack_indirect(p, op) {
-                // In the C++ partial function `ActionRestructureVarnode` and `RuleAliasUpdate`
-                // (`opCollapseIndirectsForAlias`, with the value-set ranges of the STORE
-                // guards) remove the INDIRECTs of stack varnodes nothing can alias; neither is
-                // ported, so the reference may recover this table. The partial function without
-                // the stack rules has no such INDIRECT: its table, or a loud failure.
-                // ponytail: rebuilt per failing jump, its warnings dropped; keep it beside the
-                // first partial if a function with many such jumps gets slow
-                let (p2, r2) = self.build_partial(false)?;
-                if r2.is_ok() {
-                    res = jumptable::recover_addresses(&p2, self.arch, op);
-                }
-                if matches!(res, Err(Fail::Normal(_))) {
-                    return err(
-                        "jump table: the jump reads a stack varnode through an INDIRECT that RuleAliasUpdate may collapse (ActionRestructureVarnode in the partial function): not ported",
-                    );
-                }
+        } else {
+            // In the C++ partial function `ActionRestructureVarnode` and `RuleAliasUpdate`
+            // (`opCollapseIndirectsForAlias`: the alias analysis, and the value-set ranges of
+            // the STORE guards) remove the INDIRECTs of stack varnodes nothing can alias, at a
+            // STORE or a call; neither is ported. The result stands only when it is the same
+            // with every such INDIRECT removed (then with any of them removed, taken as given),
+            // and a table that fails while the jump reads one is never taken as failed: with
+            // them removed the C++ rules may simplify further (`RuleMultiCollapse`).
+            // ponytail: one clone of the partial function per jump; cache it per partial
+            // function if a function with many tables gets slow
+            let same = match without_stack_indirects(p, self.arch)? {
+                None => true,
+                Some(q) => match (&res, &jumptable::recover_addresses(&q, self.arch, op)) {
+                    (Ok(a), Ok(b)) => a.0 == b.0 && a.2 == b.2,
+                    (Err(a), Err(b)) => std::mem::discriminant(a) == std::mem::discriminant(b),
+                    _ => false,
+                },
+            };
+            let failed_on_one = matches!(res, Err(Fail::Normal(_)))
+                && jump.iter().any(|&v| p.vn(v).def.is_some_and(|d| is_stack_indirect(p, d)));
+            if !same || failed_on_one {
+                return err(
+                    "jump table: the table depends on an INDIRECT of a stack varnode that RuleAliasUpdate may collapse (ActionRestructureVarnode in the partial function): not ported",
+                );
             }
         }
         if let Ok((.., true)) = res {

@@ -2901,6 +2901,47 @@ the switch corpus, and M500 (0x4f3366 alone is identical in `swfs-t`). No unit t
 functions above are the check. A panic of ghidra-rs prints before the buffered console output,
 so `decomp-diff.sh` cuts its message and `bars.sh` counts it as silent, not loud.
 
+Review fixes (second commit on `m3-swsilent`). A review of the first commit found paths that could
+still differ silently; each now fails loudly. Superseded by this paragraph: "the stack offset 0"
+of `fail_return`, "is tried on the partial function without the stack rules", "The INDIRECT of a
+call is not checked", "In the partial function the test stays one shared varnode", and the counts
+above.
+
+- `fail_return` compares with the spec's `<returnaddress>` (`CompilerSpec::return_address`, the
+  C++ `defaultReturnAddr`: space, offset and size), not a fixed 4-byte stack offset 0.
+- INDIRECTs of stack varnodes (of a STORE or of a call; `RuleAliasUpdate` after
+  `ActionRestructureVarnode`, neither ported): the table is recovered a second time on a copy of
+  the partial function with all of them removed. A different result (another table, or a table
+  against none) fails loudly, and so does a table that fails while the jump reads one. There is no
+  retry on the partial function without the stack rules any more. Not proven: that removing only
+  some of them (what the C++ alias analysis may do) gives the same table when removing all or none
+  does.
+- The partial function without the stack rules (the fallback when the stack heritage is not
+  ported): a table from it also fails loudly when a guard (`analyzeGuards`,
+  `jumptable::guard_conditions`) reads the stack through a LOAD the jump does not read.
+- `ActionConditionalExe`: the wider test (`BooleanMatch`) also in the partial function, where the
+  C++ runs `multicse`.
+
+On the 124 functions whose state the first commit changed or left not identical (every check of
+the table above, `bars.sh` on that list), against the first commit: 6 identical -> loud on the
+INDIRECT test (0x1cdbf0e, 0x7913d0, 0x7bb710, 0x7bf170, 0x898690, 0x898850; the reference fails
+these tables too), 0x502b80 and 0x5c37f0 identical -> loud on the guard test (0x5c37f0 was loud in
+`swfs-r` already), 0x5a3c30 identical -> loud in `paramdouble` (it was loud in the two later
+checks). No function became silent, none became identical. On the list: `paramdouble` 110 / 124
+(loud 14), `swsn-r` 106 / 124 (loud 15, silent 3: the three above), `swfs-r` 104 / 124 (loud 20).
+Outside that list, the whole switch corpus at `paramdouble`, the first commit's ghidra-rs against
+this one (`decomp-diff.sh` with the old build in the reference's place): 2036 / 2050 outputs equal;
+the 14 that differ all end in an error now: the 9 above, 0x1c69c5a (loud before, new wording),
+0x807a80 (identical -> loud, `ActionConditionalExe` in the partial function), 0x831db0 (identical ->
+loud, the INDIRECT test), and 0x2285c9b and 0x7c1f30, which the reference does not finish. Counts
+from that, of the 2,004: `paramdouble` 1999 -> 1988 (loud 16, silent 0; confirmed by `bars.sh`),
+`swsn-r` 1994 -> 1984 (loud 17, silent 3), `swfs-r` 1991 -> 1982 (loud 22, silent 0); against
+master 1947, 1943, 1937.
+M8: all 55 checks identical. M500 (`bars.sh`): `s8r` and `swfs-r` 498 / 499 as before, their one miss
+0x47a6b0 loud now (silent before: the wider `ActionConditionalExe` test); `swfs-t` 493 / 499 and
+`fs-t` 489 / 495 (loud 6 each, `mergeAddrTied`), unchanged. Not rerun: `swsn-r`, `swfs-r` on the
+whole switch corpus, and the other switch checks.
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The

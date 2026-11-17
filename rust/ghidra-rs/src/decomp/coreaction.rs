@@ -2530,14 +2530,12 @@ pub(crate) fn conditional_exe(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
         }
         let Some(&icb) = fd.blocks.block(init).ops.last() else { continue };
         // verifySameCondition: `BooleanExpressionMatch::verifyCondition`, the same or the
-        // complementary condition. The jump-table partial function keeps the narrower test (one
-        // condition varnode): it runs without `multicse` (`action::PARTIAL_SKIP`), which in the
-        // C++ merges equal conditions there.
+        // complementary condition, in the jump-table partial function too (the C++ runs
+        // `multicse` there, ghidra-rs does not: `action::PARTIAL_SKIP`)
         if fd.op(icb).opc != Opcode::Cbranch {
             continue;
         }
-        let (c, ic) = (fd.op(cb).ins[1], fd.op(icb).ins[1]);
-        if c == ic || (!fd.jumptablerecovery_on && super::rules::boolean::correlated(fd, c, ic)?) {
+        if super::rules::boolean::correlated(fd, fd.op(cb).ins[1], fd.op(icb).ins[1])? {
             // testRemovability, the part that needs no read analysis: an op of the block that
             // can never move (a call, LOAD, STORE, INDIRECT, an address-tied output) leaves
             // the block as it is

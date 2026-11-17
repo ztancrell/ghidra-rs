@@ -1282,6 +1282,15 @@ fn is_thunk(fd: &Funcdata, table: &[u64]) -> bool {
     table[0] == 0 || fd.blocks.ops().all(|o| matches!(fd.op(o).opc, Opcode::Branchind | Opcode::Branch))
 }
 
+/// The conditions of the CBRANCHs `analyzeGuards` reads for the jump `indop` (flow.rs checks
+/// them in the partial function made without the stack rules).
+pub(crate) fn guard_conditions(fd: &Funcdata, arch: &Arch, indop: OpId) -> Vec<VarnodeId> {
+    let mut basic = JumpBasic::new(fd, arch, indop);
+    basic.recover_model();
+    let ops = basic.guards.iter().map(|g| g.read_op).filter(|&o| fd.op(o).opc == Opcode::Cbranch);
+    ops.map(|o| fd.op(o).ins[1]).collect()
+}
+
 /// Port of `JumpTable::recoverAddresses` (`recoverModel`, `buildAddresses`, `sanityCheck`) on
 /// the partial function `fd`: the targets in table order, whether the table is partial (its
 /// switch looks unreachable), the values kept and whether the sanity check truncated the table

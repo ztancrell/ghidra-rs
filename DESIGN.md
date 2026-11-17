@@ -303,6 +303,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `ActionConditionalExe`, dead code in the join space. Switch corpus `paramdouble` 1947 -> 1999 / 2004
    (silent 57 -> 0), `swsn-r` 1943 -> 1994 (silent 61 -> 3), `swfs-r` 1937 -> 1991 (silent 60 -> 0, loud 7 -> 13);
    3 functions identical before are loud now (4 in `swsn-r`). The other switch checks and M500 not rerun.
+   Superseded by the review fixes on the same branch (a recovered table must not depend on an INDIRECT of a
+   stack varnode the unported `RuleAliasUpdate` may remove, or, in the fallback, on a guard reading the stack;
+   `fail_return` uses the spec's `<returnaddress>`): `paramdouble` 1988, `swsn-r` 1984 (silent 3), `swfs-r` 1982
+   (silent 0) of 2004; 12 functions identical on master are loud in `swfs-r` (14 in `swsn-r` and
+   `paramdouble`). M500 `s8r`, `swfs-r`, `swfs-t`, `fs-t` at their counts, 0x47a6b0 loud instead of silent.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
