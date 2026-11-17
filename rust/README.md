@@ -3057,6 +3057,52 @@ slice 5 above, which were derived or from single checks.) Varies with load: the 
 identical" count of `s6void-m500` is 499 / 500 here and 500 / 500 in the baseline (a reference
 timeout; identical 499 / 499 in both).
 
+### Default options: the check `pcd`, five action leaves, six rules (branch `m3-default`, 2026-11-17)
+
+The check `pcd` runs `print C` with the default options: no group off and no break. Two lists
+say what is still left out, on both engines:
+
+- `D` at the top of `bars.sh`: the action leaves not ported. Now `restructure_varnode` and
+  `mapped_local_sync` (`ScopeLocal::restructureVarnode`, `Funcdata::syncVarnodesWithSymbols`:
+  the local symbols of varmap.cc, with the `mapped`, `nolocalalias` and symbol type flags that
+  heritage, type propagation, naming and printing then read).
+- `tools/corpus/default-options.txt` (written by `r1-options.sh` from the rule tables): the
+  rules of the three pools not ported. Now eight: `aliasupdate`, `switchsingle`, `ptrflow`,
+  `segment`, `ptrsubcharconstant`, `splitcopy`, `splitload`, `splitstore`.
+
+Not loud yet: without those `togglerule ... off` lines ghidra-rs runs the default options
+*without* the eight rules and says nothing (a rule missing from the tables is simply not in the
+pool). The seven silent misses of the first `pcd` run on M500 were all this (`conditionalmove`
+and others missing). Every older rule check switches the missing rules off through its options
+file, so only a run with the plain defaults is affected. Open decision: fail every
+default-options decompile while a rule is missing, or keep it as it is.
+
+Ported on the branch:
+
+- `ActionMultiCse`, `ActionShadowVar` (`coreaction.rs`), `ActionConditionalConst`
+  (`condconst.rs`). They run in the jump-table partial function too, as in the C++; the
+  partial honours `DECOMP_SKIP_ACTIONS`, because the reference patch skips an action by name in
+  every tree. The older checks keep `multicse,shadowvar,condconst` in their skip list (`S3` in
+  `bars.sh`), so they stay comparable with their baselines.
+- `ActionDynamicSymbols` and `ActionPrototypeWarnings` have nothing to do here (`action.rs`
+  says why: no console command makes a dynamic symbol; every source of a prototype warning
+  fails loudly earlier).
+- Rules: `pullsub_indirect`, `conditionalmove`, `orpredicate`, `threewaycomp`; `transformcpool`
+  fails on a CPOOLREF (the constant pool is not ported); `funcptrencoding` has nothing to do
+  while no spec declares `<funcptr>` (cspec.rs refuses it). `CloneBlockOps::cloneExpression`
+  (`returnsplit.rs`) for `conditionalmove`.
+- `ActionParamDouble`: a stack trial that is a PIECE is split in two (`checkInputSplit`,
+  `ParamActive::splitTrial`).
+- `TypeSpacebase::getSubType` reads the local scope's symbols (`infertypes::sub_type`), so
+  `setcasts` casts the address of a named stack variable as the C++ does.
+
+Counts: see the plan, "Default options". Superseded by this section: "not ported yet,
+`multicse`, `shadowvar` and `condconst`" (stage R1), "Not ported from the table row:
+`threewaycomp` ... `conditionalmove` and `orpredicate`" (stages R2 and R5), the
+`PARTIAL_SKIP` list with `multicse`, `shadowvar`, `condconst` (stage S3), "`prototypewarnings`,
+which is `not_ported`" (C printing), and "splitting a stack trial that is a PIECE" as a loud
+miss (stage R5 slice 3).
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The

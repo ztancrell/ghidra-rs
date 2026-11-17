@@ -189,6 +189,58 @@ pub(super) fn build_subpiece(fd: &mut Funcdata, base: VarnodeId, outsize: u32, s
     Ok(outvn)
 }
 
+/// Port of `RulePullsubIndirect`: a SUBPIECE of an INDIRECT's output, when only some bytes of
+/// that output are read, becomes an INDIRECT of the smaller piece.
+pub(super) fn pullsub_indirect(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
+    let vn = inp(fd, op, 0)?;
+    let Some(indir) = def(fd, vn) else { return Ok(0) };
+    if fd.vn(vn).size > 8 || fd.op(indir).opc != Indirect {
+        return Ok(0);
+    }
+    let Some(targ) = fd.iop_target(inp(fd, indir, 1)?) else { return Ok(0) };
+    if fd.op(targ).is_dead() || fd.vn(vn).has(VnFlags::ADDRFORCE) {
+        return Ok(0);
+    }
+    let (max, min) = min_max_use(fd, vn);
+    let new_size = max - min + 1;
+    if max < min || new_size >= fd.vn(vn).size as i32 || !acceptable_size(new_size) {
+        return Ok(0);
+    }
+    if fd.vn(out(fd, op)?).is_precis() {
+        return Ok(0); // don't pull apart a double precision object
+    }
+    let consume = !(calc_mask(new_size as u32) << (8 * min));
+    let base = inp(fd, indir, 0)?;
+    if consume & fd.vn(base).consume != 0 {
+        return Ok(0);
+    }
+    let v = fd.vn(vn);
+    if v.space == Space::Join {
+        return err("RulePullsubIndirect on a join varnode: Address::renormalize not ported yet");
+    }
+    let (space, small_off) = (v.space, v.offset + min as u64);
+    let small2 = if fd.op(indir).flags.has(OpFlags::INDIRECT_CREATION) {
+        // isIndirectZero
+        let possibleout = !(fd.vn(base).is_constant() && fd.vn(base).has(VnFlags::INDIRECT_CREATION));
+        let new_ind = fd.new_indirect_creation(targ, space, small_off, new_size as u32, possibleout)?;
+        out(fd, new_ind)?
+    } else {
+        let shift = fd.vn(inp(fd, op, 1)?).offset;
+        let small1 = match find_subpiece(fd, base, new_size as u32, shift) {
+            Some(s) => s,
+            None => build_subpiece(fd, base, new_size as u32, shift as u32)?,
+        };
+        // the new INDIRECT goes next to the original one
+        let new_ind = fd.new_indirect(targ)?;
+        let small2 = fd.new_varnode_out(new_size as u32, space, small_off, new_ind);
+        fd.set_indirect_input(new_ind, small1)?;
+        fd.op_insert_before(new_ind, indir)?;
+        small2
+    };
+    replace_descendants(fd, vn, small2, min)?;
+    Ok(1)
+}
+
 /// Port of `RulePullsubMulti` (a double-precision piece, `isPrecisLo`/`isPrecisHi`, is left
 /// whole).
 pub(super) fn pullsub_multi(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {

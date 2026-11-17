@@ -1822,7 +1822,37 @@ action leaves not ported yet skipped on both engines (the list `D` in `bars.sh`)
 seven leaves skipped (`restructure_varnode`, `mapped_local_sync`, `multicse`, `shadowvar`,
 `condconst`, `dynamicsymbols`, `prototypewarnings`): M8 6 / 8 (silent 2), M500 339 / 497 (loud
 83, silent 75; 66 of the silent are one missing cast of a stack address, `(xunknown1 *)&stack...`).
-Next: port the seven leaves in the C++ order and shrink `D`.
+Next: port the seven leaves in the C++ order and shrink `D`. (Superseded: five are done, below.)
+
+Progress on the branch (details: rust/README.md, "Default options"):
+
+1. `multicse`, `shadowvar` ported, and `TypeSpacebase::getSubType` reads the local symbols (the
+   missing stack-address cast): M8 8 / 8, M500 407 / 497 (loud 83, silent 7).
+2. `condconst` ported; `dynamicsymbols` and `prototypewarnings` have nothing to do in the
+   console. `D` is `restructure_varnode,mapped_local_sync`. M500 407 / 497 (loud 83, silent 7).
+3. The 7 silent misses had one cause: rules of the default pools that are not ported are
+   missing from the pool without a word (`conditionalmove` in 0x608500; the other six not traced
+   to a rule each). `pcd` now switches the unported rules off on both engines
+   (`tools/corpus/default-options.txt`, written by `r1-options.sh`); the 7 are identical with
+   that. The first two counts above were measured without it. M500 415 / 497 (loud 82, silent 0)
+   with 11 rules off.
+4. Rules ported: `pullsub_indirect`, `conditionalmove`, `orpredicate`, `threewaycomp`, plus
+   `transformcpool` (fails on a CPOOLREF) and `funcptrencoding` (nothing to do on these specs).
+   Eight rules stay off: `aliasupdate`, `switchsingle`, `ptrflow`, `segment`,
+   `ptrsubcharconstant`, `splitcopy`, `splitload`, `splitstore`.
+5. `ActionParamDouble` splits a stack trial that is a PIECE (35 loud functions of M500: 6
+   identical in `pcd`, 29 loud later in `namevars`; all 35 identical in `print raw` at
+   `break start namevars`).
+
+Not done: `restructure_varnode` and `mapped_local_sync`. They need the local symbols of
+varmap.cc (`MapState`, `RangeHint`, the full `AliasChecker`, `createEntry`,
+`fakeInputSymbols`, `markUnaliased`, `annotateRawStackPtr`) and then
+`Funcdata::syncVarnodesWithSymbols` with the varnode flags ghidra-rs does not model yet
+(`mapped`, `nolocalalias`, type locks from symbols), which heritage guards, type propagation,
+`namevars` (symbols that exist before it) and the printer read. Also open: the loud misses
+`pcd` reaches (`namevars` `getExactPiece`, indexed stack LOADs in heritage, STORE guards in
+merge, `HeapSequence`, `ActionConditionalExe`), and whether a default-options run should fail
+while a pool rule is missing.
 
 ## Running stages in parallel
 

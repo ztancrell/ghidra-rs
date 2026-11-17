@@ -2,7 +2,8 @@
 # Writes the options of the rule-stage checks: S4's options (s4-options.txt) with more groups on,
 # and `option togglerule <rule> off` for every rule of `oppool1` and of the `cleanup` pool whose
 # group is on and which ghidra-rs does not port yet, and of `oppool2` (the tables in
-# ghidra-rs/src/decomp/rules/mod.rs). Rerun it when rules land. It writes fifteen files; each line
+# ghidra-rs/src/decomp/rules/mod.rs). Rerun it when rules land. It writes sixteen files (the last, default-options.txt, holds only
+# the unported rules of every group, for the default-options check `pcd`); each line
 # names the file it is built on:
 #   rust/tools/corpus/r1-options.txt      s4-options.txt with groups `analysis`, `cleanup` on (the R1/R2/R3 check)
 #   rust/tools/corpus/subvar-options.txt  r1-options.txt with `subvar` on (the R3 subvar check)
@@ -81,3 +82,11 @@ echo "tail-r-options.txt, tail-t-options.txt: s8-r/s8-t with localrecovery on"
 grep -v "decompile switchnorm off" "$rust/tools/corpus/s8-r-options.txt" > "$rust/tools/corpus/sw-r-options.txt"
 grep -v "decompile switchnorm off" "$rust/tools/corpus/s8-t-options.txt" > "$rust/tools/corpus/sw-t-options.txt"
 echo "sw-r-options.txt, sw-t-options.txt: s8-r/s8-t with switchnorm on"
+# the default-options check (pcd): no group off, only the rules not ported yet (of every group)
+all=" analysis cleanup subvar floatprecision typerecovery constsequence bitfields doubleload doubleprecis stackvars deadcode nodejoin conditionalexe protorecovery segment splitcopy splitpointer "
+{
+    pool "$all" 'actprop = new ActionPool' 'actstackstall->addAction( actprop )'
+    pool "$all" 'actprop2 = new ActionPool' 'actmainloop->addAction( actprop2 )'
+    pool "$all" 'actcleanup = new ActionPool' 'act->addAction( actcleanup )'
+} > "$rust/tools/corpus/default-options.txt"
+echo "default-options.txt togglerules: $(grep -c togglerule "$rust/tools/corpus/default-options.txt")"

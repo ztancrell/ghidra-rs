@@ -105,6 +105,11 @@ pub(crate) struct BlockGraph {
 }
 
 impl BlockBasic {
+    /// Port of `BlockBasic::getStart`: the first address of the cover.
+    pub(crate) fn get_start(&self) -> u64 {
+        self.cover.iter().map(|r| r.0).min().unwrap_or(self.start)
+    }
+
     /// Port of `BlockBasic::getEntryAddr`: the start of the cover's one range, else of the
     /// range holding the first op (`first_op`, its address), else that address; none for a
     /// block of several ranges without ops (the invalid address). The cover is the

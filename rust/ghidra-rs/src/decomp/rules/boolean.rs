@@ -51,6 +51,183 @@ fn op_bool_negate(fd: &mut Funcdata, vn: VarnodeId, op: OpId) -> Result<VarnodeI
     insert_new(fd, BoolNegate, op_addr(fd, op), 1, &[vn], op)
 }
 
+/// `RuleConditionalMove::checkBoolean`: the boolean `vn` holds (itself, or the constant 0 or 1
+/// it is a COPY of).
+fn cmove_check_boolean(fd: &Funcdata, vn: VarnodeId) -> Option<VarnodeId> {
+    let d = def(fd, vn)?;
+    if is_bool_output(code(fd, d)) {
+        return Some(vn);
+    }
+    if code(fd, d) == Copy {
+        let c = fd.op(d).ins[0];
+        if is_const(fd, c) && fd.vn(c).offset & !1 == 0 {
+            return Some(c);
+        }
+    }
+    None
+}
+
+/// `RuleConditionalMove::gatherExpression`: whether the expression making `vn` can move out of
+/// `branch` (its ops there, at most four, go to `ops`).
+fn cmove_gather(fd: &Funcdata, vn: VarnodeId, ops: &mut Vec<OpId>, root: BlockId, branch: BlockId) -> bool {
+    let v = fd.vn(vn);
+    if v.is_constant() {
+        return true;
+    }
+    if v.is_free() || v.has(VnFlags::ADDRTIED) {
+        return false;
+    }
+    if root == branch {
+        return true;
+    }
+    let Some(d) = v.def else { return true };
+    if fd.op(d).parent != Some(branch) {
+        return true;
+    }
+    ops.push(d);
+    let mut pos = 0;
+    while pos < ops.len() {
+        let op = ops[pos];
+        pos += 1;
+        let o = fd.op(op);
+        // getEvalType() == special
+        if !o.opc.is_unary_or_binary() && !matches!(o.opc, Ptradd | Insert | Zpull | Spull) {
+            return false;
+        }
+        for &in0 in &o.ins {
+            let iv = fd.vn(in0);
+            if iv.is_free() && !iv.is_constant() {
+                return false;
+            }
+            let Some(dd) = iv.def else { continue };
+            if fd.op(dd).parent == Some(branch) {
+                if iv.has(VnFlags::ADDRTIED) || lone_descend(fd, in0) != Some(op) || ops.len() >= 4 {
+                    return false;
+                }
+                ops.push(dd);
+            }
+        }
+    }
+    true
+}
+
+/// `RuleConditionalMove::constructBool`: the expression of `ops` cloned before `insertop`.
+fn cmove_construct(fd: &mut Funcdata, vn: VarnodeId, insertop: OpId, ops: &mut [OpId]) -> Result<VarnodeId> {
+    if ops.is_empty() {
+        return Ok(vn);
+    }
+    ops.sort_by_key(|&o| fd.op(o).order);
+    crate::decomp::returnsplit::clone_expression(fd, ops, insertop)
+}
+
+/// Port of `RuleConditionalMove`: a MULTIEQUAL of two booleans chosen by a CBRANCH becomes a
+/// boolean expression of the condition.
+pub(super) fn conditional_move(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
+    if fd.op(op).ins.len() != 2 {
+        return Ok(0);
+    }
+    let (in0, in1) = (inp(fd, op, 0)?, inp(fd, op, 1)?);
+    let Some(bool0) = cmove_check_boolean(fd, in0) else { return Ok(0) };
+    let Some(bool1) = cmove_check_boolean(fd, in1) else { return Ok(0) };
+    let Some(bb) = fd.op(op).parent else { return Ok(0) };
+    // the block the two paths split at
+    let root_of = |inblock: BlockId| -> Option<BlockId> {
+        let b = fd.blocks.block(inblock);
+        if b.outs.len() != 1 {
+            return Some(inblock);
+        }
+        (b.ins.len() == 1).then(|| b.ins[0].point)
+    };
+    let (inblock0, inblock1) = (fd.blocks.block(bb).ins[0].point, fd.blocks.block(bb).ins[1].point);
+    let (Some(root0), Some(root1)) = (root_of(inblock0), root_of(inblock1)) else { return Ok(0) };
+    if root0 != root1 {
+        return Ok(0);
+    }
+    let Some(&cbranch) = fd.blocks.block(root0).ops.last() else { return Ok(0) };
+    if code(fd, cbranch) != Cbranch {
+        return Ok(0);
+    }
+    let (mut list0, mut list1) = (Vec::new(), Vec::new());
+    if !cmove_gather(fd, bool0, &mut list0, root0, inblock0) || !cmove_gather(fd, bool1, &mut list1, root0, inblock1) {
+        return Ok(0);
+    }
+    let true_out = fd.blocks.block(root0).outs[1].point;
+    let mut path0istrue = if root0 != inblock0 { true_out == inblock0 } else { true_out != inblock1 };
+    if fd.op(cbranch).flags.has(OpFlags::BOOLEAN_FLIP) {
+        path0istrue = !path0istrue;
+    }
+    let cond = inp(fd, cbranch, 1)?;
+    if !is_const(fd, bool0) && !is_const(fd, bool1) {
+        // one input is the condition itself: an AND or an OR with the other
+        let (same, mut andorselect, first) = if inblock0 == root0 {
+            (in0, path0istrue, true)
+        } else if inblock1 == root0 {
+            (in1, !path0istrue, false)
+        } else {
+            return Ok(0);
+        };
+        if cond != same {
+            let Some(negop) = def(fd, cond) else { return Ok(0) };
+            if code(fd, negop) != BoolNegate || fd.op(negop).ins[0] != same {
+                return Ok(0);
+            }
+            andorselect = !andorselect;
+        }
+        fd.op_uninsert(op);
+        fd.op_set_opcode(op, if andorselect { BoolOr } else { BoolAnd });
+        fd.op_insert_begin(op, bb);
+        let (firstvn, secondvn) = if first {
+            let a = cmove_construct(fd, bool0, op, &mut list0)?;
+            (a, cmove_construct(fd, bool1, op, &mut list1)?)
+        } else {
+            let a = cmove_construct(fd, bool1, op, &mut list1)?;
+            (a, cmove_construct(fd, bool0, op, &mut list0)?)
+        };
+        fd.op_set_input(op, firstvn, 0)?;
+        fd.op_set_input(op, secondvn, 1)?;
+        return Ok(1);
+    }
+    // below here some change is made
+    fd.op_uninsert(op);
+    let sz = fd.vn(out(fd, op)?).size;
+    let (c0, c1) = (fd.vn(bool0).offset, fd.vn(bool1).offset);
+    if is_const(fd, bool0) && is_const(fd, bool1) {
+        fd.op_remove_input(op, 1);
+        if c0 == c1 {
+            fd.op_set_opcode(op, Copy);
+            let c = fd.new_constant(sz, c0);
+            fd.op_set_input(op, c, 0)?;
+            fd.op_insert_begin(op, bb);
+        } else {
+            let needcomplement = (c0 == 0) == path0istrue;
+            if sz == 1 {
+                fd.op_set_opcode(op, if needcomplement { BoolNegate } else { Copy });
+                fd.op_insert_begin(op, bb);
+                fd.op_set_input(op, cond, 0)?;
+            } else {
+                fd.op_set_opcode(op, IntZext);
+                fd.op_insert_begin(op, bb);
+                let boolvn = if needcomplement { op_bool_negate(fd, cond, op)? } else { cond };
+                fd.op_set_input(op, boolvn, 0)?;
+            }
+        }
+        return Ok(1);
+    }
+    // exactly one input is a constant: the condition ANDed or ORed with the other
+    let (cval, needcomplement, body, list) = if is_const(fd, bool0) {
+        (c0, path0istrue != (c0 != 0), bool1, &mut list1)
+    } else {
+        (c1, path0istrue == (c1 != 0), bool0, &mut list0)
+    };
+    fd.op_set_opcode(op, if cval != 0 { BoolOr } else { BoolAnd });
+    fd.op_insert_begin(op, bb);
+    let boolvn = if needcomplement { op_bool_negate(fd, cond, op)? } else { cond };
+    let bodyvn = cmove_construct(fd, body, op, list)?;
+    fd.op_set_input(op, boolvn, 0)?;
+    fd.op_set_input(op, bodyvn, 1)?;
+    Ok(1)
+}
+
 /// `PcodeOp::flipFlag`.
 fn flip_flag(fd: &mut Funcdata, op: OpId, f: OpFlags) {
     let flags = &mut fd.op_mut(op).flags;
@@ -494,6 +671,185 @@ pub(super) fn bool_negate(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> 
     for d in readers {
         fd.op_set_opcode(d, Copy);
     }
+    Ok(1)
+}
+
+/// `RuleOrPredicate::MultiPredicate` after `discoverZeroSlot`: a MULTIEQUAL one of whose two
+/// inputs is a COPY of zero.
+#[derive(Clone, Copy)]
+struct ZeroSet {
+    op: OpId,
+    zero_slot: usize,
+    /// the value set on the other path
+    other_vn: VarnodeId,
+}
+
+/// The rest of `MultiPredicate`, after `discoverCbranch`.
+#[derive(Clone, Copy)]
+struct ZeroCond {
+    /// the last block of the path setting zero
+    zero_block: BlockId,
+    /// the block whose CBRANCH decides whether zero is set
+    cond_block: BlockId,
+    cbranch: OpId,
+}
+
+/// `MultiPredicate::discoverZeroSlot`.
+fn orpred_zero_slot(fd: &Funcdata, vn: VarnodeId) -> Option<ZeroSet> {
+    let op = def(fd, vn)?;
+    let o = fd.op(op);
+    if o.opc != Multiequal || o.ins.len() != 2 {
+        return None;
+    }
+    for zero_slot in 0..2 {
+        let Some(copyop) = def(fd, o.ins[zero_slot]) else { continue };
+        if code(fd, copyop) != Copy {
+            continue;
+        }
+        let zerovn = fd.op(copyop).ins[0];
+        if !is_const(fd, zerovn) || off(fd, zerovn) != 0 {
+            continue;
+        }
+        let other_vn = o.ins[1 - zero_slot];
+        return (!fd.vn(other_vn).is_free()).then_some(ZeroSet { op, zero_slot, other_vn });
+    }
+    None
+}
+
+/// `MultiPredicate::discoverCbranch`.
+fn orpred_cbranch(fd: &Funcdata, z: &ZeroSet) -> Option<ZeroCond> {
+    let base = fd.blocks.block(fd.op(z.op).parent?);
+    let zero_block = base.ins[z.zero_slot].point;
+    let other_block = base.ins[1 - z.zero_slot].point;
+    let (zb, ob) = (fd.blocks.block(zero_block), fd.blocks.block(other_block));
+    let cond_block = match zb.outs.len() {
+        1 if zb.ins.len() == 1 => zb.ins[0].point,
+        2 => zero_block,
+        _ => return None,
+    };
+    if fd.blocks.block(cond_block).outs.len() != 2 {
+        return None;
+    }
+    let other_ok = match ob.outs.len() {
+        1 => ob.ins.len() == 1 && ob.ins[0].point == cond_block,
+        2 => other_block == cond_block,
+        _ => false,
+    };
+    if !other_ok {
+        return None;
+    }
+    let &cbranch = fd.blocks.block(cond_block).ops.last()?;
+    (code(fd, cbranch) == Cbranch).then_some(ZeroCond { zero_block, cond_block, cbranch })
+}
+
+/// `MultiPredicate::discoverPathIsTrue`: the path setting zero is the true path out of the
+/// condition block.
+fn orpred_path_is_true(fd: &Funcdata, z: &ZeroSet, c: &ZeroCond) -> bool {
+    let outs = &fd.blocks.block(c.cond_block).outs;
+    if outs[1].point == c.zero_block {
+        true
+    } else if outs[0].point == c.zero_block {
+        false
+    } else {
+        // the condition block is the zero block
+        Some(outs[1].point) == fd.op(z.op).parent
+    }
+}
+
+/// `MultiPredicate::discoverConditionalZero`: the CBRANCH compares `vn` with zero; the path
+/// flag adjusted for the comparison, none without that form.
+fn orpred_conditional_zero(fd: &Funcdata, c: &ZeroCond, vn: VarnodeId, mut path_is_true: bool) -> Option<bool> {
+    let compareop = def(fd, fd.op(c.cbranch).ins[1])?;
+    match code(fd, compareop) {
+        IntNotequal => path_is_true = !path_is_true,
+        IntEqual => {}
+        _ => return None,
+    }
+    let (a1, a2) = (fd.op(compareop).ins[0], fd.op(compareop).ins[1]);
+    let zerovn = if a1 == vn {
+        a2
+    } else if a2 == vn {
+        a1
+    } else {
+        return None;
+    };
+    if !is_const(fd, zerovn) || off(fd, zerovn) != 0 {
+        return None;
+    }
+    if fd.op(c.cbranch).flags.has(OpFlags::BOOLEAN_FLIP) {
+        path_is_true = !path_is_true;
+    }
+    Some(path_is_true)
+}
+
+/// `RuleOrPredicate::checkSingle`: `vn | (vn == 0 ? other : 0)`.
+fn orpred_check_single(fd: &mut Funcdata, vn: VarnodeId, z: ZeroSet, op: OpId) -> Result<i32> {
+    if fd.vn(vn).is_free() {
+        return Ok(0);
+    }
+    let Some(c) = orpred_cbranch(fd, &z) else { return Ok(0) };
+    let multi_out = out(fd, z.op)?;
+    if lone_descend(fd, multi_out) != Some(op) {
+        return Ok(0); // the MULTIEQUAL is rewritten, so this must be its only use
+    }
+    let path = orpred_path_is_true(fd, &z, &c);
+    // the true condition (vn == 0) must not go to the zero set
+    if orpred_conditional_zero(fd, &c, vn, path) != Some(false) {
+        return Ok(0);
+    }
+    fd.op_set_input(z.op, vn, z.zero_slot)?;
+    fd.op_remove_input(op, 1);
+    fd.op_set_opcode(op, Copy);
+    fd.op_set_input(op, multi_out, 0)?;
+    Ok(1)
+}
+
+/// Port of `RuleOrPredicate` (condexe.cc): an OR or XOR of two values, each zero down one path
+/// of the same condition, becomes one MULTIEQUAL.
+pub(super) fn or_predicate(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
+    let (in0, in1) = (inp(fd, op, 0)?, inp(fd, op, 1)?);
+    let (b0, b1) = match (orpred_zero_slot(fd, in0), orpred_zero_slot(fd, in1)) {
+        (None, None) => return Ok(0),
+        (None, Some(b1)) => return orpred_check_single(fd, in0, b1, op),
+        (Some(b0), None) => return orpred_check_single(fd, in1, b0, op),
+        (Some(b0), Some(b1)) => (b0, b1),
+    };
+    let Some(c0) = orpred_cbranch(fd, &b0) else { return Ok(0) };
+    let Some(c1) = orpred_cbranch(fd, &b1) else { return Ok(0) };
+    if c0.cond_block == c1.cond_block {
+        if c0.zero_block == c1.zero_block {
+            return Ok(0); // the zero sets must be along different paths
+        }
+    } else {
+        // the CBRANCHs share a condition, and the zero sets have complementary paths
+        let m = evaluate(fd, inp(fd, c0.cbranch, 1)?, inp(fd, c1.cbranch, 1)?, 1)?;
+        if m == Match::Uncorrelated {
+            return Ok(0);
+        }
+        let flip = (m == Match::Complementary)
+            ^ fd.op(c0.cbranch).flags.has(OpFlags::BOOLEAN_FLIP)
+            ^ fd.op(c1.cbranch).flags.has(OpFlags::BOOLEAN_FLIP);
+        let both = orpred_path_is_true(fd, &b0, &c0) == orpred_path_is_true(fd, &b1, &c1);
+        if both != flip {
+            return Ok(0); // one path hits both zero sets
+        }
+    }
+    let order = crate::decomp::merge::compare_order(fd, b0.op, b1.op);
+    if order == 0 {
+        return Ok(0);
+    }
+    // the later MULTIEQUAL's block, and whether branch0's non-zero value flows through slot 0
+    let (later, slot0_sets_branch0) = if order < 0 { (b1.op, b1.zero_slot == 0) } else { (b0.op, b0.zero_slot == 1) };
+    let Some(final_block) = fd.op(later).parent else { return Ok(0) };
+    let new_multi = fd.new_op(Multiequal, fd.blocks.block(final_block).get_start());
+    let (first, second) = if slot0_sets_branch0 { (b0.other_vn, b1.other_vn) } else { (b1.other_vn, b0.other_vn) };
+    fd.op_set_input(new_multi, first, 0)?;
+    fd.op_set_input(new_multi, second, 1)?;
+    let newvn = uniq_out(fd, fd.vn(b0.other_vn).size, new_multi)?;
+    fd.op_insert_begin(new_multi, final_block);
+    fd.op_remove_input(op, 1);
+    fd.op_set_input(op, newvn, 0)?;
+    fd.op_set_opcode(op, Copy);
     Ok(1)
 }
 

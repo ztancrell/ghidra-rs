@@ -322,6 +322,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    Default options, branch `m3-default` (2026-11-17): the new check `pcd` (`print C`, no option off, the seven
    unported leaves `restructure_varnode`, `mapped_local_sync`, `multicse`, `shadowvar`, `condconst`, `dynamicsymbols`,
    `prototypewarnings` skipped on both engines) starts at M8 6 / 8 (silent 2), M500 339 / 497 (loud 83, silent 75).
+   Then on the branch: five of the seven leaves done (`restructure_varnode` and `mapped_local_sync` stay skipped),
+   the unported pool rules switched off on both engines (`default-options.txt`: 14, then 8 after six rules landed):
+   M8 8 / 8, M500 415 / 497 (loud 82, silent 0) with 11 rules off. Open decision: a run with the plain default
+   options still leaves the 8 unported rules out without a word.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

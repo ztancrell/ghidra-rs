@@ -84,7 +84,7 @@ fn is_arithmetic_op(opc: Opcode) -> bool {
 }
 
 /// `TypeOp::isFloatingPointOp`.
-fn is_floating_point_op(opc: Opcode) -> bool {
+pub(crate) fn is_floating_point_op(opc: Opcode) -> bool {
     matches!(
         opc,
         FloatEqual
@@ -452,9 +452,9 @@ fn param_pair(fd: &Funcdata, op: OpId, j: usize) -> Result<bool> {
 
 /// Port of `ActionParamDouble::apply` (group `protorecovery`).
 ///
-/// - A call with active trials: a stack trial whose varnode is a PIECE would be split in two
-///   (`checkInputSplit`, `ParamActive::splitTrial`). Not ported: it errors where the C++ would
-///   ask `checkInputSplit`.
+/// - A call with active trials: a stack trial whose varnode is a PIECE is split in two when
+///   both halves fit parameter entries (`checkInputSplit`, `ParamActive::splitTrial`), and the
+///   call reads the two pieces. Superseded: "Not ported: it errors".
 /// - A call with neither trials nor a locked prototype, double precision on: two adjacent inputs
 ///   that are the pieces of one whole would be joined (`checkInputJoin` / `doInputJoin`). Not
 ///   ported: that errors.
@@ -462,11 +462,15 @@ fn param_pair(fd: &Funcdata, op: OpId, j: usize) -> Result<bool> {
 ///   primitive parameter of at least the default size are marked `precislo` / `precishi`, when
 ///   the parameter is read through such halves only.
 pub(crate) fn param_double(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
+    let mut count = 0;
     for c in fd.qlst.clone() {
         let call = fd.call(c);
         let op = call.op;
-        if let Some(active) = &call.active_input {
-            for t in &active.trials {
+        if call.active_input.is_some() {
+            let mut j = 0;
+            // the trial list grows as trials split; a split trial is looked at again (nested PIECEs)
+            while let Some(t) = fd.call(c).active_input.as_ref().and_then(|a| a.trials.get(j)).cloned() {
+                j += 1;
                 if t.has(crate::decomp::fspec::ParamTrial::CHECKED)
                     || t.has(crate::decomp::fspec::ParamTrial::UNREF)
                     || t.space != Space::Stack
@@ -474,12 +478,28 @@ pub(crate) fn param_double(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
                     continue;
                 }
                 let vn = inp(fd, op, t.slot)?;
-                let is_piece = fd.vn(vn).def.is_some_and(|d| code(fd, d) == Opcode::Piece);
-                if is_piece && call.proto.model.is_some() {
-                    return err(
-                        "ActionParamDouble: splitting a stack trial that is a PIECE not implemented in ghidra-rs yet",
-                    );
+                let Some(concat) = fd.vn(vn).def.filter(|&d| code(fd, d) == Opcode::Piece) else { continue };
+                let Some(m) = fd.call(c).proto.model else { continue };
+                let (mostvn, leastvn) = (inp(fd, concat, 0)?, inp(fd, concat, 1)?);
+                // little endian: the least significant piece is at the trial's address
+                let splitsize = fd.vn(leastvn).size;
+                // checkInputSplit (ParamListStandard::checkSplit): both halves fit an entry
+                let input = &arch.spec.models.get(m).input;
+                if splitsize >= t.size
+                    || input.find_entry(Space::Stack, t.off, splitsize).is_none()
+                    || input
+                        .find_entry(Space::Stack, t.off.wrapping_add(u64::from(splitsize)), t.size - splitsize)
+                        .is_none()
+                {
+                    continue;
                 }
+                if let Some(active) = fd.call_mut(c).active_input.as_mut() {
+                    active.split_trial(j - 1, splitsize)?;
+                }
+                fd.op_insert_input(op, leastvn, t.slot)?;
+                fd.op_set_input(op, mostvn, t.slot + 1)?;
+                count += 1;
+                j -= 1;
             }
         } else if call.proto.locked.is_none() && fd.double_precis_on {
             let n = fd.op(op).ins.len();
@@ -492,8 +512,7 @@ pub(crate) fn param_double(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             }
         }
     }
-    let mut count = 0;
-    let Some(locked) = fd.proto.locked.clone().filter(|_| fd.double_precis_on) else { return Ok(0) };
+    let Some(locked) = fd.proto.locked.clone().filter(|_| fd.double_precis_on) else { return Ok(count) };
     let min_double_size = arch.pointer_size();
     for p in &locked.inputs {
         if !primitive_whole(fd, p.ty)? {

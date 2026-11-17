@@ -40,7 +40,7 @@ pub(crate) use boolean::{boolean_flip, op_normalize_flip};
 pub(crate) use compare::replace_lessequal;
 pub(crate) use cse::func_eq_level;
 pub(crate) use cse::func_equal;
-pub(crate) use double::param_double;
+pub(crate) use double::{is_floating_point_op, param_double};
 pub(crate) use pool::{nonzero_mask, pool_apply, select, Pool};
 
 use arith::*;
@@ -114,6 +114,7 @@ pub(crate) const OPPOOL1: &[Rule] = &[
     r("selectcse", "analysis", &[Subpiece, IntSright], select_cse),
     r("collect_terms", "analysis", &[IntAdd], collect_terms),
     r("pullsub_multi", "analysis", &[Subpiece], pullsub_multi),
+    r("pullsub_indirect", "analysis", &[Subpiece], pullsub_indirect),
     r("push_multi", "nodejoin", &[Multiequal], push_multi),
     r("sborrow", "analysis", &[IntSborrow], sborrow),
     r("scarry", "analysis", &[IntScarry], scarry),
@@ -159,6 +160,7 @@ pub(crate) const OPPOOL1: &[Rule] = &[
     r("sless2zero", "analysis", &[IntSless], sless_2_zero),
     r("equal2zero", "analysis", &[IntEqual, IntNotequal], equal_2_zero),
     r("equal2constant", "analysis", &[IntEqual, IntNotequal], equal_2_constant),
+    r("threewaycomp", "analysis", &[IntSless, IntSlessequal, IntEqual, IntNotequal], three_way_compare),
     r("xorcollapse", "analysis", &[IntEqual, IntNotequal], xor_collapse),
     r("addmultcollapse", "analysis", &[IntAdd, IntMult], add_mult_collapse),
     r("collapseconstants", "analysis", &[
@@ -169,6 +171,7 @@ pub(crate) const OPPOOL1: &[Rule] = &[
         FloatDiv, FloatMult, FloatSub, FloatNeg, FloatAbs, FloatSqrt, FloatInt2float,
         FloatFloat2float, FloatTrunc, FloatCeil, FloatFloor, FloatRound, Piece, Subpiece, Popcount,
         Lzcount], collapse_constants),
+    r("transformcpool", "analysis", &[Cpoolref], transform_cpool),
     r("propagatecopy", "analysis", &[Copy], propagate_copy),
     r("zexteliminate", "analysis", &[IntEqual, IntNotequal, IntLess, IntLessequal], zext_eliminate),
     r("slesstoless", "analysis", &[IntSless, IntSlessequal], sless_to_less),
@@ -234,6 +237,9 @@ pub(crate) const OPPOOL1: &[Rule] = &[
     r("subvar_zext", "subvar", &[IntZext], subvar_ext),
     r("subvar_sext", "subvar", &[IntSext], subvar_ext),
     r("negatenegate", "analysis", &[IntNegate], negate_negate),
+    r("conditionalmove", "conditionalexe", &[Multiequal], conditional_move),
+    r("orpredicate", "conditionalexe", &[IntOr, IntXor], or_predicate),
+    r("funcptrencoding", "analysis", &[Callind], funcptr_encoding),
     r("subfloat_convert", "floatprecision", &[FloatFloat2float], subfloat_convert),
     r("floatcast", "floatprecision", &[FloatFloat2float, FloatTrunc], float_cast),
     r("ignorenan", "floatprecision", &[FloatNan], ignore_nan),
@@ -306,6 +312,17 @@ fn def(fd: &Funcdata, vn: VarnodeId) -> Option<OpId> {
 
 fn is_const(fd: &Funcdata, vn: VarnodeId) -> bool {
     fd.vn(vn).is_constant()
+}
+
+/// `RuleTransformCpool`: the constant pool (`CPoolRecord`) is not ported, so a CPOOLREF fails.
+fn transform_cpool(_: &mut Funcdata, _: OpId, _: &Arch) -> Result<i32> {
+    err("RuleTransformCpool: a CPOOLREF (the constant pool) is not implemented in ghidra-rs yet")
+}
+
+/// `RuleFuncPtrEncoding`: nothing to do while `Architecture::funcptr_align` is 0, and only a
+/// `<funcptr>` of the compiler spec sets it, which cspec.rs refuses.
+fn funcptr_encoding(_: &mut Funcdata, _: OpId, _: &Arch) -> Result<i32> {
+    Ok(0)
 }
 
 /// `Varnode::loneDescend`.

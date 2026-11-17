@@ -15,6 +15,7 @@ mod blocktransform;
 mod cast;
 mod collapse;
 mod comment;
+mod condconst;
 mod coreaction;
 mod cover;
 mod cparse;

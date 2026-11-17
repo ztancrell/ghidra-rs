@@ -208,6 +208,39 @@ fn node_split(fd: &mut Funcdata, b: BlockId, inedge: usize) -> Result<()> {
 /// `CloneBlockOps::cloneBlock`: each op of `b` but a BRANCH is cloned (flags and output) at the
 /// end of `bprime`, then `patchInputs`.
 fn clone_block(fd: &mut Funcdata, b: BlockId, bprime: BlockId, inedge: usize) -> Result<()> {
+    let mut clones: Vec<(OpId, OpId)> = Vec::new();
+    let mut orig_to_clone: HashMap<OpId, OpId> = HashMap::new();
+    for orig in fd.blocks.block(b).ops.clone() {
+        if let Some(dup) = build_clone(fd, orig, &mut clones, &mut orig_to_clone)? {
+            fd.op_insert_end(dup, bprime);
+        }
+    }
+    patch_inputs(fd, &clones, &orig_to_clone, inedge)
+}
+
+/// `CloneBlockOps::cloneExpression`: the ops of an expression (in order) cloned before
+/// `follow`; the output of the last clone.
+pub(crate) fn clone_expression(fd: &mut Funcdata, ops: &[OpId], follow: OpId) -> Result<VarnodeId> {
+    let mut clones: Vec<(OpId, OpId)> = Vec::new();
+    let mut orig_to_clone: HashMap<OpId, OpId> = HashMap::new();
+    for &orig in ops {
+        if let Some(dup) = build_clone(fd, orig, &mut clones, &mut orig_to_clone)? {
+            fd.op_insert_before(dup, follow)?;
+        }
+    }
+    let Some(&(last, _)) = clones.last() else { return err("No expression to clone") };
+    patch_inputs(fd, &clones, &orig_to_clone, 0)?;
+    fd.op(last).out.ok_or_else(|| super::LowlevelError("the cloned expression has no output".into()))
+}
+
+/// `CloneBlockOps::buildOpClone` and `buildVarnodeOutput`: the clone of one op (none for a
+/// BRANCH), not yet inserted and without inputs.
+fn build_clone(
+    fd: &mut Funcdata,
+    orig: OpId,
+    clones: &mut Vec<(OpId, OpId)>,
+    orig_to_clone: &mut HashMap<OpId, OpId>,
+) -> Result<Option<OpId>> {
     // the bits `buildOpClone` (funcdata_block.cc) keeps that ghidra-rs models (the halt kind is
     // copied below; `nocollapse`, `no_indirect_collapse`, `ptrflow` and the additional flags
     // other than `special_print` are not modelled)
@@ -230,33 +263,28 @@ fn clone_block(fd: &mut Funcdata, b: BlockId, bprime: BlockId, inedge: usize) ->
         VnFlags::INDIRECT_CREATION,
         VnFlags::RETURN_ADDRESS,
     ];
-    let mut clones: Vec<(OpId, OpId)> = Vec::new();
-    let mut orig_to_clone: HashMap<OpId, OpId> = HashMap::new();
-    for orig in fd.blocks.block(b).ops.clone() {
-        let o = fd.op(orig).clone();
-        if o.is_branch() {
-            if o.opc != Opcode::Branch {
-                return err("Cannot duplicate 2-way or n-way branch in nodeplit");
-            }
-            continue;
+    let o = fd.op(orig).clone();
+    if o.is_branch() {
+        if o.opc != Opcode::Branch {
+            return err("Cannot duplicate 2-way or n-way branch in nodeplit");
         }
-        let dup = fd.new_op(o.opc, o.seq.addr);
-        for f in OP_KEEP.into_iter().filter(|&f| o.flags.has(f)) {
-            fd.op_mut(dup).flags.set(f);
-        }
-        fd.op_mut(dup).halt = o.halt;
-        clones.push((dup, orig));
-        orig_to_clone.insert(orig, dup);
-        if let Some(out) = o.out {
-            let v = fd.vn(out).clone();
-            let nv = fd.new_varnode_out(v.size, v.space, v.offset, dup);
-            for f in VN_KEEP.into_iter().chain([VnFlags::WRITEMASK]).filter(|&f| v.flags.has(f)) {
-                fd.vn_set(nv, f);
-            }
-        }
-        fd.op_insert_end(dup, bprime);
+        return Ok(None);
     }
-    patch_inputs(fd, &clones, &orig_to_clone, inedge)
+    let dup = fd.new_op(o.opc, o.seq.addr);
+    for f in OP_KEEP.into_iter().filter(|&f| o.flags.has(f)) {
+        fd.op_mut(dup).flags.set(f);
+    }
+    fd.op_mut(dup).halt = o.halt;
+    clones.push((dup, orig));
+    orig_to_clone.insert(orig, dup);
+    if let Some(out) = o.out {
+        let v = fd.vn(out).clone();
+        let nv = fd.new_varnode_out(v.size, v.space, v.offset, dup);
+        for f in VN_KEEP.into_iter().chain([VnFlags::WRITEMASK]).filter(|&f| v.flags.has(f)) {
+            fd.vn_set(nv, f);
+        }
+    }
+    Ok(Some(dup))
 }
 
 /// `CloneBlockOps::patchInputs`.

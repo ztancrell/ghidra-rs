@@ -139,7 +139,7 @@ fn def_order(fd: &Funcdata) -> Vec<VarnodeId> {
 }
 
 /// `FlowBlock::dominates`
-fn dominates(fd: &Funcdata, dom: BlockId, mut sub: Option<BlockId>) -> bool {
+pub(crate) fn dominates(fd: &Funcdata, dom: BlockId, mut sub: Option<BlockId>) -> bool {
     let index = fd.blocks.block(dom).index;
     while let Some(s) = sub {
         if index > fd.blocks.block(s).index {
@@ -1418,7 +1418,7 @@ fn piece_root(fd: &Funcdata, mut vn: VarnodeId) -> Result<VarnodeId> {
 }
 
 /// `PcodeOp::compareOrder` (the caller tests it as a boolean, as the C++ does).
-fn compare_order(fd: &Funcdata, a: OpId, b: OpId) -> i32 {
+pub(crate) fn compare_order(fd: &Funcdata, a: OpId, b: OpId) -> i32 {
     let (pa, pb) = (fd.op(a).parent, fd.op(b).parent);
     if pa == pb {
         return if fd.op(a).order < fd.op(b).order { -1 } else { 1 };

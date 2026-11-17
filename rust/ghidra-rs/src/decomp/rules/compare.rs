@@ -701,6 +701,187 @@ pub(super) fn range_meld(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
     }
 }
 
+/// Port of `RuleThreeWayCompare::testCompareEquivalence`: `lessop` and `lessequalop` compare the
+/// same two values as `<` and `<=` (or as two `<` whose constants differ by one). 0 they do, 1
+/// they do with the two swapped, none they do not.
+fn three_way_equivalence(fd: &Funcdata, lessop: OpId, lessequalop: OpId) -> Option<bool> {
+    let mut two_less_than = match (code(fd, lessop), code(fd, lessequalop)) {
+        (IntLess, IntLessequal) | (IntSless, IntSlessequal) | (FloatLess, FloatLessequal) => false,
+        (IntLess, IntLess) | (IntSless, IntSless) => true,
+        _ => return None,
+    };
+    let (a1, a2) = (fd.op(lessop).ins[0], fd.op(lessequalop).ins[0]);
+    let (b1, b2) = (fd.op(lessop).ins[1], fd.op(lessequalop).ins[1]);
+    let mut swap = false;
+    if a1 != a2 {
+        if !is_const(fd, a1) || !is_const(fd, a2) {
+            return None;
+        }
+        let (o1, o2) = (off(fd, a1), off(fd, a2));
+        if o1 != o2 && two_less_than {
+            if o2.wrapping_add(1) == o1 {
+                two_less_than = false; // `lessequalop` is a less-than equivalent to a less-equal
+            } else if o1.wrapping_add(1) == o2 {
+                two_less_than = false; // `lessop` is the one
+                swap = true;
+            } else {
+                return None;
+            }
+        }
+    }
+    if b1 != b2 {
+        if !is_const(fd, b1) || !is_const(fd, b2) {
+            return None;
+        }
+        let (o1, o2) = (off(fd, b1), off(fd, b2));
+        if o1 != o2 && two_less_than {
+            if o1.wrapping_add(1) == o2 {
+                two_less_than = false;
+            } else if o2.wrapping_add(1) == o1 {
+                two_less_than = false;
+                swap = true;
+            }
+        } else {
+            return None;
+        }
+    }
+    (!two_less_than).then_some(swap)
+}
+
+/// Port of `RuleThreeWayCompare::detectThreeWay`: `op` (an INT_ADD) is `zext(a < b) + zext(a <=
+/// b) - 1` in one of its forms; the less-than op and whether the `- 1` is missing (the partial
+/// form).
+fn detect_three_way(fd: &Funcdata, op: OpId) -> Option<(OpId, bool)> {
+    let written = |vn: VarnodeId, opc: Opcode| def(fd, vn).filter(|&d| code(fd, d) == opc);
+    let minus_one = |vn: VarnodeId| is_const(fd, vn) && off(fd, vn) == calc_mask(fd.vn(vn).size);
+    let (vn1, vn2) = (fd.op(op).ins[0], fd.op(op).ins[1]);
+    let mut partial = false;
+    let (zext1, zext2) = if is_const(fd, vn2) {
+        // form 1: (z + z) - 1
+        if !minus_one(vn2) {
+            return None;
+        }
+        let addop = written(vn1, IntAdd)?;
+        (written(fd.op(addop).ins[0], IntZext)?, written(fd.op(addop).ins[1], IntZext)?)
+    } else {
+        let tmpop = def(fd, vn2)?;
+        match code(fd, tmpop) {
+            IntZext => {
+                // form 2: (z - 1) + z
+                let addop = def(fd, vn1)?;
+                if code(fd, addop) != IntAdd {
+                    // the partial form: z + z
+                    if code(fd, addop) != IntZext {
+                        return None;
+                    }
+                    partial = true;
+                    (addop, tmpop)
+                } else {
+                    if !minus_one(fd.op(addop).ins[1]) {
+                        return None;
+                    }
+                    (written(fd.op(addop).ins[0], IntZext)?, tmpop)
+                }
+            }
+            IntAdd => {
+                // form 3: z + (z - 1)
+                let zext1 = written(vn1, IntZext)?;
+                if !minus_one(fd.op(tmpop).ins[1]) {
+                    return None;
+                }
+                (zext1, written(fd.op(tmpop).ins[0], IntZext)?)
+            }
+            _ => return None,
+        }
+    };
+    let mut lessop = def(fd, fd.op(zext1).ins[0])?;
+    let mut lessequalop = def(fd, fd.op(zext2).ins[0])?;
+    if !matches!(code(fd, lessop), IntLess | IntSless | FloatLess) {
+        std::mem::swap(&mut lessop, &mut lessequalop);
+    }
+    if three_way_equivalence(fd, lessop, lessequalop)? {
+        lessop = lessequalop;
+    }
+    Some((lessop, partial))
+}
+
+/// Port of `RuleThreeWayCompare`: a comparison of a three-way compare (-1, 0 or 1) with a
+/// constant becomes the comparison of the two values.
+pub(super) fn three_way_compare(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
+    three_way(fd, op)
+}
+
+fn three_way(fd: &mut Funcdata, op: OpId) -> Result<i32> {
+    let mut const_slot = 0;
+    if !is_const(fd, inp(fd, op, 0)?) {
+        const_slot = 1;
+        if !is_const(fd, inp(fd, op, 1)?) {
+            return Ok(0);
+        }
+    }
+    let c = inp(fd, op, const_slot)?;
+    // the constant (-1, 0, 1, 2) is the highest three bits of the form
+    let val = off(fd, c);
+    let mut form: u32 = if val <= 2 {
+        val as u32 + 1
+    } else if val == calc_mask(fd.vn(c).size) {
+        0
+    } else {
+        return Ok(0);
+    };
+    let Some(addop) = def(fd, inp(fd, op, 1 - const_slot)?).filter(|&d| code(fd, d) == IntAdd) else { return Ok(0) };
+    let Some((lessop, partial)) = detect_three_way(fd, addop) else { return Ok(0) };
+    if partial {
+        if form == 0 {
+            return Ok(0); // -1 is out of range now
+        }
+        form -= 1; // subtract 1 from both sides to complete the three-way form
+    }
+    // then the constant's position, then the op (SLESS, SLESSEQUAL, EQUAL, NOTEQUAL)
+    form = (form << 1) + const_slot as u32;
+    form = (form << 2)
+        + match code(fd, op) {
+            IntSlessequal => 1,
+            IntEqual => 2,
+            IntNotequal => 3,
+            _ => 0,
+        };
+    let lessform = code(fd, lessop);
+    let lessequalform = match lessform {
+        IntLess => IntLessequal,
+        IntSless => IntSlessequal,
+        _ => FloatLessequal,
+    };
+    // the first input of the less-than is the second parameter of the three-way compare
+    let (bvn, avn) = (fd.op(lessop).ins[0], fd.op(lessop).ins[1]);
+    if (!is_const(fd, avn) && fd.vn(avn).is_free()) || (!is_const(fd, bvn) && fd.vn(bvn).is_free()) {
+        return Ok(0);
+    }
+    let float = lessform == FloatLess;
+    let (opc, first, second) = match form {
+        // always true, always false
+        1 | 21 | 4 | 16 => {
+            fd.op_set_opcode(op, if matches!(form, 1 | 21) { IntEqual } else { IntNotequal });
+            for slot in 0..2 {
+                let zero = fd.new_constant(1, 0);
+                fd.op_set_input(op, zero, slot)?;
+            }
+            return Ok(1);
+        }
+        2 | 5 | 6 | 12 => (lessform, avn, bvn),         // a < b
+        13 | 19 | 20 | 23 => (lessequalform, avn, bvn), // a <= b
+        8 | 17 | 18 | 22 => (lessform, bvn, avn),       // a > b
+        0 | 3 | 7 | 9 => (lessequalform, bvn, avn),     // a >= b
+        10 | 14 => (if float { FloatEqual } else { IntEqual }, avn, bvn),
+        11 | 15 => (if float { FloatNotequal } else { IntNotequal }, avn, bvn),
+        _ => return Ok(0),
+    };
+    fd.op_set_opcode(op, opc);
+    fd.op_set_input(op, first, 0)?;
+    fd.op_set_input(op, second, 1)?;
+    Ok(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -714,6 +895,55 @@ mod tests {
         fd.op_set_input(op, a, 0).unwrap();
         fd.op_set_input(op, b, 1).unwrap();
         op
+    }
+
+    /// `out = opc(ins)` with a written output of `size` bytes.
+    fn written(fd: &mut Funcdata, opc: Opcode, size: u32, ins: &[VarnodeId]) -> VarnodeId {
+        let op = fd.new_op(opc, 0x1000);
+        let off = 0x100 + 0x10 * u64::from(op.0);
+        let out = fd.new_varnode_out(size, Space::Sleigh(1), off, op);
+        for (i, &v) in ins.iter().enumerate() {
+            fd.op_set_input(op, v, i).unwrap();
+        }
+        out
+    }
+
+    #[test]
+    fn three_way_compare_forms() {
+        // (zext(a s< b) + zext(a s<= b)) - 1 is 1, 0 or -1 for a < b, a == b, a > b
+        // comparison of it with a constant, constant first, result: (opcode, a first)
+        let cases = [
+            (IntSless, 0, false, Some((IntSless, false))),        // tw s< 0: b s< a
+            (IntEqual, 0, false, Some((IntEqual, false))),        // tw == 0: equal (inputs b, a)
+            (IntNotequal, 1, true, Some((IntSlessequal, false))), // 1 != tw: b s<= a
+            (IntSless, 0, true, Some((IntSless, true))),          // 0 s< tw: a s< b
+            (IntEqual, 5, false, None),
+        ];
+        for (opc, c, const_first, want) in cases {
+            let mut fd = Funcdata::new(0x1000);
+            let k = fd.new_constant(4, 7);
+            let a = written(&mut fd, Copy, 4, &[k]);
+            let b = written(&mut fd, Copy, 4, &[k]);
+            let less = written(&mut fd, IntSless, 1, &[a, b]);
+            let lesseq = written(&mut fd, IntSlessequal, 1, &[a, b]);
+            let z1 = written(&mut fd, IntZext, 4, &[less]);
+            let z2 = written(&mut fd, IntZext, 4, &[lesseq]);
+            let sum = written(&mut fd, IntAdd, 4, &[z1, z2]);
+            let m1 = fd.new_constant(4, 0xffff_ffff);
+            let tw = written(&mut fd, IntAdd, 4, &[sum, m1]);
+            let kc = fd.new_constant(4, c);
+            let ins = if const_first { [kc, tw] } else { [tw, kc] };
+            let res = written(&mut fd, opc, 1, &ins);
+            let op = fd.vn(res).def.unwrap();
+            let changed = three_way(&mut fd, op).unwrap();
+            let got = (changed == 1).then(|| (code(&fd, op), fd.op(op).ins[0] == a));
+            assert_eq!(got, want, "{opc:?} {c} const_first={const_first}");
+            if got.is_some() {
+                let mut both = fd.op(op).ins.clone();
+                both.sort_by_key(|v| v.0);
+                assert_eq!(both, vec![a, b]);
+            }
+        }
     }
 
     #[test]

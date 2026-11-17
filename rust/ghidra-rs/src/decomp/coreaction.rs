@@ -2529,8 +2529,8 @@ pub(crate) fn conditional_exe(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
         }
         let Some(&icb) = fd.blocks.block(init).ops.last() else { continue };
         // verifySameCondition: `BooleanExpressionMatch::verifyCondition`, the same or the
-        // complementary condition, in the jump-table partial function too (the C++ runs
-        // `multicse` there, ghidra-rs does not: `action::PARTIAL_SKIP`)
+        // complementary condition, in the jump-table partial function too (superseded: "the C++ runs
+        // `multicse` there, ghidra-rs does not": both do)
         if fd.op(icb).opc != Opcode::Cbranch {
             continue;
         }
@@ -2819,6 +2819,147 @@ pub(crate) fn map_globals(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         fd.warning_header("Globals starting with '_' overlap smaller symbols at the same address");
     }
     Ok(0)
+}
+
+// ---------------------------------------------------------------------------------------
+// ActionMultiCse, ActionShadowVar
+
+/// The varnode a COPY reads, else the varnode itself ("allow for differences in copy
+/// propagation").
+fn through_copy(fd: &Funcdata, vn: VarnodeId) -> VarnodeId {
+    match fd.vn(vn).def {
+        Some(d) if fd.op(d).opc == Opcode::Copy => fd.op(d).ins[0],
+        _ => vn,
+    }
+}
+
+/// Port of `ActionMultiCse::preferredOutput`: whether `out2` replaces `out1`.
+fn multi_cse_preferred(fd: &Funcdata, out1: VarnodeId, out2: VarnodeId) -> bool {
+    let returned = |vn: VarnodeId| fd.vn(vn).descend.iter().any(|&op| fd.op(op).opc == Opcode::Return);
+    if returned(out1) {
+        return false;
+    }
+    if returned(out2) {
+        return true;
+    }
+    if !fd.vn(out1).has(VnFlags::ADDRTIED) {
+        if fd.vn(out2).has(VnFlags::ADDRTIED) {
+            return true;
+        }
+        return is_unique(fd, out1) && !is_unique(fd, out2);
+    }
+    false
+}
+
+/// Port of `ActionMultiCse::findMatch`: a MULTIEQUAL before `target` reading `vn` whose inputs
+/// are all functionally equal to the target's.
+fn multi_cse_find_match(fd: &Funcdata, bl: BlockId, target: OpId, vn: VarnodeId) -> Option<OpId> {
+    for &op in &fd.blocks.block(bl).ops {
+        if op == target {
+            break;
+        }
+        let ins = &fd.op(op).ins;
+        if !ins.iter().any(|&v| through_copy(fd, v) == vn) {
+            continue;
+        }
+        let tins = &fd.op(target).ins;
+        let same = ins.iter().enumerate().all(|(j, &v)| {
+            let in1 = through_copy(fd, v);
+            let in2 = through_copy(fd, tins[j]);
+            in1 == in2 || super::rules::func_eq_level(fd, in1, in2).0 == 0
+        });
+        if same {
+            return Some(op);
+        }
+    }
+    None
+}
+
+/// Port of `ActionMultiCse::processBlock`: removes one of two equivalent MULTIEQUALs of a block.
+fn multi_cse_block(fd: &mut Funcdata, bl: BlockId) -> Result<bool> {
+    let mut seen: HashSet<VarnodeId> = HashSet::new();
+    let mut found = None;
+    'ops: for &op in &fd.blocks.block(bl).ops {
+        match fd.op(op).opc {
+            Opcode::Copy => continue,
+            Opcode::Multiequal => {}
+            _ => break,
+        }
+        let ins: Vec<VarnodeId> = fd.op(op).ins.iter().map(|&v| through_copy(fd, v)).collect();
+        for &vn in &ins {
+            if seen.contains(&vn) {
+                if let Some(pair) = multi_cse_find_match(fd, bl, op, vn) {
+                    found = Some((pair, op));
+                    break 'ops;
+                }
+            }
+        }
+        seen.extend(ins);
+    }
+    let Some((pairop, targetop)) = found else { return Ok(false) };
+    let (Some(out1), Some(out2)) = (fd.op(pairop).out, fd.op(targetop).out) else {
+        return err("ActionMultiCse: a MULTIEQUAL without output");
+    };
+    if multi_cse_preferred(fd, out1, out2) {
+        fd.total_replace(out1, out2)?;
+        fd.op_destroy(pairop);
+    } else {
+        fd.total_replace(out2, out1)?;
+        fd.op_destroy(targetop);
+    }
+    Ok(true)
+}
+
+/// Port of `ActionMultiCse::apply`: common subexpression elimination of MULTIEQUALs.
+pub(crate) fn multi_cse(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
+    let mut count = 0;
+    for bl in fd.blocks.list.clone() {
+        while multi_cse_block(fd, bl)? {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// Port of `ActionShadowVar::apply`: a MULTIEQUAL at the start of a block with the inputs of an
+/// earlier one becomes a COPY of that one's output.
+pub(crate) fn shadow_var(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
+    let mut oplist = Vec::new();
+    for &bl in &fd.blocks.list {
+        let b = fd.blocks.block(bl);
+        // BlockBasic::getStart: the first address of the cover
+        let start = b.get_start();
+        let mut seen: HashSet<VarnodeId> = HashSet::new();
+        for &op in &b.ops {
+            let o = fd.op(op);
+            if o.seq.addr != start {
+                break;
+            }
+            if o.opc == Opcode::Multiequal && !seen.insert(o.ins[0]) {
+                oplist.push(op);
+            }
+        }
+    }
+    let mut count = 0;
+    for op in oplist {
+        let mut prev = fd.previous_op(op);
+        while let Some(op2) = prev {
+            prev = fd.previous_op(op2);
+            if fd.op(op2).opc != Opcode::Multiequal {
+                continue;
+            }
+            // as the C++, `op` is compared as it is now (a COPY after the first match)
+            let n = fd.op(op).ins.len();
+            if fd.op(op2).ins.len() < n || fd.op(op).ins[..] != fd.op(op2).ins[..n] {
+                continue;
+            }
+            let Some(out) = fd.op(op2).out else { continue };
+            fd.op_set_opcode(op, Opcode::Copy);
+            fd.op_set_all_input(op, &[out])?;
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 #[cfg(test)]

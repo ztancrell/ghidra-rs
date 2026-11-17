@@ -38,7 +38,7 @@ S=inputprototype,mapglobals,namevars,setcasts     # the leaves before finalstruc
 SC=inputprototype,mapglobals,namevars          # the same with `setcasts` on (stage S9)
 # default options (`pcd`): every action leaf not ported yet, skipped on both engines. Shrinks as
 # each is ported; empty when the default pipeline is whole.
-D=restructure_varnode,mapped_local_sync,multicse,shadowvar,condconst,dynamicsymbols,prototypewarnings
+D=restructure_varnode,mapped_local_sync
 TP=$'print tree block\nprint raw'; MP=$'print map\nprint raw'
 
 # run <check> <corpus> <env assignments...>
@@ -151,9 +151,10 @@ for C in ${CORPORA:-m8 m500 r5d-adc switch simple}; do
         # sw options (`switchnorm` on, `localrecovery` off)
         pcc-r) run $k "$C" "PRINT=print C" DECOMP_SKIP_ACTIONS=$S3,$L BREAK=prototypewarnings OPTIONS=$c/$po-r-options.txt ;;
         pcc-t) run $k "$C" "PRINT=print C" DECOMP_SKIP_ACTIONS=$L BREAK=prototypewarnings OPTIONS=$c/$po-t-options.txt ;;
-        # pcd: `print C` with the DEFAULT options (no group or rule off, no break), less the
+        # pcd: `print C` with the DEFAULT options (no group off, no break), less the rules not
+        # ported (default-options.txt, written by r1-options.sh from the rule tables) and the
         # actions of $D
-        pcd) run $k "$C" "PRINT=print C" DECOMP_SKIP_ACTIONS=$D BREAK= OPTIONS= ;;
+        pcd) run $k "$C" "PRINT=print C" DECOMP_SKIP_ACTIONS=$D BREAK= OPTIONS=$c/default-options.txt ;;
         *) echo "unknown check $k" >&2; exit 1 ;;
         esac
     done
