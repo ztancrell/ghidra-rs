@@ -10,7 +10,7 @@
 #   CORPORA  m8, m500, r5d-adc, switch, simple (files of tools/corpus/) or a file of addresses.
 #            Default: all five. Without CHECKS, r5d-adc runs only the double-rule checks,
 #            switch only the S3 bar (paramdouble), the six switch checks and pcc-r, pcc-t (with
-#            `switchnorm` on: the sw options), and simple only the four print C checks.
+#            `switchnorm` on: the sw options), and simple only the print C checks.
 #   CHECKS   names from the `case` below. Default: every check that applies to the corpus.
 #   JOBS     parallel functions per check (default: nproc); TIMEOUT seconds per function and
 #            engine (default 600)
@@ -36,6 +36,9 @@ S3=multicse,shadowvar,condconst                   # rule-stage actions not porte
 L=restructure_varnode,mapped_local_sync           # the same for `localrecovery`
 S=inputprototype,mapglobals,namevars,setcasts     # the leaves before finalstructure
 SC=inputprototype,mapglobals,namevars          # the same with `setcasts` on (stage S9)
+# default options (`pcd`): every action leaf not ported yet, skipped on both engines. Shrinks as
+# each is ported; empty when the default pipeline is whole.
+D=restructure_varnode,mapped_local_sync,multicse,shadowvar,condconst,dynamicsymbols,prototypewarnings
 TP=$'print tree block\nprint raw'; MP=$'print map\nprint raw'
 
 # run <check> <corpus> <env assignments...>
@@ -66,7 +69,7 @@ run() {
 std="stack stackhigh funclink heritage paramdouble s4 s6 s6void s6int4 s6callee r1 subvar r4 r5 r5typed s7r s7r2 s7sub s7r4 s7r5 s7t s7t2 s8 s8r"
 dbl="r5d r5dt r5dtlock r5dtlocksv"
 sw="swfs-r swfs-t swsn-r swsn-t swfsc-r swfsc-t"
-pc="pc-r pc-t pcc-r pcc-t"
+pc="pc-r pc-t pcc-r pcc-t pcd"
 all="$std r5c $dbl svlock svs6 r5slock r5s pg-r pg-t nm-r nm-t ldn-r ldn-t fs-r fs-t cs-r cs-t fsc-r fsc-t $sw $pc"
 [ -n "$LIST" ] || "$t/lock-options.sh" "$l" || exit 1
 for C in ${CORPORA:-m8 m500 r5d-adc switch simple}; do
@@ -148,6 +151,9 @@ for C in ${CORPORA:-m8 m500 r5d-adc switch simple}; do
         # sw options (`switchnorm` on, `localrecovery` off)
         pcc-r) run $k "$C" "PRINT=print C" DECOMP_SKIP_ACTIONS=$S3,$L BREAK=prototypewarnings OPTIONS=$c/$po-r-options.txt ;;
         pcc-t) run $k "$C" "PRINT=print C" DECOMP_SKIP_ACTIONS=$L BREAK=prototypewarnings OPTIONS=$c/$po-t-options.txt ;;
+        # pcd: `print C` with the DEFAULT options (no group or rule off, no break), less the
+        # actions of $D
+        pcd) run $k "$C" "PRINT=print C" DECOMP_SKIP_ACTIONS=$D BREAK= OPTIONS= ;;
         *) echo "unknown check $k" >&2; exit 1 ;;
         esac
     done

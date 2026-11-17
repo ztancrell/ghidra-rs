@@ -1815,6 +1815,15 @@ slice 5 above, which were derived or from single checks.) Varies with load: the 
 identical" count of `s6void-m500` is 499 / 500 here and 500 / 500 in the baseline (a reference
 timeout; identical 499 / 499 in both).
 
+### Default options: the check `pcd`, branch `m3-default` (2026-11-17)
+
+`pcd` in `bars.sh` runs `print C` with no group or rule switched off and no break, with the
+action leaves not ported yet skipped on both engines (the list `D` in `bars.sh`). Baseline with
+seven leaves skipped (`restructure_varnode`, `mapped_local_sync`, `multicse`, `shadowvar`,
+`condconst`, `dynamicsymbols`, `prototypewarnings`): M8 6 / 8 (silent 2), M500 339 / 497 (loud
+83, silent 75; 66 of the silent are one missing cast of a stack address, `(xunknown1 *)&stack...`).
+Next: port the seven leaves in the C++ order and shrink `D`.
+
 ## Running stages in parallel
 
 Strict chain first: S0 → S1a → S1b → S2. After S2 the work fans out. Under the cap of two

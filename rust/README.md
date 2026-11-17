@@ -695,6 +695,10 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
   with it on), `swfs-r swfs-t swsn-r swsn-t swfsc-r swfsc-t` (`finalstructure` with case
   labels, `switchnorm`, and `finalstructure` with case labels and `setcasts` on) and
   `pc-r pc-t pcc-r pcc-t` (`print C`, S9 slices 1, 2, 3A, 3B, 4 and 5, `pcc` with `setcasts` on; see "C printing").
+  `pcd` is `print C` with the DEFAULT options (no group or rule off, no break), the action leaves
+  not ported yet skipped on both engines (the list `D` at the top of `bars.sh`; it shrinks as
+  they are ported). It runs on M8, M500 and `simple`: M8 and M500 run 56 checks, `simple` five
+  (superseded: "all 55 checks" and "the four `print C` checks" above).
 - `JOBS` (default `nproc`), `TIMEOUT` (seconds per function and engine, default 120 as for every bar here; 0x4c48d0 of M500 takes
   the reference about 485 s and ghidra-rs about 600 s alone, so at 120 s it counts as a function
   the reference does not finish), `OUT`
