@@ -452,14 +452,6 @@ fn unreachable(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     super::coreaction::unreachable(fd, arch)
 }
 
-/// Port of `ActionVarnodeProps::apply` on the first pass (before heritage): with
-/// `option readonly on`, each free read of read-only memory becomes the constant the image
-/// holds there (`Funcdata::fillinReadOnly`). The rest of the action needs later passes
-/// (auto-live holds) or masks that are all ones before heritage; x86 declares no volatile memory.
-///
-/// The C++ walks the varnodes in location order (`beginLoc`: address, size, then creation for
-/// free ones) and makes one constant per read; before heritage each free varnode has one
-/// reader, so the reads are visited in that order and the constants made in it.
 /// Whether an op that is not a marker writes read-only memory, where `Funcdata::fillinReadOnly`
 /// warns "Read-only address (...) is written" (with `option readonly on`). The warning is not
 /// ported, so `print C` fails for such a function. This is wider than the C++ test: it leaves
@@ -475,6 +467,14 @@ pub(crate) fn readonly_written(fd: &Funcdata, arch: &Arch) -> bool {
         })
 }
 
+/// Port of `ActionVarnodeProps::apply` on the first pass (before heritage): with
+/// `option readonly on`, each free read of read-only memory becomes the constant the image
+/// holds there (`Funcdata::fillinReadOnly`). The rest of the action needs later passes
+/// (auto-live holds) or masks that are all ones before heritage; x86 declares no volatile memory.
+///
+/// The C++ walks the varnodes in location order (`beginLoc`: address, size, then creation for
+/// free ones) and makes one constant per read; before heritage each free varnode has one
+/// reader, so the reads are visited in that order and the constants made in it.
 fn varnode_props(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     let mut changes = varnode_props_late(fd)?;
     if !arch.readonly_propagate {

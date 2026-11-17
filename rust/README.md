@@ -2917,6 +2917,32 @@ miss; M8 print checks 7 / 7. Every switch silent is now silent in an older switc
 rerun after the follow-up: the 51 other checks on M8, which the change cannot reach (only
 `print C` reads the flag).
 
+Review fixes on the same branch:
+
+- `variable.rs`: `vn_cover_dirty` goes through `h_cover_dirty` (`HighVariable::coverDirty`), so
+  a varnode whose cover goes stale also marks the extended covers of the pieces its high
+  intersects (`markExtendCoverDirty`). Before, only the high's own cover was marked.
+- `console.rs`: `load addr` adds the function to the global scope (`IfcAddrrangeLoad`,
+  `addFunction`), as `map function` does; `decomp-diff.sh` uses it for a function the prelude
+  lacks. A function already mapped at the address stays as it is (the C++ warns of the overlap
+  and adds a second symbol; not ported).
+- `printc.rs`, `printlanguage.rs`: the string read at an address is kept (`PrintC::strings`,
+  `StringManager::stringMap`), so a second constant at the address prints the same characters
+  whatever its character size. The C++ keeps the map for the session, this for one `print C`.
+- `mod.rs`: one size for an external-reference symbol, `Arch::externref_size` (the pointer
+  size; superseded: the constant `EXTERNREF_SIZE`, 4, beside `stack_pointer.2`).
+- `action.rs`: `readonly_written` moved out of the doc comment of `varnode_props`.
+
+After them: M8 all 55 checks identical, each line equal to the run before the fixes. M500
+`pcc-r` and `pc-r` 494 / 495 (silent 1: 0x47a6b0), `pcc-t` and `pc-t` 495 / 495, `nm-r`
+498 / 499 (silent 1: 0x47a6b0, its baseline), `nm-t` 499 / 499 (baseline 493 / 499, loud 6: the
+six `mergeAddrTied` functions of this slice). No function changed state with the fixes, though
+`load addr` is live: the prelude lacks 1 function of M8, 98 of M500 and 25 of `r5d-adc` (none of
+`switch` or `simple`). Not run after them: the switch corpus, `r5d-adc`, the other M500 checks,
+the full pass. Not seen to change an output: a constant or variable at the address of a
+function loaded with `load addr`, two character sizes at one string address, a stale cover of a
+grouped variable.
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The

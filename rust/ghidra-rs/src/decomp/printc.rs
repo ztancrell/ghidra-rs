@@ -1453,7 +1453,7 @@ impl PrintC<'_> {
                 // the type-locked symbol holding the whole varnode, linked when the varnode is
                 // made (`setSymbolProperties`): a function or an external reference
                 if let Some(e) = super::infertypes::query_global(self.arch, off, size) {
-                    let whole = if e.externref { self.arch.spec.stack_pointer.2 } else { 1 };
+                    let whole = if e.externref { self.arch.externref_size() } else { 1 };
                     if e.addr != off || size != whole {
                         return err("print C: part of an external reference (pushPartialSymbol of a code pointer) is not ported");
                     }
@@ -1982,12 +1982,16 @@ impl PrintC<'_> {
     /// constant pointer to characters of `charsize` bytes points at, none when it is null, not
     /// in read-only memory or not a terminated string of valid characters. `resolveConstant`
     /// is the address itself (no segment resolver for the checks' flat space) and no ported
-    /// data-type is an opaque string.
-    fn ptr_char_constant(&self, val: u64, charsize: u32) -> Result<Option<String>> {
+    /// data-type is an opaque string. The string read at an address is kept (`stringMap`): a
+    /// later constant there prints the same characters even with another character size. The
+    /// C++ keeps it for the whole session, this for one `print C`.
+    fn ptr_char_constant(&mut self, val: u64, charsize: u32) -> Result<Option<String>> {
         if val == 0 || !self.arch.is_readonly(val, 1) {
             return Ok(None);
         }
-        let Some((chars, trunc)) = string_data(self.arch, val, charsize as usize) else { return Ok(None) };
+        let arch = self.arch;
+        let data = self.strings.entry(val).or_insert_with(|| string_data(arch, val, charsize as usize));
+        let Some((chars, trunc)) = data.clone() else { return Ok(None) };
         let mut t = String::from(if charsize > 1 { "L\"" } else { "\"" });
         for cp in chars {
             print_unicode(&mut t, cp)?;

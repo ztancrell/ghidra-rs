@@ -151,6 +151,12 @@ impl Console {
                 let a = addr(rest.first())?;
                 let name = rest.get(1).map_or_else(|| format!("func_0x{a:08x}"), |n| n.to_string());
                 writeln!(out, "Function {name}: 0x{a:08x}").map_err(io)?;
+                // `IfcAddrrangeLoad`: the function joins the global scope (`addFunction`), where
+                // constants and variables at its address find it. One already mapped there stays
+                // (the C++ warns of the overlap and adds a second symbol; not ported)
+                if let Some(arch) = self.arch.as_mut().filter(|arch| !arch.functions.contains_key(&u64::from(a))) {
+                    arch.add_function(u64::from(a), name.clone());
+                }
                 self.function = Some((a, name));
             }
             // `map function <addr> [<name>] [nocode]`: remembered for `load function`

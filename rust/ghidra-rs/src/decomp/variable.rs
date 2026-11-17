@@ -136,7 +136,7 @@ pub(crate) fn vn_cover_dirty(fd: &mut Funcdata, vn: VarnodeId) {
     fd.highs.grow(vn.0 as usize + 1);
     fd.highs.vdirty[vn.0 as usize] = true;
     if let Some(h) = fd.highs.of(vn) {
-        fd.highs.get_mut(h).cover_dirty = true;
+        h_cover_dirty(fd, h);
     }
 }
 

@@ -87,6 +87,10 @@ pub(crate) struct PrintC<'a> {
     pub(crate) depth: u32,
     /// the body comments (`commsorter`)
     pub(crate) commsorter: super::comment::CommentSorter,
+    /// `StringManager::stringMap`: the string read at an address (its code points and whether
+    /// it was truncated; none: no string), kept for the next constant at that address, whatever
+    /// its character type
+    pub(crate) strings: std::collections::HashMap<u64, Option<(Vec<i32>, bool)>>,
 }
 
 impl<'a> PrintC<'a> {
@@ -104,6 +108,7 @@ impl<'a> PrintC<'a> {
             modstack: Vec::new(),
             depth: 0,
             commsorter: Default::default(),
+            strings: Default::default(),
         }
     }
 
