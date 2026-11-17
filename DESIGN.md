@@ -323,6 +323,24 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `pcc-t` 1987 / 2005 (loud 18, silent 0). Superseded: "that case is loud now" and `pcc-t` 1986 above.
    `print raw` applies the global symbol types first: `swsn-r` switch 1987 / 2004, M500 498 / 499, silent 0.
    No silent miss is left in the checks run. Superseded: "the only silent misses left are in `swsn-r`" above.
+   Default options, branch `m3-default` (2026-11-17): the new check `pcd` (`print C`, no option off, the seven
+   unported leaves `restructure_varnode`, `mapped_local_sync`, `multicse`, `shadowvar`, `condconst`, `dynamicsymbols`,
+   `prototypewarnings` skipped on both engines) starts at M8 6 / 8 (silent 2), M500 339 / 497 (loud 83, silent 75).
+   Then on the branch: five of the seven leaves done (`restructure_varnode` and `mapped_local_sync` stay skipped),
+   the unported pool rules switched off on both engines (`default-options.txt`: 14, then 8 after six rules landed):
+   M8 8 / 8, M500 415 / 497 (loud 82, silent 0) with 11 rules off. Open decision: a run with the plain default
+   options still leaves the 8 unported rules out without a word.
+   Branch `m3-aliasupdate` (2026-11-17): `RuleAliasUpdate` and `ActionRestructureVarnode` (untyped) run in the
+   jump-table partial function, so its table is taken as it is; the older test on INDIRECTs of stack varnodes is
+   left for the partial function made without them (a load or store guard, a locked prototype). 7 functions
+   loud -> identical in every switch check, 8 in `pcc-r` and `pcc-t`. Derived from the 9 changed functions and
+   the `m3-int5` pass: `paramdouble` 1995, `swsn-r` 1991 (silent 3), the other switch checks 1994 of 2004;
+   `pcc-r` 1995, `pcc-t` 1994 of 2005. Superseded: the switch counts of the line above, and "the unported
+   `RuleAliasUpdate`" in the `m3-swsilent` lines.
+   Review fixes (2026-11-17): symbol flags on a new stack varnode, `markNotMapped` over the symbols, no failed
+   table from a partial function made without the alias analysis; no output changes. Measured on the whole switch
+   corpus: `paramdouble` 1995 / 2004, `swfs-r` 1996, `swsn-r` 1993 (silent 3), `pcc-r` 1997 / 2005, `pcc-t`
+   1996 / 2005 (Superseded: the derived counts of the line above). Open: 0x5861aa and 0x7c74c0 loud at `paramdouble`.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

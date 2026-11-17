@@ -232,6 +232,18 @@ pub(crate) fn sub_type(fd: &mut Funcdata, arch: &Arch, t: TypeId, off: i64) -> R
             if let Some((poff, ty)) = super::varmap::LocalMap::locked_param_at(fd, addr) {
                 return Ok(Some((ty, (addr - poff) as i64)));
             }
+            // the symbols of the local scope (`queryContainer` without a use point: the
+            // address-tied ones)
+            if let Some((sym, ei)) = fd.symtab.find_container(super::scope::LOCAL, Space::Stack, addr, 1, None)? {
+                let s = fd.symtab.symbol(sym);
+                let e = &s.entries[ei];
+                let off = (addr - e.offset) as i64 + i64::from(e.piece.unwrap_or(0));
+                let ty = match s.ty {
+                    Some(t) => t,
+                    None => fd.types.base(e.size, Meta::Unknown),
+                };
+                return Ok(Some((ty, off)));
+            }
             if !fd.localmap.in_scope(addr, 1) {
                 return Ok(None);
             }

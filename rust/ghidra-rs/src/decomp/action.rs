@@ -18,7 +18,7 @@ use super::{err, heritage, Arch, Funcdata, Result};
 /// off (`option currentaction decompile <group> off`): the root `universal` (restart group,
 /// once per function), its first actions, the repeating groups `fullloop`, `mainloop` and
 /// `stackstall`, and the root's actions after `fullloop` to `stop` (ported through `mapglobals`, `namevars`, `setcasts` and
-/// `finalstructure`, the tail; `prototypewarnings` is not). `oppool1` holds the
+/// `finalstructure`, the tail; superseded: "`prototypewarnings` is not"). `oppool1` holds the
 /// ported rules (`rules::OPPOOL1`) less those `togglerule` switched off (`rule:<name>` in
 /// `disabled`); the actions named `action:<name>` there (`DECOMP_SKIP_ACTIONS`) are left out. An
 /// action that is not ported fails when it runs with its group on.
@@ -119,8 +119,8 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             // ActionLaneDivide (R3, `lanedivide.rs`). Superseded: until R3 it was the one action
             // not ported that did nothing instead of failing (group `base` cannot be switched off)
             ("lanedivide", "base", super::lanedivide::lane_divide),
-            ("multicse", "analysis", not_ported),
-            ("shadowvar", "analysis", not_ported),
+            ("multicse", "analysis", c::multi_cse),
+            ("shadowvar", "analysis", c::shadow_var),
             ("deindirect", "deindirect", c::deindirect),
             ("stackptrflow", "stackptrflow", c::stack_ptr_flow),
         ],
@@ -147,7 +147,12 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("spacebase", "base", c::spacebase),
             ("infertypes", "typerecovery", super::infertypes::infer_types),
             ("nonzeromask", "analysis", super::rules::nonzero_mask),
-            ("restructure_varnode", "localrecovery", not_ported),
+            // the partial function of jump-table recovery has its port (`mapstate.rs`)
+            (
+                "restructure_varnode",
+                "localrecovery",
+                if jumptable { super::mapstate::restructure_varnode } else { not_ported },
+            ),
         ],
     );
     mainloop.push(stackstall);
@@ -170,8 +175,8 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("determinedbranch", "unreachable", c::determined_branch),
             ("unreachable", "unreachable", c::unreachable),
             ("nodejoin", "nodejoin", c::node_join),
-            ("conditionalexe", "conditionalexe", c::conditional_exe),
-            ("condconst", "analysis", not_ported),
+            ("conditionalexe", "conditionalexe", super::condexe::conditional_exe),
+            ("condconst", "analysis", super::condconst::conditional_const),
         ],
     ));
     let mainloop = t.group("mainloop", mainloop, true);
@@ -220,7 +225,9 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("mergemultientry", "merge", super::merge::merge_multi_entry),
             ("mergecopy", "merge", super::merge::merge_copy),
             ("dominantcopy", "merge", super::merge::dominant_copy),
-            ("dynamicsymbols", "dynamic", not_ported),
+            // ActionDynamicSymbols, as ActionDynamicMapping above: dynamic symbols come only from
+            // console commands ghidra-rs does not have (`map hash`, `map equate`, `map unionfacet`)
+            ("dynamicsymbols", "dynamic", c::nothing),
             ("markindirectonly", "merge", super::merge::mark_indirect_only),
             ("mergeadjacent", "merge", super::merge::merge_adjacent_action),
             ("mergetype", "merge", super::merge::merge_type),
@@ -235,11 +242,17 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("outputprototype", "localrecovery", c::output_prototype),
             ("inputprototype", "fixateproto", c::input_prototype),
             ("mapglobals", "fixateglobals", c::map_globals),
-            ("dynamicsymbols", "dynamic", not_ported),
+            // ActionDynamicSymbols, as ActionDynamicMapping above: dynamic symbols come only from
+            // console commands ghidra-rs does not have (`map hash`, `map equate`, `map unionfacet`)
+            ("dynamicsymbols", "dynamic", c::nothing),
             ("namevars", "merge", super::namevars::name_vars),
             ("setcasts", "casts", super::cast::set_casts),
             ("finalstructure", "blockrecovery", super::finalstructure::final_structure),
-            ("prototypewarnings", "protorecovery", not_ported),
+            // ActionPrototypeWarnings has nothing to warn of: a dead-code delay override is made
+            // only by the restart heritage.rs fails on, a parameter without storage fails in
+            // locked.rs (`hasInputErrors`), no return value is assigned an error, and no model
+            // is unknown (made only when a prototype is decoded from XML)
+            ("prototypewarnings", "protorecovery", c::nothing),
             ("stop", "base", c::nothing),
         ],
     ));
@@ -255,16 +268,13 @@ pub(crate) fn not_ported(_: &mut Funcdata, _: &Arch) -> Result<i32> {
 
 /// The actions of the `jumptable` root's groups the partial function is simplified without while
 /// they are not ported (an entry is skipped only as long as its leaf is `not_ported`; any other
-/// unported action reached in the partial fails the table and is reported, `flow.rs`). Three
-/// of them can change which tables are recovered: `restructure_varnode` (in the partial it also
-/// runs `protectSwitchPaths`, coreaction.cc), `condconst` (constants along a guarded path) and
-/// `normalizebranches` (flips the CBRANCHs the guards are read from).
+/// unported action reached in the partial fails the table and is reported, `flow.rs`). One
+/// of them can change which tables are recovered: `normalizebranches` (flips the CBRANCHs the
+/// guards are read from). Superseded: "Three of them"; `restructure_varnode` (the partial runs
+/// its port, `mapstate.rs`), `multicse`, `shadowvar` and `condconst` were entries until they
+/// were ported, and run in the partial.
 const PARTIAL_SKIP: &[&str] = &[
     "funclinkoutonly",
-    "restructure_varnode",
-    "multicse",
-    "shadowvar",
-    "condconst",
     "mapped_local_sync",
     "normalizebranches",
     // stage S7: the last `localrecovery` action, after merging (not in the `jumptable` groups);
@@ -280,9 +290,22 @@ const PARTIAL_SKIP: &[&str] = &[
 /// the partial function flow.rs falls back to when the stack heritage reaches a path not
 /// ported; `jumptable::fold_constants` then folds the read-only loads. Superseded: "the rules
 /// of later stages (R3 to R5, with `RuleLoadVarnode`) are missing from it".
-pub(crate) fn jumptable_partial(fd: &mut Funcdata, arch: &Arch, stack: bool) -> Result<()> {
-    let off: &[&str] = if stack { &[] } else { &["rule:loadvarnode", "rule:storevarnode"] };
-    match tree(true, &off.iter().map(|s| s.to_string()).collect()).perform(fd, arch)? {
+/// `alias` false leaves out `ActionRestructureVarnode` and `RuleAliasUpdate`, for the partial
+/// function flow.rs falls back to when they reach a path not ported (`mapstate.rs`). Every
+/// action `DECOMP_SKIP_ACTIONS` names (console.rs) is left out too: the reference patch skips
+/// an action by name in every root, so its partial function runs without it.
+pub(crate) fn jumptable_partial(fd: &mut Funcdata, arch: &Arch, stack: bool, alias: bool) -> Result<()> {
+    let mut off: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if !stack {
+        off.extend(["rule:loadvarnode", "rule:storevarnode"].map(String::from));
+    }
+    if !alias {
+        off.extend(["action:restructure_varnode", "rule:aliasupdate"].map(String::from));
+    }
+    if let Ok(skip) = std::env::var("DECOMP_SKIP_ACTIONS") {
+        off.extend(skip.split(',').filter(|s| !s.is_empty()).map(|s| format!("action:{s}")));
+    }
+    match tree(true, &off).perform(fd, arch)? {
         super::actiontree::Outcome::Complete => Ok(()),
         super::actiontree::Outcome::Break(at) => err(format!("the jumptable action stopped at {at}")),
     }

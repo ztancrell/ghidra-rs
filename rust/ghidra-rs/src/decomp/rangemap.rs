@@ -5,7 +5,7 @@
 //! depend on the insertion history, so the multiset is reproduced with libstdc++'s placement of
 //! equal keys (`_M_insert_equal`, the hinted `_M_insert_equal_`).
 //!
-//! Not ported: `find_overlap`, `find_first_after`, `find_last_before` (nothing ported calls them).
+//! Not ported: `find_first_after`, `find_last_before` (nothing ported calls them).
 
 /// The sub-sort of a record (`SymbolRange::EntrySubsort`: space index, offset).
 pub(crate) type Subsort = (u32, u64);
@@ -219,6 +219,12 @@ impl<K: Copy + PartialEq> RangeMap<K> {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// Port of `rangemap::find_overlap(point, end)`: the record of the first sub-range ending at
+    /// or after `point`, when it starts at or before `end`.
+    pub(crate) fn find_overlap(&self, point: u64, end: u64) -> Option<K> {
+        self.tree.get(self.lower_bound(point, SUB_FIRST)).filter(|p| p.first <= end).map(|p| p.key)
     }
 }
 

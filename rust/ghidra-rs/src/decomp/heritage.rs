@@ -718,7 +718,10 @@ fn guard(fd: &mut Funcdata, arch: &Arch, range: &MemRange, c: &mut Collected) ->
         // queryProperties: the global scope owns its ranges (persist, addrtied), the local scope its
         // stack ranges (addrtied); no other space has properties
         let global = fd.in_global_scope(range.space, range.off, range.size);
-        let addrtied = global || (range.space == Space::Stack && fd.localmap.in_scope(range.off, range.size));
+        // (a symbol of `restructureVarnode` holding the range gives its flags: addrtied too)
+        let addrtied = global
+            || (range.space == Space::Stack
+                && (fd.localmap.in_scope(range.off, range.size) || fd.localmap.has_container(range.off, range.size)));
         guard_calls(fd, arch, range, &mut c.write, addrtied)?;
         guard_returns(fd, arch, range, global)?;
         guard_stores(fd, arch, range, &mut c.write)?;

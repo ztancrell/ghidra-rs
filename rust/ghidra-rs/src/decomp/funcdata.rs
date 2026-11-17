@@ -136,6 +136,8 @@ pub struct Funcdata {
     pub(crate) constptr_passes: u32,
     /// `ActionSegmentize::localcount`: the action ran
     pub(crate) segmentize_done: bool,
+    /// `ActionRestructureVarnode::numpass`: its runs so far ([`super::mapstate`])
+    pub(crate) restructure_passes: u32,
     /// `typerecovery_exceeded`: inference gave up after 7 passes
     pub(crate) typerecovery_exceeded: bool,
     /// the high variables (stage S7, `variable.rs`)
@@ -198,6 +200,7 @@ impl Funcdata {
             infer_passes: 0,
             constptr_passes: 0,
             segmentize_done: false,
+            restructure_passes: 0,
             typerecovery_exceeded: false,
             highs: super::variable::Highs::default(),
             next_alive: 0,
@@ -363,15 +366,26 @@ impl Funcdata {
     /// (`setSymbolProperties` with `SymbolEntry::updateType`; a piece of one fails in heritage,
     /// `check_locked_param_pieces`).
     fn scoped_stack(&self, v: &mut Varnode) {
-        if self.localmap.in_scope(v.offset, v.size) {
-            v.flags.set(VnFlags::ADDRTIED);
+        // A symbol of `restructureVarnode` holding the varnode gives its flags
+        // (`setSymbolProperties`: `SymbolEntry::getAllFlags`, whatever `updateType` returns):
+        // `mapped`, `addrtied`, and `nolocalalias` once `markUnaliased` set it. So the next
+        // `syncVarnodesWithSymbols` finds nothing to change on it, and marks no INDIRECT.
+        match self.localmap.find_container(v.offset, v.size) {
+            Some(s) => {
+                v.flags.set(VnFlags::ADDRTIED.with(VnFlags::MAPPED));
+                if s.noalias {
+                    v.flags.set(VnFlags::NOLOCALALIAS);
+                }
+            }
+            None if self.localmap.in_scope(v.offset, v.size) => v.flags.set(VnFlags::ADDRTIED.with(VnFlags::MAPPED)),
+            None => {}
         }
         let Some(l) = &self.proto.locked else { return };
         let hit = l.inputs.iter().find(|p| {
             matches!(p.storage, Some(super::fspec::Storage::Stack { offset, size }) if offset == v.offset && size == v.size)
         });
         if let Some(p) = hit {
-            v.flags.set(VnFlags::ADDRTIED);
+            v.flags.set(VnFlags::ADDRTIED.with(VnFlags::MAPPED));
             v.ty = Some(p.ty);
             if self.types.meta(p.ty) != super::types::Meta::Unknown {
                 v.flags.set(VnFlags::TYPELOCK);

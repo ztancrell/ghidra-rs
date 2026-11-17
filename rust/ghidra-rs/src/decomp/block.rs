@@ -105,6 +105,11 @@ pub(crate) struct BlockGraph {
 }
 
 impl BlockBasic {
+    /// Port of `BlockBasic::getStart`: the first address of the cover.
+    pub(crate) fn get_start(&self) -> u64 {
+        self.cover.iter().map(|r| r.0).min().unwrap_or(self.start)
+    }
+
     /// Port of `BlockBasic::getEntryAddr`: the start of the cover's one range, else of the
     /// range holding the first op (`first_op`, its address), else that address; none for a
     /// block of several ranges without ops (the invalid address). The cover is the
@@ -324,6 +329,27 @@ impl BlockGraph {
                 self.replace_out_edge(bbin, reverse, bbout);
             }
         }
+    }
+
+    /// Port of `FlowBlock::replaceEdgesThru`: in-edge `inslot` and out-edge `outslot` of `bl`
+    /// become one edge from the one's source to the other's target, in their slots there.
+    fn replace_edges_thru(&mut self, bl: BlockId, inslot: usize, outslot: usize) {
+        let Edge { point: inb, reverse: inb_out, .. } = self.block(bl).ins[inslot];
+        let Edge { point: outb, reverse: outb_in, .. } = self.block(bl).outs[outslot];
+        let e = &mut self.block_mut(inb).outs[inb_out];
+        (e.point, e.reverse) = (outb, outb_in);
+        let e = &mut self.block_mut(outb).ins[outb_in];
+        (e.point, e.reverse) = (inb, inb_out);
+        self.half_delete_in_edge(bl, inslot);
+        self.half_delete_out_edge(bl, outslot);
+    }
+
+    /// Port of `BlockGraph::removeFromFlowSplit`: `bl` (two in, two out) leaves the flow, its
+    /// first in-edge going on through its first out-edge (the second with `flipflow`) and its
+    /// second through the other.
+    pub(crate) fn remove_from_flow_split(&mut self, bl: BlockId, flipflow: bool) {
+        self.replace_edges_thru(bl, usize::from(!flipflow), 1);
+        self.replace_edges_thru(bl, 0, 0);
     }
 
     /// Port of `BlockGraph::removeBlock`.

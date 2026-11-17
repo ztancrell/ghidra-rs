@@ -55,6 +55,11 @@ impl OpFlags {
     /// `warning` (an additional flag in C++): the op was seen writing read-only memory
     /// (`Funcdata::fillinReadOnly`), so it warns at most once
     pub(crate) const WARNING: OpFlags = OpFlags(1 << 18);
+    /// `store_aliasupdate`: the alias information of an INDIRECT of this STORE or call changed
+    /// (`setAliasUpdate`); `RuleAliasUpdate` clears it
+    pub(crate) const ALIAS_UPDATE: OpFlags = OpFlags(1 << 21);
+    /// `no_indirect_collapse`: an INDIRECT `opCollapseIndirectsForAlias` keeps (`protectSwitchPaths`)
+    pub(crate) const NO_INDIRECT_COLLAPSE: OpFlags = OpFlags(1 << 22);
 
     pub(crate) fn has(self, f: OpFlags) -> bool {
         self.0 & f.0 != 0
