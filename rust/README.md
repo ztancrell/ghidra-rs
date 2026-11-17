@@ -1922,7 +1922,8 @@ R5 slices 4 and 5 (branch `m3-r5b`, 2026-11-13). Superseded: "constseq.cc, bitfi
   are not in the plan's R5 row and stay off.
   Superseded: "Not ported: `ptrsubcharconstant`". Stage S10, slice 1 ports it
   (`rules/typecleanup.rs`, `printc::is_string`) for the strings of the facts; the option files
-  of the checks still switch it off, and no check against `decomp_dbg` runs it.
+  of the checks still switch it off (`kept_off` in `tools/r1-options.sh`, which would drop the
+  line otherwise), and no check against `decomp_dbg` runs it.
 - Slice 5, `rules/constseq.rs`, `rules/bitfield.rs`: the groups `constsequence` and `bitfields`
   as far as they run without scopes and bit-field types. `stringcopy` never matches (no local
   symbols), `stringstore` fails at `HeapSequence` (not ported); no type has bit-fields, so the four
@@ -3152,7 +3153,8 @@ above comes out of the ported C++ paths rather than out of new printing code.
 here). `tools/ghidra/ExportFacts.java`, run headless by `tools/ghidra-facts.sh` on the copy of
 the Java project (`-readOnly`), calls `DecompileCallback` and `PcodeDataTypeManager` as
 `DecompInterface` does and writes each answer as the XML Java would send, one record per line,
-fields separated by tabs, to `$GHIDRA_REF/mercs2.facts` (123 MB for mercs2, about one minute):
+fields separated by tabs, to `$GHIDRA_REF/mercs2.facts` (127 MB for mercs2, about two minutes;
+the file is version 2, see "Review fixes" below):
 
 | record | what | mercs2 |
 |---|---|---|
@@ -3165,7 +3167,10 @@ fields separated by tabs, to `$GHIDRA_REF/mercs2.facts` (123 MB for mercs2, abou
 | `comments <entry> <xml>` | `getComments(entry)`, when there is one | 1,613 |
 | `data <first> <length> <xml>` | `getMappedSymbols` of defined or labelled data | 271,502 |
 | `extref <addr> <xml>` | `getExternalRef` of a pointer to an external location | 1,022 |
-| `label <addr> <name>` | `getCodeLabel` of a label inside a function | 158,072 |
+| `label <addr> <name> [<entry>]` | `getCodeLabel` of a primary symbol at an instruction; with `<entry>`, the name only that function's decompile gets | 218,095 (0 with an entry) |
+| `depth <entry> <to> <change>` | a stack-depth-change override at a call site of the function | 0 |
+| `string <first> <length> <n\|->` | defined string data; `n` characters when a raw read gives what `getStringData` gives | 26,420 (213 `-`) |
+| `undef <first> <last> <prefix>` | undefined bytes of a block that is not writable | 58,069 (`UNK_`) |
 | `override <addr> <kind>` | an instruction with a flow, fall-through or length override | 3,365 |
 | `type <id> <xml>` | `getDataType` of each `<typeref>` in the records | 376 |
 | `ns <id> <xml>` | `getNamespacePath` of each namespace id in the records | 798 |
@@ -3201,8 +3206,11 @@ the prelude as before):
 - Data symbols (`ScopeGhidra::removeQuery`): the symbol holding an address joins the function's
   global scope when `mapGlobals`, `linkSymbol` or `linkSymbolReference` ask (`DAT_00cde2b0`);
   a variable larger than the symbol at its address prints `_DAT_0256f88a` with the header
-  warning (`pushMismatchSymbol`); a locked data-type types the varnodes the symbol holds; every
-  data symbol is isolated from speculative merging (`merge="false"`).
+  warning (`pushMismatchSymbol`); a locked data-type types the varnodes the symbol holds; the varnodes
+  a data symbol or a label holds are isolated from speculative merging (Java sends `typelock`
+  and `merge="false"` with every `HighCodeSymbol` and `HighLabelSymbol`).
+  Superseded: "every data symbol is isolated" (it did not name the labels, which Java isolates
+  too: 17,878 `<labelsym>` records of mercs2, each with `merge="false"`).
 - Pointers to data symbols (`ActionConstantPtr`): `&PTR_FUN_00bd2f98`, an array by its name
   (`hkpEntityListener::vftable`), a string through `RulePtrsubCharConstant` (ported here:
   `"AimMovementNodes"`).
@@ -3283,6 +3291,92 @@ function symbol covers its entry byte (Java's covers up to 8 bytes of a small fu
 Not run: `bars.sh` beyond the checks named above (no full pass), the Mac, `ghidra-diff.sh` on
 the other corpora. Not done: the eight actions, the struct and union paths, and the items
 under "Fails loudly with facts".
+
+### Stage S10, slice 1: review fixes, branch `worktree-agent-af954dab401167074` (2026-11-17)
+
+An independent review of the slice above; each finding was checked against the Java and C++
+sources before a change. The facts file is now version 2 (`ghidra-rs-facts 2`): a file of
+version 1 fails at `load facts` and `tools/ghidra-facts.sh` writes it again.
+
+Fixed:
+
+- Panics with facts: `SubfloatFlow::set_replacement`, `SubvariableFlow::set_replacement` and
+  `LaneDivide` read the size or metatype of a locked varnode's data-type from the
+  architecture's types; the id is one of the function's (`fd.types`). No M8 or M500 function
+  reached them.
+- `ghidra-diff.sh`: `FACTS=0` was cleared before it was tested, so the facts were always
+  loaded. Superseded: "`FACTS=0`: the prelude, as before" was not true until this fix.
+- Strings (`printc::java_reads_the_same`): `DecompileCallback.getStringData` reads the
+  listing's defined string data holding the address (its length, an offset into it, its
+  character set, a translation), and the raw bytes only where there is none. The `string`
+  records name the defined strings and, for each the export found plain (one-byte ASCII, the
+  data's own first bytes, zeros after them, no translation shown), its number of characters.
+  A string is printed when it is plain ASCII and either lies outside defined string data or
+  ends where a plain defined string ends; a raw read that finds no string inside defined string
+  data, a defined string of another form (213 of the 26,420 of mercs2) and a raw read of
+  another length fail. Superseded: "only plain ASCII strings are taken as the same in Java".
+- Labels: `getCodeLabel` answers for any address, so the `label` records are now the primary
+  symbols at every instruction (in a body, at an entry, outside every function), not only
+  those inside a body, where `print C` printed `code_r0x...` for Java's `LAB_...`. A label of
+  a function's namespace has a prefixed name outside that function's decompile
+  (`getNamespacePrefix`); the record then carries the function's entry and another function
+  reaching it fails (none in mercs2).
+- Undefined bytes of a block that is not writable (`encodeData`): Java sends a read-only
+  1-byte symbol of type `undefined` for each one without a primary symbol, named by
+  `SymbolUtilities.getDynamicName` (`UNK_00400128` in mercs2, not `DAT_`). The `undef` records
+  give the ranges and the prefix; `Facts::data_symbol` writes the symbol's XML, and the export
+  compares that text with Java's for the first such byte of every range (it stops on a
+  difference).
+- `RulePtrsubCharConstant::pushConstFurther`: the sum is not masked to the constant's size,
+  as in the C++.
+- `r1-options.sh`: `ptrsubcharconstant` is in `rules/mod.rs` now, so a rerun dropped its
+  `togglerule ... off` from the option files. The script keeps a list of rules that are ported
+  and stay off (`kept_off`): no check against `decomp_dbg` has run with the rule on. A rerun
+  leaves the fifteen option files unchanged.
+
+Fails loudly now (was silent):
+
+- A stack-depth-change override at a call site (`getExtraPopOverride`,
+  `CallDepthChangeInfo`): the `depth` records name the functions that have one, and their
+  decompile fails. mercs2 has none.
+- A core character data-type that is no `int` (Java's `uchar` is a `uint` with
+  `char="true"`): fails at `load facts`. The core types of mercs2 have none; outside the core
+  types it failed before.
+- A variable larger than its symbol when the symbol is in a namespace: the C++ prints `_` and
+  the name without its namespaces; the port keeps both as one string.
+- A calling convention name the compiler spec does not have, other than `unknown`: the C++
+  keeps the name (`createUnknownModel`) and prints it in the declaration. mercs2 has
+  `__cdecl`, `__fastcall`, `__stdcall`, `__thiscall` and `unknown` only.
+
+Not changed: the review took `HighLabelSymbol` as not type-locked. It is
+(`super(0, nm, DataType.DEFAULT, true, true, dtmanage)`, and `isIsolated` is the type lock), all
+17,878 `<labelsym>` records of mercs2 carry `typelock="true"` and `merge="false"`, and
+`LabSymbol::decode` reads them with `decodeHeader`: labels stay isolated, as Java's are.
+
+Results (the Java C and `SKIP` as above; "before" is the slice's build with the facts of
+version 1):
+
+| run | before | after |
+|---|---|---|
+| `ghidra-diff.sh m8`, the eight skipped | identical 3 / 7 (loud 0, silent 4) | the same |
+| `ghidra-diff.sh m500`, the eight skipped | identical 192 / 499 (loud 70, silent 237) | the same; no function changed state |
+
+The console output of all 500 M500 functions is byte for byte the slice's (0x4c48d0, which
+Java does not finish, timed out in the loaded run and gave the same text alone). So no M8 or
+M500 function reaches a fixed path: the Java C of the two corpora has no `UNK_` name and no
+label that was `code_r0x` here, and the loud cases are reached by none. What checks the
+`undef` symbols is the export's comparison with Java's XML; what checks the `string` records
+is the export's comparison of the string with the data's bytes. `FACTS=0 ghidra-diff.sh m8`
+now runs the prelude: identical 0 / 7 (silent 7).
+
+Superseded: "identical 192 / 499 (loud 72, silent 235)" in the slice above is the run before
+its last three fixes; its final build gives loud 70, silent 237.
+
+Not done: outside defined string data, bytes with no terminator within 2,048 are no string
+here and are taken as none in Java, whose limit may differ by one character; a label of
+another function's namespace and the four loud cases above are not ported; no unit test
+covers the new records (they need a loaded architecture). Not run: `ghidra-diff.sh` on the
+other corpora, a full pass, the Mac.
 
 ## Speed
 

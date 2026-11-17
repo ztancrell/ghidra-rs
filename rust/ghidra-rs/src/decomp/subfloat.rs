@@ -179,7 +179,6 @@ fn is_float_arith(opc: Opcode) -> bool {
 /// Port of `SubfloatFlow`.
 struct SubfloatFlow<'a> {
     fd: &'a Funcdata,
-    arch: &'a Arch,
     tm: TransformManager,
     precision: u32,
     terminator_count: i32,
@@ -192,10 +191,9 @@ struct SubfloatFlow<'a> {
 
 impl<'a> SubfloatFlow<'a> {
     /// Port of `SubfloatFlow::SubfloatFlow`.
-    fn new(fd: &'a Funcdata, arch: &'a Arch, root: VarnodeId, precision: u32) -> Result<SubfloatFlow<'a>> {
+    fn new(fd: &'a Funcdata, root: VarnodeId, precision: u32) -> Result<SubfloatFlow<'a>> {
         let mut flow = SubfloatFlow {
             fd,
-            arch,
             tm: TransformManager::default(),
             precision,
             terminator_count: 0,
@@ -299,7 +297,7 @@ impl<'a> SubfloatFlow<'a> {
         }
         // a locked varnode without a recorded type has the default one, of its own size
         // (no partial-structure metatype is ported)
-        if v.has(VnFlags::TYPELOCK) && v.ty.map_or(v.size, |t| self.arch.types.size(t)) != self.precision {
+        if v.has(VnFlags::TYPELOCK) && v.ty.map_or(v.size, |t| self.fd.types.size(t)) != self.precision {
             return Ok(None);
         }
         if v.is_input() && v.size != self.precision {
@@ -474,7 +472,7 @@ pub(crate) fn subfloat_convert(fd: &mut Funcdata, op: OpId, arch: &Arch) -> Resu
     let (insize, outsize) = (fd.vn(invn).size, fd.vn(outvn).size);
     let (root, precision) = if outsize > insize { (outvn, insize) } else { (invn, outsize) };
     let tm = {
-        let mut flow = SubfloatFlow::new(fd, arch, root, precision)?;
+        let mut flow = SubfloatFlow::new(fd, root, precision)?;
         if !flow.do_trace()? {
             return Ok(0);
         }

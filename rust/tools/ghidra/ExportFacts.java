@@ -2,7 +2,7 @@
 // decompiler, recorded once. Each answer is the XML that DecompileCallback sends (the same
 // calls DecompInterface makes), so nothing of the encoding is redone here.
 // Argument: the output file. One record per line, fields separated by tabs, addresses in hex:
-//   ghidra-rs-facts 1
+//   ghidra-rs-facts 2
 //   coretypes <xml>                  PcodeDataTypeManager.encodeCoreTypes
 //   block <first> <last> <r|w>[v]    a memory block: writable or not, volatile
 //   wref <addr>                      an address of a non-writable block with a write reference
@@ -13,7 +13,17 @@
 //   comments <entry> <xml>           getComments(entry, every type), when there is one
 //   data <first> <length> <xml>      getMappedSymbols(first) for defined or labelled data
 //   extref <addr> <xml>              getExternalRef(addr) for a pointer to an external location
-//   label <addr> <name>              getCodeLabel(addr) for a label inside a function
+//   depth <entry> <to> <change>      a stack-depth-change override at a call site of the function
+//                                    (what getExtraPopOverride reads): the flow target and the value
+//   string <first> <length> <n|->    defined string data (StringDataInstance): n when getStringData
+//                                    reads n plain ASCII characters, the first n bytes of the data,
+//                                    and the rest of the data is zero; - for any other string
+//   undef <first> <last> <prefix>    undefined bytes of a block that is not writable: Java sends a
+//                                    read-only 1-byte symbol <prefix><address> of type undefined for
+//                                    each without a record of its own (encodeData)
+//   label <addr> <name> [<entry>]    getCodeLabel(addr) for a primary symbol at an instruction; with
+//                                    <entry> the name holds only while that function is decompiled
+//                                    (a label of its namespace has another name elsewhere)
 //   override <addr> <kind>           an instruction with a flow, fall-through or length override
 //   type <id> <xml>                  getDataType for each <typeref> of the records above
 //   ns <id> <xml>                    getNamespacePath for each namespace id of the records above
@@ -28,12 +38,15 @@ import java.util.HashSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import ghidra.app.cmd.function.CallDepthChangeInfo;
 import ghidra.app.decompiler.DecompileCallback;
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressIterator;
 import ghidra.program.model.address.AddressRange;
 import ghidra.program.model.address.AddressSet;
+import ghidra.program.model.address.AddressSetView;
+import ghidra.program.model.data.StringDataInstance;
 import ghidra.program.model.listing.Data;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FlowOverride;
@@ -45,8 +58,10 @@ import ghidra.program.model.pcode.PcodeDataTypeManager;
 import ghidra.program.model.pcode.XmlEncode;
 import ghidra.program.model.symbol.ExternalReference;
 import ghidra.program.model.symbol.IdentityNameTransformer;
+import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.ReferenceIterator;
 import ghidra.program.model.symbol.Symbol;
+import ghidra.program.model.symbol.SymbolUtilities;
 
 public class ExportFacts extends GhidraScript {
     private static final Pattern TYPEREF = Pattern.compile("<typeref name=\"([^\"]*)\" id=\"(0x[0-9a-f]+)\"");
@@ -91,7 +106,7 @@ public class ExportFacts extends GhidraScript {
         DecompileCallback cb = new DecompileCallback(currentProgram, currentProgram.getLanguage(),
             currentProgram.getCompilerSpec(), dtmanage);
         out = Files.newBufferedWriter(new File(getScriptArgs()[0]).toPath(), StandardCharsets.UTF_8);
-        out.write("ghidra-rs-facts 1\n");
+        out.write("ghidra-rs-facts 2\n");
 
         XmlEncode enc = new XmlEncode(false);
         dtmanage.encodeCoreTypes(enc);
@@ -121,6 +136,9 @@ public class ExportFacts extends GhidraScript {
                     }
                 }
             }
+            if (!b.isVolatile()) {
+                undefined(cb, b);
+            }
         }
 
         for (Function f : listing.getFunctions(true)) {
@@ -135,6 +153,18 @@ public class ExportFacts extends GhidraScript {
                 body.append('\t').append(hex(r.getMinAddress())).append('-').append(hex(r.getMaxAddress()));
             }
             out.write(body.append('\n').toString());
+            // DecompileCallback.getExtraPopOverride: the overrides in this function's body
+            AddressIterator changes = CallDepthChangeInfo.getStackDepthChanges(currentProgram, f.getBody());
+            while (changes.hasNext()) {
+                Address at = changes.next();
+                Integer change = CallDepthChangeInfo.getStackDepthChange(currentProgram, at);
+                for (Reference ref : currentProgram.getReferenceManager().getFlowReferencesFrom(at)) {
+                    if (change != null) {
+                        Address to = ref.getToAddress();
+                        out.write("depth\t" + hex(entry) + "\t" + (to.isMemoryAddress() ? hex(to) : "-") + "\t" + change + "\n");
+                    }
+                }
+            }
             enc = new XmlEncode(false);
             cb.getTrackedRegisters(entry, enc);
             String sets = enc.toString().replaceFirst(" offset=\"0x[0-9a-f]+\"", "");
@@ -155,19 +185,37 @@ public class ExportFacts extends GhidraScript {
         HashSet<Address> seen = new HashSet<>();
         for (Data d : listing.getDefinedData(true)) {
             monitor.checkCancelled();
+            StringDataInstance sdi = StringDataInstance.getStringDataInstance(d);
+            if (sdi != StringDataInstance.NULL_INSTANCE) {
+                out.write("string\t" + hex(d.getMinAddress()) + "\t" + d.getLength() + "\t" + plain(d, sdi) + "\n");
+            }
             data(cb, d, seen);
         }
         for (Symbol s : currentProgram.getSymbolTable().getAllSymbols(true)) {
             monitor.checkCancelled();
             Address a = s.getAddress();
-            if (!s.isPrimary() || !a.isMemoryAddress() || listing.getFunctionAt(a) != null) {
+            if (!s.isPrimary() || !a.isMemoryAddress()) {
                 continue;
             }
-            if (listing.getFunctionContaining(a) != null) {
+            if (listing.getInstructionAt(a) != null) {
+                // a block can start at any instruction: in a body, at an entry or outside every function
                 String name = cb.getCodeLabel(a);
-                if (name != null) {
-                    out.write("label\t" + hex(a) + "\t" + name + "\n");
+                String own = "";
+                if (s.getParentNamespace() instanceof Function fn) {
+                    // getNamespacePrefix: no prefix while the label's own function is decompiled
+                    cb.setFunction(fn, fn.getEntryPoint(), null);
+                    String inside = cb.getCodeLabel(a);
+                    cb.setFunction(null, currentProgram.getMinAddress(), null);
+                    if (!inside.equals(name)) {
+                        name = inside;
+                        own = "\t" + hex(fn.getEntryPoint());
+                    }
                 }
+                if (name != null) {
+                    out.write("label\t" + hex(a) + "\t" + name + own + "\n");
+                }
+            }
+            if (listing.getFunctionAt(a) != null || listing.getFunctionContaining(a) != null) {
                 continue;
             }
             Data d = listing.getDataContaining(a);
@@ -227,6 +275,73 @@ public class ExportFacts extends GhidraScript {
             enc = new XmlEncode(false);
             cb.getExternalRef(a, enc);
             record("extref\t" + hex(a), enc.toString());
+        }
+    }
+
+    // The undefined bytes of a block that is not writable. DecompileCallback.encodeData gives each
+    // one without a primary symbol (so without a reference: its mutability is the block's) a
+    // read-only symbol of one byte, named by SymbolUtilities.getDynamicName. One record per range;
+    // ghidra-rs writes the symbol's XML itself (decomp/facts.rs, `undef_symbol`), so the first such
+    // byte of each range is checked here against the same text.
+    private void undefined(DecompileCallback cb, MemoryBlock b) throws Exception {
+        Listing listing = currentProgram.getListing();
+        AddressSetView ranges =
+            listing.getUndefinedRanges(new AddressSet(b.getStart(), b.getEnd()), false, monitor);
+        for (AddressRange r : ranges) {
+            monitor.checkCancelled();
+            Address s = r.getMinAddress();
+            while (s != null && r.contains(s) && (currentProgram.getSymbolTable().getPrimarySymbol(s) != null ||
+                listing.getFunctionContaining(s) != null)) {
+                s = s.next();
+            }
+            if (s == null || !r.contains(s)) {
+                continue; // every byte has a record of its own or lies in a function
+            }
+            String name = SymbolUtilities.getDynamicName(currentProgram, s);
+            String tail = String.format("%08x", s.getOffset());
+            if (name == null || !name.endsWith(tail)) {
+                throw new RuntimeException("undefined byte at " + s + ": the name " + name);
+            }
+            String prefix = name.substring(0, name.length() - tail.length());
+            String expect = "<doc id=\"0x0\"><mapsym><symbol id=\"0x0\" name=\"" + prefix + tail +
+                "\" typelock=\"true\" namelock=\"true\" readonly=\"true\" merge=\"false\" cat=\"-1\">" +
+                "<typeref name=\"undefined\" id=\"0xc000000000000000\"/></symbol><addr space=\"ram\" offset=\"0x" +
+                hex(s) + "\" size=\"1\"/><rangelist/></mapsym></doc>";
+            XmlEncode enc = new XmlEncode(false);
+            cb.getMappedSymbols(s, enc);
+            if (!enc.toString().equals(expect)) {
+                throw new RuntimeException("undefined byte at " + s + ": " + enc);
+            }
+            out.write("undef\t" + hex(r.getMinAddress()) + "\t" + hex(r.getMaxAddress()) + "\t" + prefix + "\n");
+        }
+    }
+
+    // What DecompileCallback.getStringData reads from defined string data, when a read of the raw
+    // bytes up to a zero gives the same: the number of characters, all plain ASCII of one byte,
+    // the same as the first bytes of the data (so one byte each), with only zeros after them in the
+    // data. "-" for
+    // any other string (a translation shown, wide or other characters, a length prefix).
+    private String plain(Data d, StringDataInstance sdi) {
+        try {
+            if (sdi.isShowTranslation() && sdi.getTranslatedValue() != null) {
+                return "-";
+            }
+            String v = sdi.getStringValue();
+            byte[] bytes = d.getBytes();
+            if (v == null || v.length() > bytes.length) {
+                return "-";
+            }
+            for (int i = 0; i < bytes.length; i++) {
+                char c = i < v.length() ? v.charAt(i) : 0;
+                boolean ok = i >= v.length() || (c >= 0x20 && c <= 0x7e) || c == 9 || c == 10 || c == 13;
+                if (!ok || bytes[i] != (byte) c) {
+                    return "-";
+                }
+            }
+            return Integer.toString(v.length());
+        }
+        catch (Exception e) {
+            return "-";
         }
     }
 }

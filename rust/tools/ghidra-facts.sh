@@ -2,7 +2,7 @@
 # The facts of the mercs2 Ghidra project for `load facts` (stage S10): one headless run of
 # tools/ghidra/ExportFacts.java on a copy of the project, opened -readOnly.
 #
-#   ghidra-facts.sh        writes $GHIDRA_REF/mercs2.facts unless it is there
+#   ghidra-facts.sh        writes $GHIDRA_REF/mercs2.facts unless it is there in this version
 #
 #   GHIDRA_REF, GHIDRA, PROJECT, BIN   as ghidra-diff.sh
 # Writes only under GHIDRA_REF (default rust/target/ghidra-ref): the facts, facts.log and proj/.
@@ -11,7 +11,8 @@ rust=$(cd "$(dirname "$0")/.." && pwd)
 ref=${GHIDRA_REF:-$rust/target/ghidra-ref}
 case $ref in */.*) echo "GHIDRA_REF $ref: Ghidra refuses a path component starting with '.'" >&2; exit 1 ;; esac
 BIN=${BIN:-$HOME/projects/mercs/mercs2-decomp/orig/Mercenaries2.analysis.exe}
-[ -f "$ref/mercs2.facts" ] && exit 0
+# a file of an older version is written again
+[ "$(head -n 1 "$ref/mercs2.facts" 2>/dev/null)" = "ghidra-rs-facts 2" ] && exit 0
 mkdir -p "$ref"
 [ -d "$ref/proj" ] || cp -r "${PROJECT:-$HOME/projects/mercs/mercs2-decomp/build/ghidra}" "$ref/proj"
 # written under another name and renamed, so a run cut short leaves no half file

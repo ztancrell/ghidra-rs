@@ -359,7 +359,7 @@ fn push_const_further(fd: &mut Funcdata, outtype: TypeId, op: OpId, slot: usize,
     }
     let addval = off(fd, vn).wrapping_mul(off(fd, inp(fd, op, 2)?));
     let size = sz(fd, vn);
-    let newconst = fd.new_constant(size, val.wrapping_add(addval) & calc_mask(size));
+    let newconst = fd.new_constant(size, val.wrapping_add(addval));
     fd.vn_mut(newconst).ty = Some(outtype);
     fd.op_remove_input(op, 2);
     fd.op_remove_input(op, 1);

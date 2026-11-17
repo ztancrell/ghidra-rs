@@ -330,6 +330,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    type names, function and data names, prototypes, read-only memory, comments, labels, `local_` names. With the
    eight actions skipped: M8 identical 3 / 7 (the other four need the eight), M500 identical 192 / 499 (loud 72, silent 235). Still
    blocked on the eight. See `rust/README.md`, "Stage S10, slice 1".
+   Review fixes (2026-11-17): panics with facts, strings read as Java reads them, labels at every instruction,
+   undefined read-only bytes, `FACTS=0`; four silent cases made loud; facts file version 2. Superseded: "loud 72,
+   silent 235" (the slice's final build: loud 70, silent 237; the same after the fixes). See `rust/README.md`,
+   "Stage S10, slice 1: review fixes".
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

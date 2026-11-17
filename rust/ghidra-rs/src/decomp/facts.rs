@@ -9,7 +9,7 @@
 //!
 //! The file is indexed by address at load; a record's XML is parsed when it is asked for.
 
-use super::fspec::{ExtraPop, FuncProto, ModelId, Storage};
+use super::fspec::{ExtraPop, FuncProto, Storage};
 use super::funcdata::Funcdata;
 use super::infertypes::update_type;
 use super::locked::{Locked, Param};
@@ -95,7 +95,17 @@ pub(crate) struct Facts {
     funcs: HashMap<u64, Range<usize>>,
     extrefs: HashMap<u64, Range<usize>>,
     data: BTreeMap<u64, DataRec>,
-    labels: HashMap<u64, Range<usize>>,
+    /// `getCodeLabel`: the name, and the entry of the one function whose decompile gets that
+    /// name (a label of a function's namespace is prefixed anywhere else)
+    labels: HashMap<u64, (Range<usize>, Option<u64>)>,
+    /// functions with a stack-depth-change override at one of their call sites
+    /// (`DecompileCallback.getExtraPopOverride`)
+    depths: HashSet<u64>,
+    /// defined string data: first -> (length, the characters `getStringData` reads when a raw
+    /// read to the terminator gives the same)
+    strings: BTreeMap<u64, (u64, Option<u64>)>,
+    /// undefined bytes of the blocks that are not writable: first -> (last, name prefix)
+    undef: BTreeMap<u64, (u64, Range<usize>)>,
     comments: HashMap<u64, Range<usize>>,
     /// tracked registers from an entry on (the export writes them when they change)
     tracked: BTreeMap<u64, Range<usize>>,
@@ -107,8 +117,6 @@ pub(crate) struct Facts {
     /// `TypeCode` with a prototype: the port's `code` types carry none, so a call through a
     /// pointer to one fails
     code_protos: HashSet<TypeId>,
-    /// `Architecture::createUnknownModel("unknown")`
-    unknown_model: ModelId,
     /// namespaces by id (`getNamespacePath`): the names from the outermost in, each with `::`
     ns: HashMap<u64, String>,
 }
@@ -291,13 +299,16 @@ impl Facts {
     /// console's) and its `type` records after them.
     pub(crate) fn load(arch: &mut Arch, text: String) -> Result<Facts> {
         let mut lines = text.lines();
-        if lines.next() != Some("ghidra-rs-facts 1") {
-            return err("facts: not a facts file of version 1");
+        if lines.next() != Some("ghidra-rs-facts 2") {
+            return err("facts: not a facts file of version 2 (write it again: tools/ghidra-facts.sh)");
         }
         let at = |s: &str| {
             let start = s.as_ptr() as usize - text.as_ptr() as usize;
             start..start + s.len()
         };
+        // `Architecture::createUnknownModel("unknown")`: a copy of the default model. Any other
+        // unrecognized name fails in `function` (the C++ keeps the name and prints it in the
+        // declaration)
         let models = &mut arch.spec.models;
         let mut unknown = models.get(models.default).clone();
         unknown.name = "unknown".into();
@@ -311,12 +322,14 @@ impl Facts {
             extrefs: HashMap::new(),
             data: BTreeMap::new(),
             labels: HashMap::new(),
+            depths: HashSet::new(),
+            strings: BTreeMap::new(),
+            undef: BTreeMap::new(),
             comments: HashMap::new(),
             tracked: BTreeMap::new(),
             overrides: HashMap::new(),
             types: HashMap::new(),
             code_protos: HashSet::new(),
-            unknown_model: ModelId(models.list.len() as u32 - 1),
             ns: HashMap::new(),
         };
         // functions in a namespace: entry and namespace id, named once the `ns` records are read
@@ -334,6 +347,11 @@ impl Facts {
                     let mut core = Vec::new();
                     for t in &root.kids {
                         let meta = t.req("metatype").map_err(facts_err)?;
+                        // TypeChar and TypeUnicode of another metatype (Java's `uchar` is a uint)
+                        // have their own sub-metatypes: not ported
+                        if (t.flag("char") || t.flag("utf")) && meta != "int" {
+                            return err(format!("facts: a core character data-type of metatype {meta} is not ported"));
+                        }
                         core.push(CoreType {
                             name: t.req("name").map_err(facts_err)?,
                             size: t.int("size").map_err(facts_err)? as u32,
@@ -405,8 +423,21 @@ impl Facts {
                     arch.add_externref(slot, slot);
                     scoped.push((slot, scope_id(x)?));
                 }
-                ("label", Some(a), Some(name), None) => {
-                    f.labels.insert(hex(a)?, at(name));
+                ("label", Some(a), Some(name), own) => {
+                    f.labels.insert(hex(a)?, (at(name), own.map(hex).transpose()?));
+                }
+                ("depth", Some(entry), Some(to), Some(_)) => {
+                    // a target outside memory is never the address of a queried function
+                    if to != "-" {
+                        f.depths.insert(hex(entry)?);
+                    }
+                }
+                ("string", Some(a), Some(len), Some(n)) => {
+                    let len = len.parse().map_err(|_| bad(line))?;
+                    f.strings.insert(hex(a)?, (len, n.parse().ok()));
+                }
+                ("undef", Some(first), Some(last), Some(prefix)) => {
+                    f.undef.insert(hex(first)?, (hex(last)?, at(prefix)));
                 }
                 ("override", Some(a), Some(kind), None) => {
                     f.overrides.entry(hex(a)?).or_default().push(at(kind));
@@ -466,6 +497,22 @@ impl Facts {
         (addr - first < rec.len).then_some((first, rec))
     }
 
+    /// The name prefix of the symbol Java makes for `addr` when it is an undefined byte of a
+    /// block that is not writable (an `undef` record) and has no `data` record of its own.
+    fn undef_prefix(&self, addr: u64) -> Option<&str> {
+        let (_, (last, prefix)) = self.undef.range(..=addr).next_back()?;
+        (addr <= *last).then(|| self.xml(prefix))
+    }
+
+    /// The defined string data holding `addr` (`DecompileCallback.getStringData` reads the
+    /// listing's string there, not the bytes up to a terminator): the offset of `addr` in it
+    /// and, when the export found the string plain (one-byte ASCII characters, the data's own
+    /// first bytes, zeros after them, no translation), its number of characters.
+    pub(crate) fn string_at(&self, addr: u64) -> Option<(u64, Option<u64>)> {
+        let (&first, &(len, chars)) = self.strings.range(..=addr).next_back()?;
+        (addr - first < len).then_some((addr - first, chars))
+    }
+
     /// The function whose body holds `addr`: its entry and the last address of that range.
     fn body_at(&self, addr: u64) -> Option<(u64, u64, u64)> {
         let (&first, &(last, entry)) = self.bodies.range(..=addr).next_back()?;
@@ -504,21 +551,34 @@ impl Facts {
         if self.in_function(addr) {
             return Ok(None);
         }
-        let Some((first, rec)) = self.data_at(addr) else { return Ok(None) };
-        if rec.kind == DataKind::ExternRef {
-            return Ok(None);
-        }
-        if rec.volatile {
-            return err(format!("facts: the volatile symbol at {first:#x} is not ported"));
-        }
-        let doc = parse(self.xml(&rec.xml))?;
+        let (first, kind, xml) = match (self.data_at(addr), self.undef_prefix(addr)) {
+            (Some((_, rec)), _) if rec.kind == DataKind::ExternRef => return Ok(None),
+            (Some((first, rec)), _) if rec.volatile => {
+                return err(format!("facts: the volatile symbol at {first:#x} is not ported"));
+            }
+            (Some((first, rec)), _) => (first, rec.kind, Cow::Borrowed(self.xml(&rec.xml))),
+            // `DecompileCallback.encodeData` of an undefined byte without a symbol, in a block
+            // that is not writable: the text `ExportFacts.java` checked against Java's
+            (None, Some(prefix)) => (
+                addr,
+                DataKind::Symbol,
+                Cow::Owned(format!(
+                    "<doc id=\"0x0\"><mapsym><symbol id=\"0x0\" name=\"{prefix}{addr:08x}\" typelock=\"true\" \
+                     namelock=\"true\" readonly=\"true\" merge=\"false\" cat=\"-1\"><typeref name=\"undefined\" \
+                     id=\"0xc000000000000000\"/></symbol><addr space=\"ram\" offset=\"{addr:#x}\" size=\"1\"/>\
+                     <rangelist/></mapsym></doc>"
+                )),
+            ),
+            (None, None) => return Ok(None),
+        };
+        let doc = parse(&xml)?;
         let (sym, prefix) = self.mapsym(&doc)?;
         let (Some(head), Some(addr_el)) = (sym.kids.first(), sym.kid("addr")) else {
             return err(format!("facts: bad symbol at {first:#x}"));
         };
         let name = format!("{prefix}{}", head.req("name").map_err(facts_err)?);
         let size = addr_el.int("size").map_err(facts_err)? as u32;
-        let ty = match rec.kind {
+        let ty = match kind {
             // LabSymbol::buildType
             DataKind::Label => types.base(1, Meta::Unknown),
             _ => {
@@ -602,8 +662,15 @@ impl Facts {
         // FuncProto::decode: the model first (an unrecognized name makes an unknown model)
         let model = match p.attr("model") {
             None | Some("" | "default") => models.default,
-            Some(n) => models.find(n).unwrap_or(self.unknown_model),
+            Some(n) => models
+                .find(n)
+                .map_err(|_| unported(&format!("the unrecognized model name {n} (createUnknownModel)")))?,
         };
+        // DecompileCallback.getExtraPopOverride: a callee's extrapop is the override at a call
+        // site of the function being decompiled; the facts hold each function's own value only
+        if own && self.depths.contains(&entry) {
+            return Err(unported("a stack-depth-change override at a call site (getExtraPopOverride)"));
+        }
         proto.set_model(models, model);
         match p.attr("extrapop") {
             Some("unknown") => proto.extrapop = ExtraPop::Unknown,
@@ -646,8 +713,13 @@ impl Facts {
     /// The range (first address, length) of the data symbol or label holding `addr`, without
     /// reading it.
     pub(crate) fn data_range(&self, addr: u64) -> Option<(u64, u64)> {
-        let (first, rec) = self.data_at(addr).filter(|_| !self.in_function(addr))?;
-        (rec.kind != DataKind::ExternRef).then_some((first, rec.len))
+        if self.in_function(addr) {
+            return None;
+        }
+        match self.data_at(addr) {
+            Some((first, rec)) => (rec.kind != DataKind::ExternRef).then_some((first, rec.len)),
+            None => self.undef_prefix(addr).map(|_| (addr, 1)),
+        }
     }
 
     /// Whether a data symbol of a composite data-type lies where
@@ -667,9 +739,16 @@ impl Facts {
         Ok(false)
     }
 
-    /// `getCodeLabel`: the listing's label at an address inside a function.
-    pub(crate) fn label(&self, addr: u64) -> Option<&str> {
-        self.labels.get(&addr).map(|r| self.xml(r))
+    /// `getCodeLabel`: the listing's label at an instruction, while the function at `entry` is
+    /// decompiled.
+    pub(crate) fn label(&self, addr: u64, entry: u64) -> Result<Option<&str>> {
+        let Some((name, own)) = self.labels.get(&addr) else { return Ok(None) };
+        if own.is_some_and(|o| o != entry) {
+            return err(format!(
+                "facts: the label at {addr:#x} is in the namespace of another function (getCodeLabel prefixes it): not ported"
+            ));
+        }
+        Ok(Some(self.xml(name)))
     }
 
     /// `getComments` of the function at `entry`.

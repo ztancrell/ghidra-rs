@@ -888,7 +888,8 @@ impl PrintC<'_> {
         // unless the block has a special label (joined or duplicated)
         if let (Some(facts), false) = (&self.arch.facts, block.joined || block.duplicated) {
             let first_op = block.ops.first().map(|&op| self.fd.op(op).seq.addr);
-            if let Some(label) = block.entry_addr(first_op).and_then(|a| facts.label(a)) {
+            let label = block.entry_addr(first_op).map(|a| facts.label(a, self.fd.entry)).transpose()?;
+            if let Some(label) = label.flatten() {
                 self.emit.print_str(label);
                 return Ok(());
             }
@@ -1502,7 +1503,15 @@ impl PrintC<'_> {
                 return err("print C: a variable past the end of its symbol (pushMismatchSymbol) is not ported");
             }
             if off == 0 {
-                let name = format!("_{}", self.fd.symtab.symbol(sym).name);
+                let name = &self.fd.symtab.symbol(sym).name;
+                // '_' + getDisplayName(): the name without its namespaces, which the port's
+                // symbol keeps as one string
+                if name.contains("::") {
+                    return err(
+                        "print C: a variable larger than its symbol in a namespace (pushMismatchSymbol) is not ported",
+                    );
+                }
+                let name = format!("_{name}");
                 return self.push_atom(Atom::Text(name));
             }
             return self.push_unnamed_location(vn, size);
@@ -2014,8 +2023,9 @@ impl PrintC<'_> {
         }
         let arch = self.arch;
         let data = self.strings.entry(val).or_insert_with(|| string_data(arch, val, charsize as usize));
-        let Some((chars, trunc)) = data.clone() else { return Ok(None) };
-        java_reads_the_same(arch, charsize, &chars, trunc)?;
+        let data = data.clone();
+        java_reads_the_same(arch, val, charsize, data.as_ref())?;
+        let Some((chars, trunc)) = data else { return Ok(None) };
         let mut t = String::from(if charsize > 1 { "L\"" } else { "\"" });
         for cp in chars {
             print_unicode(&mut t, cp)?;
@@ -2087,13 +2097,28 @@ fn print_unicode(t: &mut String, cp: i32) -> Result<()> {
 /// `StringManagerUnicode::maximumChars` (sleigh_arch.cc: 2048).
 const MAXIMUM_CHARS: usize = 2048;
 
-/// With facts (stage S10) Java reads a string (`DecompileCallback.getStringData`: the listing's
-/// string data with its character set, else a terminated string). Only a whole string of plain
-/// ASCII is taken to read the same there as [`string_data`] reads it; any other fails.
-fn java_reads_the_same(arch: &Arch, charsize: u32, chars: &[i32], trunc: bool) -> Result<()> {
+/// With facts (stage S10) Java reads a string (`DecompileCallback.getStringData`): the listing's
+/// defined string data holding the address, with its length, character set and translation,
+/// else a terminated string of the bytes. [`string_data`] reads the bytes up to a terminator.
+/// The two are taken to agree on a whole string of plain one-byte ASCII that either lies
+/// outside defined string data, or in a string the export found plain and that ends where the
+/// raw read does (`Facts::string_at`); and on no string where the listing defines none. Any
+/// other case fails.
+// ponytail: outside defined string data, bytes without a terminator within `MAXIMUM_CHARS`
+// are no string here and are taken as none in Java (its limit may differ by one character)
+fn java_reads_the_same(arch: &Arch, addr: u64, charsize: u32, data: Option<&(Vec<i32>, bool)>) -> Result<()> {
+    let Some(facts) = &arch.facts else { return Ok(()) };
+    let defined = facts.string_at(addr);
     let plain = |&c: &i32| matches!(c, 0x20..=0x7e | 9 | 10 | 13);
-    if arch.facts.is_some() && (charsize != 1 || trunc || !chars.iter().all(plain)) {
-        return err("print C: a string Java Ghidra reads (getStringData) that is not plain ASCII is not ported");
+    let same = match data {
+        None => defined.is_none(),
+        Some((chars, trunc)) => {
+            let whole = charsize == 1 && !trunc && chars.len() + 2 < MAXIMUM_CHARS && chars.iter().all(plain);
+            whole && defined.is_none_or(|(at, n)| n.is_some_and(|n| n.saturating_sub(at) == chars.len() as u64))
+        }
+    };
+    if !same {
+        return err("print C: a string Java Ghidra reads (getStringData) from defined string data of another length or form, or that is not plain ASCII, is not ported");
     }
     Ok(())
 }
@@ -2101,9 +2126,9 @@ fn java_reads_the_same(arch: &Arch, charsize: u32, chars: &[i32], trunc: bool) -
 /// Port of `StringManager::isString`: whether a string of characters of `charsize` bytes
 /// (not an empty one) is at `addr`.
 pub(crate) fn is_string(arch: &Arch, addr: u64, charsize: u32) -> Result<bool> {
-    let Some((chars, trunc)) = string_data(arch, addr, charsize as usize) else { return Ok(false) };
-    java_reads_the_same(arch, charsize, &chars, trunc)?;
-    Ok(!chars.is_empty())
+    let data = string_data(arch, addr, charsize as usize);
+    java_reads_the_same(arch, addr, charsize, data.as_ref())?;
+    Ok(data.is_some_and(|(chars, _)| !chars.is_empty()))
 }
 
 /// Port of `StringManagerUnicode::getStringData` (with `checkCharacters` and

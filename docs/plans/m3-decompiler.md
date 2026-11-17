@@ -885,7 +885,8 @@ R5 slices 4 and 5 (branch `m3-r5b`, 2026-11-13). Superseded: "constseq.cc, bitfi
   so the check still switches it off. `threewaycomp`, `conditionalmove`, `orpredicate` (oppool1)
   are not in the plan's R5 row and stay off.
   Superseded: "Not ported: `ptrsubcharconstant`". S10 slice 1 ports it for the strings of the
-  facts; the checks' option files still switch it off, and no check against `decomp_dbg` runs it.
+  facts; the checks' option files still switch it off (`kept_off` in `r1-options.sh`), and no
+  check against `decomp_dbg` runs it.
 - Slice 5, `rules/constseq.rs`, `rules/bitfield.rs`: the groups `constsequence` and `bitfields`
   as far as they run without scopes and bit-field types. `stringcopy` never matches (no local
   symbols), `stringstore` fails at `HeapSequence` (not ported); no type has bit-fields, so the four
@@ -1863,6 +1864,12 @@ to confirm, and the loader is one module (`decomp/facts.rs`) that another source
   (0x40a110, 0x58d030, 0x9eec5e), and the other four differ where `decomp_dbg` itself
   changes when the eight are skipped. M500 with the eight skipped: identical 192 / 499 (loud 72, silent 235).
 - The checks against `decomp_dbg` are unchanged: `pcc-r` 494 / 495 (loud 1), `pcc-t` 495 / 495, `pc-r` 494 / 495 (loud 1), `pc-t` 495 / 495, `nm-r` 498 / 499 (loud 1), `nm-t` 499 / 499: the six lines equal the baseline.
+- Review fixes (2026-11-17, `rust/README.md`, "Stage S10, slice 1: review fixes"): panics with
+  facts, strings as `getStringData` reads them, labels at every instruction, undefined bytes of
+  read-only blocks, `FACTS=0` in `ghidra-diff.sh`, `kept_off` in `r1-options.sh`; call-site
+  extrapop overrides, `uchar` core types, unknown model names and `_ns::name` fail loudly. The
+  facts file is version 2. Superseded: "loud 72, silent 235": the slice's final build gives
+  M500 identical 192 / 499 (loud 70, silent 237), and the fixes change no function's state.
 
 Still before the gate: the eight actions (item 1), the misses default options reach (item 2),
 and from this slice the struct and union symbols and the other loud items.

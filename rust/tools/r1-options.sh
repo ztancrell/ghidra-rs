@@ -1,7 +1,8 @@
 #!/bin/bash
 # Writes the options of the rule-stage checks: S4's options (s4-options.txt) with more groups on,
 # and `option togglerule <rule> off` for every rule of `oppool1` and of the `cleanup` pool whose
-# group is on and which ghidra-rs does not port yet, and of `oppool2` (the tables in
+# group is on and which ghidra-rs does not port yet (or ports but keeps off: `kept_off` below),
+# and of `oppool2` (the tables in
 # ghidra-rs/src/decomp/rules/mod.rs). Rerun it when rules land. It writes fifteen files; each line
 # names the file it is built on:
 #   rust/tools/corpus/r1-options.txt      s4-options.txt with groups `analysis`, `cleanup` on (the R1/R2/R3 check)
@@ -23,6 +24,12 @@ set -e
 rust=$(cd "$(dirname "$0")/.." && pwd)
 cpp=$rust/../Ghidra/Features/Decompiler/src/decompile/cpp
 ported=" $(grep -o '"[a-z0-9_]*", "[a-z]*", &\[' "$rust/ghidra-rs/src/decomp/rules/mod.rs" | cut -d'"' -f2 | tr '\n' ' ') "
+# ported, but still switched off in these files: `ptrsubcharconstant` was ported for `load facts`
+# (stage S10: only a data symbol with a character data-type reaches it) and no check against
+# decomp_dbg has run with it on; the option files and their baselines stay as they were. Take a
+# name out of this list once a decomp_dbg check with the rule on has passed.
+kept_off=" ptrsubcharconstant "
+ported=$(for n in $ported; do case "$kept_off" in *" $n "*) ;; *) printf ' %s' "$n" ;; esac; done) && ported="$ported "
 # class -> rule name, from the constructors `RuleX(const string &g) : Rule(g, 0, "name")`
 names=$(grep -ho 'Rule[A-Za-z0-9]*(const string &g[^)]*) : Rule( *g *, *[^,]*, *"[a-z0-9_]*")' "$cpp"/*.hh |
     sed 's/(.*"\([a-z0-9_]*\)")/ \1/')

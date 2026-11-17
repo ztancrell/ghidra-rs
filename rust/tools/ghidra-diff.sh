@@ -50,8 +50,9 @@ export out=${OUT:-$rust/target/ghidra-diff/$name}
 if [ "$ENGINE" = ref ]; then eng="$rust/target/decomp-build/decomp_dbg"; else eng="$rust/target/release/ghidra-rs decompile"; fi
 export eng DECOMP_SKIP_ACTIONS=$SKIP
 "$rust/tools/decomp-diff.sh" --prelude
+facts=$FACTS
 export FACTS=
-if [ "$ENGINE" != ref ] && [ "$FACTS" != 0 ]; then
+if [ "$ENGINE" != ref ] && [ "$facts" != 0 ]; then
     GHIDRA_REF=$ref "$rust/tools/ghidra-facts.sh"
     FACTS=$ref/mercs2.facts
 fi
