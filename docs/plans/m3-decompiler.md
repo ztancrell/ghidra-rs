@@ -1862,7 +1862,7 @@ to confirm, and the loader is one module (`decomp/facts.rs`) that another source
   identical 0 / 7, loud 7 (the eight actions); with the eight skipped identical 3 / 7
   (0x40a110, 0x58d030, 0x9eec5e), and the other four differ where `decomp_dbg` itself
   changes when the eight are skipped. M500 with the eight skipped: identical 192 / 499 (loud 72, silent 235).
-- The checks against `decomp_dbg` are unchanged: `pcc-r` 494 / 495 (loud 1), equal to the baseline; the other five were still running when this was written.
+- The checks against `decomp_dbg` are unchanged: `pcc-r` 494 / 495 (loud 1), `pcc-t` 495 / 495, `pc-r` 494 / 495 (loud 1), `pc-t` 495 / 495, `nm-r` 498 / 499 (loud 1), `nm-t` 499 / 499: the six lines equal the baseline.
 
 Still before the gate: the eight actions (item 1), the misses default options reach (item 2),
 and from this slice the struct and union symbols and the other loud items.

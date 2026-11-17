@@ -3245,7 +3245,7 @@ which only ghidra-rs skips here: Java runs them):
 | `ghidra-diff.sh m500` | java finished 499 / 500, identical 0 / 499, loud 499 (498 the same action; 0x403060 a function in a namespace) |
 | `ghidra-diff.sh m500`, the eight skipped | identical 192 / 499 (loud 72, silent 235) |
 | `bars.sh`, `CORPORA=m8`, every check | 55 lines, each equal to the baseline's (`m3-int5-116d9d34da.summary`) |
-| `bars.sh`, M500 `pcc-r`, `pcc-t`, `pc-r`, `pc-t`, `nm-r`, `nm-t` | `pcc-r` 494 / 495 (loud 1), equal to the baseline; the other five were still running when this was written |
+| `bars.sh`, M500 `pcc-r`, `pcc-t`, `pc-r`, `pc-t`, `nm-r`, `nm-t` | `pcc-r` 494 / 495 (loud 1), `pcc-t` 495 / 495, `pc-r` 494 / 495 (loud 1), `pc-t` 495 / 495, `nm-r` 498 / 499 (loud 1), `nm-t` 499 / 499: the six lines equal the baseline |
 
 What is left of the four M8 misses is what the eight actions do in Java and not here: the
 store to `_DAT_0256f88a` in 0x401000 (`directwrite`), the stack variables of 0x401080 and
