@@ -641,7 +641,8 @@ impl<'a> Checker<'a> {
         let an = self.an;
         let i = &an.insns[&a];
         let mut f = Fl { fall: Some(a + i.len as u32), ..Fl::default() };
-        let noret_slot = i.slot.is_some_and(|s| an.noreturn.contains(&s));
+        // derived, or an override of the project store
+        let call_return = an.call_return(a, i);
         // CALL/JMP [ptr] through an initialised pointer to code: Ghidra flows to its value
         let via_ptr: Vec<u32> = i
             .slot
@@ -656,18 +657,18 @@ impl<'a> Checker<'a> {
             Flow::Call => {
                 f.call = true;
                 f.flows.extend(i.target);
-                if i.target.is_some_and(|t| an.noreturn.contains(&t)) {
+                if call_return {
                     (f.terminal, f.fall) = (true, None);
                 }
             }
             Flow::CallInd => {
                 (f.call, f.computed, f.flows) = (true, true, via_ptr);
-                if noret_slot {
+                if call_return {
                     (f.terminal, f.fall) = (true, None);
                 }
             }
             // a JMP to a function: Shared Return Calls' CALL_RETURN override
-            Flow::Jump if i.target.is_some_and(|t| an.funcs.contains(&t)) => {
+            Flow::Jump if call_return => {
                 (f.call, f.terminal, f.fall) = (true, true, None);
                 f.flows.extend(i.target);
             }

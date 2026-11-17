@@ -327,8 +327,29 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.
+   In part on branch `worktree-agent-af1e2713bbdee8eab` (2026-11-17): the project store as one plain
+   text file (`store.rs`: created and removed functions, fixed bodies, no-return flags, flow
+   overrides, thunk marks, switch targets, laid over a fresh analysis by `analyze --store`) and
+   mercs2's five project-editing scripts as `ghidra-rs edit` commands (`edits.rs`). On
+   Mercenaries2.analysis.exe the store brings the `.text` functions shared with the Java project
+   from 20422 to 36602 of 37635 (36178 with the same body size). Not ported, failing by name:
+   ExportBindings `--recover`, AuditRecoveredFunctions `--remove-empty`. Details in
+   `rust/README.md`, "Project store and the editing scripts".
 
 ## Open questions
 
-None open. Superseded: "where the edits of mercs2's five project-editing scripts live", decided
+Superseded: "where the edits of mercs2's five project-editing scripts live", decided
 2026-11-15 (plain files, see Decided).
+
+Open (asked 2026-11-17, with the project store):
+
+- The Decided entry of 2026-11-15 describes the five editing scripts as "renames, types,
+  comments" and lets them move off Java "after S10". They edit function boundaries, no-return
+  flags and flow overrides, and the store built for them needs no S10. The entry is left as
+  written; a corrected wording waits for the user.
+- The store's choices marked "Claude's call" wait for a yes or no: one file per project, passed
+  as `--store` (not a directory); final state, not a log of edits; a function is not created
+  where nothing decodes (Java makes a one-byte function); derived flow overrides and thunks
+  with only the exceptions stored.
+- Whether ExportBindings `--recover` and AuditRecoveredFunctions `--remove-empty` get ported
+  (both fail by name now), and whether mercs2 switches its pipeline to the store.
