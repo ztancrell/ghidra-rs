@@ -18,7 +18,9 @@
 //!   from name-locked symbols when it is cleared, and it holds none.
 //! - CAST ops (`setcasts` runs after this action) and proto-partial varnodes do not exist.
 //! - `VariablePiece` groups (`isSameGroup`) are not ported; merging fails loudly on them.
-//! - `finalizeDatatype` of a piece of a symbol (`getExactPiece`) fails loudly.
+//! - `finalizeDatatype` giving a variable a data-type other than its own fails loudly (nothing
+//!   ported reads `type_finalized`); a partial struct, array, union or enum piece fails in
+//!   `getExactPiece` (`infertypes.rs`).
 
 use std::collections::BTreeMap;
 
@@ -393,16 +395,16 @@ fn link_spacebase_symbol(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, namerec:
     Ok(())
 }
 
-/// Port of `HighVariable::finalizeDatatype` for a high holding a whole symbol: the symbol's
-/// data-type becomes the variable's. Nothing ported reads `type_finalized`, so a type that
-/// would change, or a piece of the symbol, fails.
+/// Port of `HighVariable::finalizeDatatype`: the piece of the symbol's data-type the variable
+/// covers (`getExactPiece`; the whole type for a whole symbol) becomes the variable's, when
+/// there is one and it is not unknown. Nothing ported reads `type_finalized`, so a type that
+/// would change fails.
 fn finalize_datatype(fd: &mut Funcdata, arch: &Arch, h: HighId, sym: SymbolId) -> Result<()> {
     let Some(cur) = fd.symtab.symbol(sym).ty else { return Ok(()) };
     let sz = fd.vn(fd.highs.get(h).inst[0]).size;
-    if symbol_offset(fd, arch, h)? > 0 || fd.types.size(cur) != sz {
-        return err("namevars: finalizeDatatype of a piece of a symbol (getExactPiece) is not ported");
-    }
-    if fd.types.meta(cur) != Meta::Unknown && cur != h_type(fd, h).0 {
+    let off = symbol_offset(fd, arch, h)?.max(0);
+    let Some(tp) = super::infertypes::exact_piece(fd, arch, cur, off as u64, sz)? else { return Ok(()) };
+    if fd.types.meta(tp) != Meta::Unknown && tp != h_type(fd, h).0 {
         return err("namevars: finalizeDatatype changing the data-type of a variable is not ported");
     }
     Ok(())

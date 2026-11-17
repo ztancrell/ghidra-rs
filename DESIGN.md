@@ -347,6 +347,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    2004 / 2005, `pcc-t` 2003 / 2005; M500 `pcd` 440 / 497 (loud 57), silent 0. 0x5861aa and 0x7c74c0 traced: the
    reference's partial function fails too and its later tables come from the half-simplified clone, left loud.
    Superseded: the switch counts and "Open" of the line above, `pcd` 415 / 497 in the `m3-default` line.
+   Pieces of symbols (2026-11-17): `finalizeDatatype` through `getExactPiece`, `pushMismatchSymbol`, the validity
+   test of `HeapSequence`: `pcd` M500 474 / 497 (loud 23, silent 0; was 422, loud 75), `r5c` M500 498 / 498.
+   Decided: where the C++ orders by `HighVariable` address (`snipOutputInterference` over several variables of a
+   group) ghidra-rs fails loudly; the order is the allocator's and cannot be reproduced (0x4130d0).
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

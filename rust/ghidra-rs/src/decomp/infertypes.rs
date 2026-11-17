@@ -686,7 +686,13 @@ fn propagate_across_returns(fd: &mut Funcdata, arch: &Arch, st: &mut Infer) -> R
 
 /// Port of `TypeFactory::getExactPiece`: the piece of `ct` at `offset` of exactly `size` bytes.
 /// Partial structs, unions and enums are not ported (`sub_type` fails on their parents).
-fn exact_piece(fd: &mut Funcdata, arch: &Arch, mut ct: TypeId, offset: u64, size: u32) -> Result<Option<TypeId>> {
+pub(crate) fn exact_piece(
+    fd: &mut Funcdata,
+    arch: &Arch,
+    mut ct: TypeId,
+    offset: u64,
+    size: u32,
+) -> Result<Option<TypeId>> {
     let mut cur = offset as i64;
     let mut last = None;
     loop {

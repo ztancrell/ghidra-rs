@@ -713,11 +713,17 @@ fn snip_output_interference(fd: &mut Funcdata, indop: OpId) -> Result<bool> {
     if correctable.is_empty() {
         return Ok(false);
     }
-    // ponytail: PcodeOpNode::compareByHigh orders by HighVariable pointer; HighIds count
-    // creation, which is allocation order
+    // PcodeOpNode::compareByHigh orders by HighVariable pointer. Reads of one high keep the
+    // order of `std::sort`; several highs (the pieces of a group) come in the order of their
+    // heap addresses, which the allocator decides (a new high reuses freed memory), and the
+    // order numbers the copies. Superseded: "HighIds count creation, which is allocation
+    // order" (0x4130d0 printed two copies swapped).
     let mut keyed = Vec::with_capacity(correctable.len());
     for &(o, s) in &correctable {
         keyed.push((in_high(fd, o, s)?, o, s));
+    }
+    if keyed.iter().any(|k| k.0 != keyed[0].0) {
+        return err("merge: snipOutputInterference of several variables of a group orders its copies by HighVariable address (compareByHigh), which ghidra-rs cannot reproduce");
     }
     super::stdsort::sort(&mut keyed, |a, b| a.0 < b.0);
     correctable = keyed.iter().map(|&(_, o, s)| (o, s)).collect();

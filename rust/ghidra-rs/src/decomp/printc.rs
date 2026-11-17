@@ -15,7 +15,9 @@
 //! Slice 5: the label of a spliced block (`BlockBasic::getEntryAddr` over the merged cover),
 //! a global variable that is a whole function or external reference symbol (its name), string
 //! constants (`pushPtrCharConstant`, the string read as `StringManagerUnicode` reads it) and
-//! function pointer constants (`pushPtrCodeConstant`, the function's name).
+//! function pointer constants (`pushPtrCodeConstant`, the function's name). A variable running
+//! past the end of its local or data symbol prints as `pushMismatchSymbol` does (`_name` at the
+//! symbol's start, else the unnamed location).
 //!
 //! Every construct the C++ would print that is not ported fails with an error naming it, so a
 //! function prints identically or not at all. Not ported yet: the long suffix of a constant, a
@@ -1479,7 +1481,13 @@ impl PrintC<'_> {
             return err("print C: part of a symbol without a data-type is not ported");
         };
         if i64::from(off) + i64::from(size) > i64::from(self.fd.types.size(sty)) {
-            return err("print C: a variable past the end of its symbol (pushMismatchSymbol) is not ported");
+            // PrintC::pushMismatchSymbol: the symbol's address with a size too small prints
+            // its name after an underscore, any other offset the unnamed location
+            if off == 0 {
+                let name = format!("_{}", self.fd.symtab.symbol(sym).name);
+                return self.push_atom(Atom::Text(name));
+            }
+            return self.push_unnamed_location(vn, size);
         }
         self.push_partial_symbol(sym, i64::from(off), size, is_read.then_some(vn))
     }
