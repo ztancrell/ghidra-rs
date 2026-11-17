@@ -702,6 +702,9 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
   not ported yet skipped on both engines (the list `D` at the top of `bars.sh`; it shrinks as
   they are ported). It runs on M8, M500 and `simple`: M8 and M500 run 56 checks, `simple` five
   (superseded: "all 55 checks" and "the four `print C` checks" above).
+  `pmd` is `print map` and `print raw` with the same options at `break start startcleanup` (the
+  local symbols and the typed ops after `mapped_local_sync`); `D` is empty now. M8 and M500 run
+  57 checks, `simple` six (superseded: "56 checks" and "five").
 - `JOBS` (default `nproc`), `TIMEOUT` (seconds per function and engine, default 120 as for every bar here; 0x4c48d0 of M500 takes
   the reference about 485 s and ghidra-rs about 600 s alone, so at 120 s it counts as a function
   the reference does not finish), `OUT`
@@ -2144,6 +2147,9 @@ the M500 numbers in `docs/plans/m3-decompiler.md`, "Stack heritage". (Superseded
 partial function of jump-table recovery: it runs a port of `ActionRestructureVarnode`, branch
 `m3-aliasupdate`. Superseded: "the load-guard value-set analysis" in that list, and the
 "load-guard error" of 0x40ad80 above; see "Value-set analysis and the stack guards".)
+the M500 numbers in `docs/plans/m3-decompiler.md`, "Stack heritage". (Superseded:
+`ActionRestructureVarnode` is ported, for the partial function of jump-table recovery on
+branch `m3-aliasupdate` and for the `decompile` root in "Local symbols".)
 
 
 Review fixes and merges (2026-11-14). 0x4098c0 is fixed: the heritage location map rebuilt a
@@ -2196,8 +2202,8 @@ bar fell; the table is in `docs/plans/m3-decompiler.md`, "Stack heritage".
 - Tools: `decomp-diff.sh` takes `DECOMP` and `GHIDRA_RS` from the environment, `decomp-ref.sh`
   takes `DECOMP_BUILD` and `JOBS`; `r1-options.sh` also writes `s8-t-options.txt`,
   `tail-r-options.txt` and `tail-t-options.txt`.
-- The unported leaves `restructure_varnode` and `mapped_local_sync` carry their C++ names
-  (superseded: `restructurevarnode`, `mappedlocalsync`).
+- The leaves `restructure_varnode` and `mapped_local_sync` carry their C++ names
+  (superseded: `restructurevarnode`, `mappedlocalsync`; and "unported": see "Local symbols").
 
 Checks and commands: docs/plans/m3-decompiler.md, "Tail". Results (M8; M500 of the functions the
 reference finishes): prototypes and globals 8 / 8, 498 / 499 (99.8 %) (rules on) and 8 / 8, 493 / 499 (98.8 %) (types
@@ -3189,10 +3195,8 @@ the full pass.
 The check `pcd` runs `print C` with the default options: no group off and no break. Two lists
 say what is still left out, on both engines:
 
-- `D` at the top of `bars.sh`: the action leaves not ported. Now `restructure_varnode` and
-  `mapped_local_sync` (`ScopeLocal::restructureVarnode`, `Funcdata::syncVarnodesWithSymbols`:
-  the local symbols of varmap.cc, with the `mapped`, `nolocalalias` and symbol type flags that
-  heritage, type propagation, naming and printing then read).
+- `D` at the top of `bars.sh`: the action leaves not ported. Now empty. (Superseded: "Now
+  `restructure_varnode` and `mapped_local_sync`"; both are ported, see "Local symbols" below.)
 - `tools/corpus/default-options.txt` (written by `r1-options.sh` from the rule tables): the
   rules of the three pools not ported. Now eight: `aliasupdate`, `switchsingle`, `ptrflow`,
   `segment`, `ptrsubcharconstant`, `splitcopy`, `splitload`, `splitstore`.
@@ -3269,6 +3273,71 @@ Counts, M500: `pcd` 474 / 497 (loud 23, silent 0; before 422, loud 75). 50 of th
 functions here; the fourth, 0x47a6b0, is identical too, and `r5c` was not run on `m3-default`,
 so where it changed is not measured). M8: the 56 summary lines unchanged.
 Not run: the switch and `simple` corpora, and the other M500 checks.
+### Local symbols: `restructure_varnode` and `mapped_local_sync` in the `decompile` root (2026-11-17)
+
+The last two action leaves of the default pipeline run in the `decompile` root. `D` in
+`bars.sh` is empty: `pcd` skips no action. (Superseded: "Now `restructure_varnode` and
+`mapped_local_sync`" in the section above, and "The action of the `decompile` root stays
+unported" in the alias analysis section below.)
+
+One port serves the root and the jump-table partial function (`mapstate.rs`; the partial
+function's hints simply have unknown types):
+
+- Range hints carry data-types: `RangeHint::reconcile`, `isConstAbsorbable`, `preferred` with
+  `typeOrder`, `attemptJoin` through pointers, `reconcileDatatypes`; `createEntry` makes an
+  array when more than one element fits. `MapState::adjustOutOfRange` with
+  `RangeList::getNearestRange` and the backfill hints (`attemptBackfill`, `backfillOpen`)
+  replace the loud "open range hint outside the local ranges".
+- A symbol is an entry of `LocalMap` (range, `nolocalalias`, the `fake_input` category) with a
+  typed, unnamed symbol of the local scope behind it (`Funcdata::add_local_sym`), so the
+  `$$undef` names count up as in the C++. `markNotMapped`, `clearUnlockedCategory(-1)` and
+  `clearCategory(fake_input)` remove both.
+- `checkUnaliasedReturn` (through `markNotMapped`) and `annotateRawStackPtr` (a `PTRSUB(sp, #0)`
+  and a symbol at stack offset 0) are ported. (Superseded: the two loud paths of the same
+  names.)
+- `syncVarnodesWithSymbols` with `updateDatatypes`: `ActionMappedLocalSync` gives a stack
+  varnode the data-type of its place in its symbol (`TypeFactory::getExactPiece`). The action
+  runs in the partial function too (it left `action::PARTIAL_SKIP`).
+- `ActionInputPrototype` clears the fake inputs first; a reference into the stack parameters
+  that no input covers is a trial (`gatherParamSpacebaseRefs`, `markActiveInputRefs`) or gets a
+  symbol (`addRefOnlySymbols`).
+
+Readers of the symbols that changed with them:
+
+- `RulePtrArith` asks `TypeSpacebase::nearestArrayedComponentForward` and `Backward` for an
+  array symbol near a stack offset (`infertypes::nearest_arrayed_component`, with
+  `ScopeInternal::findSymbolAfter` and `findSymbolBefore`; `rangemap.rs` gains `after` and
+  `before`). It assumed no array symbol exists, which was a silent difference (0x4042e0:
+  `axStack_4a + -6`).
+- `HighIntersectTest::testUntiedCallIntersection` reads `hasNoLocalAlias`; `baseExplicit` reads
+  `isMapped` for a varnode that is not address-tied.
+- `finalizeDatatype` takes the type of the variable's place in its symbol and keeps it
+  (`type_finalized`, read by `variable::h_type`). (Superseded: "`finalizeDatatype` of a piece
+  of a symbol (`getExactPiece`) fails loudly" and "changing the data-type of a variable is not
+  ported".)
+- `PrintC::pushMismatchSymbol` for a variable larger than the symbol at its address
+  (`_xStack00000000`).
+- `linkSymbol` fails loudly where `handleSymbolConflict` would make a dynamic symbol.
+- `RuleStringCopy` fails loudly on a character copied into a symbol of `restructure_varnode`
+  (`StringSequence` is not ported).
+- Fixed on the way: `subflow.rs` and `subfloat.rs` read the size of a locked varnode's type
+  from the architecture's type factory instead of the function's (a panic once the stack
+  pointer's space-base type was reached; `bars.sh` counted it as silent).
+
+Not ported, each failing with an error that names it: a valid load or store guard
+(`MapState::addGuard`, the value-set ranges), a structure or union among the hints, a locked
+prototype with parameters, a piece of an array symbol as a data-type
+(`getTypePartialStruct`), a reference into the stack parameters of a locked prototype.
+
+The check `pmd` (new in `bars.sh`): `print map` and `print raw` at `break start startcleanup`
+with the default options, so the symbols (their `$$undef` names, ranges, types, attributes) and
+the typed ops are compared right after `mapped_local_sync`, before naming and printing. It
+found a silent difference `pcd` hid behind a later error (0x581bf6 of `simple`):
+`ActionUnjustifiedParams` looked at register inputs only and passed over a stack input in the
+middle of a parameter slot, which the C++ widens (`adjustInputVarnodes`, not ported). A stack
+input fails loudly there now.
+
+Counts: see the plan, "Local symbols".
 
 ## Speed
 ### Alias analysis of the jump-table partial function (branch `m3-aliasupdate`, 2026-11-17)
@@ -3306,7 +3375,9 @@ Not ported, each failing with an error that names it: a valid load or store guar
 is not ported), an open hint outside the local ranges and the parameter range
 (`adjustOutOfRange` with `getNearestRange`), a locked prototype, a typed stack varnode or one
 above `max_basetype_size`, a RETURN of a stack varnode (`checkUnaliasedReturn`),
-`annotateRawStackPtr` once type recovery has started. The action of the `decompile` root
+`annotateRawStackPtr` once type recovery has started. (Superseded, see "Local symbols" above:
+of these only the guards and a locked prototype with parameters are left, and the action runs
+in the `decompile` root.) The action of the `decompile` root
 stays unported (`restructure_varnode` fails there as before), and `r1-options.sh` keeps
 `aliasupdate` off in the function itself: there the rule fails on the INDIRECTs of an indexed
 stack STORE. Without an options file the rule is on in the `decompile` root too:

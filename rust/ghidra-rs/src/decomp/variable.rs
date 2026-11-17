@@ -46,6 +46,8 @@ pub(crate) struct HighVariable {
     /// `intersectdirty` and `extendcoverdirty`
     intersect_dirty: bool,
     extend_dirty: bool,
+    /// `type_finalized`: the data-type `finalizeDatatype` took from the variable's symbol
+    pub(crate) type_finalized: Option<TypeId>,
 }
 
 /// Port of `VariablePiece`: a high as a piece of a `VariableGroup`.
@@ -278,10 +280,15 @@ fn type_representative(fd: &mut Funcdata, h: HighId) -> VarnodeId {
 }
 
 /// Port of `HighVariable::updateType` / `getType` and `isTypeLock`: the representative's type
-/// and lock. ponytail: `stripType` is left out, no ported type has a stripped form.
+/// and lock, or the finalized type. ponytail: `stripType` is left out, no ported type has a
+/// stripped form.
 pub(crate) fn h_type(fd: &mut Funcdata, h: HighId) -> (TypeId, bool) {
     let rep = type_representative(fd, h);
-    (super::infertypes::vn_type(fd, rep), fd.vn(rep).has(VnFlags::TYPELOCK))
+    let ty = match fd.highs.get(h).type_finalized {
+        Some(t) => t,
+        None => super::infertypes::vn_type(fd, rep),
+    };
+    (ty, fd.vn(rep).has(VnFlags::TYPELOCK))
 }
 
 /// `HighVariable::getTiedVarnode`
@@ -889,12 +896,16 @@ fn block_intersection(fd: &mut Funcdata, a: HighId, b: HighId, blk: i32) -> bool
 
 /// Port of `HighIntersectTest::testUntiedCallIntersection` with `Cover::intersect(PcodeOpSet)`:
 /// whether the untied high is live across a call (or guarded STORE) that may change the tied
-/// one. `hasNoLocalAlias` is never set (`localrecovery` is not ported).
+/// one. A local variable without aliases (`hasNoLocalAlias`, set by `restructure_varnode`) is
+/// in nobody's way. (Superseded: "`hasNoLocalAlias` is never set".)
 fn untied_call_intersection(fd: &mut Funcdata, tied: HighId, untied: HighId) -> Result<bool> {
     if h_is(fd, tied, VnFlags::PERSIST) {
         return Ok(false);
     }
     let rep = tied_varnode(fd, tied)?;
+    if fd.vn(rep).has(VnFlags::NOLOCALALIAS) {
+        return Ok(false);
+    }
     if fd.highs.affecting.is_none() {
         fd.highs.affecting = Some(stack_affecting_ops(fd));
     }

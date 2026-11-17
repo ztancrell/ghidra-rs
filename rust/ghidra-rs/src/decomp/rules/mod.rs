@@ -363,7 +363,7 @@ fn uniq_out(fd: &mut Funcdata, size: u32, op: OpId) -> Result<VarnodeId> {
 
 /// A new op at `addr` with a unique output of `size` bytes and the inputs `ins` (`newOp`,
 /// `newUniqueOut`, `opSetInput`), inserted before `follow` (`opInsertBefore`): its output.
-fn insert_new(
+pub(crate) fn insert_new(
     fd: &mut Funcdata,
     opc: Opcode,
     addr: u64,

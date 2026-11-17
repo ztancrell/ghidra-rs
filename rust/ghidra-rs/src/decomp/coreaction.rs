@@ -2515,6 +2515,8 @@ fn trace_trash(fd: &Funcdata, vn: VarnodeId) -> Option<Vec<OpId>> {
 
 /// Port of `ActionUnjustifiedParams::apply`: an input that sits in a parameter entry but not
 /// justified would be widened (`adjustInputVarnodes`), which is not ported; it fails loudly.
+/// A stack input counts too (0x581bf6: one byte in the middle of a parameter slot; it was
+/// passed over without a word, which the check `pmd` showed).
 pub(crate) fn unjustified_params(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     let Some(m) = fd.proto.model else { return Ok(0) };
     let list = &arch.spec.models.get(m).input;
@@ -2523,7 +2525,6 @@ pub(crate) fn unjustified_params(fd: &mut Funcdata, arch: &Arch) -> Result<i32> 
         if !v.is_input() {
             continue;
         }
-        let Space::Sleigh(_) = v.space else { continue };
         // unjustifiedInputParam: an entry contains it, not at the justified offset
         let unjustified = (0..list.entries.len()).any(|i| {
             list.justified_contain(i, v.space, v.offset, v.size).is_some_and(|o| o != 0)
@@ -2602,10 +2603,18 @@ pub(crate) fn output_prototype(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
 /// input varnodes (each one the model could pass is a trial, active when something reads it;
 /// a merged model resolves to its best member; `fillinMap` picks the used trials) and stored
 /// as the local scope's category-0 symbols (`FuncProto::updateInputTypes`,
-/// `ProtoStoreSymbol::setInput`). Without `restructure_varnode` (not ported) the scope has no
-/// fake inputs and no open parameter references, so those parts have nothing to do.
+/// `ProtoStoreSymbol::setInput`). The fake inputs of `restructure_varnode` go first, and a
+/// reference into the stack parameters that no input varnode covers is a trial too
+/// (`markActiveInputRefs`) or gets a symbol of its own (`addRefOnlySymbols`). Superseded:
+/// "Without `restructure_varnode` (not ported) the scope has no fake inputs and no open
+/// parameter references".
 pub(crate) fn input_prototype(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     use super::scope::{SymbolEntry, UseLimit, LOCAL};
+    fd.clear_local_syms(true); // clearCategory(Symbol::fake_input)
+    let refs = if fd.localmap.open_param_refs { gather_param_spacebase_refs(fd, arch)? } else { Vec::new() };
+    if fd.proto.locked.is_some() && !refs.is_empty() {
+        return err("ActionInputPrototype: a reference into the stack parameters of a locked prototype is not ported");
+    }
     if fd.proto.locked.is_none() {
         fd.symtab.clear_category(LOCAL, 0); // clearUnlockedInput
         let models = &arch.spec.models;
@@ -2632,6 +2641,20 @@ pub(crate) fn input_prototype(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
                 if let Some(t) = active.trials.last_mut() {
                     t.mark_active();
                 }
+            }
+        }
+        // markActiveInputRefs
+        for &(off, dt) in &refs {
+            let size = fd.types.size(dt);
+            if fd.has_input_intersection(Space::Stack, off, size)
+                || models.get(model).input.find_entry(Space::Stack, off, size).is_none()
+            {
+                continue;
+            }
+            active.register_trial(Space::Stack, off, size);
+            types.push(dt);
+            if let Some(t) = active.trials.last_mut() {
+                t.mark_active();
             }
         }
         // resolveModel: only a merged model is replaced (by its best member)
@@ -2680,8 +2703,69 @@ pub(crate) fn input_prototype(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             }
         }
     }
+    // addRefOnlySymbols
+    for (off, dt) in refs {
+        if fd.symtab.overlapping(LOCAL, Space::Stack, off, fd.types.size(dt)).is_empty() {
+            fd.add_local_sym(off, dt, false)?;
+        }
+    }
     fd.clear_dead_varnodes();
     Ok(0)
+}
+
+/// Port of `ActionInputPrototype::gatherParamSpacebaseRefs` (with `InputRef::dedup`): the
+/// stack offsets in the parameter range that a PTRSUB or a constant PTRADD off the stack
+/// pointer refers to, each with the data-type pointed to, sorted, less those inside an earlier
+/// one. (`unjustifiedInputParam` only widens a reference on a big-endian stack.)
+fn gather_param_spacebase_refs(fd: &mut Funcdata, arch: &Arch) -> Result<Vec<(u64, super::types::TypeId)>> {
+    use super::types::{Kind, Meta};
+    let mut refs = Vec::new();
+    let Some(sp) = super::heritage_guard::stack_pointer_input(fd, arch) else { return Ok(refs) };
+    let sb = fd.vn(sp).ty.and_then(|t| fd.types.ptr_to(t));
+    if !sb.is_some_and(|t| matches!(fd.types.get(t).kind, Kind::Spacebase { .. })) {
+        return Ok(refs);
+    }
+    let mask = fd.localmap.highest();
+    for op in fd.vn(sp).descend.iter().copied().collect::<Vec<_>>() {
+        let o = fd.op(op);
+        let off = match o.opc {
+            Opcode::Ptrsub => fd.vn(o.ins[1]).offset,
+            Opcode::Ptradd if fd.vn(o.ins[1]).is_constant() => {
+                fd.vn(o.ins[1]).offset.wrapping_mul(fd.vn(o.ins[2]).offset)
+            }
+            _ => continue,
+        } & mask;
+        let params = fd.localmap.params();
+        if !params.iter().any(|&(first, last)| first <= off && off <= last) {
+            continue;
+        }
+        let Some(out) = o.out else { continue };
+        let ct = super::infertypes::vn_type(fd, out);
+        let dt = fd.types.ptr_to(ct).filter(|&t| fd.types.size(t) != 0);
+        let dt = match dt {
+            Some(t) => t,
+            None => fd.types.base(1, Meta::Unknown),
+        };
+        refs.push((off, dt));
+    }
+    // InputRef::operator<: by address, bigger data-types first, then the more specific
+    refs.sort_by(|a, b| {
+        let (sa, sb) = (fd.types.size(a.1), fd.types.size(b.1));
+        a.0.cmp(&b.0).then_with(|| match () {
+            _ if a.1 == b.1 => std::cmp::Ordering::Equal,
+            _ if sa != sb => sb.cmp(&sa),
+            _ if fd.types.order(a.1, b.1) <= 0 => std::cmp::Ordering::Less,
+            _ => std::cmp::Ordering::Greater,
+        })
+    });
+    let mut kept: Vec<(u64, super::types::TypeId)> = Vec::new();
+    for r in refs {
+        match kept.last() {
+            Some(&(last, dt)) if r.0 >= last && r.0 - last < u64::from(fd.types.size(dt)) => {}
+            _ => kept.push(r),
+        }
+    }
+    Ok(kept)
 }
 
 /// Port of `ActionMapGlobals::apply` (`Funcdata::mapGlobals`): each run of overlapping

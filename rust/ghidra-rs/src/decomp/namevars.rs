@@ -18,9 +18,10 @@
 //!   from name-locked symbols when it is cleared, and it holds none.
 //! - CAST ops (`setcasts` runs after this action) and proto-partial varnodes do not exist.
 //! - `VariablePiece` groups (`isSameGroup`) are not ported; merging fails loudly on them.
-//! - `finalizeDatatype` giving a variable a data-type other than its own fails loudly (nothing
-//!   ported reads `type_finalized`); a partial struct, array, union or enum piece fails in
-//!   `getExactPiece` (`infertypes.rs`).
+//! - `finalizeDatatype` of a piece of a symbol that is a partial type (a partial struct, array,
+//!   union or enum piece: `getTypePartialStruct`) fails loudly in `getExactPiece`
+//!   (`infertypes.rs`). (Superseded: "of a piece of a symbol (`getExactPiece`) fails loudly",
+//!   "giving a variable a data-type other than its own fails loudly".)
 
 use std::collections::BTreeMap;
 
@@ -236,6 +237,19 @@ fn link_symbol(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId) -> Result<Option<S
     // queryProperties(addr, 1, usepoint): the local scope, then (for storage it does not own)
     // the global one, which holds nothing outside its ranges
     if let Some((sym, e)) = fd.symtab.find_container(LOCAL, space, offset, 1, Some(usepoint))? {
+        // handleSymbolConflict: a varnode that is not address-tied, in a symbol valid everywhere
+        // (one of `restructure_varnode`) whose own storage holds another variable, gets a
+        // dynamic symbol instead
+        let entry = &fd.symtab.symbol(sym).entries[e];
+        let (everywhere, at) = (entry.uselimit.0.is_empty(), (entry.space, entry.offset, entry.size));
+        let v = fd.vn(vn);
+        if everywhere && !v.is_input() && !v.has(VnFlags::ADDRTIED) {
+            for other in fd.loc_at(at.0, at.1, at.2) {
+                if high(fd, other)? != h {
+                    return err("namevars: a variable in the storage of another one's symbol (buildDynamicSymbol) is not ported");
+                }
+            }
+        }
         if !fd.symtab.symbol(sym).entries[e].conflict {
             fd.mapentry.insert(vn, (sym, e));
             return Ok(Some(sym));
@@ -396,16 +410,17 @@ fn link_spacebase_symbol(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, namerec:
 }
 
 /// Port of `HighVariable::finalizeDatatype`: the piece of the symbol's data-type the variable
-/// covers (`getExactPiece`; the whole type for a whole symbol) becomes the variable's, when
-/// there is one and it is not unknown. Nothing ported reads `type_finalized`, so a type that
-/// would change fails.
+/// covers (`getExactPiece`, `infertypes.rs`; the whole type for a whole symbol) becomes the
+/// variable's, when there is one and it is not unknown. It stays (`type_finalized`, read by
+/// `variable::h_type`). A piece that is a partial type fails. (Superseded: "Nothing ported
+/// reads `type_finalized`, so a type that would change, or a piece of the symbol, fails".)
 fn finalize_datatype(fd: &mut Funcdata, arch: &Arch, h: HighId, sym: SymbolId) -> Result<()> {
     let Some(cur) = fd.symtab.symbol(sym).ty else { return Ok(()) };
     let sz = fd.vn(fd.highs.get(h).inst[0]).size;
     let off = symbol_offset(fd, arch, h)?.max(0);
     let Some(tp) = super::infertypes::exact_piece(fd, arch, cur, off as u64, sz)? else { return Ok(()) };
-    if fd.types.meta(tp) != Meta::Unknown && tp != h_type(fd, h).0 {
-        return err("namevars: finalizeDatatype changing the data-type of a variable is not ported");
+    if fd.types.meta(tp) != Meta::Unknown {
+        fd.highs.get_mut(h).type_finalized = Some(tp);
     }
     Ok(())
 }

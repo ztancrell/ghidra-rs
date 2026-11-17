@@ -1487,6 +1487,10 @@ fn base_explicit(fd: &Funcdata, vn: VarnodeId, mut maxref: usize) -> Result<i32>
             Opcode::Piece => {}
             _ => return Ok(-1),
         }
+    } else if v.has(VnFlags::MAPPED) {
+        // mapped without being address-tied (`syncVarnodesWithSymbols` sets the one, never the
+        // other): explicit
+        return Ok(-1);
     }
     if v.descend.is_empty() {
         return Ok(-1);
@@ -1718,9 +1722,9 @@ fn group_partials(fd: &Funcdata) -> Result<()> {
 }
 
 /// `ActionMergeMultiEntry`: only a symbol with several whole entries has work; the local scope
-/// holds none here (`localrecovery`, which would make them, is not ported), so one fails
-/// loudly. Superseded: "the local scope holds no symbols" (it holds the parameters, one entry
-/// each).
+/// holds none here (the symbols of `restructure_varnode` and the parameters have one entry
+/// each; no dynamic symbol exists), so one fails loudly. Superseded: "the local scope holds no
+/// symbols", "`localrecovery`, which would make them, is not ported".
 pub(crate) fn merge_multi_entry(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
     let multi = fd
         .symtab

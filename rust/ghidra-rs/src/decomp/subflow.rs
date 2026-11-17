@@ -174,7 +174,6 @@ impl Graph {
 /// Port of `SubvariableFlow`: the trace.
 pub(crate) struct SubvariableFlow<'a> {
     fd: &'a Funcdata,
-    arch: &'a Arch,
     /// the size of the logical value in bytes
     flowsize: u32,
     /// its size in bits
@@ -206,13 +205,7 @@ pub(crate) struct Replacement {
 impl<'a> SubvariableFlow<'a> {
     /// Port of the `SubvariableFlow` constructor: the logical value is the bits `mask` of
     /// `root`.
-    pub(crate) fn new(
-        fd: &'a Funcdata,
-        arch: &'a Arch,
-        root: VarnodeId,
-        mask: u64,
-        kind: FlowKind,
-    ) -> Result<SubvariableFlow<'a>> {
+    pub(crate) fn new(fd: &'a Funcdata, root: VarnodeId, mask: u64, kind: FlowKind) -> Result<SubvariableFlow<'a>> {
         let FlowKind { aggressive, sext, big } = kind;
         let bitsize = if mask == 0 { 0 } else { mostsigbit_set(mask) - leastsigbit_set(mask) + 1 };
         let flowsize = match bitsize {
@@ -222,7 +215,6 @@ impl<'a> SubvariableFlow<'a> {
         };
         let mut flow = SubvariableFlow {
             fd,
-            arch,
             flowsize,
             bitsize,
             returns_traversed: false,
@@ -274,7 +266,7 @@ impl<'a> SubvariableFlow<'a> {
         }
         // a locked varnode without a recorded type has the default one, of its own size
         let locked_other_size =
-            v.has(VnFlags::TYPELOCK) && v.ty.map_or(v.size, |t| self.arch.types.size(t)) != self.flowsize;
+            v.has(VnFlags::TYPELOCK) && v.ty.map_or(v.size, |t| self.fd.types.size(t)) != self.flowsize;
         if self.sext {
             // an input or a global cannot be assumed sign-extended
             let unknown_ext = (!self.aggressive && v.is_input()) || v.has(VnFlags::PERSIST);

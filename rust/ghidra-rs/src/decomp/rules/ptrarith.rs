@@ -354,14 +354,13 @@ impl AddTree {
         }
         match fd.types.meta(self.base_type) {
             Meta::Spacebase => {
-                // The C++ asks `nearestArrayedComponent` before and after `getSubType`. It is
-                // false here while no symbol has an arrayed component: the global scope holds only
-                // functions and external references (`infertypes::Entry`), the local scope only
-                // the locked stack parameters of the function (stack heritage, `varmap.rs`), which
-                // count while their type is primitive or a pointer. A parameter of any other type
-                // fails; when data symbols or other local symbols land, port
-                // `TypeSpacebase::nearestArrayedComponent*` here (the marker:
-                // `nearest_arrayed_component` fails on a space-base type).
+                // The C++ asks `nearestArrayedComponent` before and after `getSubType`
+                // (`infertypes::nearest_arrayed_component`: the array symbols of the local scope,
+                // made by `restructure_varnode`). The global scope holds only functions and
+                // external references here (`infertypes::Entry`). A locked stack parameter is not
+                // a symbol of the scope: it counts while its type is primitive or a pointer, and
+                // one of any other type fails. (Superseded: "It is false here while no symbol has
+                // an arrayed component".)
                 let local = !matches!(
                     fd.types.get(self.base_type).kind,
                     crate::decomp::types::Kind::Spacebase { scope: crate::decomp::types::GLOBAL_SCOPE, .. }
@@ -374,7 +373,21 @@ impl AddTree {
                         return err("RulePtrArith into a locked stack parameter of struct, union or array type (TypeSpacebase::nearestArrayedComponent): not implemented in ghidra-rs yet");
                     }
                 }
-                let Some((_, extra)) = sub_type(fd, arch, self.base_type, self.offset as i64)? else {
+                // the offset into the mapped variable: of an array symbol near it (preferring the
+                // element size of the index), else of the symbol holding it
+                use crate::decomp::infertypes::nearest_arrayed_component as nearest;
+                let (bytes, hint) = (self.offset as i64, self.biggest_non_mult_coeff);
+                let mut extra = None;
+                if hint != 0 {
+                    extra = nearest(fd, arch, self.base_type, bytes, hint)?;
+                }
+                if extra.is_none() {
+                    extra = sub_type(fd, arch, self.base_type, bytes)?.map(|(_, e)| e);
+                }
+                if extra.is_none() && hint == 0 {
+                    extra = nearest(fd, arch, self.base_type, bytes, 1)?;
+                }
+                let Some(extra) = extra else {
                     self.valid = false;
                     return Ok(());
                 };

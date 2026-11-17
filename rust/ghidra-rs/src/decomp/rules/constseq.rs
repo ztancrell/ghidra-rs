@@ -1,7 +1,8 @@
 //! The `constsequence` rules (stage R5, slice 5): `RuleStringCopy`, `RuleStringStore`
 //! (constseq.cc), up to their sequences. `RuleStringCopy` needs a local symbol holding the
-//! copied-to storage (`ScopeLocal::queryContainer`); the local scope's symbols are the locked
-//! parameters of the function (`localrecovery` is not ported), and `StringSequence` is not
+//! copied-to storage (`ScopeLocal::queryContainer`): a locked parameter of the function or a
+//! symbol of `restructure_varnode` (superseded: "the local scope's symbols are the locked
+//! parameters of the function (`localrecovery` is not ported)"). `StringSequence` is not
 //! ported: a character copied into one fails loudly. `RuleStringStore`'s `HeapSequence` is
 //! ported up to its validity (the constructor): a STORE that roots no sequence of four
 //! characters is left alone, a valid sequence fails loudly (`HeapSequence::transform`, the
@@ -25,7 +26,9 @@ pub(super) fn string_copy(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> 
     }
     // ScopeLocal::queryContainer: a piece of a locked stack parameter fails in heritage, so the
     // entry holding the varnode is the parameter exactly at it
-    if param_symbol(fd, outvn).is_some() {
+    // (or a symbol of `restructure_varnode` holding it)
+    let v = fd.vn(outvn);
+    if param_symbol(fd, outvn).is_some() || (v.space == Space::Stack && fd.localmap.has_container(v.offset, v.size)) {
         return err("RuleStringCopy: StringSequence (constseq.cc) not implemented in ghidra-rs yet");
     }
     Ok(0)
