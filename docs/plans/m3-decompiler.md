@@ -1893,6 +1893,19 @@ to master's. Still loud, by missing port: `ValueSetSolver` and the guard ranges 
 prints a function now. Details in `rust/README.md`, "Alias analysis of the jump-table partial
 function". (Superseded: the switch counts of the `m3-int5` paragraph above.)
 
+Review fixes of that port (branch `m3-default`, 2026-11-17): a new stack varnode inside a symbol
+of `restructureVarnode` takes the symbol's flags (`mapped`, `addrtied`, `nolocalalias`);
+`markNotMapped` removes the symbols under its range and stops at a `fake_input` one; a partial
+function made without the action and the rule that fails with a normal error ends the decompile
+loudly. No output changes: the build before against the one after is equal on the switch corpus
+(`paramdouble`, `swfs-r`, `swsn-r`, `pcc-r`, `pcc-t`), M8 (56 checks) and M500 (`pcd`,
+`paramdouble`, `swfs-r`, `pcc-r`, `pcc-t`, `r5s`). Measured against the reference on the whole
+switch corpus (Superseded: the derived counts above): `paramdouble` 1995 / 2004 (loud 9),
+`swfs-r` 1996 (loud 8), `swsn-r` 1993 (loud 8, silent 3), `pcc-r` 1997 / 2005 (loud 8), `pcc-t`
+1996 / 2005 (loud 9). Open: 0x5861aa and 0x7c74c0, identical at `paramdouble` in the `m3-int5`
+pass, are loud there before and after these fixes ("a second table after the partial function's
+action failed"). Details in `rust/README.md`, "Review fixes" of the alias analysis section.
+
 ## Running stages in parallel
 
 Strict chain first: S0 → S1a → S1b → S2. After S2 the work fans out. Under the cap of two

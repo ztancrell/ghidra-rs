@@ -367,11 +367,19 @@ impl Funcdata {
     /// (`setSymbolProperties` with `SymbolEntry::updateType`; a piece of one fails in heritage,
     /// `check_locked_param_pieces`).
     fn scoped_stack(&self, v: &mut Varnode) {
-        // A symbol of `restructureVarnode` (unlocked) gives a new varnode nothing
-        // (`setSymbolProperties`: `SymbolEntry::updateType` is false); the next
-        // `syncVarnodesWithSymbols` sets its flags.
-        if !self.localmap.has_container(v.offset, v.size) && self.localmap.in_scope(v.offset, v.size) {
-            v.flags.set(VnFlags::ADDRTIED.with(VnFlags::MAPPED));
+        // A symbol of `restructureVarnode` holding the varnode gives its flags
+        // (`setSymbolProperties`: `SymbolEntry::getAllFlags`, whatever `updateType` returns):
+        // `mapped`, `addrtied`, and `nolocalalias` once `markUnaliased` set it. So the next
+        // `syncVarnodesWithSymbols` finds nothing to change on it, and marks no INDIRECT.
+        match self.localmap.find_container(v.offset, v.size) {
+            Some(s) => {
+                v.flags.set(VnFlags::ADDRTIED.with(VnFlags::MAPPED));
+                if s.noalias {
+                    v.flags.set(VnFlags::NOLOCALALIAS);
+                }
+            }
+            None if self.localmap.in_scope(v.offset, v.size) => v.flags.set(VnFlags::ADDRTIED.with(VnFlags::MAPPED)),
+            None => {}
         }
         let Some(l) = &self.proto.locked else { return };
         let hit = l.inputs.iter().find(|p| {

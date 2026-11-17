@@ -143,11 +143,31 @@ impl LocalMap {
         self.entries.find_overlap(off, off.saturating_add(size.max(1) - 1)).map(|i| &self.syms[i])
     }
 
-    /// Whether a symbol holds all of `[off, off + size)` (`Scope::findContainer` finds one: the
-    /// symbols are address-tied, so in use everywhere).
-    pub(crate) fn has_container(&self, off: u64, size: u32) -> bool {
+    /// The symbol loop of `ScopeLocal::markNotMapped` over `[off, last]`: each symbol under the
+    /// range is removed (`removeSymbol`; none is typelocked), until a `fake_input` one stops it.
+    /// True when one did: the range then stays mapped.
+    fn unmap_syms(&mut self, off: u64, last: u64) -> bool {
+        while let Some(i) = self.entries.find_overlap(off, last) {
+            let s = self.syms[i];
+            if s.fake_input {
+                return true;
+            }
+            self.entries.erase(i, s.off, s.last);
+            self.syms[i].live = false;
+        }
+        false
+    }
+
+    /// Port of `ScopeInternal::findContainer`: the smallest symbol holding all of
+    /// `[off, off + size)` (the symbols are address-tied, so in use everywhere).
+    pub(crate) fn find_container(&self, off: u64, size: u32) -> Option<&LocalSym> {
         let last = off.saturating_add(u64::from(size.max(1)) - 1);
-        self.syms.iter().any(|s| s.live && s.off <= off && last <= s.last)
+        self.syms.iter().filter(|s| s.live && s.off <= off && last <= s.last).min_by_key(|s| s.last - s.off)
+    }
+
+    /// Whether a symbol holds all of `[off, off + size)`.
+    pub(crate) fn has_container(&self, off: u64, size: u32) -> bool {
+        self.find_container(off, size).is_some()
     }
 
     /// Port of `RangeList::longestFit` on the scope's ranges: the bytes from `off` on that
@@ -284,9 +304,12 @@ fn locked_stack_params(fd: &Funcdata) -> Vec<(u64, u32, String)> {
 
 /// Port of `ScopeLocal::markNotMapped`: the stack range is no longer mapped by the local
 /// scope. A parameter range widens the parameter extent first; a typelocked symbol under it (a
-/// locked parameter) keeps the range, with a warning unless both are parameters. Any other
-/// local symbol under it (removed, or a `fake_input` that keeps the range, in the C++) fails
-/// loudly: ghidra-rs's local scope holds none while this runs.
+/// locked parameter) keeps the range, with a warning unless both are parameters. A symbol of
+/// `restructureVarnode` under it is removed, and a `fake_input` one keeps the range
+/// (`LocalMap::unmap_syms`). Any other local symbol under it fails loudly. So does a locked
+/// parameter under it while such symbols exist (the order `findOverlap` gives the two in is not
+/// ported; `restructureVarnode` makes no symbol under a locked prototype), and a range that
+/// wraps the space while they do.
 pub(crate) fn mark_not_mapped(fd: &mut Funcdata, space: Space, first: u64, sz: u32, parameter: bool) -> Result<()> {
     if space != Space::Stack {
         return Ok(());
@@ -308,12 +331,22 @@ pub(crate) fn mark_not_mapped(fd: &mut Funcdata, space: Space, first: u64, sz: u
     let hit = locked
         .into_iter()
         .find(|&(off, size, _)| u128::from(off) < end && u128::from(first) < u128::from(off) + u128::from(size));
+    // findOverlap(addr, sz) takes the range as given, not clipped
+    let sym_last = first.checked_add(u64::from(sz.max(1)) - 1);
+    if !fd.localmap.entries.records().is_empty() && (sym_last.is_none() || hit.is_some()) {
+        return super::err(
+            "markNotMapped with symbols of restructureVarnode over a locked parameter or a range wrapping the stack space: not implemented in ghidra-rs yet",
+        );
+    }
     if let Some((_, _, name)) = hit {
         // every symbol here is a typelocked function parameter
         if !parameter {
             fd.warning_header(format!("Variable defined which should be unmapped: {name}"));
         }
         return Ok(());
+    }
+    if sym_last.is_some_and(|l| fd.localmap.unmap_syms(first, l)) {
+        return Ok(()); // inputs in the stack space are not unmapped
     }
     fd.localmap.remove_range(first, sz);
     Ok(())
@@ -567,5 +600,18 @@ mod tests {
         // a range covering a whole piece removes it
         m.remove(0, 8, false);
         assert_eq!(m.ranges[0], (12, 511));
+    }
+
+    /// `markNotMapped` removes the symbols under a range until it meets a fake input.
+    #[test]
+    fn unmapping_removes_symbols_up_to_a_fake_input() {
+        let mut m = LocalMap::empty();
+        m.add_sym(0x10, 4, false);
+        m.add_sym(0x20, 4, true);
+        assert!(m.find_container(0x12, 2).is_some() && m.find_container(0x12, 4).is_none());
+        assert!(!m.unmap_syms(0x8, 0x13));
+        assert!(!m.has_container(0x10, 4));
+        assert!(m.unmap_syms(0x1c, 0x23));
+        assert!(m.has_container(0x20, 4));
     }
 }

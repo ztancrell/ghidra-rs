@@ -333,6 +333,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    the `m3-int5` pass: `paramdouble` 1995, `swsn-r` 1991 (silent 3), the other switch checks 1994 of 2004;
    `pcc-r` 1995, `pcc-t` 1994 of 2005. Superseded: the switch counts of the line above, and "the unported
    `RuleAliasUpdate`" in the `m3-swsilent` lines.
+   Review fixes (2026-11-17): symbol flags on a new stack varnode, `markNotMapped` over the symbols, no failed
+   table from a partial function made without the alias analysis; no output changes. Measured on the whole switch
+   corpus: `paramdouble` 1995 / 2004, `swfs-r` 1996, `swsn-r` 1993 (silent 3), `pcc-r` 1997 / 2005, `pcc-t`
+   1996 / 2005 (Superseded: the derived counts of the line above). Open: 0x5861aa and 0x7c74c0 loud at `paramdouble`.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

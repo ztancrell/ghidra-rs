@@ -3142,9 +3142,12 @@ to the switch. Ported, for the partial function only:
 - `varnode.rs`, `op.rs`: the varnode flags `mapped` and `nolocalalias` (`VnFlags` is 64 bits
   wide now), the op flags `store_aliasupdate` and `no_indirect_collapse`.
   `heritage_guard.rs` marks a STORE that gets a store guard (`analyzeNewLoadGuards`).
-- `funcdata.rs`, `heritage.rs`: a new stack varnode inside one of these symbols takes no
-  property from the scope (`setSymbolProperties` on an unlocked symbol), and the heritage
-  guard reads `addrtied` from the symbol.
+- `funcdata.rs`, `heritage.rs`: a new stack varnode inside one of these symbols takes the
+  symbol's flags (`setSymbolProperties`: `SymbolEntry::getAllFlags`, so `mapped`, `addrtied`,
+  and `nolocalalias` once `markUnaliased` set it), and the heritage guard reads `addrtied` from
+  the symbol. (Superseded: "takes no property from the scope"; see "Review fixes" below.)
+- `varmap.rs`: `markNotMapped` removes the symbols under its range, and a `fake_input` one
+  keeps the range mapped.
 - `varmap.rs`: `AliasChecker::gatherAdditiveBase` keeps the index term (`AddBase::index`).
 
 Not ported, each failing with an error that names it: a valid load or store guard
@@ -3155,7 +3158,10 @@ above `max_basetype_size`, a RETURN of a stack varnode (`checkUnaliasedReturn`),
 `annotateRawStackPtr` once type recovery has started. The action of the `decompile` root
 stays unported (`restructure_varnode` fails there as before), and `r1-options.sh` keeps
 `aliasupdate` off in the function itself: there the rule fails on the INDIRECTs of an indexed
-stack STORE.
+stack STORE. Without an options file the rule is on in the `decompile` root too:
+`heritage_guard.rs` marks a STORE that gets a store guard in every root, so there the rule
+fails loudly on a guarded STORE with INDIRECTs and otherwise collapses nothing (no varnode of
+the function itself is `nolocalalias`).
 
 `flow.rs` makes the partial function three ways (`Mode`): as the C++ does (`Exact`); without the
 action and the rule when they reach one of the paths above (`NoAlias`), where the test of
@@ -3225,6 +3231,37 @@ the same output at `paramdouble` has the same tables.
 - Not run: the full pass, the switch checks on the whole corpus and M500 against the
   reference, the Mac. One unit test (`mapstate.rs`): overlapping hints merge into an open
   range, and an alias offset reaches the symbols at and above it.
+
+Review fixes (branch `m3-default`, 2026-11-17), from an independent review of the port:
+
+- A new stack varnode inside a symbol of `restructureVarnode` got no flag; in the C++ it takes
+  the symbol's (`Varnode::setSymbolProperties` sets `getAllFlags` whatever `updateType`
+  returns): `mapped`, `addrtied`, and `nolocalalias` after `markUnaliased`. With the flags
+  missing, the next `syncVarnodesWithSymbols` saw a change and marked the varnode's INDIRECT
+  for `RuleAliasUpdate`, which the C++ does not.
+- `markNotMapped` ignored the symbols of `restructureVarnode`: it now removes those under the
+  range and keeps the range for a `fake_input` one, as the C++; a locked parameter under the
+  range while such symbols exist, or a range wrapping the space, fails loudly.
+- A partial function that fails with a normal error after it was made without the action and
+  the rule (`NoAlias`) no longer gives a failed table ("Treating indirect jump as call"): the
+  decompile ends with an error naming the path not ported. The same case for the partial
+  function without the `stackvars` rules (`NoStack`) is as before and not reviewed.
+- Checks, the build before the fixes against the one after: `paramdouble`, `swfs-r`, `swsn-r`,
+  `pcc-r`, `pcc-t` on the switch corpus (2,050 / 2,050 outputs equal in each), all 56 checks on
+  M8 (8 / 8 in each), `pcd`, `paramdouble`, `swfs-r`, `pcc-r`, `pcc-t`, `r5s` on M500
+  (500 / 500 in each). No function changes state; none of the three paths changes an output of
+  these corpora, so the fixes are tested only by one unit test (`varmap.rs`: the symbols under
+  a range and the fake input).
+- The same checks against the reference, the whole corpus (Superseded: the derived switch
+  counts above): `paramdouble` 1995 / 2004 (loud 9), `swfs-r` 1996 / 2004 (loud 8), `swsn-r`
+  1993 / 2004 (loud 8, silent 3 as before), `pcc-r` 1997 / 2005 (loud 8), `pcc-t` 1996 / 2005
+  (loud 9). M8: 56 checks, the 55 summary lines of the `m3-int5` baseline unchanged, `pcd`
+  8 / 8. M500: `pcd` 422 / 497 (loud 75), `paramdouble` 500 / 500, `swfs-r` 499 / 499, `pcc-r`
+  and `pcc-t` 495 / 495, `r5s` 483 / 499 (loud 16). Loud on the switch corpus: the six indexed
+  stack LOADs and 0x1c69c5a in all five, 0x23f4238 from `swfs-r` on, 0x23caea8 in `pcc-t`
+  (`fillinReadOnly`), and in `paramdouble` only 0x5861aa and 0x7c74c0 ("a second table after
+  the partial function's action failed is not ported"). Those two were identical in the
+  `m3-int5` pass and are loud in the build before these fixes too: not traced.
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The
 input was the whole `.text` of `/usr/lib/libLLVM.so.21.1`: 97 MB, 21,830,419 instructions,

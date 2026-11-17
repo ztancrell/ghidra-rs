@@ -709,6 +709,14 @@ impl Flow<'_> {
                     if e.is_unported() {
                         return Err(e);
                     }
+                    // The action failing without `ActionRestructureVarnode` and
+                    // `RuleAliasUpdate` does not show that it fails with them: no failed table
+                    // is taken from that partial function.
+                    if let Mode::NoAlias(why) = &mode {
+                        return err(format!(
+                            "jump table: the partial function made without the alias analysis fails ({e}), which does not show that the C++ one does ({why})"
+                        ));
+                    }
                     *partial = Partial::Failed;
                     return Ok(Err(Fail::Normal(e.0)));
                 }
