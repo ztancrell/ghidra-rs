@@ -3079,7 +3079,11 @@ say what is still left out, on both engines:
   heritage, type propagation, naming and printing then read).
 - `tools/corpus/default-options.txt` (written by `r1-options.sh` from the rule tables): the
   rules of the three pools not ported. Now eight: `aliasupdate`, `switchsingle`, `ptrflow`,
-  `segment`, `ptrsubcharconstant`, `splitcopy`, `splitload`, `splitstore`.
+  `segment`, `ptrsubcharconstant`, `splitcopy`, `splitload`, `splitstore`. (Superseded: two,
+  `segment` and `ptrsubcharconstant`; see "Pool rules" below.)
+
+(Superseded: the next paragraph. A `decompile` run now fails while an unported rule is on; see
+"Pool rules: every rule listed, a missing one fails" below.)
 
 Not loud yet: without those `togglerule ... off` lines ghidra-rs runs the default options
 *without* the eight rules and says nothing (a rule missing from the tables is simply not in the
@@ -3118,6 +3122,65 @@ Counts: see the plan, "Default options". Superseded by this section: "not ported
 which is `not_ported`" (C printing), "splitting a stack trial that is a PIECE" as a loud
 miss (stage R5 slice 3), and "0x47a6b0 is loud in every check" (the `ActionConditionalExe`
 removal, integration `m3-int5`).
+
+### Pool rules: every rule listed, a missing one fails (branch `worktree-agent-ab53ef4e46d4bec80`, 2026-11-17)
+
+Behaviour change: a `decompile` run fails while a pool rule that is not ported is on. Before, a
+rule missing from the rule tables was simply not in the pool, and a run with the default
+options gave a result without it and said nothing (superseded: "Not loud yet" and the open
+decision in "Default options" above).
+
+- The tables `OPPOOL1`, `OPPOOL2` and `CLEANUP` (`rules/mod.rs`) now list every rule of the C++
+  pools, in the C++ order: a ported rule as `r(...)`, one that is not as `u(...)` (name, group,
+  op list). A unit test reads `coreaction.cc` and the rule constructors in the `.hh` files and
+  compares names, groups and order, so a rule the C++ gains or one dropped here fails
+  `cargo test`.
+- The `decompile` root (`pool::select` with `strict`): a pool holding a `u` rule whose group is
+  on and that `option togglerule <rule> off` did not switch off fails when it is first applied:
+  "pool rules not ported to ghidra-rs yet are on: ...". Switching the rule off on both engines
+  is the only way to run, and `tools/corpus/default-options.txt` (the `pcd` skip list) is where
+  the checks do it. A run that stops at a break before the pool is not affected.
+- The `jumptable` root, which no option reaches: the `u` rule is in the pool and fails on the
+  first op of its op list (for `segment`: a SEGMENTOP in the partial function).
+- `r1-options.sh` reads the `r(` entries as the ported rules.
+
+Two rules are `u` entries, both ported on other branches and left for integration (replace the
+`u` line by the `r` line there): `segment` (branch `worktree-agent-a852cab363d8d01f3`) and
+`ptrsubcharconstant` (branch `worktree-agent-af954dab401167074`). `default-options.txt` holds
+these two (superseded: eight).
+
+Ported here:
+
+- `switchsingle` (`RuleSwitchSingle`, `rules/mod.rs`): a BRANCHIND whose block has one out edge
+  and whose table has its labels becomes a BRANCH to the one destination, the table is removed
+  and the structure cleared; the header warning "Switch with 1 destination removed at ..." as
+  in the C++.
+- `ptrflow` (`RulePtrFlow`): its op list is empty unless the default data space is truncated
+  (`<truncate_space>` in the `.ldefs`, which ghidra-rs does not read). The console now refuses
+  a `.sla` that a language with a `<truncate_space>` uses in an `.ldefs` next to it
+  (`Sleigh::refuse_truncated`; no x86 language has one), so the rule has nothing to do. The
+  truncation itself (`SleighArchitecture::modifySpaces`, `truncatePointer`) is not ported.
+- `splitcopy`, `splitload`, `splitstore` (`SplitDatatype`, `rules/split.rs`): a COPY, LOAD or
+  STORE of a structure or array becomes one op per component (`getValueDatatype`,
+  `categorizeDatatype`, `getComponent` with holes, `testDatatypeCompatibility`,
+  `RootPointer::find` and `backUpPointer`, `buildPointers`, `buildInConstants`,
+  `buildInSubpieces` with `generateConstants`, `buildOutVarnodes`). Each of these fails with
+  an error naming it: a data-type that needs resolution (unionresolve.cc is not ported, so the
+  `ResolveCache` is left out), a piece of a structure or array (`TypePartialStruct` from
+  `getExactPiece`), the CONCAT of split outputs (`buildOutConcats`: proto-partial pieces need
+  `VariablePiece`), so a COPY or LOAD is split only when nothing reads its output, a STORE
+  through an address-tied root pointer (`buildCopyTemp`), a value in the join space.
+  `TypePointerRel` is not a ghidra-rs type.
+- `aliasupdate` in the `decompile` root: the rule was already in the root's pool (branch
+  `m3-aliasupdate`); `default-options.txt` no longer switches it off, so `pcd` runs it on both
+  engines. What the root still lacks is not in the rule: the value-set range of a store guard
+  (a guarded STORE with INDIRECTs fails loudly) and `restructure_varnode` (`nolocalalias`).
+  The older rule checks keep it off (`r1-options.sh`), as before.
+
+The options files of the rule checks lose `togglerule switchsingle off` (and
+`subvar-options.txt` `ptrflow off`), so those checks run `switchsingle` on both engines now.
+
+Counts: see the plan, "Pool rules".
 
 ## Speed
 ### Alias analysis of the jump-table partial function (branch `m3-aliasupdate`, 2026-11-17)

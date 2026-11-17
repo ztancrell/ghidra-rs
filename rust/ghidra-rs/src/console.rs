@@ -78,6 +78,7 @@ fn x86_windows() -> Result<(Sleigh, String), String> {
         std::env::var_os("GHIDRA_RS_SLA").map(std::path::PathBuf::from).unwrap_or_else(|| Sleigh::sla_path("x86"));
     let cspec_path = path.with_file_name("x86win.cspec");
     let cspec = std::fs::read_to_string(&cspec_path).map_err(|e| format!("{}: {e}", cspec_path.display()))?;
+    Sleigh::refuse_truncated(&path)?;
     Ok((Sleigh::load(&path)?, cspec))
 }
 

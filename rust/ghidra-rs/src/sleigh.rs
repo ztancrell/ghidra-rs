@@ -697,6 +697,27 @@ impl Sleigh {
         Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../Ghidra/Processors/x86/data/languages/{name}.sla"))
     }
 
+    /// ghidra-rs reads no `.ldefs`, whose `<truncate_space>` shortens a space's addresses
+    /// (`SleighArchitecture::modifySpaces`) and puts `RulePtrFlow` to work. So a `.sla` that a
+    /// language of an `.ldefs` next to it uses with a `<truncate_space>` is refused.
+    pub(crate) fn refuse_truncated(path: &Path) -> Result<()> {
+        let sla = path.file_name().and_then(|n| n.to_str());
+        let Some(Ok(dir)) = path.parent().map(std::fs::read_dir) else { return Ok(()) };
+        for file in dir.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "ldefs")) {
+            let Ok(text) = std::fs::read_to_string(&file) else { continue };
+            let root = crate::xml::parse(&text).map_err(|e| format!("{}: {e}", file.display()))?;
+            let hit = |l: &crate::xml::Element| l.attr("slafile") == sla && l.kid("truncate_space").is_some();
+            if root.kids_named("language").any(hit) {
+                return Err(format!(
+                    "{}: a language of {} truncates a space (<truncate_space>, RulePtrFlow): not implemented in ghidra-rs yet",
+                    path.display(),
+                    file.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Load a `.sla`; context defaults come from the `.pspec` of the same name next to it, if any.
     pub fn load(path: &Path) -> Result<Sleigh> {
         let (context, tracked, incidental, laned) = match std::fs::read_to_string(path.with_extension("pspec")) {

@@ -1846,7 +1846,8 @@ Progress on the branch (details: rust/README.md, "Default options"):
 4. Rules ported: `pullsub_indirect`, `conditionalmove`, `orpredicate`, `threewaycomp`, plus
    `transformcpool` (fails on a CPOOLREF) and `funcptrencoding` (nothing to do on these specs).
    Eight rules stay off: `aliasupdate`, `switchsingle`, `ptrflow`, `segment`,
-   `ptrsubcharconstant`, `splitcopy`, `splitload`, `splitstore`.
+   `ptrsubcharconstant`, `splitcopy`, `splitload`, `splitstore`. (Superseded: two stay off,
+   `segment` and `ptrsubcharconstant`; see "Pool rules" below.)
 5. `ActionParamDouble` splits a stack trial that is a PIECE (35 loud functions of M500: 6
    identical in `pcd`, 29 loud later in `namevars`; all 35 identical in `print raw` at
    `break start namevars`).
@@ -1859,7 +1860,8 @@ varmap.cc (`MapState`, `RangeHint`, the full `AliasChecker`, `createEntry`,
 `namevars` (symbols that exist before it) and the printer read. Also open: the loud misses
 `pcd` reaches (`namevars` `getExactPiece`, indexed stack LOADs in heritage, STORE guards in
 merge, `HeapSequence`, `ActionConditionalExe`), and whether a default-options run should fail
-while a pool rule is missing. (Superseded: `ActionConditionalExe` is ported, `condexe.rs`.)
+while a pool rule is missing. (Superseded: `ActionConditionalExe` is ported, `condexe.rs`; a
+run now fails while a pool rule is missing, see "Pool rules" below.)
 
 End sweep of the branch before the merge of `m3-aliasupdate` (final build): all 56 checks on
 M8 identical. M500: `pcd` 422 / 497 (loud 75, silent 0: 51 `namevars` `getExactPiece`, 16
@@ -1905,6 +1907,22 @@ switch corpus (Superseded: the derived counts above): `paramdouble` 1995 / 2004 
 1996 / 2005 (loud 9). Open: 0x5861aa and 0x7c74c0, identical at `paramdouble` in the `m3-int5`
 pass, are loud there before and after these fixes ("a second table after the partial function's
 action failed"). Details in `rust/README.md`, "Review fixes" of the alias analysis section.
+
+Pool rules (branch `worktree-agent-ab53ef4e46d4bec80`, 2026-11-17). Behaviour change: the
+`decompile` root fails while a pool rule that is not ported is on (the rule tables list every
+C++ rule, `r` ported or `u` not; a unit test compares them with coreaction.cc), so
+`default-options.txt` is the only way to run without one. Ported: `switchsingle`, `ptrflow`
+(nothing to do without a `<truncate_space>`, which the console refuses), `splitcopy`,
+`splitload`, `splitstore` (`SplitDatatype`, `rules/split.rs`; loud on a type needing
+resolution, a partial structure, the CONCAT of split outputs, an address-tied root pointer).
+`aliasupdate` is no longer switched off in `pcd`. `default-options.txt` holds two rules:
+`segment` and `ptrsubcharconstant`, ported on other branches and `u` entries here until those
+merge. Checks:
+- `pcd` M500 422 / 497 (loud 75, silent 0), the same 75 functions as before; the six with a
+  STORE guard now fail in `RuleAliasUpdate` instead of in merge.
+- The reference alone on M500 with the six rules on against the eight off: three outputs
+  change (0x4130d0, 0x494200, 0x5bed50), all by `aliasupdate`, all loud in ghidra-rs. So
+  `switchsingle` and the split rules change nothing on M500.
 
 ## Running stages in parallel
 
