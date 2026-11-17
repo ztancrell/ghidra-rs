@@ -4,18 +4,22 @@
 //! store: each edit through it changes both, and `Project::finish` proves that the store alone
 //! gives the same program again. See rust/README.md "Project store".
 //!
-//! One record per line, fields separated by one space, addresses as `0x%08x`, written in the
-//! order they are applied and sorted by address within a kind:
+//! One record per line, fields separated by one space, addresses as `0x%08x`. The first line
+//! names the binary and the seed set the store was made on (FNV-1a 64 hashes, `Basis`). The
+//! records that change what disassembly decodes or reads (`clear`, `noreturn`, `code`,
+//! `switch`, `override`) follow in the order the edits made them, since their order matters;
+//! the ones that only set the final state (`function`, `body`, `thunk`) come last, sorted by
+//! address within a kind. `apply` replays the file from top to bottom.
 //!
 //! ```text
-//! ghidra-rs-store 1
+//! ghidra-rs-store 2 binary 0x<16 hex> seeds 0x<16 hex>
 //! clear <first>-<last>               instructions overlapping the range are removed
 //! noreturn <addr> on|off             the no-return flag of a function (or import slot)
 //! switch <jump> <target>...          the targets of a computed jump
 //! code <addr>                        disassemble from here (flow is followed)
+//! override <addr> call_return|none   the flow override of an instruction
 //! function <entry> create|remove     a function analysis lacks, or one it has
 //! body <entry> <first>-<last>...     a fixed body in place of the flow from the entry
-//! override <addr> call_return|none   the flow override of an instruction
 //! thunk <entry> off|<target>         the function is (not) a thunk
 //! ```
 
@@ -24,47 +28,76 @@ use crate::sleigh::Sleigh;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 
-const HEADER: &str = "ghidra-rs-store 1";
+const MAGIC: &str = "ghidra-rs-store";
+const VERSION: &str = "2";
+
+/// What a store was made on: FNV-1a 64 of the binary's bytes, and of the seed set the analysis
+/// ran with (a byte for `--functions-from`, then the seeds sorted, without repeats). A store
+/// applied to another binary or seed set would edit a program it was never proven on.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Basis {
+    pub binary: u64,
+    pub seeds: u64,
+}
+
+impl Basis {
+    pub fn new(binary: &[u8], seeds: &[u32], exact: bool) -> Basis {
+        const START: u64 = 0xcbf2_9ce4_8422_2325;
+        let fnv = |h: u64, b: &u8| (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3);
+        let mut s = seeds.to_vec();
+        s.sort_unstable();
+        s.dedup();
+        let seeds: Vec<u8> = s.iter().flat_map(|a| a.to_le_bytes()).collect();
+        Basis { binary: binary.iter().fold(START, fnv), seeds: seeds.iter().fold(fnv(START, &u8::from(exact)), fnv) }
+    }
+}
+
+/// A record whose place among the others matters: replayed in edit order.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Step {
+    Clear(u32, u32),
+    NoReturn(u32, bool),
+    Code(u32),
+    Switch(u32, Vec<u32>),
+    /// true: CALL_RETURN, false: none
+    Override(u32, bool),
+}
 
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct Store {
-    pub clear: BTreeSet<(u32, u32)>,
-    pub noreturn: BTreeMap<u32, bool>,
-    pub switches: BTreeMap<u32, Vec<u32>>,
-    pub code: BTreeSet<u32>,
+    pub basis: Basis,
+    /// in edit order
+    pub steps: Vec<Step>,
     /// true: create, false: remove
     pub functions: BTreeMap<u32, bool>,
     pub bodies: BTreeMap<u32, Vec<(u32, u32)>>,
-    /// true: CALL_RETURN, false: none
-    pub overrides: BTreeMap<u32, bool>,
     pub thunks: BTreeMap<u32, Option<u32>>,
 }
 
 impl std::fmt::Display for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let ranges = |r: &[(u32, u32)]| r.iter().fold(String::new(), |s, (a, b)| s + &format!(" 0x{a:08x}-0x{b:08x}"));
-        writeln!(f, "{HEADER}")?;
-        for &r in &self.clear {
-            writeln!(f, "clear{}", ranges(&[r]))?;
-        }
-        for (a, on) in &self.noreturn {
-            writeln!(f, "noreturn 0x{a:08x} {}", if *on { "on" } else { "off" })?;
-        }
-        for (a, targets) in &self.switches {
-            let t = targets.iter().fold(String::new(), |s, t| s + &format!(" 0x{t:08x}"));
-            writeln!(f, "switch 0x{a:08x}{t}")?;
-        }
-        for a in &self.code {
-            writeln!(f, "code 0x{a:08x}")?;
+        let Basis { binary, seeds } = self.basis;
+        writeln!(f, "{MAGIC} {VERSION} binary 0x{binary:016x} seeds 0x{seeds:016x}")?;
+        for step in &self.steps {
+            match step {
+                Step::Clear(lo, hi) => writeln!(f, "clear{}", ranges(&[(*lo, *hi)]))?,
+                Step::NoReturn(a, on) => writeln!(f, "noreturn 0x{a:08x} {}", if *on { "on" } else { "off" })?,
+                Step::Code(a) => writeln!(f, "code 0x{a:08x}")?,
+                Step::Switch(a, targets) => {
+                    let t = targets.iter().fold(String::new(), |s, t| s + &format!(" 0x{t:08x}"));
+                    writeln!(f, "switch 0x{a:08x}{t}")?
+                }
+                Step::Override(a, on) => {
+                    writeln!(f, "override 0x{a:08x} {}", if *on { "call_return" } else { "none" })?
+                }
+            }
         }
         for (a, create) in &self.functions {
             writeln!(f, "function 0x{a:08x} {}", if *create { "create" } else { "remove" })?;
         }
         for (a, r) in &self.bodies {
             writeln!(f, "body 0x{a:08x}{}", ranges(r))?;
-        }
-        for (a, on) in &self.overrides {
-            writeln!(f, "override 0x{a:08x} {}", if *on { "call_return" } else { "none" })?;
         }
         for (a, t) in &self.thunks {
             writeln!(f, "thunk 0x{a:08x} {}", t.map_or("off".into(), |t| format!("0x{t:08x}")))?;
@@ -74,13 +107,28 @@ impl std::fmt::Display for Store {
 }
 
 impl Store {
+    /// An empty store for the analysis of `basis`.
+    pub fn new(basis: Basis) -> Store {
+        Store { basis, ..Store::default() }
+    }
+
     /// Reads the text of a store. Anything it does not know is an error, never skipped.
     pub fn parse(text: &str) -> Result<Store, String> {
         let mut lines = text.lines().enumerate();
-        if lines.next().map(|l| l.1) != Some(HEADER) {
-            return Err(format!("not a project store this version reads: the first line must be `{HEADER}`"));
-        }
-        let mut s = Store::default();
+        let first: Vec<&str> = lines.next().map_or("", |l| l.1).split(' ').collect();
+        let hash =
+            |t: &str| t.strip_prefix("0x").filter(|h| h.len() == 16).and_then(|h| u64::from_str_radix(h, 16).ok());
+        let basis = match first.as_slice() {
+            [MAGIC, VERSION, "binary", b, "seeds", s] => hash(b).zip(hash(s)),
+            _ => None,
+        };
+        let Some((binary, seeds)) = basis else {
+            return Err(format!(
+                "not a project store this version reads: the first line must be `{MAGIC} {VERSION} binary 0x<16 hex> \
+                 seeds 0x<16 hex>` (a version 1 store names no binary: make it again)"
+            ));
+        };
+        let mut s = Store::new(Basis { binary, seeds });
         for (n, line) in lines {
             let err = |why: &str| format!("line {}: {why}: {line}", n + 1);
             let addr = |t: &str| {
@@ -96,21 +144,28 @@ impl Store {
                 Ok(r)
             };
             let fields: Vec<&str> = line.split(' ').collect();
-            let fresh = match fields.as_slice() {
-                ["clear", r] => s.clear.insert(range(r)?),
-                ["noreturn", a, v @ ("on" | "off")] => s.noreturn.insert(addr(a)?, *v == "on").is_none(),
+            let step = match fields.as_slice() {
+                ["clear", r] => Some(range(r).map(|(lo, hi)| Step::Clear(lo, hi))?),
+                ["noreturn", a, v @ ("on" | "off")] => Some(Step::NoReturn(addr(a)?, *v == "on")),
                 ["switch", a, t @ ..] if !t.is_empty() => {
-                    let targets = t.iter().map(|t| addr(t)).collect::<Result<_, _>>()?;
-                    s.switches.insert(addr(a)?, targets).is_none()
+                    Some(Step::Switch(addr(a)?, t.iter().map(|t| addr(t)).collect::<Result<_, _>>()?))
                 }
-                ["code", a] => s.code.insert(addr(a)?),
+                ["code", a] => Some(Step::Code(addr(a)?)),
+                ["override", a, v @ ("call_return" | "none")] => Some(Step::Override(addr(a)?, *v == "call_return")),
+                _ => None,
+            };
+            if let Some(step) = step {
+                if !(s.functions.is_empty() && s.bodies.is_empty() && s.thunks.is_empty()) {
+                    return Err(err("an ordered record after the function, body and thunk records"));
+                }
+                s.steps.push(step);
+                continue;
+            }
+            let fresh = match fields.as_slice() {
                 ["function", a, v @ ("create" | "remove")] => s.functions.insert(addr(a)?, *v == "create").is_none(),
                 ["body", a, r @ ..] if !r.is_empty() => {
                     let body = r.iter().map(|r| range(r)).collect::<Result<_, _>>()?;
                     s.bodies.insert(addr(a)?, body).is_none()
-                }
-                ["override", a, v @ ("call_return" | "none")] => {
-                    s.overrides.insert(addr(a)?, *v == "call_return").is_none()
                 }
                 ["thunk", a, "off"] => s.thunks.insert(addr(a)?, None).is_none(),
                 ["thunk", a, t] => s.thunks.insert(addr(a)?, Some(addr(t)?)).is_none(),
@@ -128,32 +183,48 @@ impl Store {
         Store::parse(&text).map_err(|e| format!("{path}: {e}"))
     }
 
+    /// An error unless the store was made on `basis`: the same binary and seed set.
+    pub fn check(&self, basis: Basis) -> Result<(), String> {
+        let mut why = Vec::new();
+        if self.basis.binary != basis.binary {
+            why.push(format!("binary 0x{:016x}, the store's 0x{:016x}", basis.binary, self.basis.binary));
+        }
+        if self.basis.seeds != basis.seeds {
+            why.push(format!("seed set 0x{:016x}, the store's 0x{:016x}", basis.seeds, self.basis.seeds));
+        }
+        match why.is_empty() {
+            true => Ok(()),
+            false => Err(format!("the store was made on another analysis: {}", why.join("; "))),
+        }
+    }
+
     /// Lays the edits over a fresh analysis, in the order of the file, and computes the bodies
-    /// again. A record that cannot hold (no instruction decodes at a `code` or `function`
-    /// address, a `body` or `thunk` of no function) is an error.
+    /// again. A record that cannot hold when its turn comes (no instruction decodes at a
+    /// `code`, `switch`, `override` or `function` address, a `body` or `thunk` of no function)
+    /// is an error.
     pub fn apply(&self, an: &mut Analysis, img: &Image, sl: &Sleigh) -> Result<(), String> {
-        for &(lo, hi) in &self.clear {
-            clear_insns(an, lo, hi);
-        }
-        for (&a, &on) in &self.noreturn {
-            if on {
-                an.noreturn.insert(a);
-            } else {
-                an.noreturn.remove(&a);
-            }
-        }
-        let code: Vec<u32> = self.code.iter().copied().collect();
-        an.disassemble(img, sl, &code, false);
         let need_insn = |an: &Analysis, kind: &str, a: u32| match an.insns.contains_key(&a) {
             true => Ok(()),
             false => Err(format!("store: {kind} 0x{a:08x}: no instruction there")),
         };
-        for &a in &self.code {
-            need_insn(an, "code", a)?;
-        }
-        for (&a, targets) in &self.switches {
-            need_insn(an, "switch", a)?;
-            an.tables.insert(a, targets.clone());
+        for step in &self.steps {
+            match *step {
+                Step::Clear(lo, hi) => drop(clear_insns(an, lo, hi)),
+                Step::NoReturn(a, true) => drop(an.noreturn.insert(a)),
+                Step::NoReturn(a, false) => drop(an.noreturn.remove(&a)),
+                Step::Code(a) => {
+                    an.disassemble(img, sl, &[a], false);
+                    need_insn(an, "code", a)?;
+                }
+                Step::Switch(a, ref targets) => {
+                    need_insn(an, "switch", a)?;
+                    an.tables.insert(a, targets.clone());
+                }
+                Step::Override(a, on) => {
+                    need_insn(an, "override", a)?;
+                    an.overrides.insert(a, on);
+                }
+            }
         }
         for (&f, &create) in &self.functions {
             if create {
@@ -163,15 +234,11 @@ impl Store {
                 an.funcs.remove(&f);
             }
         }
-        for &a in self.overrides.keys() {
-            need_insn(an, "override", a)?;
-        }
         for (kind, f) in self.bodies.keys().map(|f| ("body", f)).chain(self.thunks.keys().map(|f| ("thunk", f))) {
             if !an.funcs.contains(f) {
                 return Err(format!("store: {kind} 0x{f:08x}: no function there"));
             }
         }
-        an.overrides = self.overrides.iter().map(|(&a, &o)| (a, o)).collect();
         an.fixed_bodies = self.bodies.clone();
         an.thunks = self.thunks.iter().map(|(&f, &t)| (f, t)).collect();
         an.compute_bodies();
@@ -180,7 +247,8 @@ impl Store {
     }
 }
 
-/// Ghidra's `clearListing(lo, hi)` for instructions: every one overlapping the range goes.
+/// Ghidra's `clearListing(lo, hi)` for instructions: every one overlapping the range goes,
+/// with its switch targets and flow override.
 fn clear_insns(an: &mut Analysis, lo: u32, hi: u32) -> Vec<u32> {
     let before = an.insns.range(..lo).next_back().filter(|(&a, i)| a + i.len as u32 > lo);
     let from = before.map_or(lo, |(&a, _)| a);
@@ -188,6 +256,7 @@ fn clear_insns(an: &mut Analysis, lo: u32, hi: u32) -> Vec<u32> {
     for a in &gone {
         an.insns.remove(a);
         an.tables.remove(a);
+        an.overrides.remove(a);
     }
     gone
 }
@@ -394,7 +463,7 @@ impl<'a> Project<'a> {
         if !self.an.insns.contains_key(&a) {
             return false;
         }
-        self.store.code.insert(a);
+        self.store.steps.push(Step::Code(a));
         self.index_refs(&new, true);
         let reached: Vec<u32> = new.iter().flat_map(|&n| self.flowing_into(n)).collect();
         self.rebody(reached);
@@ -413,13 +482,7 @@ impl<'a> Project<'a> {
             return;
         }
         clear_insns(&mut self.an, lo, hi);
-        self.store.clear.insert((lo, hi));
-        for a in &gone {
-            self.store.code.remove(a);
-            self.store.switches.remove(a);
-            self.store.overrides.remove(a);
-            self.an.overrides.remove(a);
-        }
+        self.store.steps.push(Step::Clear(lo, hi));
         self.rebody(owners);
     }
 
@@ -464,7 +527,7 @@ impl<'a> Project<'a> {
         } else {
             self.an.noreturn.remove(&f);
         }
-        self.store.noreturn.insert(f, on);
+        self.store.steps.push(Step::NoReturn(f, on));
         let callers = self.owners_of(self.refs_to(f).into_iter().map(|r| r.0));
         self.rebody(callers);
     }
@@ -472,7 +535,7 @@ impl<'a> Project<'a> {
     /// `Instruction.setFlowOverride`: CALL_RETURN or NONE.
     pub fn set_override(&mut self, a: u32, call_return: bool) {
         self.an.overrides.insert(a, call_return);
-        self.store.overrides.insert(a, call_return);
+        self.store.steps.push(Step::Override(a, call_return));
         self.rebody(self.owners_of([a]));
     }
 
@@ -482,8 +545,18 @@ impl<'a> Project<'a> {
         self.store.thunks.insert(f, target);
     }
 
-    /// `Function.setBody`: the body is these instructions, whatever the flow says.
-    pub fn set_body(&mut self, f: u32, insns: &BTreeSet<u32>) {
+    /// `Function.setBody`: the body is these instructions, whatever the flow says. Java throws
+    /// OverlappingFunctionException where the new body overlaps another function's; here
+    /// bodies the flow derives may share instructions, so only the instructions the body gains
+    /// are checked, and one another function holds is that error (nothing changes).
+    pub fn set_body(&mut self, f: u32, insns: &BTreeSet<u32>) -> Result<(), String> {
+        let old = self.an.bodies.get(&f).map_or(&[][..], Vec::as_slice);
+        let taken =
+            insns.iter().find(|a| old.binary_search(a).is_err() && self.owners_of([**a]).iter().any(|&g| g != f));
+        if let Some(&a) = taken {
+            let last = a + self.an.insns[&a].len as u32 - 1;
+            return Err(format!("Unable to create function at {f:08x} due to overlap with range [{a:08x},{last:08x}]"));
+        }
         let mut ranges: Vec<(u32, u32)> = Vec::new();
         for &a in insns {
             let last = a + self.an.insns[&a].len as u32 - 1;
@@ -495,6 +568,7 @@ impl<'a> Project<'a> {
         self.an.fixed_bodies.insert(f, ranges.clone());
         self.store.bodies.insert(f, ranges);
         self.rebody([f]);
+        Ok(())
     }
 
     /// `CreateFunctionCmd.fixupFunctionBody`: the body is the flow from the entry again.
@@ -508,7 +582,7 @@ impl<'a> Project<'a> {
     pub fn set_switch(&mut self, a: u32, targets: Vec<u32>) {
         self.index_refs(&[a], false);
         self.an.tables.insert(a, targets.clone());
-        self.store.switches.insert(a, targets);
+        self.store.steps.push(Step::Switch(a, targets));
         self.index_refs(&[a], true);
         self.rebody(self.owners_of([a]));
     }

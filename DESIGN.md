@@ -432,7 +432,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    Mercenaries2.analysis.exe the store brings the `.text` functions shared with the Java project
    from 20422 to 36602 of 37635 (36178 with the same body size). Not ported, failing by name:
    ExportBindings `--recover`, AuditRecoveredFunctions `--remove-empty`. Details in
-   `rust/README.md`, "Project store and the editing scripts".
+   `rust/README.md`, "Project store and the editing scripts". Superseded in part (review of
+   `m3-int6`, 2026-11-17): store version 2 replays its records in edit order, names its binary
+   and seed set, and is applied after the constants pass; with those fixes
+   `fold-slot-fragments` stops loudly on mercs2 at 0x861190 (an owner its own walk removes,
+   where Java ends with an exception), so the 36602 is the old build's count.
 
 ## Open questions
 

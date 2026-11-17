@@ -3,7 +3,7 @@
 // same program (`Project::finish`).
 use ghidra_rs::analysis::{Analysis, Image, Section};
 use ghidra_rs::sleigh::Sleigh;
-use ghidra_rs::store::{Project, Store};
+use ghidra_rs::store::{Basis, Project, Store};
 use std::collections::BTreeSet;
 
 fn image() -> Image {
@@ -51,11 +51,11 @@ fn edits_round_trip_through_the_store() {
     p.set_override(0x401003, false);
     assert_eq!(p.body_bytes(0x401000), 10);
     // a fixed body holds until the function is re-flowed
-    p.set_body(0x401010, &BTreeSet::from([0x401010, 0x401012]));
+    p.set_body(0x401010, &BTreeSet::from([0x401010, 0x401012])).unwrap();
     assert_eq!(p.body_bytes(0x401010), 4);
     p.reflow(0x401010);
     assert_eq!(p.body_bytes(0x401010), 6);
-    p.set_body(0x401030, &BTreeSet::from([0x401030, 0x401031]));
+    p.set_body(0x401030, &BTreeSet::from([0x401030, 0x401031])).unwrap();
     // removing a function analysis found is a record
     p.remove_function(0x401000);
 
@@ -64,13 +64,13 @@ fn edits_round_trip_through_the_store() {
     let text = store.to_string();
     assert_eq!(
         text,
-        "ghidra-rs-store 1\n\
-         noreturn 0x00401010 on\n\
+        "ghidra-rs-store 2 binary 0x0000000000000000 seeds 0x0000000000000000\n\
          code 0x00401030\n\
+         noreturn 0x00401010 on\n\
+         override 0x00401003 none\n\
          function 0x00401000 remove\n\
          function 0x00401030 create\n\
-         body 0x00401030 0x00401030-0x00401031\n\
-         override 0x00401003 none\n"
+         body 0x00401030 0x00401030-0x00401031\n"
     );
     assert_eq!(Store::parse(&text).unwrap(), store);
     let mut again = base.clone();
@@ -80,24 +80,58 @@ fn edits_round_trip_through_the_store() {
 }
 
 #[test]
+fn records_replay_in_edit_order() {
+    let path = Sleigh::sla_path("x86");
+    let (sl, img) = (Sleigh::load(&path).unwrap(), image());
+    let base = Analysis::run(&img, &sl, &[], false).unwrap();
+    let mut p = Project::new(&img, &sl, base.clone(), Store::default());
+    // code, then a clear inside what it decoded: applied clear-first, the code would come back
+    assert!(p.disassemble(0x401030));
+    p.clear(0x401031, 0x401031);
+    assert!(p.an.insns.contains_key(&0x401032) && !p.an.insns.contains_key(&0x401031));
+    // a body that would take another function's instruction is Java's overlap error
+    let err = p.set_body(0x401000, &BTreeSet::from([0x401000, 0x401010])).unwrap_err();
+    assert!(err.contains("overlap with range [00401010,00401011]"), "{err}");
+    let store = p.finish(base).unwrap();
+    assert!(store.to_string().ends_with("code 0x00401030\nclear 0x00401031-0x00401031\n"));
+}
+
+#[test]
+fn a_store_names_its_binary_and_seeds() {
+    let basis = Basis::new(b"MZ", &[0x401010, 0x401000, 0x401010], false);
+    assert_eq!(basis, Basis::new(b"MZ", &[0x401000, 0x401010], false));
+    let store = Store::new(basis);
+    assert!(store.check(basis).is_ok());
+    assert!(store.check(Basis::new(b"MZ", &[0x401000, 0x401010], true)).unwrap_err().contains("seed set"));
+    assert!(store.check(Basis::new(b"MZ!", &[0x401000, 0x401010], false)).unwrap_err().contains("binary"));
+    assert_eq!(Store::parse(&store.to_string()).unwrap(), store);
+}
+
+#[test]
 fn a_store_it_cannot_hold_fails() {
+    const H: &str = "ghidra-rs-store 2 binary 0x0000000000000000 seeds 0x0000000000000000\n";
     let path = Sleigh::sla_path("x86");
     let (sl, img) = (Sleigh::load(&path).unwrap(), image());
     let base = Analysis::run(&img, &sl, &[], false).unwrap();
     for (text, why) in [
-        ("ghidra-rs-store 2\n", "first line"),
-        ("ghidra-rs-store 1\nrename 0x00401000 main\n", "unknown record"),
-        ("ghidra-rs-store 1\nfunction 0x401000 create\n", "bad address"),
-        ("ghidra-rs-store 1\ncode 0x00401030\ncode 0x00401030\n", "second record"),
+        ("ghidra-rs-store 1\n".to_string(), "first line"),
+        (format!("{H}rename 0x00401000 main\n"), "unknown record"),
+        (format!("{H}function 0x401000 create\n"), "bad address"),
+        (format!("{H}function 0x00401030 create\nfunction 0x00401030 remove\n"), "second record"),
+        (format!("{H}function 0x00401030 create\ncode 0x00401030\n"), "ordered record after"),
     ] {
-        assert!(Store::parse(text).unwrap_err().contains(why), "{text}");
+        assert!(Store::parse(&text).unwrap_err().contains(why), "{text}");
     }
     for (text, why) in [
-        ("ghidra-rs-store 1\nfunction 0x00401031 create\n", "function 0x00401031: no instruction"),
-        ("ghidra-rs-store 1\ncode 0x00401004\n", "code 0x00401004: no instruction"),
-        ("ghidra-rs-store 1\nthunk 0x00401030 off\n", "thunk 0x00401030: no function"),
+        (format!("{H}function 0x00401031 create\n"), "function 0x00401031: no instruction"),
+        (format!("{H}code 0x00401004\n"), "code 0x00401004: no instruction"),
+        (format!("{H}thunk 0x00401030 off\n"), "thunk 0x00401030: no function"),
+        (
+            format!("{H}code 0x00401030\nclear 0x00401030-0x00401030\noverride 0x00401030 none\n"),
+            "override 0x00401030: no instruction",
+        ),
     ] {
-        let err = Store::parse(text).unwrap().apply(&mut base.clone(), &img, &sl).unwrap_err();
+        let err = Store::parse(&text).unwrap().apply(&mut base.clone(), &img, &sl).unwrap_err();
         assert!(err.contains(why), "{err}");
     }
 }

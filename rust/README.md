@@ -579,7 +579,7 @@ script's own run time in Ghidra was not measured here.
 ## Project store and the editing scripts
 
 ```sh
-ghidra-rs edit <pe32> --store <file> [--seeds <csv> | --functions-from <csv>]... [--sla <file>] <command>
+ghidra-rs edit <pe32> --store <file> [--new-store] [--seeds <csv> | --functions-from <csv>]... [--sla <file>] <command>
 ghidra-rs analyze <pe32> ... --store <file>
 ```
 
@@ -592,32 +592,52 @@ decision of 2026-11-15: plain text in the project's repo, and every run starts f
 
 ### The file
 
-One file, one record per line, fields separated by one space, addresses as `0x%08x`. Records
-are written in the order they are applied and sorted by address within a kind, so a change
-is a small diff:
+One file, one record per line, fields separated by one space, addresses as `0x%08x`. The
+first line names what the store was made on: FNV-1a 64 hashes of the binary's bytes and of
+the seed set (a byte for `--functions-from`, then the `--seeds`/`--functions-from` entries
+sorted without repeats). The records that change what disassembly decodes or reads (`clear`,
+`noreturn`, `code`, `switch`, `override`) follow in the order the edits made them, since
+replaying them in another order gives another program ("code, then a clear inside what it
+decoded"; "code decoded behind a call, then the callee's no-return flag cleared"). The
+records that only set the final state (`function`, `body`, `thunk`) come last, sorted by
+address within a kind. A command appends to the first part and rewrites the second, so a
+change is still a small diff. `Store::apply` replays the file from top to bottom.
 
 ```text
-ghidra-rs-store 1
+ghidra-rs-store 2 binary 0x<16 hex> seeds 0x<16 hex>
 clear <first>-<last>               instructions overlapping the range are removed
 noreturn <addr> on|off             the no-return flag of a function (or import slot)
 switch <jump> <target>...          the targets of a computed jump
 code <addr>                        disassemble from here (flow is followed)
+override <addr> call_return|none   the flow override of an instruction
 function <entry> create|remove     a function analysis lacks, or one it has
 body <entry> <first>-<last>...     a fixed body in place of the flow from the entry
-override <addr> call_return|none   the flow override of an instruction
 thunk <entry> off|<target>         the function is (not) a thunk
 ```
 
-`analyze --store` applies it right after discovery, before anything reads the analysis, so
-`--functions`, `--gaps`, `--abi-callers` and `--decomp-prelude` (the decompiler's function
-list) all see the edited program. Bodies are computed again from the flow at the end, so a
-function re-flows whenever a neighbour is created or removed or a flag changes; only a `body`
-record pins one, and `edit reflow <addr>` drops that record.
+Superseded (2026-11-17, review of `m3-int6`): version 1 (first line `ghidra-rs-store 1`) wrote
+every kind sorted by address and applied all `clear`, then all `noreturn`, then all `code`
+records, which lost the order of the edits; it named no binary or seed set. Version 1 files
+are refused; make them again with `edit --new-store`.
 
-What fails instead of being skipped: a first line other than `ghidra-rs-store 1`, an unknown
-record, a malformed address or range, two records of one kind for one address, a `code`,
-`function`, `switch` or `override` address where no instruction decodes, a `body` or `thunk`
-of an address that is no function. There are no comment lines: a command rewrites the whole
+`analyze --store` follows Java's order: discovery and the constants pass (`disassemble` with
+constants, which Ghidra's auto-analysis runs before any script), then the store, and the
+bodies computed after both; only then the `--abi-callers` contract entries and the
+`--facts` passes, so `--functions`, `--gaps`, `--abi-callers`, `--facts` and
+`--decomp-prelude` (the decompiler's function list) all see the edited program. `edit` proves
+its store on the same base (discovery and the constants pass). Superseded: the store was
+applied right after discovery and the constants pass of `--abi-callers` and `--facts` ran
+after it, on a program `edit` never proved the store on. Bodies are computed again from the
+flow at the end, so a function re-flows whenever a neighbour is created or removed or a flag
+changes; only a `body` record pins one, and `edit reflow <addr>` drops that record.
+
+What fails instead of being skipped: a first line other than version 2's, a store made on
+another binary or seed set (`analyze --store` and `edit` both check; note that
+`--abi-callers` adds the targets of `securom_functions.csv` to the seeds, so its store must be
+made with those seeds too), an unknown record, a malformed address or range, an ordered record
+after the `function`/`body`/`thunk` records, two `function`, `body` or `thunk` records for one
+address, a `code`, `function`, `switch` or `override` address where no instruction decodes
+when its turn comes, a `body` or `thunk` of an address that is no function. There are no comment lines: a command rewrites the whole
 file and would drop them.
 
 ### What ghidra-rs derives, and what the store overrides
@@ -649,30 +669,47 @@ overrides, references made by hand.
 | `fold-slot-fragments <functions-original.csv> <slot-rewrites.csv> <report.csv>` | FoldSlotFragments.java | folds wrapper-exit fragments into their owners |
 | `create-function <addr>`, `remove-function <addr>`, `reflow <addr>` | | single edits |
 
-A store file that is not there yet starts empty. Each command analyses, applies the store,
-runs, and then proves the result: `Project::finish` applies the new store to the untouched
-analysis and compares instructions, functions, no-return flags, switch targets and bodies
-with what the command left. Any difference is an error and nothing is written.
+A missing store file is an error; `edit --new-store` makes a new one (and refuses a file that
+is there), so a mistyped `--store` path cannot start an empty store unnoticed. Superseded: a
+store file that was not there started empty. Each command analyses, applies the store, runs,
+and then proves the result: `Project::finish` applies the new store to the untouched analysis
+and compares instructions, functions, no-return flags, switch targets and bodies with what
+the command left. Any difference is an error and nothing is written. The store is written to
+`<file>.part` and then renamed over `<file>`, so a failed write leaves the old store whole.
 
 Not ported, failing by name before anything is loaded: `export-bindings` (ExportBindings.java
 `--recover`) and `audit-recovered-functions` (AuditRecoveredFunctions.java `--remove-empty`).
-Inside the ports, loud rather than guessed: a `fold-slot-fragments` switch whose operand has a
-base register or a prefix (`not ported: ...`), and a pointer or table word outside the image
-(Java throws there too).
+Inside the ports, loud rather than guessed: a `fold-slot-fragments` switch whose jump has an
+8-bit table displacement or a prefix other than a CS, DS, ES or SS override (`not ported:
+...`), and a pointer or table word outside the image (Java throws there too). The
+`fold-slot-fragments` switch guard is read from the decoded instruction (`CMP <index
+register>,<scalar>`, any encoding, as Java's `getRegister(0)` and `getScalar(1)`); a jump
+`[base + index*4 + table]` takes the index, as Java takes the last register of the operand.
+Superseded: the guard was matched on the bytes `83 /7`, `81 /7` and `3D` only (those are all
+the encodings of a 32-bit register compare without a prefix), and a base register failed.
+Addresses in the CSVs and arguments read as Java's `Long.decode` (sign, `0x`/`0X`/`#` hex,
+leading-`0` octal, decimal) and fields as `String.split(",")` (empty fields at the end
+dropped). Superseded: octal and `#` read as decimal or failed, and a trailing comma failed.
 
 Where a port cannot do what Java does:
 
 - Java makes a function of one undefined byte where nothing decodes. Here `create_function`
-  refuses; `add-relocated-entries` and `define-table-functions` print the address on stderr
-  and go on, `recover-functions` reports `no_entry_instruction` (it also stands for Java's
+  refuses; `add-relocated-entries` and `define-table-functions` print the address on stderr,
+  go on, and count those in their summary line ("... not created where Java makes a one-byte
+  function"), `recover-functions` reports `no_entry_instruction` (it also stands for Java's
   `disassembly_failed`, which Java tells apart by a return value that is true either way).
 - `recover-functions` reports `defined_data` only for address-table slots.
 - `clear-false-noreturn` has no defined data to clear and no fall-through overrides; the
   cleared item's text is ghidra-rs's disassembly; names are export names or `FUN_<addr>`.
-- `fold-slot-fragments`: `setBody` cannot fail on an overlap. Bodies here re-flow as soon as a
-  fragment goes, so "refit before->after" compares with the body at the start of the round
-  (Java's body until `setBody`). An owner that is itself folded by its own walk is skipped
-  (Java goes on with the deleted function).
+- `fold-slot-fragments`: `setBody` fails as Java's OverlappingFunctionException ("refit
+  failed Unable to create function at ... due to overlap with range [...]", the old body
+  kept), but only for the instructions the body gains: bodies the flow derives here may share
+  instructions, where Java's never do. The range named is the first such instruction, which
+  may not be the one Java names. Bodies here re-flow as soon as a fragment goes, so "refit
+  before->after" compares with the body at the start of the round (Java's body until
+  `setBody`). An owner that its own walk removes ends the command with an error, as Java's
+  next call on the deleted function throws. Superseded: `setBody` could not fail, and such an
+  owner was skipped.
 
 ### Against Java (Mercenaries2.analysis.exe, 2026-11-17)
 
@@ -706,6 +743,20 @@ The store after those four commands: 23128 records (18365 `function`, 2471 `over
 1434 `body`, 812 `thunk`, 43 `code`, 3 `noreturn`; 696 KB). An `edit` run takes 20 to 30 s of CPU on the
 shared desktop (the analysis, the command, the store applied twice; about 1.8 GB at the peak);
 `clear-false-noreturn` took 115 s of CPU.
+
+Superseded (2026-11-17, review of `m3-int6`): the tables above are from before the review
+fixes (store version 1, edits on discovery without the constants pass, `fold-slot-fragments`
+skipping an owner its own walk removed); rerun with that build, the four commands give the
+same 36602 / 1033 / 180. With the fixes, `fold-slot-fragments` stops on mercs2 with
+"FoldSlotFragments: the walk from 0x00861190 removed that owner itself": 0x861190 is a
+function in ghidra-rs's discovery (reached by jumps only) and an owner of a rewritten site,
+where Java has no function there (not in its facts export, its original functions or its fold
+report); the old build removed it in the same way and went on. The pipeline with the
+fixes is therefore not comparable yet. Without `fold-slot-fragments` (`recover-functions`,
+`add-relocated-entries`, `clear-false-noreturn`), the `.text` functions in both / Java only /
+ghidra-rs only are 36864 / 771 / 2338 with the fixes against 36610 / 1025 / 2336 with the old
+build: `recover-functions` creates 16406 (16150 before) once it runs after the constants pass.
+The fixed store is 16488 lines (16449 `function`, 35 `code`, 3 `noreturn`).
 
 Not compared: flow overrides against the 3365 of the facts export (ghidra-rs derives them and
 has no export of them), functions outside `.text`, body ranges beyond their size. The shadow
@@ -4381,7 +4432,13 @@ a block that is not writable is a `wref` now.
 of match, up to four names, the libraries (family, version, variant; shortened from 5
 libraries on). Only where no matched name is mangled: Java shows the demangler's full form of
 a mangled name, which is not ported, and such a function keeps its `underived comments`
-record.
+record. "Multiple Matches With Same Base Name" (`numNames() > 1` and
+`getMostOptimisticCount() == 1`) is not ported, checked in the `m3-int6` review: with no
+mangled name the final list is the raw or the underscore-stripped names, whichever is
+shorter, so the count can reach 1 only through the demangled sets, and those are dropped
+as soon as one name does not demangle. That holds while the Microsoft demangler demangles no
+name without `?` or `@` (the test `fid.rs` uses for "mangled"), which was not checked in the
+demangler's sources.
 
 **Against Java** (mercs2, `FUNCS=java`; equal records and their share of Java's; each row adds
 its piece to the rows above it):
@@ -4501,7 +4558,11 @@ not have are gone (29 `trivial`, 14 `unconcluded`, 7 `violation`, 4 `unknown`: c
 bytes that are data now); 7 rows Java has are new with Java's status (4 `trivial`, 2
 `unknown`, 1 `unconcluded`); 1 row went from `ok` to Java's `unknown`; 1 row Java has is gone
 (0x56d910 called at 0x550c94, `ok` on both sides before: that code is no longer reached).
-`--functions` and `--gaps` give the same files, byte for byte.
+Why (traced in the `m3-int6` review): ghidra-rs had reached 0x550c94 from an offcut table
+entry, 0x550c74, in the `.securom` pointer run at 0x24d7780. Java's real entry there is
+0x550be0, reached through a pointer at 0xd17218 that ghidra-rs does not see: the only
+reference to that table is `PUSH 0xd17200` in `.securom` code at 0x24f5a6a, which ghidra-rs
+leaves undecoded. Superseded: "that code is no longer reached" gave no cause. `--functions` and `--gaps` give the same files, byte for byte.
 
 The checks against `decomp_dbg` do not read the facts: `bars.sh` with `CORPORA=m8` gives 55
 lines, each equal to the baseline's (`m3-int5-116d9d34da.summary`). `cargo fmt` and `clippy -D
