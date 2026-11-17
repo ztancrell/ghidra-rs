@@ -412,7 +412,8 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    pool rule is unported and `default-options.txt` is empty, so `pcd` and `pmd` run the plain default options. M8
    all 57 checks identical (the 55 baseline lines unchanged, `pcd` and `pmd` 8 / 8). M500: `pcd` 493 / 499 (loud 6,
    silent 0), `pmd` 497 / 500 (loud 3), `pcc-r` and `pcc-t` 495 / 495, `r5s` 498 / 498, `paramdouble` 500 / 500,
-   `swsn-r` 499 / 499; no function of the `m3-int5` baseline got worse. Superseded: the `pcd` and `pmd` M500
+   `swsn-r` 499 / 499; no function of the `m3-int5` baseline got worse (0x6b21e0 of `r5s` not compared: the
+   reference no longer finishes it, as on the branches). Superseded: the `pcd` and `pmd` M500
    counts of the lines above, "`default-options.txt` holds 2 rules", "Open: `ValueSetSolver`", and "Blocked: eight
    actions" of S10 (ported; the checks against Java Ghidra not rerun). Not run: the full pass. See
    `rust/README.md`, "Integration `m3-int6`".
