@@ -30,7 +30,7 @@ struct ConstPoint {
 type Edge = (OpId, usize);
 
 /// `Varnode::loneDescend`.
-fn lone_descend(fd: &Funcdata, vn: VarnodeId) -> Option<OpId> {
+pub(crate) fn lone_descend(fd: &Funcdata, vn: VarnodeId) -> Option<OpId> {
     match fd.vn(vn).descend[..] {
         [op] => Some(op),
         _ => None,
@@ -39,7 +39,7 @@ fn lone_descend(fd: &Funcdata, vn: VarnodeId) -> Option<OpId> {
 
 /// Port of `FlowBlock::restrictedByConditional`: every path into `bl` comes through its edge
 /// from `cond`.
-fn restricted_by_conditional(fd: &Funcdata, bl: BlockId, cond: BlockId) -> Result<bool> {
+pub(crate) fn restricted_by_conditional(fd: &Funcdata, bl: BlockId, cond: BlockId) -> Result<bool> {
     let b = fd.blocks.block(bl);
     if b.ins.len() == 1 {
         return Ok(true);

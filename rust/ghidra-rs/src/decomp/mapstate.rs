@@ -9,7 +9,6 @@
 //! What the port leaves out fails with an error naming it ("not ported"), and flow.rs then
 //! recovers the table from the partial function without this action (`flow.rs`, the older
 //! test on the INDIRECTs of stack varnodes):
-//! - a valid load or store guard (`MapState::addGuard` reads the value-set ranges, not ported),
 //! - an open hint outside the scope's ranges and the parameter range (`adjustOutOfRange` with
 //!   `getNearestRange`),
 //! - a locked prototype, a typed stack varnode or one above `max_basetype_size` (arrays),
@@ -18,7 +17,7 @@
 //!
 //! The action of the `decompile` root stays unported: there the symbols carry types and names.
 
-use super::heritage_guard::{has_valid_guards, stack_pointer_input};
+use super::heritage_guard::{stack_pointer_input, LoadGuard};
 use super::op::{OpFlags, OpId};
 use super::opcode::Opcode;
 use super::varmap::{gather_additive_base, gather_offset, LocalMap};
@@ -292,16 +291,52 @@ impl MapState {
 
     /// Port of `MapState::gatherOpen`: an open hint of unknown bytes at each alias offset.
     fn gather_open(&mut self, fd: &Funcdata, arch: &Arch) -> Result<()> {
-        if has_valid_guards(fd, true) || has_valid_guards(fd, false) {
-            return unported("a load or store guard (its value-set range)");
+        if let Some(base) = stack_pointer_input(fd, arch) {
+            for (vn, index) in gather_additive_base(fd, base) {
+                let offset = gather_offset(fd, vn);
+                self.alias.push(offset);
+                self.add_range(offset, 1, 0, RangeType::Open, if index { 3 } else { -1 })?;
+            }
         }
-        let Some(base) = stack_pointer_input(fd, arch) else { return Ok(()) };
-        for (vn, index) in gather_additive_base(fd, base) {
-            let offset = gather_offset(fd, vn);
-            self.alias.push(offset);
-            self.add_range(offset, 1, 0, RangeType::Open, if index { 3 } else { -1 })?;
+        for g in &fd.heritage.load_guards {
+            self.add_guard(fd, g, Opcode::Load)?;
+        }
+        for g in &fd.heritage.store_guards {
+            self.add_guard(fd, g, Opcode::Store)?;
         }
         Ok(())
+    }
+
+    /// Port of `MapState::addGuard`: an indexed LOAD or STORE with a step is an open hint, an
+    /// array of unknown elements of the step's size (the pointer has no data-type here).
+    fn add_guard(&mut self, fd: &Funcdata, guard: &LoadGuard, opc: Opcode) -> Result<()> {
+        if !guard.is_valid(fd, opc) || guard.step == 0 {
+            return Ok(());
+        }
+        let op = fd.op(guard.op);
+        let Some(out_size) =
+            (if opc == Opcode::Store { op.ins.get(2).copied() } else { op.out }).map(|v| fd.vn(v).size)
+        else {
+            return Ok(());
+        };
+        let mut step = guard.step;
+        if out_size != step {
+            // a field in an array of structures, or something more unusual
+            if out_size > step || !step.is_multiple_of(out_size) {
+                return Ok(());
+            }
+            step = out_size;
+        }
+        // the pointer's type is the unknown type of its size: no primitive above 8 bytes is made
+        if fd.vn(fd.input(guard.op, 1)?).size != step && step > 8 {
+            return Ok(());
+        }
+        let high = if guard.is_range_locked() {
+            ((guard.maximum.wrapping_sub(guard.minimum).wrapping_add(1) / u64::from(step)) as i32).wrapping_sub(1)
+        } else {
+            3
+        };
+        self.add_range(guard.minimum, step, 0, RangeType::Open, high)
     }
 
     /// Port of `MapState::initialize`: the bounding hint, the sort and `reconcileDatatypes`.
@@ -579,8 +614,7 @@ impl Funcdata {
     }
 
     /// Port of `Funcdata::opCollapseIndirectsForAlias`: the INDIRECTs of `effect` whose output
-    /// nothing can alias any more go. With a store guard an INDIRECT outside its analysed range
-    /// goes too: that range is not ported.
+    /// nothing can alias any more go, and with a store guard those outside its range.
     pub(crate) fn op_collapse_indirects_for_alias(&mut self, effect: OpId) -> Result<()> {
         self.op_mut(effect).flags.clear(OpFlags::ALIAS_UPDATE);
         let Some(bb) = self.op(effect).parent else { return Ok(()) };
@@ -589,18 +623,18 @@ impl Funcdata {
         let inds: Vec<OpId> =
             ops[..pos].iter().rev().copied().take_while(|&o| self.op(o).opc == Opcode::Indirect).collect();
         let e = self.op(effect);
-        let guarded = e.opc == Opcode::Store
-            && e.flags.has(OpFlags::SPACEBASE_PTR)
-            && self.heritage.store_guards.iter().any(|g| g.op == effect);
-        if guarded && !inds.is_empty() {
-            return err("RuleAliasUpdate: the INDIRECTs of an indexed stack STORE need the value-set range of its guard (LoadGuard::isGuarded): not ported");
-        }
+        // getStoreGuard
+        let guard = (e.opc == Opcode::Store && e.flags.has(OpFlags::SPACEBASE_PTR))
+            .then(|| self.heritage.store_guards.iter().find(|g| g.op == effect).copied())
+            .flatten();
         for op in inds {
             let o = self.op(op);
             let Some(out) = o.out else { continue };
-            if self.vn(out).has(VnFlags::NOLOCALALIAS)
+            let v = self.vn(out);
+            if (v.has(VnFlags::NOLOCALALIAS)
                 && !o.flags.has(OpFlags::INDIRECT_CREATION)
-                && !o.flags.has(OpFlags::NO_INDIRECT_COLLAPSE)
+                && !o.flags.has(OpFlags::NO_INDIRECT_COLLAPSE))
+                || guard.is_some_and(|g| !g.is_guarded(v.space, v.offset))
             {
                 let inp = o.ins[0];
                 self.total_replace(out, inp)?;

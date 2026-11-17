@@ -1920,7 +1920,11 @@ to master's. Still loud, by missing port: `ValueSetSolver` and the guard ranges 
 0x546d40, 0x5629d0, 0x78e7d0, 0x1b0c190, 0x502b80, 0x5c37f0), `ActionConditionalExe` (0x5a3c30,
 0x807a80), multistage tables (0x23f4238). Open: 0x2285c9b, which the reference does not finish,
 prints a function now. Details in `rust/README.md`, "Alias analysis of the jump-table partial
-function". (Superseded: the switch counts of the `m3-int5` paragraph above.)
+function". (Superseded: the switch counts of the `m3-int5` paragraph above. Superseded
+2026-11-17: `ValueSetSolver` and the guard ranges are ported and those 7 functions are identical;
+derived counts switch `paramdouble` 2002 / 2004, `pcc-r` 2004 / 2005, `pcc-t` 2003 / 2005, M500
+`pcd` 440 / 497 (loud 57). Details in `rust/README.md`, "Value-set analysis and the stack
+guards".)
 
 Review fixes of that port (branch `m3-default`, 2026-11-17): a new stack varnode inside a symbol
 of `restructureVarnode` takes the symbol's flags (`mapped`, `addrtied`, `nolocalalias`);

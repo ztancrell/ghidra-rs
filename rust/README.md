@@ -1050,7 +1050,8 @@ becomes a call and a halt, as before. Modules:
   the guards and strides read.
 - `rangeutil.rs` (from rangeutil.cc, 2,605 lines): `CircleRange` (ranges, intersection, union,
   non-zero masks, `pullBack` through unary and binary ops). The value-set solver is not used by
-  jump tables and not ported.
+  jump tables and not ported. (Superseded: ported for the stack guards, `valueset.rs`, see
+  "Value-set analysis and the stack guards".)
 - `emulate.rs` (from emulateutil.cc 397, emulate.cc 462, opbehavior.cc): `EmulateFunction` over
   the data flow (`EmulatePcodeOp`, `Emulate::executeCurrentOp`) and the integer and boolean op
   behaviors. memstate.cc (738 lines) is not needed: `EmulateFunction` keeps a value per
@@ -2141,7 +2142,8 @@ Bars held: S4 and the four S6 checks 498 / 500, paramdouble 500 / 500, switch co
 analysis, revisited markers, the dead-code restart, `ActionRestructureVarnode`. Details and
 the M500 numbers in `docs/plans/m3-decompiler.md`, "Stack heritage". (Superseded for the
 partial function of jump-table recovery: it runs a port of `ActionRestructureVarnode`, branch
-`m3-aliasupdate`.)
+`m3-aliasupdate`. Superseded: "the load-guard value-set analysis" in that list, and the
+"load-guard error" of 0x40ad80 above; see "Value-set analysis and the stack guards".)
 
 
 Review fixes and merges (2026-11-14). 0x4098c0 is fixed: the heritage location map rebuilt a
@@ -3275,7 +3277,9 @@ stays unported (`restructure_varnode` fails there as before), and `r1-options.sh
 stack STORE. Without an options file the rule is on in the `decompile` root too:
 `heritage_guard.rs` marks a STORE that gets a store guard in every root, so there the rule
 fails loudly on a guarded STORE with INDIRECTs and otherwise collapses nothing (no varnode of
-the function itself is `nolocalalias`).
+the function itself is `nolocalalias`). (Superseded: "a valid load or store guard" in the list
+above, the mark set when the guard is made, and the rule failing on a guarded STORE; the guard
+ranges are analysed and read now, see "Value-set analysis and the stack guards" below.)
 
 `flow.rs` makes the partial function three ways (`Mode`): as the C++ does (`Exact`); without the
 action and the rule when they reach one of the paths above (`NoAlias`), where the test of
@@ -3299,7 +3303,9 @@ The 17 functions of the switch corpus that were loud on master (`paramdouble`, `
 
 What is left needs three ports: `ValueSetSolver` with the guard ranges (rangeutil.cc, about
 1,500 lines; 7 functions), `ActionConditionalExe` (condexe.cc; 2) and the multistage recovery
-(1).
+(1). (Superseded: the first of the three is done and its 7 functions are identical, see
+"Value-set analysis and the stack guards" below; `ActionConditionalExe` was ported on
+`m3-default`.)
 
 Checks. The master build stands in the reference's place (`decomp-diff.sh` with `DECOMP` set
 to a wrapper of it), so a run lists the functions whose output the branch changes; the checks
@@ -3375,7 +3381,78 @@ Review fixes (branch `m3-default`, 2026-11-17), from an independent review of th
   stack LOADs and 0x1c69c5a in all five, 0x23f4238 from `swfs-r` on, 0x23caea8 in `pcc-t`
   (`fillinReadOnly`), and in `paramdouble` only 0x5861aa and 0x7c74c0 ("a second table after
   the partial function's action failed is not ported"). Those two were identical in the
-  `m3-int5` pass and are loud in the build before these fixes too: not traced.
+  `m3-int5` pass and are loud in the build before these fixes too: not traced. (Superseded:
+  traced, see the next section.)
+
+### Value-set analysis and the stack guards (branch `worktree-agent-af2329329d4027b82`, 2026-11-17)
+
+An indexed LOAD or STORE through the stack pointer gets a guard record at the stack's first
+heritage pass. The C++ then finds the stack range each one can reach with the value-set
+analysis, and four places read that range. All of it is ported:
+
+- `valueset.rs` (new, from rangeutil.cc): `ValueSet`, `ValueSetRead`, `WidenerFull`,
+  `WidenerNone`, `ValueSetSolver` (`establishValueSets`, the constraints of the conditional
+  branches with `applyConstraints`, `generateRelativeConstraint` and the landmarks,
+  Bourdoncle's iteration order, `solve`). A varnode's set is found through a map in the
+  solver; a varnode with a set is the C++ marked varnode.
+- `rangeutil.rs`: the rest of `CircleRange` the solver needs (`pushForwardUnary`, `Binary`,
+  `Trinary`, `minimalContainer`, `contains` of a range, `widen`, `invert`, `getMaxInfo`,
+  `normalize`). Not ported: `setStride` (nothing calls it).
+- `heritage_guard.rs`: `analyzeNewLoadGuards` with `LoadGuard::establishRange` and
+  `finalizeRange`, `guardLoads` (a COPY of an address-tied range before each LOAD that may read
+  it), `handleNewLoadCopies` with `findAddressForces` and `propagateCopyAway`. The
+  `store_aliasupdate` mark of a guarded STORE is set by the analysis, as in the C++.
+- The readers: `LoadGuard::isGuarded` in `opCollapseIndirectsForAlias` and `MapState::addGuard`
+  in `gatherOpen` (`mapstate.rs`), `StackAffectingOps::populate` and `affectsTest` in the merge
+  test (`variable.rs`, `cover.rs`).
+
+Fails loudly: new guards after analysed ones (the C++ loop reads a missing value set there), a
+value set read for a varnode that has none, a constant with more than one reader as a root.
+`GHIDRA_RS_GUARD_DEBUG=<file>` appends one line per analysed guard (function, op, range, step,
+state) to the file.
+
+The two functions of `paramdouble` named above, 0x5861aa and 0x7c74c0, are not a guard case.
+The reference's partial function fails in its action too ("Overlapping input varnodes", the
+warning of the first table in `print C`), and the C++ then recovers the two later tables from
+the half-simplified clone ("Too many branches" for both). ghidra-rs matches the first failure
+and stops at the second table, which is the path not ported. They counted as identical in the
+`m3-int5` pass only because `print raw` shows no warning and every table failed either way;
+in `pcc-r`, `pcc-t` (`restructure_varnode` skipped) and the three `-r` switch checks they are
+identical (why the action does not fail under the `-r` options was not traced). Left loud: taking a table from a clone whose action stopped
+half way needs that state to be equal op for op, which no check shows.
+
+Checks (reference `decomp_dbg`, same options as the bars):
+
+- The 22 functions of M500 that were loud in `pcd` on a guard (16 "indexed stack LOAD", 6
+  "STORE guard" in the merge), all 56 checks: 52 checks 22 / 22 identical; `pcd` 18 / 22 (loud:
+  3 `getExactPiece`, 1 `HeapSequence`), `r5c` 21 / 22 (`HeapSequence`), `r5slock` and
+  `r5dtlocksv` 19 / 22 (a piece of a locked stack parameter). Silent 0. (That run used a build
+  that differs from the commit by comments, a dead field, two clippy rewrites and the debug
+  line.)
+- The 7 switch functions blocked on guard ranges (0x1c69c5a, 0x546d40, 0x5629d0, 0x78e7d0,
+  0x1b0c190, 0x502b80, 0x5c37f0) with 0x5861aa and 0x7c74c0, in `paramdouble`, `pcc-r`,
+  `pcc-t`, `swfs-r`, `swfs-t`, `swsn-r`, `swsn-t`, `swfsc-r`, `swfsc-t`: the 7 identical in all
+  nine; the other two identical in `pcc-r`, `pcc-t`, `swfs-r`, `swsn-r`, `swfsc-r`, loud in
+  `paramdouble`, `swfs-t`, `swsn-t`, `swfsc-t`.
+- The whole corpora, in two steps (the committed build). A function with no load or store
+  guard takes no new code path, so its result is that of the `m3-default` pass. Step one runs
+  the check with ghidra-rs alone and `GHIDRA_RS_GUARD_DEBUG` and lists the functions with a
+  guard, in the function or its partial function; step two runs those against the reference.
+  Switch corpus (2,050): `paramdouble` 68 with a guard, 66 / 66 identical (the reference does
+  not finish 2); `pcc-r` 98, 96 / 96; `pcc-t` 68, 66 / 66; `swsn-t` 68, 66 / 66. M500 `pcd`: 26
+  with a guard, 18 / 25 identical, 7 loud (6 `getExactPiece`, 1 `HeapSequence`, all loud before;
+  the reference times out on 0x6b21e0). Silent 0 in all five, no function identical before is
+  anything else now.
+- Counts derived from that and the `m3-default` pass, not from a run of every function against
+  the reference: switch `paramdouble` 1995 -> 2002 / 2004 (loud 2: 0x5861aa, 0x7c74c0), `pcc-r`
+  1997 -> 2004 / 2005 (loud 1), `pcc-t` 1996 -> 2003 / 2005 (loud 2); M500 `pcd` 422 -> 440 / 497
+  (loud 75 -> 57: 18 of the 22 guard functions are identical, 4 are loud on another port).
+- M8, 11 checks (`heritage`, `paramdouble`, `s4`, `r5`, `s7t`, `s8r`, `r5s`, `fs-t`, `pcc-r`,
+  `pcc-t`, `pcd`): identical in each. Not run: the other 45 checks on M8, the other switch
+  checks on the whole corpus, M500 beyond `pcd`.
+- One unit test (`rangeutil.rs`, `value_set_ranges`): push-forward, container and widening on
+  hand-computed ranges. The solver has no unit test; it is checked only through the functions
+  above.
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The
 input was the whole `.text` of `/usr/lib/libLLVM.so.21.1`: 97 MB, 21,830,419 instructions,
