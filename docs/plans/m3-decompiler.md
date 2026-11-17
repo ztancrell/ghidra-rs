@@ -528,6 +528,9 @@ table row:
   and `donothing`; `analyzeGuards` is the C++ loop. Left: the fold through read-only loads
   (`RuleLoadVarnode`, R5). S3 recheck at `paramdouble`: M8 8 / 8, M500 500 / 500, switch
   corpus 1,947 / 2,050 (1,934 before).
+  Superseded (branch `m3-aliasupdate`): `restructure_varnode` runs in the partial function
+  (`mapstate.rs`); seven actions are left out, of which `condconst` and `normalizebranches` can
+  change table recovery.
 - With R3 part two and R4 merged: the R1/R2/R3 check, the subvar check and the R4 check (all
   with group `cleanup` on) are each M8 8 / 8, M500 498 / 499 (497 / 499 before the merge).
 - `ActionNonzeroMask` on the function itself no longer reads folded constants (an R1
@@ -957,6 +960,8 @@ Open, failing loudly:
   of `opCollapseIndirectsForCopy`); partial structs, arrays and unions in `getExactPiece`.
 - Not modelled: `PcodeOp::isStoreUnmapped` (set only by `ActionRestructureVarnode`, not
   ported), word sizes other than 1.
+  Superseded: `ActionInternalStorage` sets that mark, and no x86 model declares internal
+  storage; `ActionRestructureVarnode` never did.
 - The jump-table partial function still runs without the two rules and with
   `jumptable::fold_constants` (the C++ has `stackvars` on there and `fillinReadOnly`); the tree
   builder leaves them out of the `jumptable` root (`action.rs`).
@@ -1171,6 +1176,8 @@ answers a locked stack parameter's type (10 functions typed `ESP + 4` as `int4 *
   (`removeRevisitedMarkers`), the restart after heritage following dead-code removal
   (`bumpDeadcodeDelay`), pieces of a locked stack parameter, `ActionRestructureVarnode`
   (MapState, RangeHint, AliasChecker, symbols), `ActionMappedLocalSync`.
+  Superseded (branch `m3-aliasupdate`): `ActionRestructureVarnode` is ported for the partial
+  function of jump-table recovery (`mapstate.rs`), not for the function itself.
 
 Review fixes and merges (2026-11-14). Fixed after an independent review:
 
@@ -1852,7 +1859,39 @@ varmap.cc (`MapState`, `RangeHint`, the full `AliasChecker`, `createEntry`,
 `namevars` (symbols that exist before it) and the printer read. Also open: the loud misses
 `pcd` reaches (`namevars` `getExactPiece`, indexed stack LOADs in heritage, STORE guards in
 merge, `HeapSequence`, `ActionConditionalExe`), and whether a default-options run should fail
-while a pool rule is missing.
+while a pool rule is missing. (Superseded: `ActionConditionalExe` is ported, `condexe.rs`.)
+
+End sweep of the branch before the merge of `m3-aliasupdate` (final build): all 56 checks on
+M8 identical. M500: `pcd` 422 / 497 (loud 75, silent 0: 51 `namevars` `getExactPiece`, 16
+indexed stack LOAD, 6 STORE guard in merge, 2 `HeapSequence`), `paramdouble` 500 / 500, `r1`
+499 / 499 (baseline 498), `r5s` 483 / 499 (baseline 446), `s7r` 499 / 499 (498), `pcc-r`
+495 / 495 (494), `pcc-t` 495 / 495. `simple`: `pcd` 184 / 200 (loud 16), `pcc-r` and `pcc-t`
+194 / 194. Switch `pcc-t` 1988 / 2005 (baseline 1986, silent 0). Not run: the other M500 and
+switch checks (the full pass). `m3-aliasupdate` is merged into the branch after that sweep
+(its `mapstate.rs` runs in the jump-table partial only; the decompile-root leaf is still
+`not_ported`, so `D` is unchanged); what was rerun on the merge is in the merge commit.
+
+Alias analysis of the jump-table partial function (branch `m3-aliasupdate`, 2026-11-17).
+`RuleAliasUpdate` only runs `opCollapseIndirectsForAlias`; what that collapses comes from
+`ActionRestructureVarnode` (`nolocalalias`) and from the value-set range of a store guard. Ported
+for the partial function (`mapstate.rs`): the rule, `opCollapseIndirectsForAlias`,
+`syncVarnodesWithSymbols`, `ScopeLocal::restructureVarnode` without data-types (MapState,
+RangeHint, `fakeInputSymbols`, `markUnaliased`) and `protectSwitchPaths`. `flow.rs` makes the
+partial function as the C++ does and takes its table as it is; where the action or the rule
+reaches a path not ported (a load or store guard, `adjustOutOfRange`, a locked prototype, a typed
+or large stack varnode, `checkUnaliasedReturn`) it falls back to the partial function without
+them and the test of `m3-swsilent`. The action of the `decompile` root stays unported.
+Switch corpus: 0x1cdbf0e, 0x7913d0, 0x7bb710, 0x7bf170, 0x831db0, 0x898690 and 0x898850 loud ->
+identical in `paramdouble`, the six switch checks, `pcc-r` and `pcc-t` (each checked against the
+reference); 0x7c1f30 loud -> identical in `pcc-r` and `pcc-t`. Derived counts: `paramdouble`
+1995 / 2004 (loud 9), `swfs-r`, `swfs-t`, `swfsc-r`, `swfsc-t`, `swsn-t` 1994 (loud 10), `swsn-r`
+1991 (loud 10, silent 3), `pcc-r` 1995 / 2005 (loud 10), `pcc-t` 1994 / 2005 (loud 11). Every
+other switch output at `paramdouble`, all 55 checks on M8 and nine checks on M500 are byte-equal
+to master's. Still loud, by missing port: `ValueSetSolver` and the guard ranges (0x1c69c5a,
+0x546d40, 0x5629d0, 0x78e7d0, 0x1b0c190, 0x502b80, 0x5c37f0), `ActionConditionalExe` (0x5a3c30,
+0x807a80), multistage tables (0x23f4238). Open: 0x2285c9b, which the reference does not finish,
+prints a function now. Details in `rust/README.md`, "Alias analysis of the jump-table partial
+function". (Superseded: the switch counts of the `m3-int5` paragraph above.)
 
 ## Running stages in parallel
 

@@ -145,7 +145,12 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("spacebase", "base", c::spacebase),
             ("infertypes", "typerecovery", super::infertypes::infer_types),
             ("nonzeromask", "analysis", super::rules::nonzero_mask),
-            ("restructure_varnode", "localrecovery", not_ported),
+            // the partial function of jump-table recovery has its port (`mapstate.rs`)
+            (
+                "restructure_varnode",
+                "localrecovery",
+                if jumptable { super::mapstate::restructure_varnode } else { not_ported },
+            ),
         ],
     );
     mainloop.push(stackstall);
@@ -261,14 +266,13 @@ pub(crate) fn not_ported(_: &mut Funcdata, _: &Arch) -> Result<i32> {
 
 /// The actions of the `jumptable` root's groups the partial function is simplified without while
 /// they are not ported (an entry is skipped only as long as its leaf is `not_ported`; any other
-/// unported action reached in the partial fails the table and is reported, `flow.rs`). Two
-/// of them can change which tables are recovered: `restructure_varnode` (in the partial it also
-/// runs `protectSwitchPaths`, coreaction.cc) and
-/// `normalizebranches` (flips the CBRANCHs the guards are read from). Superseded: `multicse`,
-/// `shadowvar` and `condconst` were entries until they were ported; they run in the partial.
+/// unported action reached in the partial fails the table and is reported, `flow.rs`). One
+/// of them can change which tables are recovered: `normalizebranches` (flips the CBRANCHs the
+/// guards are read from). Superseded: "Three of them"; `restructure_varnode` (the partial runs
+/// its port, `mapstate.rs`), `multicse`, `shadowvar` and `condconst` were entries until they
+/// were ported, and run in the partial.
 const PARTIAL_SKIP: &[&str] = &[
     "funclinkoutonly",
-    "restructure_varnode",
     "mapped_local_sync",
     "normalizebranches",
     // stage S7: the last `localrecovery` action, after merging (not in the `jumptable` groups);
@@ -284,11 +288,18 @@ const PARTIAL_SKIP: &[&str] = &[
 /// the partial function flow.rs falls back to when the stack heritage reaches a path not
 /// ported; `jumptable::fold_constants` then folds the read-only loads. Superseded: "the rules
 /// of later stages (R3 to R5, with `RuleLoadVarnode`) are missing from it".
-pub(crate) fn jumptable_partial(fd: &mut Funcdata, arch: &Arch, stack: bool) -> Result<()> {
-    let off: &[&str] = if stack { &[] } else { &["rule:loadvarnode", "rule:storevarnode"] };
-    let mut off: std::collections::HashSet<String> = off.iter().map(|s| s.to_string()).collect();
-    // the check-only `DECOMP_SKIP_ACTIONS` (console.rs): the reference patch skips an action by
-    // its name in every tree, this one included
+/// `alias` false leaves out `ActionRestructureVarnode` and `RuleAliasUpdate`, for the partial
+/// function flow.rs falls back to when they reach a path not ported (`mapstate.rs`). Every
+/// action `DECOMP_SKIP_ACTIONS` names (console.rs) is left out too: the reference patch skips
+/// an action by name in every root, so its partial function runs without it.
+pub(crate) fn jumptable_partial(fd: &mut Funcdata, arch: &Arch, stack: bool, alias: bool) -> Result<()> {
+    let mut off: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if !stack {
+        off.extend(["rule:loadvarnode", "rule:storevarnode"].map(String::from));
+    }
+    if !alias {
+        off.extend(["action:restructure_varnode", "rule:aliasupdate"].map(String::from));
+    }
     if let Ok(skip) = std::env::var("DECOMP_SKIP_ACTIONS") {
         off.extend(skip.split(',').filter(|s| !s.is_empty()).map(|s| format!("action:{s}")));
     }

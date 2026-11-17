@@ -396,6 +396,16 @@ pub(super) fn push_multi(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
     Ok(1)
 }
 
+/// Port of `RuleAliasUpdate`: collapse the INDIRECTs of a STORE or call whose alias information
+/// changed (`Funcdata::opCollapseIndirectsForAlias`, `mapstate.rs`).
+pub(super) fn alias_update(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
+    if !fd.op(op).flags.has(super::super::op::OpFlags::ALIAS_UPDATE) {
+        return Ok(0);
+    }
+    fd.op_collapse_indirects_for_alias(op)?;
+    Ok(1)
+}
+
 /// Port of `RuleMultiCollapse`.
 pub(super) fn multi_collapse(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
     if ins(fd, op).iter().any(|&v| !fd.vn(v).is_heritage_known()) {

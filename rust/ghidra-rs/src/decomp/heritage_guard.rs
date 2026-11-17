@@ -7,10 +7,13 @@
 //! establishRange`/`finalizeRange`, rangeutil.cc's `ValueSetSolver`). A guard keeps only the
 //! offset its pointer was traced from; `guardLoads`, the one reader of the analysed range during
 //! heritage, fails when it would need it. With no load-guard COPYs, `handleNewLoadCopies` has
-//! nothing to do. The other readers of the analysed ranges, none ported yet, must fail while
+//! nothing to do. The other readers of the analysed ranges must fail while
 //! [`has_valid_guards`] is true: `StackAffectingOps::populate`/`affectsTest` (merge.cc, stage
-//! S7), `Funcdata::opCollapseIndirectsForAlias` (funcdata_op.cc, through `RuleAliasUpdate`)
-//! and `MapState::gatherOpen` / the alias checker (varmap.cc, `ActionRestructureVarnode`).
+//! S7), `Funcdata::opCollapseIndirectsForAlias` (funcdata_op.cc, through `RuleAliasUpdate`:
+//! ported in `mapstate.rs`, it fails on the INDIRECTs of a STORE with a guard) and
+//! `MapState::gatherOpen` (varmap.cc, `ActionRestructureVarnode`: ported for the partial
+//! function of jump-table recovery in `mapstate.rs`, it fails on a valid guard).
+//! (Superseded: "none ported yet".)
 
 use super::op::{OpFlags, OpId};
 use super::opcode::Opcode;
@@ -40,7 +43,7 @@ struct StackNode {
 }
 
 /// The input stack-pointer varnode (`Funcdata::findVarnodeInput` of the space's spacebase).
-fn stack_pointer_input(fd: &Funcdata, arch: &Arch) -> Option<VarnodeId> {
+pub(crate) fn stack_pointer_input(fd: &Funcdata, arch: &Arch) -> Option<VarnodeId> {
     let (sp, off, size) = arch.spec.stack_pointer;
     fd.loc_at(Space::Sleigh(sp), off, size).into_iter().find(|&v| fd.vn(v).is_input())
 }
@@ -132,6 +135,8 @@ fn generate_guard(fd: &mut Funcdata, op: OpId, pointer_base: u64, store: bool) {
     }
     let g = LoadGuard { op, pointer_base };
     if store {
+        // analyzeNewLoadGuards: the alias information of the STORE has changed
+        fd.op_mut(op).flags.set(OpFlags::ALIAS_UPDATE);
         fd.heritage.store_guards.push(g);
     } else {
         fd.heritage.load_guards.push(g);

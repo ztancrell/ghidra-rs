@@ -326,6 +326,13 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    the unported pool rules switched off on both engines (`default-options.txt`: 14, then 8 after six rules landed):
    M8 8 / 8, M500 415 / 497 (loud 82, silent 0) with 11 rules off. Open decision: a run with the plain default
    options still leaves the 8 unported rules out without a word.
+   Branch `m3-aliasupdate` (2026-11-17): `RuleAliasUpdate` and `ActionRestructureVarnode` (untyped) run in the
+   jump-table partial function, so its table is taken as it is; the older test on INDIRECTs of stack varnodes is
+   left for the partial function made without them (a load or store guard, a locked prototype). 7 functions
+   loud -> identical in every switch check, 8 in `pcc-r` and `pcc-t`. Derived from the 9 changed functions and
+   the `m3-int5` pass: `paramdouble` 1995, `swsn-r` 1991 (silent 3), the other switch checks 1994 of 2004;
+   `pcc-r` 1995, `pcc-t` 1994 of 2005. Superseded: the switch counts of the line above, and "the unported
+   `RuleAliasUpdate`" in the `m3-swsilent` lines.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

@@ -10,7 +10,9 @@
 //!
 //! The pool tables [`OPPOOL1`] and [`CLEANUP`] list the ported rules in the C++ order; a rule not
 //! listed is switched off on the reference side by the check (`rust/tools/corpus/r1-options.txt`,
-//! written by `rust/tools/r1-options.sh` from this table). x86 is little-endian, so the
+//! written by `rust/tools/r1-options.sh` from this table). `aliasupdate` is the exception: it is listed
+//! for the partial function of jump-table recovery and the script keeps it off in the `decompile`
+//! root. x86 is little-endian, so the
 //! big-endian address arithmetic of the rules is left out.
 
 mod arith;
@@ -151,6 +153,7 @@ pub(crate) const OPPOOL1: &[Rule] = &[
     r("shift2mult", "analysis", &[IntLeft], shift_2_mult),
     r("shiftpiece", "analysis", &[IntOr, IntXor, IntAdd], shift_piece),
     r("multicollapse", "analysis", &[Multiequal], multi_collapse),
+    r("aliasupdate", "analysis", &[Store, Call, Callind, Callother], alias_update),
     r("2comp2mult", "analysis", &[Int2comp], two_comp_2_mult),
     r("sub2add", "analysis", &[IntSub], sub_2_add),
     r("carryelim", "analysis", &[IntCarry], carry_elim),
