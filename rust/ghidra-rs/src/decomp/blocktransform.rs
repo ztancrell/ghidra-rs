@@ -490,7 +490,7 @@ pub(crate) fn find_initializer(fd: &Funcdata, head: BlockId, slot: usize, loop_d
 
 /// `getEvalType() == PcodeOp::special`: the TypeOps with the `special` flag (typeop.cc), less CAST
 /// (`unary|special`: its eval type is `unary`, so it is moveable).
-fn is_special(opc: Opcode) -> bool {
+pub(crate) fn is_special(opc: Opcode) -> bool {
     use Opcode::*;
     matches!(
         opc,

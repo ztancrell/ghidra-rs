@@ -3119,6 +3119,41 @@ which is `not_ported`" (C printing), "splitting a stack trial that is a PIECE" a
 miss (stage R5 slice 3), and "0x47a6b0 is loud in every check" (the `ActionConditionalExe`
 removal, integration `m3-int5`).
 
+### Default options: pieces of symbols at naming and printing, `HeapSequence` validity (2026-11-17)
+
+The 51 `pcd` M500 functions loud in `namevars` and the two loud in `RuleStringStore`:
+
+- `namevars.rs`: `HighVariable::finalizeDatatype` asks `TypeFactory::getExactPiece`
+  (`infertypes::exact_piece`) for the piece of the symbol's data-type the variable covers. No
+  piece (a part of a scalar), or an unknown one, leaves the variable's type alone, as the C++.
+  Still loud: a piece whose type differs from the variable's (nothing ported reads
+  `type_finalized`), and a partial struct, array, union or enum. Superseded: "`finalizeDatatype`
+  of a piece of a symbol (`getExactPiece`) fails loudly".
+- `printc.rs`: `PrintC::pushMismatchSymbol` for a variable running past the end of its local or
+  data symbol: `_name` at the symbol's start, else the unnamed location (`stack0x...`).
+  Superseded: "a variable past the end of its symbol (`pushMismatchSymbol`)" in the loud list of
+  slice 3A. The case of a function or external reference symbol stays loud.
+- `rules/constseq.rs`: the `HeapSequence` constructor (`findBasePointer`,
+  `findDuplicateBases`, `findInitialStores`, `collectStoreOps`, `checkInterference`,
+  `formByteArray`). A STORE of a character constant that roots no sequence of four characters
+  is left alone; a valid sequence fails loudly (`HeapSequence::transform`: the built-in string
+  copy user-op, its internal string and their printing are not ported). Superseded:
+  "`stringstore` fails at `HeapSequence` (not ported)" (stage R5 slice 5) and the three
+  HeapSequence misses of `r5c` (0x41f7f0, 0x4c1230, 0x766350: none is a valid sequence).
+- `merge.rs`, `snipOutputInterference`: the C++ sorts the reads by `HighVariable` address
+  (`PcodeOpNode::compareByHigh`). With reads of several variables of one group the order is
+  the allocator's (a new `HighVariable` reuses freed memory) and it numbers the copies made.
+  ghidra-rs sorted by creation order, which gave 0x4130d0 two copies swapped once naming let
+  it through; such a snip now fails loudly. Reads of a single variable are unchanged.
+
+Counts, M500: `pcd` 474 / 497 (loud 23, silent 0; before 422, loud 75). 50 of the 51 and both
+`RuleStringStore` functions are identical; 0x4130d0 is loud in `snipOutputInterference`. Left:
+16 indexed stack LOADs, 6 STORE guards, that one. `nm-r`, `nm-t`, `s7r` 499 / 499, `pcc-r`,
+`pcc-t` 495 / 495, `r5c` 498 / 498 (494 in the `m3-int5` pass: the three HeapSequence
+functions here; the fourth, 0x47a6b0, is identical too, and `r5c` was not run on `m3-default`,
+so where it changed is not measured). M8: the 56 summary lines unchanged.
+Not run: the switch and `simple` corpora, and the other M500 checks.
+
 ## Speed
 ### Alias analysis of the jump-table partial function (branch `m3-aliasupdate`, 2026-11-17)
 
