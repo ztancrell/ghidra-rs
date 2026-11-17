@@ -437,6 +437,20 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    and seed set, and is applied after the constants pass; with those fixes
    `fold-slot-fragments` stops loudly on mercs2 at 0x861190 (an owner its own walk removes,
    where Java ends with an exception), so the 36602 is the old build's count.
+   Superseded: "Not ported, failing by name: ExportBindings `--recover`, AuditRecoveredFunctions
+   `--remove-empty`". On branch `worktree-agent-adca953958c1688b0` (2026-11-17) mercs2's eight
+   remaining scripts are commands (`exports.rs`): the read-only ones under `ghidra-rs export`,
+   the two editing options under `edit`. So each of the 17 scripts of
+   `mercs2-decomp/tools/ghidra/` has a command; `Decompile.java` and the C that
+   ExportAbiCandidates greps still wait for S10 (`abi-candidates` fails loudly without C verified
+   identical to Java's). On the Java project's functions seven of the eight outputs have Java's
+   rows but for body and reference differences of the analysis; where Ghidra's answer cannot be
+   known (an instruction in two bodies here) a command stops. Details and counts in
+   `rust/README.md`, "The read-only scripts". The four outputs that are byte-identical to
+   Java (mod-hook-owners, boundaries, bindings, call-contexts of 0x00568900) have a drop-in
+   wrapper for mercs2, `rust/tools/mercs2-exports.sh`. It needs the Java project's function
+   list. `call-contexts` reference order (Java's creation order) stays a known difference.
+   See `rust/README.md`, "Switching mercs2's export scripts".
 
 ## Open questions
 
