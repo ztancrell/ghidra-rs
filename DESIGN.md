@@ -319,6 +319,12 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    Integration `m3-int5` (2026-11-17), full pass clean against the slice 4 baseline: switch `pcc-r` 1987 / 2005,
    `pcc-t` 1986 / 2005, silent 0; the other switch checks 1984 to 1988 of 2004; `simple` print 194 / 194; the only
    silent misses left are in `swsn-r` (3 on switch, 3 on M500). Superseded: the switch counts in the lines above.
+   S10 (2026-11-17), check and inventory only: `tools/ghidra-diff.sh` against Java Ghidra, M8 identical 0 / 7
+   (loud 7; Java has no function at 0x54c990), M500 Java finishes 499 / 500. Blocked: eight actions of the
+   default `decompile` are not ported (`restructure_varnode`, `mapped_local_sync`, `multicse`, `shadowvar`,
+   `condconst`, `directwrite`, `dynamicsymbols`, `prototypewarnings`); with them skipped on both engines and
+   default options, M8 8 / 8 and M500 410 / 500 against `decomp_dbg` (loud 78, silent 11, in no `bars.sh`
+   check). See `rust/README.md`, "Stage S10".
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

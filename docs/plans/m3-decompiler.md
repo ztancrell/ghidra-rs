@@ -185,7 +185,7 @@ ported, then estimated Rust lines.
 | S7 | Merge, high variables | `merge`, `variable`, merge actions, `dynamic` (hashes, needed for saved locals) | 5k → 2.5k | `print raw` with high-variable ids after `copymarker` | M500 ≥ 95% | S6 |
 | S8 | Structuring | rest of `block`, `blockaction`, CFG edits of `funcdata_block` | 5k → 3k | `print tree block` at the end, rules off and then on | M500 ≥ 98% | S4 |
 | S9 | C printing | `printc`, `printlanguage`, `prettyprint`, `comment`, `stringmanage`, naming and cast actions | 7k → 4k | `print C` | all of D passes in our runner; M500 ≥ 95% identical to `decomp_dbg` | S7, S8, R5 |
-| S10 | Ghidra-facing output | Ghidra names (`FUN_`, `DAT_`, `undefined4`), import prototypes, read-only blocks | → 1.5k | our C against `Decompile.java` | M8 identical; M500 ≥ 90% with differences listed | S9 |
+| S10 | Ghidra-facing output | Ghidra names (`FUN_`, `DAT_`, `undefined4`), import prototypes, read-only blocks | → 1.5k | our C against `Decompile.java` | M8 identical; M500 ≥ 90% with differences listed | S9, and the default `decompile` action (see "S10: reference and inventory only, blocked") |
 
 "Print raw with types" and "with high-variable ids" need a small patch to the reference copy
 (`Varnode::printRaw` in `varnode.cc`, about 20 lines), kept under `rust/tools/` and applied by the
@@ -1814,6 +1814,29 @@ M500 (4 in the baseline); 0x47a6b0 is loud in every check. (Superseded: the swit
 slice 5 above, which were derived or from single checks.) Varies with load: the "all outputs
 identical" count of `s6void-m500` is 499 / 500 here and 500 / 500 in the baseline (a reference
 timeout; identical 499 / 499 in both).
+
+### S10: reference and inventory only, blocked (2026-11-17)
+
+No decompiler code. `rust/tools/ghidra-diff.sh` and `rust/tools/ghidra/DecompileRef.java` capture
+Java Ghidra's C (the call of mercs2's `Decompile.java`) and compare it with `print C` under
+default options. M8: Java finishes 7 / 8 (no function at 0x54c990 in the Java project),
+ghidra-rs identical 0 / 7, loud 7. M500: Java finishes 499 / 500; `decomp_dbg` identical
+0 / 499.
+
+The gate needs the default `decompile` action, which ghidra-rs finishes for no function: eight
+leaves are not ported (`restructure_varnode`, `mapped_local_sync`, `multicse`, `shadowvar`,
+`condconst`, `directwrite`, `dynamicsymbols`, `prototypewarnings`). The S9 print checks ran with
+the `tail` options and the two `localrecovery` leaves skipped. With the eight skipped on both
+engines and default options: M8 8 / 8 against `decomp_dbg`; M500 410 / 500 (reference ran 498;
+loud 78, silent 11, one reference timeout). So before S10 proper:
+
+1. the eight actions, checked against `decomp_dbg` with default options;
+2. the loud and silent misses that default options reach (list in `rust/README.md`, "Stage S10");
+3. then the Ghidra-facing parts: type and symbol names, the project's prototypes and function
+   set, read-only data, Java's comments (the inventory in `rust/README.md`).
+
+Open, for the user: where ghidra-rs takes the Java project's facts from (an export of the
+Ghidra project, or its own analysis), and the name of the output mode.
 
 ## Running stages in parallel
 

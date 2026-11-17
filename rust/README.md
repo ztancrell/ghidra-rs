@@ -72,6 +72,8 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
 - `tools/decomp-diff.sh`: runs a corpus on both decompilers and compares; `tools/decomp-show.sh`,
   `tools/decomp-rank.sh`, `tools/decomp-bisect.sh`: the S2 debugging tools (verbose diff,
   easy-first order, first differing step; see "Debugging tools").
+- `tools/ghidra-diff.sh`, `tools/ghidra/DecompileRef.java`: the stage S10 check, `print C` against
+  the C of Java Ghidra (see "Stage S10").
 - `tools/decomp-corpus.sh`, `tools/corpus/m8.txt`, `tools/corpus/m500.txt`: the mercs2 corpora.
 
 ## Build
@@ -3052,6 +3054,82 @@ M500 (4 in the baseline); 0x47a6b0 is loud in every check. (Superseded: the swit
 slice 5 above, which were derived or from single checks.) Varies with load: the "all outputs
 identical" count of `s6void-m500` is 499 / 500 here and 500 / 500 in the baseline (a reference
 timeout; identical 499 / 499 in both).
+
+### Stage S10 (reference and inventory only; blocked), branch `worktree-agent-a6369f440dde42a16` (2026-11-17)
+
+Nothing of the decompiler changed in this slice. It adds the S10 check and records why the S10
+gate (M8 identical to Java Ghidra) cannot be reached yet.
+
+The check, `tools/ghidra-diff.sh <corpus>`: `tools/ghidra/DecompileRef.java` (the
+`DecompInterface` call of mercs2's `Decompile.java`, one output file per address) runs in
+headless Ghidra on a copy of the mercs2 Ghidra project, opened `-readOnly`; the console side is
+`print C` with default options, from ghidra-rs or, with `ENGINE=ref`, from `decomp_dbg`. The
+Java output is kept under `rust/target/ghidra-ref/java/<corpus>/` (the installed Ghidra is 12.2,
+the sources of this repository 12.3). Summary line: `java finished F / N, identical I / F (loud
+L, silent S)`.
+
+Results:
+
+| run | result |
+|---|---|
+| `ghidra-diff.sh m8` (ghidra-rs) | java finished 7 / 8 (no function at 0x54c990 in the Java project), identical 0 / 7, loud 7: "action restructure_varnode is not implemented" |
+| `ENGINE=ref ghidra-diff.sh m8` | identical 0 / 7 (the inventory below) |
+| `ENGINE=ref ghidra-diff.sh m500` | java finished 499 / 500 (0x4c48d0: 60 s timeout), identical 0 / 499 |
+| `decomp-diff.sh m8`, `print C`, default options | ghidra-rs loud 8 / 8 |
+| the same with the eight unported actions skipped on both engines | M8 identical 8 / 8; M500 reference ran 498 / 500, identical 410 / 500, loud 78, silent 11, and 0x4c48d0 (reference timeout) |
+
+Why it is blocked: Java Ghidra runs the default `decompile` action, every group on. ghidra-rs
+does not finish it for any function. The print checks of S9 (`pc-*`, `pcc-*`) run with the
+`tail-t` options (14 groups and 5 rules off) and with `restructure_varnode` and
+`mapped_local_sync` skipped. With default options eight leaves of `action.rs` are `not_ported`
+and fail loudly: `restructure_varnode` and `mapped_local_sync` (group `localrecovery`:
+`ScopeLocal::restructureVarnode`, `MapState`, `RangeHint`, `markUnaliased`, `fakeInputSymbols`,
+`remapSymbol`, the name recommendations of `varmap.cc`, about 1,100 lines of C++ not in
+`varmap.rs`), `multicse`, `shadowvar`, `condconst` (group `analysis`), `directwrite`
+(`protorecovery_b`), `dynamicsymbols` (`dynamic`) and `prototypewarnings` (`protorecovery`).
+
+With those eight skipped on both engines (`DECOMP_SKIP_ACTIONS`), default options otherwise:
+of the 78 loud M500 functions 36 fail at "ActionParamDouble: splitting a stack trial that is a
+PIECE", 17 at "heritage: an indexed stack LOAD ..." (one of them 0x6b21e0, where
+the reference timed out), 14 at "namevars: finalizeDatatype of a
+piece of a symbol (getExactPiece)", 5 at "merge: a STORE guard of the stack heritage pass", 3 at
+"subflow: a logical value in a join varnode", 2 at `RuleStringStore` (`HeapSequence`), 1 at
+`ActionConditionalExe`. 11 are silent, which no check of
+`bars.sh` runs: 0x40dc10 (`extraout_EDX` against `pfVar2`), 0x434f70, 0x494400 and 0x5b8ca0 (a
+missing `(xunknown1 *)` cast of a stack address), 0x45ec20, 0x571cc0, 0x5d3c90, 0x5d4050 and
+0x74c9b0 (other local declarations), 0x5c5ba0 (`in_XMM0_Da` against `in_XMM0_Qa`), 0x6fa6e0
+(`param_1[9]` against `param_1[8]`). Not looked into.
+
+What Java Ghidra prints that `decomp_dbg` does not (M8 and M500, `ENGINE=ref`), the S10 work
+proper, none of it ported:
+
+- Core type names: `undefined4`, `undefined1`, `int`, `uint`, `byte`, `float` for `xunknown4`,
+  `xunknown1`, `int4`, `uint4`, `uint1`, `float4`; with them the variable prefixes (`uVar1`,
+  `auStack_c0`, `puVar1` for `xVar1`, `axStack_c0`, `pxVar1`).
+- Function names: `FUN_00401000` for `func_0x00401000`; a thunk to an import by the import's
+  name (`D3DXVec3TransformNormal` for `func_0x0096bd76`); FID names without decoration
+  (`__security_check_cookie` for `@__security_check_cookie@4`).
+- Global names from the listing: `DAT_00cde2b0`, `_DAT_0256f88a`, `PTR_FUN_00bd2f98` for
+  `iRam00cde2b0`.
+- Read-only data: Java prints `DAT_00b9b664` and `DAT_00b97eec` where `decomp_dbg`, with the
+  prelude's `readonly` range, prints the constants `1.0` and `0.01`.
+- Stack locals: `local_bc` where `decomp_dbg` prints `iStack_bc` (the local range of the
+  prototype; 117 of the 499 M500 functions have a `local_`), and other pieces
+  (`auStack_4a [6]`, `uStack_44` for `axStack_4a [2]`, `xStack_48`).
+- Prototypes of the project: import parameter types (`LeaveCriticalSection((LPCRITICAL_SECTION)
+  ...)`), stored calling conventions and parameters of callees (`FUN_...(in_EAX)`, 152 of the
+  499 print a convention), no-return callees ("WARNING: Subroutine does not return").
+- Function set: 0x54c990 is no function in the Java project; in 0x9eec5e Java prints the jump
+  to `___report_gsfailure` as a call that does not return, where `decomp_dbg` follows the jump
+  and prints that function's body.
+- Comments: the FID plate comment ("Library Function - Single Match"), "WARNING: Globals
+  starting with '_' overlap smaller symbols at the same address" (80 of the 499).
+- Frame: Java's text ends with a blank line; `ghidra-diff.sh` drops blank lines before and
+  after the function on both sides.
+
+Not run: the checks of `bars.sh` (no Rust source changed), `ghidra-diff.sh` on the other
+corpora. Not decided: how ghidra-rs gets the Java project's facts (names, prototypes, data
+types, listing data), and the name of the output mode.
 
 ## Speed
 
