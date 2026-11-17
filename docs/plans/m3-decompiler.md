@@ -1877,7 +1877,8 @@ Progress on the branch (details: rust/README.md, "Default options"):
 4. Rules ported: `pullsub_indirect`, `conditionalmove`, `orpredicate`, `threewaycomp`, plus
    `transformcpool` (fails on a CPOOLREF) and `funcptrencoding` (nothing to do on these specs).
    Eight rules stay off: `aliasupdate`, `switchsingle`, `ptrflow`, `segment`,
-   `ptrsubcharconstant`, `splitcopy`, `splitload`, `splitstore`.
+   `ptrsubcharconstant`, `splitcopy`, `splitload`, `splitstore`. (Superseded: two stay off,
+   `segment` and `ptrsubcharconstant`; see "Pool rules" below.)
 5. `ActionParamDouble` splits a stack trial that is a PIECE (35 loud functions of M500: 6
    identical in `pcd`, 29 loud later in `namevars`; all 35 identical in `print raw` at
    `break start namevars`).
@@ -1892,6 +1893,8 @@ varmap.cc (`MapState`, `RangeHint`, the full `AliasChecker`, `createEntry`,
 merge, `HeapSequence`, `ActionConditionalExe`), and whether a default-options run should fail
 while a pool rule is missing. (Superseded: `ActionConditionalExe` is ported, `condexe.rs`;
 `restructure_varnode` and `mapped_local_sync` are ported, see "Local symbols" below.)
+while a pool rule is missing. (Superseded: `ActionConditionalExe` is ported, `condexe.rs`; a
+run now fails while a pool rule is missing, see "Pool rules" below.)
 
 End sweep of the branch before the merge of `m3-aliasupdate` (final build): all 56 checks on
 M8 identical. M500: `pcd` 422 / 497 (loud 75, silent 0: 51 `namevars` `getExactPiece`, 16
@@ -1999,6 +2002,50 @@ Found by `pmd` and `r5s` on simple: 0x581bf6 was silent. `ActionUnjustifiedParam
 a stack input in the middle of a parameter slot (it looked at register inputs only); the C++
 widens it (`adjustInputVarnodes`, not ported). It fails loudly now. In `pcd` the function was
 loud later anyway (`StringSequence`), which hid it.
+Pool rules (branch `worktree-agent-ab53ef4e46d4bec80`, 2026-11-17). Behaviour change: the
+`decompile` root fails while a pool rule that is not ported is on (the rule tables list every
+C++ rule, `r` ported or `u` not; a unit test compares them with coreaction.cc), so
+`default-options.txt` is the only way to run without one. Ported: `switchsingle`, `ptrflow`
+(nothing to do without a `<truncate_space>`, which the console refuses), `splitcopy`,
+`splitload`, `splitstore` (`SplitDatatype`, `rules/split.rs`; loud on a type needing
+resolution, a partial structure, the CONCAT of split outputs).
+`aliasupdate` is no longer switched off in `pcd`. `default-options.txt` holds two rules:
+`segment` and `ptrsubcharconstant`, ported on other branches and `u` entries here until those
+merge. Checks:
+- `pcd` M500 422 / 497 (loud 75, silent 0), the same 75 functions as before; the six with a
+  STORE guard now fail in `RuleAliasUpdate` instead of in merge.
+- The reference alone on M500 with the six rules on against the eight off: three outputs
+  change (0x4130d0, 0x494200, 0x5bed50), all by `aliasupdate`, all loud in ghidra-rs. So
+  `switchsingle` and the split rules change nothing on M500.
+- Switch corpus, `pcd` (its first run there; not a `bars.sh` default): 1788 / 1994 identical
+  (loud 199, silent 7; counted before `buildCopyTemp` was added, which changes 4 loud
+  functions, see below). The reference alone with `switchsingle` and the split rules on
+  against off: 81 outputs change; ghidra-rs prints 55 of them identically, 25 are loud
+  (indexed stack LOAD, `getExactPiece`, `HeapSequence`, one jump table), 1 is silent
+  (0x2396e7d). The 7 silent misses are the same with the old eight rules off, so they are older
+  than this branch: 0x2396e7d (an extra "Recovered jumptable eliminated as dead code"),
+  0x1c1df81, 0x761980, 0x780890 (a cast on a RETURN value missing), 0x521087, 0x636a4c,
+  0x9944d6 (names and types of stack inputs). Not traced.
+- The four functions that stopped at `duplicateToTemp` (0x54054b, 0x77f310, 0x7f89b0,
+  0x7f8fe5) after `buildCopyTemp` was ported: all four loud in `namevars` (`getExactPiece`) in
+  `pcd`; `print raw` at `break start namevars`: 0x77f310 and 0x7f89b0 identical (the split
+  STOREs through the temporary), 0x54054b and 0x7f8fe5 differ, and differ the same way with
+  the eight rules off (SUBPIECEs of stack inputs the reference has): older, not traced.
+- `simple`: `pcd` 184 / 200 (loud 16, silent 0), as before; the six rules change three
+  reference outputs there, all loud in ghidra-rs (indexed stack LOAD).
+- M8: 56 checks, the 55 lines of the `m3-int5` baseline unchanged, `pcd` 8 / 8.
+- M500 rule checks (the options files without `togglerule switchsingle off`), identical /
+  reference finished, baseline `m3-int5` in brackets: `r1`, `subvar`, `r4`, `r5d`, `s7r`,
+  `s7r2`, `s7sub`, `s7r4`, `s7t`, `s7t2` 499 / 499 (498 or 499); `r5`, `r5typed`, `r5dt`,
+  `s7r5` 498 / 498 (497); `r5c` 495 / 498 (494); `r5dtlock` 482 / 498 (481); `r5dtlocksv` and
+  `r5slock` 453 / 498 (451 / 499); `r5s` 482 / 498 (446 / 499; `m3-default` 483 / 499). Silent
+  0 in each. In `r5dtlocksv`, `r5slock` and `r5s` the reference finished 498, not 499 (a
+  timeout on the loaded machine), so one function is not compared there.
+- Switch corpus: `pcc-r` 1997 / 2005 (loud 8, silent 0) and `swsn-r` 1993 / 2004 (loud 8,
+  silent 3: 0x8d8f40, 0x8eabe0, 0x8ead90), both as in the `m3-default` review-fix pass, now with
+  `switchsingle` on.
+- Not run: the other M500 checks, the other switch checks, `pcd` on the switch corpus again
+  with the final build (only the four functions above), `r5d-adc`.
 
 ## Running stages in parallel
 

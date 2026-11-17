@@ -359,6 +359,14 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    (`paramdouble` 1995 / 2004, `swfs-r` 1996, `swsn-r` 1993 with the 3 silent, `pcc-t` 1996 / 2005). Superseded: "`restructure_varnode`
    and `mapped_local_sync` stay skipped" and "M500 415 / 497" above. Open: `ValueSetSolver` (26 of the 36 loud),
    `StringSequence`, `adjustInputVarnodes` (0x581bf6 was silent in `pmd`, loud now).
+   Pool rules (branch `worktree-agent-ab53ef4e46d4bec80`, 2026-11-17): the `decompile` root now fails while a
+   pool rule that is not ported is on (Superseded: the open decision in the `m3-default` lines above); the rule
+   tables list every C++ rule and a unit test compares them with coreaction.cc. `switchsingle`, `ptrflow`,
+   `splitcopy`, `splitload`, `splitstore` ported, `aliasupdate` on in `pcd`; `default-options.txt` holds 2 rules
+   (`segment`, `ptrsubcharconstant`, ported on other branches). `pcd` M500 422 / 497 (loud 75, silent 0), unchanged;
+   M8 56 checks unchanged; M500 rule checks equal or better, silent 0; switch `pcc-r` 1997 / 2005, `swsn-r` 1993 / 2004
+   (silent 3) unchanged. First `pcd` on the switch corpus: 1788 / 1994 (loud 199, silent 7, all 7 older than the branch);
+   the new rules change 81 reference outputs there, 55 identical here, 25 loud, 1 of the 7 silent.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

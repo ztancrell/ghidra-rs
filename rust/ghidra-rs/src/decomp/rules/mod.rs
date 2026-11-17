@@ -8,12 +8,14 @@
 //! folding ([`float`]); the `Funcdata` methods they need (`cseEliminateList`,
 //! `distributeIntMultAdd`, `totalReplaceConstant`, ...) are in `funcdata.rs`.
 //!
-//! The pool tables [`OPPOOL1`] and [`CLEANUP`] list the ported rules in the C++ order; a rule not
-//! listed is switched off on the reference side by the check (`rust/tools/corpus/r1-options.txt`,
-//! written by `rust/tools/r1-options.sh` from this table). `aliasupdate` is the exception: it is listed
-//! for the partial function of jump-table recovery and the script keeps it off in the `decompile`
-//! root. x86 is little-endian, so the
-//! big-endian address arithmetic of the rules is left out.
+//! The pool tables [`OPPOOL1`], [`OPPOOL2`] and [`CLEANUP`] list every rule of the C++ pools in
+//! the C++ order (a test compares them with coreaction.cc): a ported rule as `r(...)`, one not
+//! ported as `u(...)`. The `decompile` root fails while a `u` rule is on, so the checks switch
+//! it off on both engines (`rust/tools/corpus/r1-options.txt` and the other options files,
+//! written by `rust/tools/r1-options.sh` from these tables). The script also keeps `aliasupdate`
+//! off in the older rule checks: it is ported, but in the function itself it fails on a guarded
+//! stack STORE. x86 is little-endian, so the big-endian address arithmetic of the rules is left
+//! out.
 
 mod arith;
 mod bitfield;
@@ -34,6 +36,7 @@ mod piece;
 mod pool;
 pub(crate) mod ptrarith;
 mod segment;
+mod split;
 mod stackvars;
 mod subpiece;
 mod subvar;
@@ -64,6 +67,7 @@ use modulo::*;
 use piece::*;
 use ptrarith::*;
 use segment::*;
+use split::*;
 use stackvars::*;
 use subpiece::*;
 use subvar::*;
@@ -96,6 +100,28 @@ pub(crate) struct Rule {
 
 const fn r(name: &'static str, group: &'static str, ops: &'static [Opcode], apply: RuleFn) -> Rule {
     Rule { name, group, ops, apply }
+}
+
+/// A rule of the C++ pool that is not ported. The `decompile` root refuses to run while one is
+/// on (`pool::select`); in the `jumptable` root, which no option reaches, it fails on the first op
+/// it would be tried on.
+const fn u(name: &'static str, group: &'static str, ops: &'static [Opcode]) -> Rule {
+    Rule { name, group, ops, apply: rule_not_ported }
+}
+
+fn rule_not_ported(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
+    let o = fd.op(op);
+    err(format!(
+        "a pool rule tried on {:?} at 0x{:08x} is not ported (rules/mod.rs: the `u` entries)",
+        o.opc, o.seq.addr
+    ))
+}
+
+impl Rule {
+    /// A `u` entry.
+    fn unported(&self) -> bool {
+        std::ptr::fn_addr_eq(self.apply, rule_not_ported as RuleFn)
+    }
 }
 
 use Opcode::*;
@@ -217,6 +243,7 @@ pub(crate) const OPPOOL1: &[Rule] = &[
     r("signmod2nopt", "analysis", &[IntRight], sign_mod2n_opt),
     r("signmod2nopt2", "analysis", &[IntMult], sign_mod2n_opt2),
     r("signmod2opt", "analysis", &[IntAnd], sign_mod2_opt),
+    r("switchsingle", "analysis", &[Branchind], switch_single),
     r("condnegate", "analysis", &[Cbranch], cond_negate),
     r("boolnegate", "analysis", &[BoolNegate], bool_negate),
     r("lessequal", "analysis", &[BoolOr], less_equal),
@@ -237,6 +264,7 @@ pub(crate) const OPPOOL1: &[Rule] = &[
     r("subvar_and", "subvar", &[IntAnd], subvar_and),
     r("subvar_subpiece", "subvar", &[Subpiece], subvar_subpiece),
     r("splitflow", "subvar", &[Subpiece], split_flow),
+    r("ptrflow", "subvar", &[], ptr_flow),
     r("subvar_compzero", "subvar", &[IntNotequal, IntEqual], subvar_comp_zero),
     r("subvar_shift", "subvar", &[IntRight], subvar_shift),
     r("subvar_zext", "subvar", &[IntZext], subvar_ext),
@@ -280,9 +308,13 @@ pub(crate) const CLEANUP: &[Rule] = &[
     r("subright", "cleanup", &[Subpiece], sub_right),
     r("floatsigncleanup", "cleanup", &[IntAnd, IntXor], float_sign_cleanup),
     r("expandload", "cleanup", &[Load], expand_load),
+    u("ptrsubcharconstant", "cleanup", &[Ptrsub]),
     r("extensionpush", "cleanup", &[IntZext, IntSext], extension_push),
     r("piecestructure", "cleanup", &[Piece, IntZext], piece_structure),
     r("andstructure", "cleanup", &[IntAnd], and_structure),
+    r("splitcopy", "splitcopy", &[Copy], split_copy),
+    r("splitload", "splitpointer", &[Load], split_load),
+    r("splitstore", "splitpointer", &[Store], split_store),
     r("stringcopy", "constsequence", &[Copy], string_copy),
     r("stringstore", "constsequence", &[Store], string_store),
     r("bitfield_store", "bitfields", &[Store], bitfield_transform),
@@ -329,6 +361,45 @@ fn transform_cpool(_: &mut Funcdata, _: OpId, _: &Arch) -> Result<i32> {
 /// `<funcptr>` of the compiler spec sets it, which cspec.rs refuses.
 fn funcptr_encoding(_: &mut Funcdata, _: OpId, _: &Arch) -> Result<i32> {
     Ok(0)
+}
+
+/// `RulePtrFlow`: its op list is empty unless the default data space is truncated
+/// (`<truncate_space>` of the `.ldefs`), and the console refuses a language that has one
+/// (`Sleigh::refuse_truncated`).
+fn ptr_flow(_: &mut Funcdata, _: OpId, _: &Arch) -> Result<i32> {
+    Ok(0)
+}
+
+/// Port of `RuleSwitchSingle`: a BRANCHIND whose block has one out edge becomes a BRANCH to the
+/// table's one destination, and the table goes (`Funcdata::removeJumpTable`).
+fn switch_single(fd: &mut Funcdata, op: OpId, arch: &Arch) -> Result<i32> {
+    let Some(bb) = fd.op(op).parent else { return Ok(0) };
+    if fd.blocks.block(bb).outs.len() != 1 {
+        return Ok(0);
+    }
+    let Some(jt) = fd.jumptables.iter().find(|jt| jt.op == op) else { return Ok(0) };
+    // labels must be recovered (`isLabelled`)
+    let (Some(&target), false) = (jt.targets.first(), jt.labels.is_empty()) else { return Ok(0) };
+    let n = jt.targets.len();
+    let all_match = n != 1 && jt.targets.iter().all(|&t| t == target);
+    if n != 1 || !is_const(fd, inp(fd, op, 0)?) {
+        // `printRaw` of a 4-byte ram address
+        let mut msg = format!("Switch with 1 destination removed at 0x{:08x}", fd.op(op).seq.addr);
+        if all_match {
+            msg.push_str(&format!(" : {n} cases all go to same destination"));
+        }
+        fd.warning_header(msg);
+    }
+    fd.op_set_opcode(op, Branch);
+    // newCodeRef: a one-byte annotation at the destination
+    let cref = fd.new_varnode(1, Space::Sleigh(arch.sleigh.code_space()), target);
+    fd.vn_set(cref, VnFlags::CODEREF);
+    fd.vn_clear(cref, VnFlags::PERSIST);
+    fd.vn_clear(cref, VnFlags::ADDRTIED);
+    fd.op_set_input(op, cref, 0)?;
+    fd.jumptables.retain(|jt| jt.op != op);
+    fd.structure.clear();
+    Ok(1)
 }
 
 /// `Varnode::loneDescend`.
@@ -456,6 +527,61 @@ pub(super) mod testutil {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three tables hold every rule of the C++ pools (`universalAction`, coreaction.cc), in
+    /// its order and with its group: a rule missing from a table would be silently absent from
+    /// a run, so it must be listed, ported (`r`) or not (`u`).
+    #[test]
+    fn tables_list_every_rule_of_the_cpp_pools() {
+        let cpp =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Ghidra/Features/Decompiler/src/decompile/cpp");
+        // class -> rule name, from the constructors `RuleX(const string &g) : Rule(g, 0, "name")`
+        // (RulePtrFlow's is in ruleaction.cc: it takes the architecture too)
+        let mut names = std::collections::HashMap::from([("RulePtrFlow".to_string(), "ptrflow".to_string())]);
+        for file in std::fs::read_dir(&cpp).unwrap().map(|e| e.unwrap().path()) {
+            if file.extension().is_none_or(|x| x != "hh") {
+                continue;
+            }
+            for line in std::fs::read_to_string(&file).unwrap().lines() {
+                let l = line.trim_start();
+                let Some((class, rest)) = l.split_once("(const string &g") else { continue };
+                let Some((_, rule)) = rest.split_once(": Rule(") else { continue };
+                if let Some(name) = rule.split('"').nth(1) {
+                    names.insert(class.to_string(), name.to_string());
+                }
+            }
+        }
+        let core = std::fs::read_to_string(cpp.join("coreaction.cc")).unwrap();
+        let pool = |var: &str| -> Vec<(String, String)> {
+            let (first, last) = (format!("{var} = new ActionPool"), format!("addAction( {var} )"));
+            core.lines()
+                .skip_while(|l| !l.contains(&first))
+                .take_while(|l| !l.contains(&last))
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .filter_map(|l| l.split_once("new Rule"))
+                .map(|(_, r)| {
+                    let class = format!("Rule{}", r.split('(').next().unwrap());
+                    let name = names.get(&class).unwrap_or_else(|| panic!("no rule name for {class}"));
+                    (name.clone(), r.split('"').nth(1).unwrap().to_string())
+                })
+                .collect()
+        };
+        for (var, table) in [("actprop", OPPOOL1), ("actprop2", OPPOOL2), ("actcleanup", CLEANUP)] {
+            let ours: Vec<_> = table.iter().map(|rl| (rl.name.to_string(), rl.group.to_string())).collect();
+            assert_eq!(ours, pool(var), "{var}");
+        }
+    }
+
+    /// The `decompile` root refuses to apply a pool while a rule that is not ported is on; the
+    /// `jumptable` root files the rule, which fails on an op of its list.
+    #[test]
+    fn an_unported_rule_that_is_on_fails_the_pool() {
+        static TABLE: &[Rule] = &[u("segment", "segment", &[Segmentop])];
+        let strict = select(TABLE, |_| true, true);
+        assert_eq!(strict.missing, ["segment"]);
+        assert!(select(TABLE, |_| false, true).missing.is_empty());
+        assert!(select(TABLE, |_| true, false).missing.is_empty());
+    }
 
     #[test]
     fn shift_helpers_table() {

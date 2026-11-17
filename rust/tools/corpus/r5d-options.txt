@@ -13,5 +13,4 @@ option currentaction decompile constsequence off
 option currentaction decompile bitfields off
 option currentaction decompile dynamic off
 option togglerule aliasupdate off
-option togglerule switchsingle off
 option togglerule ptrsubcharconstant off

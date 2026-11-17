@@ -23,11 +23,13 @@
 set -e
 rust=$(cd "$(dirname "$0")/.." && pwd)
 cpp=$rust/../Ghidra/Features/Decompiler/src/decompile/cpp
-ported=" $(grep -o '"[a-z0-9_]*", "[a-z]*", &\[' "$rust/ghidra-rs/src/decomp/rules/mod.rs" | cut -d'"' -f2 | tr '\n' ' ') "
+# the ported rules: the `r(` entries of the tables (a `u(` entry is a rule not ported)
+all_ported=" $(grep -o '\br("[a-z0-9_]*", "[a-z]*", &\[' "$rust/ghidra-rs/src/decomp/rules/mod.rs" | cut -d'"' -f2 | tr '\n' ' ') "
 # `aliasupdate` is ported for the partial function of jump-table recovery, where the `decompile`
 # options do not reach. In the function itself it fails on the INDIRECTs of an indexed stack STORE
-# (the value-set range of the store guard is not ported), so the checks keep it off there.
-ported=${ported/ aliasupdate / }
+# (the value-set range of the store guard is not ported), so the older checks keep it off there.
+# The default-options check (the last file) runs it.
+ported=${all_ported/ aliasupdate / }
 # class -> rule name, from the constructors `RuleX(const string &g) : Rule(g, 0, "name")`
 names=$(grep -ho 'Rule[A-Za-z0-9]*(const string &g[^)]*) : Rule( *g *, *[^,]*, *"[a-z0-9_]*")' "$cpp"/*.hh |
     sed 's/(.*"\([a-z0-9_]*\)")/ \1/')
@@ -86,7 +88,9 @@ echo "tail-r-options.txt, tail-t-options.txt: s8-r/s8-t with localrecovery on"
 grep -v "decompile switchnorm off" "$rust/tools/corpus/s8-r-options.txt" > "$rust/tools/corpus/sw-r-options.txt"
 grep -v "decompile switchnorm off" "$rust/tools/corpus/s8-t-options.txt" > "$rust/tools/corpus/sw-t-options.txt"
 echo "sw-r-options.txt, sw-t-options.txt: s8-r/s8-t with switchnorm on"
-# the default-options check (pcd): no group off, only the rules not ported yet (of every group)
+# the default-options check (pcd): no group off, only the rules not ported yet (of every group;
+# `aliasupdate` runs)
+ported=$all_ported
 all=" analysis cleanup subvar floatprecision typerecovery constsequence bitfields doubleload doubleprecis stackvars deadcode nodejoin conditionalexe protorecovery segment splitcopy splitpointer "
 {
     pool "$all" 'actprop = new ActionPool' 'actstackstall->addAction( actprop )'

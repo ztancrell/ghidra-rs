@@ -21,7 +21,8 @@ use super::{err, heritage, Arch, Funcdata, Result};
 /// `finalstructure`, the tail; superseded: "`prototypewarnings` is not"). `oppool1` holds the
 /// ported rules (`rules::OPPOOL1`) less those `togglerule` switched off (`rule:<name>` in
 /// `disabled`); the actions named `action:<name>` there (`DECOMP_SKIP_ACTIONS`) are left out. An
-/// action that is not ported fails when it runs with its group on.
+/// action that is not ported fails when it runs with its group on, and so does a pool while a
+/// rule that is not ported is on (`rules::pool::select`).
 pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
     tree(false, disabled)
 }
@@ -98,7 +99,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             .collect()
     };
     // the rules of the groups that are on, less those `togglerule` switched off ("rule:<name>")
-    let pool1 = super::rules::select(super::rules::OPPOOL1, rule_on);
+    let pool1 = super::rules::select(super::rules::OPPOOL1, rule_on, !jumptable);
     let pool1 = t.pool("oppool1", pool1);
     let mut root = leaves(
         &mut t,
@@ -162,7 +163,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
     // oppool2 (stage R5): the `typerecovery` pointer rules and the `stackvars` rules.
     // The `stackvars` rules are on in the jump-table partial function too, as in the C++
     // (superseded: "runs without the `stackvars` rules"; see [`jumptable_partial`]).
-    let pool2 = super::rules::select(super::rules::OPPOOL2, rule_on);
+    let pool2 = super::rules::select(super::rules::OPPOOL2, rule_on, !jumptable);
     mainloop.push(t.pool("oppool2", pool2));
     mainloop.extend(leaves(
         &mut t,
@@ -204,7 +205,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("startcleanup", "cleanup", c::nothing),
         ],
     ));
-    let cleanup = super::rules::select(super::rules::CLEANUP, rule_on);
+    let cleanup = super::rules::select(super::rules::CLEANUP, rule_on, !jumptable);
     root.push(t.pool("cleanup", cleanup));
     root.extend(leaves(
         &mut t,
