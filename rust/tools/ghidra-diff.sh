@@ -10,6 +10,8 @@
 #   ENGINE=ref   compare Java with decomp_dbg instead of ghidra-rs (what Java Ghidra adds to the
 #                console decompiler: names, types, prototypes, comments)
 #   FACTS=0      ghidra-rs without the facts (the prelude, as decomp_dbg)
+#   FACTS=<file> ghidra-rs with another facts file, such as the one ghidra-rs derives itself
+#                (`analyze --facts`, tools/facts-own.sh)
 #   SKIP         DECOMP_SKIP_ACTIONS for the console engine (actions left out; none by default)
 #   CLASSIFY=<actions>  also run decomp_dbg with the prelude (and `option readonly off`) twice,
 #                as it is and with these actions skipped, and mark each miss `skip` when the
@@ -52,7 +54,9 @@ export eng DECOMP_SKIP_ACTIONS=$SKIP
 "$rust/tools/decomp-diff.sh" --prelude
 facts=$FACTS
 export FACTS=
-if [ "$ENGINE" != ref ] && [ "$facts" != 0 ]; then
+if [ "$ENGINE" != ref ] && [ -f "$facts" ]; then
+    FACTS=$facts
+elif [ "$ENGINE" != ref ] && [ "$facts" != 0 ]; then
     GHIDRA_REF=$ref "$rust/tools/ghidra-facts.sh"
     FACTS=$ref/mercs2.facts
 fi

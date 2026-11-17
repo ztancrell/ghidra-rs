@@ -8,6 +8,10 @@
 //! them; a record it cannot honour is an error when a decompile reads it, never at load.
 //!
 //! The file is indexed by address at load; a record's XML is parsed when it is asked for.
+//!
+//! `analyze --facts` (`factsout.rs`) writes the same file from ghidra-rs's own analysis. What it
+//! does not derive it names in `underived <address> <what>` records, and a decompile that reads
+//! one fails (`Facts::derived`).
 
 use super::fspec::{ExtraPop, FuncProto, Storage};
 use super::funcdata::Funcdata;
@@ -119,6 +123,9 @@ pub(crate) struct Facts {
     code_protos: HashSet<TypeId>,
     /// namespaces by id (`getNamespacePath`): the names from the outermost in, each with `::`
     ns: HashMap<u64, String>,
+    /// what the writer of the facts did not derive (`analyze --facts`, factsout.rs), by
+    /// address: `function`, `locals`, `comments`, `label`. A decompile that reads one fails
+    underived: HashMap<u64, Vec<Range<usize>>>,
 }
 
 fn hex(s: &str) -> Result<u64> {
@@ -331,6 +338,7 @@ impl Facts {
             types: HashMap::new(),
             code_protos: HashSet::new(),
             ns: HashMap::new(),
+            underived: HashMap::new(),
         };
         // functions in a namespace: entry and namespace id, named once the `ns` records are read
         let mut scoped = Vec::new();
@@ -449,6 +457,9 @@ impl Facts {
                     let path = parse(x)?;
                     let names = path.kids.iter().filter(|v| !v.text.is_empty()).map(|v| format!("{}::", v.text));
                     f.ns.insert(hex(id)?, names.collect());
+                }
+                ("underived", Some(a), Some(what), None) => {
+                    f.underived.entry(hex(a)?).or_default().push(at(what));
                 }
                 _ => return Err(bad(line)),
             }
@@ -600,6 +611,10 @@ impl Facts {
     /// `FuncProto::decode` of its `<prototype>` over the parameters of its `<localdb>`
     /// (`ProtoStoreSymbol`).
     pub(crate) fn function(&self, arch: &Arch, types: &mut TypeFactory, entry: u64, own: bool) -> Result<FuncFact> {
+        self.derived(entry, "function")?;
+        if own {
+            self.derived(entry, "locals")?;
+        }
         let rec =
             if arch.externref_target(entry).is_some() { self.extrefs.get(&entry) } else { self.funcs.get(&entry) };
         let rec = rec.ok_or_else(|| LowlevelError(format!("facts: no function at {entry:#x}")))?;
@@ -739,9 +754,20 @@ impl Facts {
         Ok(false)
     }
 
+    /// Fails when the facts name `what` at `addr` as not derived (an `underived` record).
+    fn derived(&self, addr: u64, what: &str) -> Result<()> {
+        match self.underived.get(&addr) {
+            Some(v) if v.iter().any(|r| self.xml(r) == what) => {
+                err(format!("facts: the {what} at {addr:#x} are not derived by ghidra-rs (analyze --facts)"))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// `getCodeLabel`: the listing's label at an instruction, while the function at `entry` is
     /// decompiled.
     pub(crate) fn label(&self, addr: u64, entry: u64) -> Result<Option<&str>> {
+        self.derived(addr, "label")?;
         let Some((name, own)) = self.labels.get(&addr) else { return Ok(None) };
         if own.is_some_and(|o| o != entry) {
             return err(format!(
@@ -753,6 +779,7 @@ impl Facts {
 
     /// `getComments` of the function at `entry`.
     pub(crate) fn comments(&self, entry: u64) -> Result<Vec<ListingComment>> {
+        self.derived(entry, "comments")?;
         let Some(r) = self.comments.get(&entry) else { return Ok(Vec::new()) };
         let root = parse(self.xml(r))?;
         let mut out = Vec::new();

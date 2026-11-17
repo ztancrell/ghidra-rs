@@ -334,6 +334,13 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    undefined read-only bytes, `FACTS=0`; four silent cases made loud; facts file version 2. Superseded: "loud 72,
    silent 235" (the slice's final build: loud 70, silent 237; the same after the fixes). See `rust/README.md`,
    "Stage S10, slice 1: review fixes". The checks against `decomp_dbg` (M8 all 55, M500 six) equal the baseline.
+   S10 slice 2 (2026-11-17): `ghidra-rs analyze --facts` writes the same facts from ghidra-rs's own analysis
+   (`factsout.rs`), so `load facts` needs no Java project: functions, bodies, names, purge, stack variables,
+   imports with the prototypes of Ghidra's Windows archive (a one-time headless export,
+   `tools/ghidra-protos.sh`), data symbols, strings and pointers at references, labels, read-only blocks,
+   tracked registers, flow overrides. What it does not derive is an `underived` record and fails when a
+   decompile reads it. `tools/facts-diff.sh` compares with the Java facts per record kind (mercs2, with
+   Java's function set: `func` 80.6%, `body` 98.1%, `extref` 90.0%, `data` 47.1%, `label` 94.9% equal; `ghidra-diff.sh` M8 identical 2 / 7 against 3 / 7 with the Java facts, M500 171 / 499 against 192 / 499). See `rust/README.md`, "Stage S10, slice 2".
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
@@ -353,3 +360,12 @@ scripts live", decided 2026-11-15 (plain files, see Decided).
   the Ghidra project by a headless script, read with the console command `load facts`. The
   alternative is ghidra-rs's own analysis plus the edit files of the 2026-11-15 decision, which
   cannot match Java's C wherever Java's analysis differs. To confirm or change.
+  S10 slice 2 built that alternative next to the export (`analyze --facts`, the same file format) and
+  measured it; both exist, the question stays open.
+- 2026-11-17: Choices of S10 slice 2 made without the user, to confirm or change: a part of the facts
+  ghidra-rs does not derive is named (`underived`) and fails the decompile that reads it, while a
+  rule of Ghidra's analyzers ported with an approximation is written and measured instead; a
+  function given by `--seeds` or `--functions-from` that discovery does not find stands for one a
+  script made after auto-analysis (no purge, no stack variables); the import prototypes come from a
+  one-time headless export of Ghidra's archive, not from a `.gdt` reader in Rust (the 2026-11-13
+  decision names data-type archives as data to read in place: not started).

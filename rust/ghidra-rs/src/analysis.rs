@@ -168,6 +168,26 @@ pub struct Fold {
     regs: Vec<(u32, u64, u32, Option<Val>, bool)>,
     mem: Vec<(Val, Option<Val>, bool)>,
     whole: bool, // a whole-function walk (`propagate`): keeps more memory
+    /// the stack slots the last instruction read or wrote through a folded address: (offset
+    /// from ESP at the entry, bytes, written)
+    pub stack: Vec<(u32, u32, bool)>,
+    /// bytes of the last LOAD or STORE of the last instruction, 0 without one
+    pub mem_size: u32,
+    /// `AND ESP,mask` keeps a stack address (the mask applies to its offset), as Ghidra's
+    /// stack analysis has it; off for the walks of `propagate`
+    stack_and: bool,
+}
+
+impl Fold {
+    /// The offset from ESP at the entry that the 4-byte register at `reg` of the register
+    /// space `rs` holds, where it holds a stack address.
+    pub fn stack_offset(&self, rs: u32, reg: u64) -> Option<u32> {
+        match self.regs.iter().find(|f| f.0 == rs && f.1 < reg + 4 && reg < f.1 + f.2 as u64) {
+            Some(&(_, at, 4, Some(Val::S(0x10, d)), _)) if at == reg => Some(d),
+            Some(_) => None,
+            None => (reg == 0x10).then_some(0),
+        }
+    }
 }
 
 impl Ins {
@@ -428,6 +448,8 @@ impl Analysis {
         // follows jumps (`descend` hands it to the target) and a call clobbers EAX/ECX/EDX/ESP.
         let (uniq, rs) = (sl.uniq_space(), self.reg_space);
         fold.regs.retain(|f| f.0 != uniq);
+        fold.stack.clear();
+        fold.mem_size = 0;
         let val = |v: &crate::sleigh::Varnode, fold: &Fold| -> Option<(Val, bool)> {
             let mem = |x: u32| match fold.mem.iter().find(|m| m.0 == Val::C(x)) {
                 Some(m) => m.1.map(|v| (v, m.2)),
@@ -479,6 +501,14 @@ impl Analysis {
         }
         let mut computed = None;
         for op in &ops {
+            if matches!(op.opc, 2 | 3) {
+                // for the stack variables of `stack_uses`; nothing here reads these
+                let size = if op.opc == 2 { op.out.as_ref().map_or(0, |o| o.size) } else { op.ins[2].size };
+                fold.mem_size = size;
+                if let Some((Val::S(0x10, d), _)) = op.ins.get(1).and_then(|v| val(v, fold)) {
+                    fold.stack.push((d, size, op.opc == 3));
+                }
+            }
             if op.opc == 3 {
                 let v = op.ins.get(2).and_then(|v| val(v, fold));
                 // a constant stored through a register, `MOV ECX,fn; MOV [EAX*8+t],ECX`: Ghidra's
@@ -548,6 +578,7 @@ impl Analysis {
                                     Val::S(b, d.wrapping_add(c))
                                 }
                                 (20, Val::S(b, d), Val::C(c)) => Val::S(b, d.wrapping_sub(c)),
+                                (27, Val::S(0x10, d), Val::C(m)) if fold.stack_and => Val::S(0x10, d & m),
                                 (20 | 26, x, y) if x == y => Val::C(0), // `XOR EDI,EDI`
                                 (20, Val::S(b, d), Val::S(b2, d2)) if b == b2 => Val::C(d.wrapping_sub(d2)),
                                 _ => return None,
@@ -1175,11 +1206,25 @@ impl Analysis {
     /// One function's walk for `propagate`: every decode of an instruction of the body, with
     /// the state the walk brought there.
     fn flow_constants(&self, img: &Image, sl: &Sleigh, p: &mut crate::sleigh::Parse, f: u32) -> Vec<(u32, Ins)> {
+        self.flow_walk(img, sl, p, f, false, &mut |_, _| {})
+    }
+
+    /// The walk of `flow_constants`; `visit` sees each instruction's address and the state
+    /// after it. With `stack_and`, `AND ESP,mask` keeps ESP a stack address.
+    pub fn flow_walk(
+        &self,
+        img: &Image,
+        sl: &Sleigh,
+        p: &mut crate::sleigh::Parse,
+        f: u32,
+        stack_and: bool,
+        visit: &mut dyn FnMut(u32, &Fold),
+    ) -> Vec<(u32, Ins)> {
         const MAX_EXTRA_INSTRUCTION_FLOW: u32 = 16;
         let body = &self.bodies[&f];
         let (mut out, mut visited, mut edges) = (Vec::new(), HashSet::new(), HashSet::new());
         // (destination, source, state, instructions run since hitting visited code)
-        let mut stack = vec![(f, f, Fold { whole: true, ..Fold::default() }, None::<u32>)];
+        let mut stack = vec![(f, f, Fold { whole: true, stack_and, ..Fold::default() }, None::<u32>)];
         while let Some((mut a, src, mut fold, mut extra)) = stack.pop() {
             if !edges.insert((a, src)) {
                 continue; // already flowed here from there
@@ -1194,6 +1239,7 @@ impl Analysis {
                     extra = None;
                 }
                 let Some(d) = self.decode(img, sl, p, a, &mut fold) else { break };
+                visit(a, &fold);
                 let computed = d.computed;
                 out.push((a, d));
                 let call = matches!(ins.flow, Flow::Call | Flow::CallInd);
@@ -1242,6 +1288,39 @@ impl Analysis {
             (Flow::CallInd, Some(s)) => img.read_u32(s).filter(|t| self.funcs.contains(t)),
             _ => None,
         }
+    }
+
+    /// The bytes the RETs of `f` pop (`RET n`), where they agree.
+    pub fn purge(&self, f: u32) -> Option<u32> {
+        self.purge.get(&f).copied()
+    }
+
+    /// Ghidra's `FunctionPurgeAnalysisCmd`: the bytes the first RET of the body (by address,
+    /// among its first 2048 instructions) pops; without a RET, the purge of the function the
+    /// last jump out of the body calls (a jump with a `CALL_RETURN` override).
+    // ponytail: Ghidra takes the callee's purge as it is when this function is analysed (in
+    // address order); here the callee is always worked out first, 8 jumps deep at most
+    pub fn ret_purge(&self, img: &Image, f: u32, depth: u32) -> Option<u32> {
+        let mut backup = None;
+        for &a in self.bodies.get(&f)?.iter().take(2048) {
+            let i = &self.insns[&a];
+            match i.flow {
+                Flow::Return => {
+                    let sec = img.block_of(a)?;
+                    let b = &sec.data[(a - sec.addr) as usize..];
+                    let b = &b[b.iter().take_while(|&&x| matches!(x, 0xf2 | 0xf3 | 0x66)).count()..];
+                    return match b {
+                        [0xc2 | 0xca, lo, hi, ..] => Some(u16::from_le_bytes([*lo, *hi]) as u32),
+                        [0xc3 | 0xcb, ..] => Some(0),
+                        _ => None, // IRET
+                    };
+                }
+                Flow::Jump => backup = i.target.filter(|t| *t != f && self.funcs.contains(t)).or(backup),
+                _ => {}
+            }
+        }
+        let t = backup.filter(|t| depth < 8 && !self.noreturn.contains(t))?;
+        self.ret_purge(img, t, depth + 1)
     }
 
     pub fn body_size(&self, f: u32) -> u64 {

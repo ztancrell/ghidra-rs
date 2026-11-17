@@ -28,6 +28,8 @@
 //   type <id> <xml>                  getDataType for each <typeref> of the records above
 //   ns <id> <xml>                    getNamespacePath for each namespace id of the records above
 // Newlines and tabs inside the XML are written as character references.
+// `ghidra-rs analyze --facts` (factsout.rs) writes the same file from its own analysis, with one
+// more record for what it does not derive: underived <address> <function|comments|label>.
 //@category ghidra-rs
 import java.io.BufferedWriter;
 import java.io.File;

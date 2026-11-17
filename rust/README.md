@@ -26,6 +26,8 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   an object's vtable, resolved through a value stored via a symbolic register; whole-function
   propagation, where a vtable stored to the stack survives a call to a `RET 4` function and a
   join; ExportFunctions counting a computed call in `callees` and `callers`.
+- `ghidra-rs/src/factsout.rs`: `analyze --facts`: the facts of ghidra-rs's own analysis in the
+  format of `tools/ghidra/ExportFacts.java` (stage S10, slice 2), for `load facts`.
 - `ghidra-rs/src/fid.rs`: Function ID: the FID hasher, a reader for Ghidra's `.fidbf`
   databases, and FID's matching and naming.
 - `ghidra-rs/tests/fid.rs`: the FID hash of a known CRT function, and its record in Ghidra's
@@ -142,8 +144,10 @@ Varnodes print as a register name when one matches exactly, `0x5:4` for constant
 
 ```sh
 ghidra-rs analyze <pe32> [--functions <csv>] [--gaps <csv>] [--abi-callers <register_abi.csv> <out.csv> [--data-pointers]]
-                         [--decomp-prelude <out>] [--seeds <csv> | --functions-from <csv>]... [--sla <file>]
+                         [--decomp-prelude <out>] [--facts <out> [--protos <file>]] [--seeds <csv> | --functions-from <csv>]... [--sla <file>]
 ```
+
+`--facts` is stage S10, slice 2 (below): the facts `load facts` reads, from this analysis.
 
 Analyzes a 32-bit x86 PE and writes the files of three headless Ghidra scripts of the mercs2
 decomp project (`mercs2-decomp/tools/ghidra`), in the same format:
@@ -3379,6 +3383,177 @@ here and are taken as none in Java, whose limit may differ by one character; a l
 another function's namespace and the four loud cases above are not ported; no unit test
 covers the new records (they need a loaded architecture). Not run: `ghidra-diff.sh` on the
 other corpora, a full pass, the Mac.
+
+### Stage S10, slice 2: the facts from ghidra-rs's own analysis (`analyze --facts`), branch `worktree-agent-ad70960380034c8df` (2026-11-17)
+
+The facts of slice 1 come from a Java Ghidra project. This slice writes the same file from
+ghidra-rs's own analysis of the binary, so `load facts` needs no project:
+
+```sh
+ghidra-rs analyze <pe32> --facts <out> [--protos <file>] [--seeds <csv> | --functions-from <csv>]
+tools/facts-own.sh            # mercs2: writes rust/target/facts/mercs2.facts and compares it
+tools/ghidra-protos.sh        # once per Ghidra version: $GHIDRA_REF/win32.protos
+```
+
+`ghidra-rs/src/factsout.rs` writes each record as Java's `DecompileCallback` would send it for
+a listing holding what the analysis found. With `--facts`, `analyze` runs discovery with
+Create Address Tables and constant propagation (`Analysis::disassemble` with constants) and
+Function ID; mercs2 takes about 55 s with plain discovery and 50 to 130 s with
+`--functions-from` (discovery runs twice, see below; the desktop was shared), the file is 86 to 89 MB.
+
+| record | where it comes from |
+|---|---|
+| `coretypes` | Ghidra's built-in data-types for x86:LE:32 Windows, a copy of one export (`src/facts_coretypes.xml`); they do not depend on the program |
+| `block` | the PE sections and headers, writable or not; the TEB block of Ghidra's "Windows x86 Thread Environment Block" analyzer (`0xffdff000`) |
+| `wref` | an address of a block that is not writable which an instruction writes |
+| `func`, `body` | the functions and their bodies as address ranges. Names: an export's, Function ID's (`@name@4` is `name` with `__fastcall` locked, `_name` is `name` with `__cdecl` locked, as the demangler leaves them), a thunk's (one `JMP` to a function, through an import slot, or through a pointer that holds a function's entry: `thunk_FUN_...`, or the name and prototype of the import), else `FUN_<address>`. `extrapop`: Ghidra's `FunctionPurgeAnalysisCmd` (`Analysis::ret_purge`: the first RET by address, else the function the last jump out calls). No-return: the analysis's set. Call fixups: the compiler spec's `<callfixup>` targets by name. Stack variables: Ghidra's stack analysis (`Exporter::locals`, below) |
+| `tracked` | the `.pspec`'s tracked registers (`DF = 0`) and `FS_OFFSET = 0xffdff000`, once: they hold for every function |
+| `extref`, `data` (`<externrefsymbol>`) | the import slots. The prototype is the archive's (`--protos`), with no-return added from the analysis's set |
+| `data` | at every reference target that is not code: a pointer (`PTR_<what it points to>_<address>`: the slots of Create Address Tables, and the Reference analyzer's `checkForPointer`, followed from pointer to pointer), a string (below), `DAT_<address>` typed `undefinedN` where a COPY from memory or a LOAD or STORE through a constant sizes it (constant propagation's `createData`; only a COPY's direct read counts, as in `SymbolicPropogator`), else `DAT_<address>` of one `undefined` byte. A label at code outside every function is a `<labelsym>` |
+| `string` | the Reference analyzer's strings (`OperandReferenceAnalyzer.checkForAscii`, `checkForUnicode`): 5 or more ASCII characters with a terminator, or more than 3 UTF-16 ones, at a reference target outside executable blocks, with no reference into them; named `s_<text>` and `u_<text>` (`makeStringLabel`) |
+| `undef` | the bytes of the blocks that are not writable which no instruction, typed data or import slot covers, as ranges |
+| `label` | a function's name at its entry, `LAB_<address>` at an instruction something refers to |
+| `override` | `CALL_RETURN` on a jump to another function (not a thunk's) and on a call of a function that does not return |
+| `type` | the data-types of the archive's prototypes that are used, and `undefined` |
+| `underived <address> <what>` | what this analysis does not derive (new with this slice, below) |
+
+**Absent loudly.** What ghidra-rs does not derive is named, and the loader (`Facts::derived`)
+fails when a decompile reads it:
+
+| `underived` | when | mercs2 (plain discovery) |
+|---|---|---|
+| `function` | a function with a C++ name (an export or a Function ID name the small demangler leaves: Java has its namespace and the prototype of its mangling); an import, or a thunk to one, whose name the archive does not have (Java gives 220 of the 1,022 imports no prototype either, but an `extrapop` it works out at the call sites) | 699 |
+| `comments` | a function Function ID names (Java's plate comment lists the libraries, which `fid.rs` does not load) or with a C++ name (the demangler's comment) | 1,638 |
+| `label` | a switch case (Java: `caseD_3` in a `switchD_...` namespace, from its decompiler switch analysis) | 7,969 |
+
+**Function prototypes of the imports.** Java takes them from its data-type archive
+(`Ghidra/Features/Base/data/typeinfo/win32/windows_vs12_32.gdt`, in this repo). The archive is
+a Ghidra database (a packed buffer file like the `.fidbf` files, with the tables of
+`DataTypeManagerDB`), and a prototype's facts need its data-types (17,957 are used by the prototypes) encoded as the decompiler's
+XML: reading it in Rust means porting the data-type tables and `PcodeDataTypeManager`'s
+encoder. Not done here. Instead `tools/ghidra/ExportArchiveProtos.java` (run once per Ghidra
+version by `tools/ghidra-protos.sh`, about a minute) applies every function definition of the
+archive to an external function of a scratch program as the "Apply Data Archives" analyzer
+does (`ApplyFunctionSignatureCmd`, source IMPORTED) and records what
+`DecompileCallback.getExternalRef` answers: `$GHIDRA_REF/win32.protos`, 22,825 prototypes and
+17,957 data-types, 41 MB, for every 32-bit Windows program. It reads no program and no project
+of the user's. Without `--protos` every import is `underived`.
+
+**Stack variables** (`Exporter::locals`, `Analysis::flow_walk`): a port of
+`NewFunctionStackAnalysisCmd` with its defaults (locals, no parameters) on the constant
+propagation walk, with ESP at the entry as the stack's origin. A read or write through a stack
+address that an operand names makes a variable of the bytes the instruction's last LOAD or
+STORE moves (`getRefSize`); an `LEA` of a stack address makes one without a data-type;
+a variable that meets others becomes one over them all (`accumulateVariable`, with its "same
+length" test); `AND ESP,mask` keeps the stack address. Approximations: "an operand names the
+address" is "not the slot a PUSH, POP or CALL uses itself"; a call whose callee's purge the
+analysis does not know ends the tracking of its path, where Ghidra goes by the purge the
+callee has when the caller is analysed (unknown for a function it makes later:
+`local_res0`).
+
+**Seeds.** The Java project of mercs2 is not plain auto-analysis: its pipeline makes 18,483
+functions afterwards (`RecoverFunctions` and others), and Ghidra's purge, stack and constant
+propagation analyzers did not run on most of them (16,632 of them have `extrapop="unknown"`
+and no stack variables in the Java facts). `--facts` with `--seeds` or `--functions-from`
+models that: discovery runs once without the seeds, and a function only the seeds bring gets
+no `extrapop`, no stack variables, and its instructions size no data.
+
+**The comparison** (`tools/facts-diff.sh <ours> <java>`): per record kind, `equal` (the same
+key and text), `different`, `missing` (only Java) and `extra` (only ours), with every such
+record in `rust/target/facts-diff/<kind>.<state>`. A record's key is its kind and address.
+Ghidra's database ids are left out, the symbols of a function are compared in one order, and
+`tracked` is spread over the functions. `tools/facts-func-why.sh` and
+`tools/facts-data-why.sh` count the differing `func`, `extref` and `data` records by what
+differs. mercs2 against `$GHIDRA_REF/mercs2.facts` (Java's 44,990 functions):
+
+| kind | Java | with Java's functions (`FUNCS=java`): equal / different / missing / extra | equal | plain discovery: equal / different / missing / extra | equal |
+|---|---|---|---|---|---|
+| `func` | 44,990 | 36,282 / 8,701 / 7 / 0 | 80.6% | 19,905 / 6,602 / 18,483 / 2,733 | 44.2% |
+| `body` | 44,990 | 44,123 / 860 / 7 / 0 | 98.1% | 24,380 / 2,127 / 18,483 / 2,733 | 54.2% |
+| `extref` | 1,022 | 920 / 102 / 0 / 0 | 90.0% | 920 / 102 / 0 / 0 | 90.0% |
+| `data` | 271,502 | 127,777 / 13,553 / 130,172 / 17,037 | 47.1% | 101,255 / 38,582 / 131,665 / 42,693 | 37.3% |
+| `label` | 218,095 | 206,920 / 1,149 / 10,026 / 13,405 | 94.9% | 182,798 / 22,207 / 13,090 / 13,179 | 83.8% |
+| `string` | 26,420 | 13,635 / 1,466 / 11,319 / 112 | 51.6% | 13,623 / 1,467 / 11,330 / 111 | 51.6% |
+| `undef` | 58,069 | 53,779 / 1,097 / 3,193 / 3,214 | 92.6% | 53,577 / 1,178 / 3,314 / 3,239 | 92.3% |
+| `block` | 14 | 14 / 0 / 0 / 0 | 100% | 14 / 0 / 0 / 0 | 100% |
+| `wref` | 265 | 166 / 0 / 99 / 0 | 62.6% | 183 / 0 / 82 / 5 | 69.1% |
+| `tracked` (per function) | 44,990 | 44,963 / 20 / 7 / 0 | 99.9% | 26,498 / 9 / 18,483 / 2,733 | 58.9% |
+| `override` | 3,365 | 2,510 / 0 / 855 / 1,059 | 74.6% | 2,260 / 0 / 1,105 / 2,486 | 67.2% |
+| `comments` | 1,613 | 0 / 0 / 1,613 / 0 | 0% | the same | 0% |
+| `coretypes` | 1 | 1 / 0 / 0 / 0 | 100% | the same | 100% |
+| `type` (by name) | 365 | 263 / 0 / 102 / 2 | 72.1% | the same | 72.1% |
+| `ns` | 797 | 0 / 0 / 797 / 0 | 0% | the same | 0% |
+| `underived` | 0 | 10,414 extra | | 10,306 extra | |
+
+Plain discovery finds 29,240 functions, 26,507 of Java's 44,990. The mercs2 pipeline makes
+functions after auto-analysis (see "Analysis" above), and `--functions-from` takes such a
+list: `FUNCS=java` gives it the entries of the Java facts, so that column measures everything
+but the function set. It is not a run without Java: the list comes from the Java project.
+
+What differs, with Java's functions (the counts of `facts-func-why.sh` and
+`facts-data-why.sh`):
+
+- `func` (8,701): stack variables that differ 1,754 + 143 + 110, only in Java 503 + 461,
+  only here 497 + 178 (not looked at one by one; two seen: the purge Ghidra had for a callee
+  when it analysed the caller, see above); `extrapop` known only in Java 1,843 + 461 and only
+  here 1,752 + 497 + 143 (not looked at; among the functions the seeds bring, Java has an
+  `extrapop` for 1,851 and none for 16,632); no-return only here 395; names, models and
+  return types of C++ functions 268 + 213 + 110 (`underived` here).
+- `data`: 90,750 pointers of SecuROM's `Sdata` and `Srdata` are missing: those sections
+  are flagged as code, `Analysis::address_tables` takes a pointer into an executable section
+  as code and disassembles there, so the tables that follow collide with it (Ghidra asks its
+  pseudo-disassembler). 7,412 + 2,656 labels and 5,212 pointers of ours are that code.
+  10,664 strings are missing: Ghidra's ASCII Strings analyzer finds them without a
+  reference, by its trigram model (`StringModel.sng`), not ported. 6,442 `BYTE_` and about
+  2,200 `WORD_`/`DWORD_` records are Java's typed switch and loader tables. 2,401 + 907 `DAT_`
+  symbols are sized in Java through a register-held address the walk here does not size; of
+  the symbols sized here 54 differ. The loader's structures (`IMAGE_DOS_HEADER`, resources)
+  and the RTTI structures (about 1,400) are not derived.
+- `extref`: 102 differ, most of them in the `extrapop` Java has for an import without an
+  archive prototype (`underived` here). An import keeps its name where the archive has it
+  (`_cexit`) and takes the demangler's otherwise (`_initterm` is `initterm`, `__cdecl`).
+- `label`: missing switch cases (`underived`) and labels in code Ghidra reaches and
+  ghidra-rs does not; extra labels in SecuROM's sections (above).
+- `comments`, `ns`: not derived (1,553 of the 1,613 comments are Function ID's).
+
+**The end effect** (`tools/ghidra-diff.sh` with `FACTS=<file>`, new: another facts file than
+the Java project's; the eight actions skipped as in slice 1):
+
+| facts | M8 | M500 |
+|---|---|---|
+| the Java project's (slice 1) | identical 3 / 7 (loud 0, silent 4) | identical 192 / 499 (loud 70, silent 237) |
+| ghidra-rs's own, with Java's functions | identical 2 / 7 (loud 2, silent 3) | identical 171 / 499 (loud 71, silent 257) |
+| ghidra-rs's own, plain discovery | identical 1 / 7 (loud 2, silent 4) | identical 90 / 499 (loud 156, silent 253) |
+
+With Java's functions the console output of ghidra-rs is byte for byte the output it gives
+with the Java facts on 377 of the 500 M500 functions, and on M8 on all five that print:
+0x40a110 and 0x58d030 are Java's C, and 0x401000, 0x73a340 and 0x4042e0 miss it in the same
+way with either facts (the eight actions). The two loud M8 functions are what is not derived:
+0x401080 calls `D3DXVec3TransformNormal` through a thunk (an import the archive does not
+have: `underived function`), and 0x9eec5e, `__security_check_cookie`, has Function ID's plate
+comment (`underived comments`); with the Java facts it is the third identical one. Of the 71
+loud M500 functions 12 read an `underived` function and the others are the misses the Java
+facts reach too. With plain discovery 98 of the 156 loud ones are "no function at": the M500
+function, or one it calls, is a function only the mercs2 pipeline makes; 0x40a110 is a
+thunk there (`thunk_FUN_004a8660`), since discovery makes the jump's target a function.
+
+The checks against `decomp_dbg` do not read the facts: `bars.sh` with `CORPORA=m8` gives 55
+lines, each equal to the baseline's (`m3-int5-116d9d34da.summary`). `cargo test`: 140 pass.
+
+Decisions made here, for the user to confirm ("Claude's call"): the command is the `analyze`
+option `--facts <out>` (as `--functions`, `--decomp-prelude`); the `underived` records and
+the loader failing on them; a seeded function stands for one a script made after
+auto-analysis; the archive's prototypes come from a one-time headless export, not from a
+`.gdt` reader in Rust; the core types are a copied file; a rule of Ghidra's analyzers that is
+ported with an approximation (the stack variables, the strings and pointers at references,
+the data sizes) is written without an `underived` mark and measured by `facts-diff.sh`
+instead: a mark on every such record would make every decompile fail.
+
+Not done: the ASCII Strings analyzer, Function ID's comments, the demangler's namespaces and
+prototypes, switch-case labels, the structures of the loader and of RTTI, a `.gdt` reader,
+the order of Ghidra's analysis. Not fixed: `address_tables` on sections flagged as code (it
+feeds `--abi-callers` and `--functions` too, so it needs their gates). Not run: a full
+`bars.sh` pass, `ghidra-diff.sh` on the corpora other than M8 and M500, the Mac.
 
 ## Speed
 

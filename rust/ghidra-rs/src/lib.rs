@@ -3,6 +3,7 @@ pub mod abi;
 pub mod analysis;
 pub mod console;
 pub mod decomp;
+pub mod factsout;
 pub mod fid;
 pub mod scripts;
 pub mod sla;

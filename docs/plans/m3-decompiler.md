@@ -1871,6 +1871,15 @@ to confirm, and the loader is one module (`decomp/facts.rs`) that another source
   facts file is version 2. Superseded: "loud 72, silent 235": the slice's final build gives
   M500 identical 192 / 499 (loud 70, silent 237), and the fixes change no function's state.
   The checks against `decomp_dbg` (M8 all 55 lines, the six M500 lines) equal the baseline.
+- Slice 2 (2026-11-17, `rust/README.md`, "Stage S10, slice 2"): `ghidra-rs analyze --facts`
+  writes the facts from ghidra-rs's own analysis (`factsout.rs`), in the same format, so the
+  Java project is not needed to make them; the import prototypes come from a one-time export
+  of Ghidra's Windows archive (`tools/ghidra-protos.sh`). What is not derived is an
+  `underived` record and fails the decompile that reads it. `tools/facts-diff.sh` compares the
+  two facts files per record kind; `ghidra-diff.sh` takes `FACTS=<file>`.
+  mercs2 with Java's function set: `func` 80.6%, `body` 98.1%, `extref` 90.0%, `data` 47.1% equal;
+  `ghidra-diff.sh` with the eight skipped: M8 identical 2 / 7 (3 / 7 with the Java facts), M500
+  171 / 499 (192 / 499). The checks against `decomp_dbg` (M8, 55 lines) equal the baseline.
 
 Still before the gate: the eight actions (item 1), the misses default options reach (item 2),
 and from this slice the struct and union symbols and the other loud items.
