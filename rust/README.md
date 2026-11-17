@@ -16,6 +16,12 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   descent, function discovery, switch tables, function bodies, flows and data references.
 - `ghidra-rs/src/scripts.rs`: writers for the ExportFunctions and ExportGaps CSV files, plus
   RTTI vftables and a small MSVC name demangler.
+- `ghidra-rs/src/store.rs`: the project store: a text file of edits (functions, bodies, no-return
+  flags, flow overrides, thunk marks) laid over the analysis, and the script primitives that
+  edit both (see "Project store and the editing scripts").
+- `ghidra-rs/src/edits.rs`: mercs2's five project-editing scripts (AddRelocatedEntries,
+  DefineTableFunctions, RecoverFunctions, ClearFalseNoReturn, FoldSlotFragments) on the store.
+- `ghidra-rs/tests/store.rs`: edits on a fixed 32-bit blob, the store's text and its errors.
 - `ghidra-rs/src/main.rs`: the `ghidra-rs` CLI (binary loading via the `object` crate).
 - `ghidra-rs/tests/decode.rs`: decodes a fixed byte sequence and checks text and p-code.
 - `ghidra-rs/src/abi.rs`: port of CheckAbiCallers.java: per-byte register liveness walks
@@ -144,7 +150,7 @@ Varnodes print as a register name when one matches exactly, `0x5:4` for constant
 
 ```sh
 ghidra-rs analyze <pe32> [--functions <csv>] [--gaps <csv>] [--abi-callers <register_abi.csv> <out.csv> [--data-pointers]]
-                         [--decomp-prelude <out>] [--facts <out> [--protos <file>]] [--seeds <csv> | --functions-from <csv>]... [--sla <file>]
+                         [--decomp-prelude <out>] [--facts <out> [--protos <file>]] [--seeds <csv> | --functions-from <csv>]... [--store <file>] [--sla <file>]
 ```
 
 `--facts` is stage S10, slice 2 (below): the facts `load facts` reads, from this analysis.
@@ -552,6 +558,150 @@ whole-function propagation). Before 2026-11-11 the check took 38 s on one
 thread: each walk step copied and hashed the whole live set (a set of `String`s) to detect
 revisits; live keys are now inline (`Key`) and a walk numbers each distinct live set once. The
 script's own run time in Ghidra was not measured here.
+
+## Project store and the editing scripts
+
+```sh
+ghidra-rs edit <pe32> --store <file> [--seeds <csv> | --functions-from <csv>]... [--sla <file>] <command>
+ghidra-rs analyze <pe32> ... --store <file>
+```
+
+The project store keeps a project's edits on top of ghidra-rs's own analysis, so mercs2's five
+project-editing Ghidra scripts run without a Java Ghidra project. It follows DESIGN.md's
+decision of 2026-11-15: plain text in the project's repo, and every run starts from scratch
+(load, analyse) and then applies the file. Nothing is reloaded while running. Code:
+`ghidra-rs/src/store.rs` (the format, `Store::apply`, and `Project`, the script primitives),
+`ghidra-rs/src/edits.rs` (the five scripts), `ghidra-rs/tests/store.rs`.
+
+### The file
+
+One file, one record per line, fields separated by one space, addresses as `0x%08x`. Records
+are written in the order they are applied and sorted by address within a kind, so a change
+is a small diff:
+
+```text
+ghidra-rs-store 1
+clear <first>-<last>               instructions overlapping the range are removed
+noreturn <addr> on|off             the no-return flag of a function (or import slot)
+switch <jump> <target>...          the targets of a computed jump
+code <addr>                        disassemble from here (flow is followed)
+function <entry> create|remove     a function analysis lacks, or one it has
+body <entry> <first>-<last>...     a fixed body in place of the flow from the entry
+override <addr> call_return|none   the flow override of an instruction
+thunk <entry> off|<target>         the function is (not) a thunk
+```
+
+`analyze --store` applies it right after discovery, before anything reads the analysis, so
+`--functions`, `--gaps`, `--abi-callers` and `--decomp-prelude` (the decompiler's function
+list) all see the edited program. Bodies are computed again from the flow at the end, so a
+function re-flows whenever a neighbour is created or removed or a flag changes; only a `body`
+record pins one, and `edit reflow <addr>` drops that record.
+
+What fails instead of being skipped: a first line other than `ghidra-rs-store 1`, an unknown
+record, a malformed address or range, two records of one kind for one address, a `code`,
+`function`, `switch` or `override` address where no instruction decodes, a `body` or `thunk`
+of an address that is no function. There are no comment lines: a command rewrites the whole
+file and would drop them.
+
+### What ghidra-rs derives, and what the store overrides
+
+This analysis keeps less state than a Ghidra project, so three things the scripts read are
+derived, and the store holds only the exceptions:
+
+- Flow overrides (`Analysis::call_return`): a call of a no-return function and an
+  unconditional jump to a function entry count as CALL_RETURN (Ghidra's no-return and
+  shared-return analyzers set those). `override ... none` cancels one, `call_return` adds one.
+  `--abi-callers` reads the same answer.
+- Thunks (`Project::thunked`): a body of one jump to a function, or through an import slot.
+  `thunk ... off` cancels that. Only the editing commands read thunk marks.
+- Bodies: the flow from the entry up to other function entries. Two functions can share
+  instructions (Ghidra's bodies never overlap); "the function containing an address" is the
+  function starting there, else the lowest entry.
+
+Not kept at all: defined data (only the slots of address tables count as data), fall-through
+overrides, references made by hand.
+
+### Commands
+
+| Command | Script | What it does |
+|---|---|---|
+| `add-relocated-entries <securom_functions.csv>` | AddRelocatedEntries.java | a function at each entry (first column) that lies in none |
+| `define-table-functions <start> <end>...` | DefineTableFunctions.java | a function at every `.text` pointer of the data ranges that lies in none |
+| `recover-functions <audit.csv>` | RecoverFunctions.java | functions from pointer runs in `.rdata`/`.data` and direct calls; same audit CSV |
+| `clear-false-noreturn <report.csv>` | ClearFalseNoReturn.java | clears no-return where a RET is reached without a call, decodes behind the calls, to a fixpoint |
+| `fold-slot-fragments <functions-original.csv> <slot-rewrites.csv> <report.csv>` | FoldSlotFragments.java | folds wrapper-exit fragments into their owners |
+| `create-function <addr>`, `remove-function <addr>`, `reflow <addr>` | | single edits |
+
+A store file that is not there yet starts empty. Each command analyses, applies the store,
+runs, and then proves the result: `Project::finish` applies the new store to the untouched
+analysis and compares instructions, functions, no-return flags, switch targets and bodies
+with what the command left. Any difference is an error and nothing is written.
+
+Not ported, failing by name before anything is loaded: `export-bindings` (ExportBindings.java
+`--recover`) and `audit-recovered-functions` (AuditRecoveredFunctions.java `--remove-empty`).
+Inside the ports, loud rather than guessed: a `fold-slot-fragments` switch whose operand has a
+base register or a prefix (`not ported: ...`), and a pointer or table word outside the image
+(Java throws there too).
+
+Where a port cannot do what Java does:
+
+- Java makes a function of one undefined byte where nothing decodes. Here `create_function`
+  refuses; `add-relocated-entries` and `define-table-functions` print the address on stderr
+  and go on, `recover-functions` reports `no_entry_instruction` (it also stands for Java's
+  `disassembly_failed`, which Java tells apart by a return value that is true either way).
+- `recover-functions` reports `defined_data` only for address-table slots.
+- `clear-false-noreturn` has no defined data to clear and no fall-through overrides; the
+  cleared item's text is ghidra-rs's disassembly; names are export names or `FUN_<addr>`.
+- `fold-slot-fragments`: `setBody` cannot fail on an overlap. Bodies here re-flow as soon as a
+  fragment goes, so "refit before->after" compares with the body at the start of the round
+  (Java's body until `setBody`). An owner that is itself folded by its own walk is skipped
+  (Java goes on with the deleted function).
+
+### Against Java (Mercenaries2.analysis.exe, 2026-11-17)
+
+Run in the order of mercs2's `analysis_pipeline.sh` on a fresh store, from plain discovery
+(no `--functions-from`); Java's outputs are `mercs2-decomp/build/*.csv` (2026-10-14) and the
+project's facts export (`rust/target/ghidra-ref/mercs2.facts`, 2026-11-17). Java ran
+ExportBindings `--recover` and AuditRecoveredFunctions `--remove-empty` in between; here they
+are not ported.
+
+| Command | Java | ghidra-rs |
+|---|---|---|
+| `recover-functions` | 15938 created, 36302 examined | 16150 created, 36909 examined; 15823 created by both, 115 by Java only, 327 here only |
+| `fold-slot-fragments` | 2204 removed, 1438 refit, 2 rounds | 2172 removed, 1423 refit, 2 rounds; removed by both 2140 (64 Java only, 32 here only); refit by both 1411, 1237 with the same sizes |
+| `add-relocated-entries` | not in mercs2's logs | 43 added |
+| `clear-false-noreturn` | not in mercs2's logs (its last report: 25 kept) | 3 cleared, 2 call sites, 608 kept |
+| `define-table-functions 0xd16bf0 0xd16d20 0xd17000 0xd1b000` | not saved (a read-only pre-script) | 66 defined |
+
+Java's three `switch` rows of the fold report have no counterpart: ghidra-rs's own switch
+recovery already has those jumps' targets. ghidra-rs flags far more functions no-return than
+Ghidra (every body without a return); 0x00401740, the one the Java script was written for, is
+not flagged here.
+
+The function set in `.text` against the Java project's facts (37635 functions):
+
+| | in both | same body size | Java only | ghidra-rs only |
+|---|---|---|---|---|
+| plain `analyze` | 20422 | 18663 | 17213 | 2331 |
+| with the store, after the four pipeline commands | 36602 | 36178 | 1033 | 180 |
+
+The store after those four commands: 23128 records (18365 `function`, 2471 `override`,
+1434 `body`, 812 `thunk`, 43 `code`, 3 `noreturn`; 696 KB). An `edit` run takes 20 to 30 s of CPU on the
+shared desktop (the analysis, the command, the store applied twice; about 1.8 GB at the peak);
+`clear-false-noreturn` took 115 s of CPU.
+
+Not compared: flow overrides against the 3365 of the facts export (ghidra-rs derives them and
+has no export of them), functions outside `.text`, body ranges beyond their size. The shadow
+check (`mercs2-decomp/tools/ghidra-rs-shadow.sh`: `analyze --functions-from ... --abi-callers`
+without a store) writes the same 56966 lines as before this change.
+
+### With the facts of a project
+
+The store is not the facts format (`load facts`, another branch): facts are the answers a
+program gives the decompiler, the store is only what a person or a script changed. They
+combine in one direction: a facts producer in `analysis` reads the `Analysis` after
+`Store::apply`, so its function, body and override records come out with the edits in them.
+The store never holds facts records.
 
 ## Decompiler harness (Milestone 3, stage S0)
 

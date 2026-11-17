@@ -1940,6 +1940,12 @@ Everything a person changes while reversing, so a rerun keeps it:
 The decompiler only reads this through one query interface (like the C++ `Scope`/`Database`),
 so milestone 3 can keep it in memory and milestone 4 swaps in the store.
 
+A first part exists (2026-11-17, `rust/ghidra-rs/src/store.rs`): a plain text file with created and
+removed functions, fixed bodies, no-return flags, flow overrides, thunk marks and switch targets,
+applied over a fresh analysis (`analyze --store`). It holds none of the other items above, and it
+does not record who set a fact: everything in the file is an edit, everything else is analysis.
+See `rust/README.md`, "Project store and the editing scripts".
+
 ## Where to diverge from Ghidra, and where not
 
 Keep exactly as Ghidra:

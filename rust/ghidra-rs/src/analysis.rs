@@ -196,6 +196,7 @@ impl Ins {
     }
 }
 
+#[derive(Clone)]
 pub struct Analysis {
     pub text_start: u32,
     pub text_end: u32,
@@ -210,6 +211,13 @@ pub struct Analysis {
     fpu_ip: Option<(u32, u64)>,          // FPUInstructionPointer, which x87 constructors set to inst_start
     purge: HashMap<u32, u32>,            // function -> bytes its RETs pop (RET n), where they agree
     reg_space: u32,
+    /// Flow overrides of the project store (`store.rs`), by instruction: CALL_RETURN (true) or
+    /// none (false) in place of what `call_return` derives. Empty without a store.
+    pub overrides: HashMap<u32, bool>,
+    /// Bodies the store sets (inclusive address ranges) in place of the flow from the entry.
+    pub fixed_bodies: BTreeMap<u32, Vec<(u32, u32)>>,
+    /// Thunk marks of the store: the thunked function, or `None` for "not a thunk".
+    pub thunks: HashMap<u32, Option<u32>>,
 }
 
 const MAX_STACK: [usize; 2] = [16, 1024]; // local fold, whole-function walk
@@ -309,6 +317,9 @@ impl Analysis {
             fpu_ip: None,
             purge: HashMap::new(),
             reg_space: 0,
+            overrides: HashMap::new(),
+            fixed_bodies: BTreeMap::new(),
+            thunks: HashMap::new(),
         };
         let (rs, list) = sl.registers();
         an.fpu_ip = list.iter().find(|r| r.0 == "FPUInstructionPointer").map(|r| (rs, r.1));
@@ -681,8 +692,9 @@ impl Analysis {
     /// through code constants (`PUSH offset callback`, `MOV [g],offset fn`, SecuROM's
     /// `PUSH next; PUSH callee; RET`, values the local fold computes) where `valid_subroutine`
     /// accepts them, and the entries of address tables of code (`address_tables`), repeated
-    /// over what that reaches. Bodies stay as they are.
-    pub fn disassemble(&mut self, img: &Image, sl: &Sleigh, addrs: &[u32], constants: bool) {
+    /// over what that reaches. Bodies stay as they are. Returns the instructions decoded by
+    /// the descent from `addrs`.
+    pub fn disassemble(&mut self, img: &Image, sl: &Sleigh, addrs: &[u32], constants: bool) -> Vec<u32> {
         let mut owner = vec![0u8; (self.code_hi - self.code_lo) as usize];
         for (&a, i) in &self.insns {
             let o = (a - self.code_lo) as usize;
@@ -693,7 +705,9 @@ impl Analysis {
         let mut queue: Vec<u32> = addrs.iter().copied().filter(|&a| self.is_code(img, a)).collect();
         let mut p = sl.new_parse();
         let mut log: Vec<u32> = if constants { self.insns.keys().copied().collect() } else { Vec::new() };
+        let known = log.len();
         self.descend(img, sl, &mut p, &mut owner, &mut queue, &mut log);
+        let new = log[known..].to_vec();
         if constants {
             self.propagate(img, sl);
         }
@@ -725,6 +739,7 @@ impl Analysis {
             }
         }
         self.funcs = funcs;
+        new
     }
 
     /// PseudoDisassembler.isValidSubroutine(entry, false), which Ghidra asks before it
@@ -1084,42 +1099,61 @@ impl Analysis {
         }
     }
 
-    fn compute_bodies(&mut self) {
-        let mut bodies = BTreeMap::new();
-        for &f in &self.funcs {
-            let mut seen = BTreeSet::new();
-            let mut work = vec![f];
-            while let Some(a) = work.pop() {
-                if (a != f && self.funcs.contains(&a)) || !seen.insert(a) {
-                    continue;
-                }
-                let Some(i) = self.insns.get(&a) else {
-                    seen.remove(&a);
-                    continue;
-                };
-                let noret = match i.flow {
-                    Flow::Call => i.target.is_some_and(|t| self.noreturn.contains(&t)),
-                    Flow::CallInd => i.slot.is_some_and(|s| self.noreturn.contains(&s)),
-                    _ => false,
-                };
-                if i.falls_through() && !noret {
-                    work.push(a + i.len as u32);
-                }
-                if matches!(i.flow, Flow::Jump | Flow::CondJump) {
-                    work.extend(i.target);
-                }
-                if let Some(cases) = self.tables.get(&a) {
-                    work.extend(cases);
-                }
-            }
-            bodies.insert(f, seen.into_iter().collect());
+    /// Ghidra's CALL_RETURN flow override at an instruction, which ghidra-rs derives: a call of
+    /// a non-returning function (the no-return analyzer) and a jump to a function (Shared
+    /// Return Calls). An override of the project store wins.
+    pub fn call_return(&self, a: u32, i: &Ins) -> bool {
+        if let Some(&o) = self.overrides.get(&a) {
+            return o;
         }
-        self.bodies = bodies;
+        match i.flow {
+            Flow::Call => i.target.is_some_and(|t| self.noreturn.contains(&t)),
+            Flow::CallInd => i.slot.is_some_and(|s| self.noreturn.contains(&s)),
+            Flow::Jump => i.target.is_some_and(|t| self.funcs.contains(&t)),
+            _ => false,
+        }
+    }
+
+    /// The body of function `f`: the instructions of the ranges the store set for it, else the
+    /// flow from its entry up to other function entries.
+    pub fn body_of(&self, f: u32) -> Vec<u32> {
+        if let Some(ranges) = self.fixed_bodies.get(&f) {
+            return ranges.iter().flat_map(|&(lo, hi)| self.insns.range(lo..=hi).map(|(&a, _)| a)).collect();
+        }
+        let mut seen = BTreeSet::new();
+        let mut work = vec![f];
+        while let Some(a) = work.pop() {
+            if (a != f && self.funcs.contains(&a)) || !seen.insert(a) {
+                continue;
+            }
+            let Some(i) = self.insns.get(&a) else {
+                seen.remove(&a);
+                continue;
+            };
+            let calls = matches!(i.flow, Flow::Call | Flow::CallInd);
+            // the override of a jump matters only where the store set one: a derived one
+            // targets a function entry, where the walk stops anyway
+            let tail = self.overrides.get(&a) == Some(&true);
+            if i.falls_through() && !(calls && self.call_return(a, i)) {
+                work.push(a + i.len as u32);
+            }
+            if matches!(i.flow, Flow::Jump | Flow::CondJump) && !tail {
+                work.extend(i.target);
+            }
+            if let Some(cases) = self.tables.get(&a) {
+                work.extend(cases);
+            }
+        }
+        seen.into_iter().collect()
+    }
+
+    pub fn compute_bodies(&mut self) {
+        self.bodies = self.funcs.iter().map(|&f| (f, self.body_of(f))).collect();
     }
 
     /// Each function's stack purge, as Ghidra sets it from the function's returns: the `n` of
     /// `RET n` (0 for `RET`), where every return of the body agrees.
-    fn stack_purges(&mut self, img: &Image) {
+    pub fn stack_purges(&mut self, img: &Image) {
         self.purge.clear();
         for (&f, body) in &self.bodies {
             let mut pops = body.iter().filter(|a| self.insns[a].flow == Flow::Return).map(|&a| {
