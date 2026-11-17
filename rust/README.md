@@ -3168,8 +3168,9 @@ Ported here:
   an error naming it: a data-type that needs resolution (unionresolve.cc is not ported, so the
   `ResolveCache` is left out), a piece of a structure or array (`TypePartialStruct` from
   `getExactPiece`), the CONCAT of split outputs (`buildOutConcats`: proto-partial pieces need
-  `VariablePiece`), so a COPY or LOAD is split only when nothing reads its output, a STORE
-  through an address-tied root pointer (`buildCopyTemp`), a value in the join space.
+  `VariablePiece`), so a COPY or LOAD is split only when nothing reads its output, a value in
+  the join space. A STORE through an address-tied root pointer copies it to a temporary first
+  (`Funcdata::buildCopyTemp`).
   `TypePointerRel` is not a ghidra-rs type.
 - `aliasupdate` in the `decompile` root: the rule was already in the root's pool (branch
   `m3-aliasupdate`); `default-options.txt` no longer switches it off, so `pcd` runs it on both

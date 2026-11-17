@@ -10,7 +10,6 @@
 //! - the CONCAT of the split outputs (`buildOutConcats`: proto-partial varnodes and the partial
 //!   root need `VariablePiece`, which `Merge::groupPartials` does not have). A COPY or LOAD is
 //!   split only when nothing reads its output;
-//! - a STORE through an address-tied root pointer (`Funcdata::buildCopyTemp`);
 //! - a value in the join space (`Address::renormalize`).
 //!
 //! `TypePointerRel` is not a ghidra-rs type, so `getValueDatatype` reads plain pointers only.
@@ -194,6 +193,62 @@ fn out_concats(fd: &Funcdata, root: VarnodeId) -> Result<()> {
         return Ok(());
     }
     err("SplitDatatype: the CONCAT of split outputs (buildOutConcats: proto-partial pieces, VariablePiece) is not implemented in ghidra-rs yet")
+}
+
+/// Port of `Funcdata::buildCopyTemp`: a COPY of `vn` into a temporary that is defined at
+/// `point`, reusing a COPY into a temporary that `vn` already has when it dominates `point`.
+fn build_copy_temp(fd: &mut Funcdata, vn: VarnodeId, point: OpId) -> Result<VarnodeId> {
+    let uniq = fd.uniq.map(Space::Sleigh);
+    let other_op = fd.vn(vn).descend.iter().copied().find(|&op| {
+        code(fd, op) == Copy
+            && fd.op(op).out.is_some_and(|o| Some(fd.vn(o).space) == uniq && !fd.vn(o).has(VnFlags::TYPELOCK))
+    });
+    let size = sz(fd, vn);
+    let new_copy = |fd: &mut Funcdata, addr: u64| -> Result<OpId> {
+        let c = fd.new_op(Copy, addr);
+        uniq_out(fd, size, c)?;
+        fd.op_set_input(c, vn, 0)?;
+        Ok(c)
+    };
+    let parent = |fd: &Funcdata, op: OpId| {
+        fd.op(op).parent.ok_or_else(|| LowlevelError("buildCopyTemp: an op outside the blocks".into()))
+    };
+    let mut used_copy = None;
+    if let Some(other) = other_op {
+        let (pb, ob) = (parent(fd, point)?, parent(fd, other)?);
+        if pb == ob {
+            if fd.op(point).order >= fd.op(other).order {
+                used_copy = Some(other);
+            }
+        } else {
+            let common = fd
+                .find_common_block(pb, ob)
+                .ok_or_else(|| LowlevelError("buildCopyTemp: no common dominator".into()))?;
+            if common == ob {
+                used_copy = Some(other);
+            } else if common != pb {
+                // neither op is an ancestor of the other
+                let c = new_copy(fd, fd.blocks.block(common).stop)?;
+                fd.op_insert_end(c, common);
+                used_copy = Some(c);
+            }
+        }
+    }
+    let used_copy = match used_copy {
+        Some(c) => c,
+        None => {
+            let c = new_copy(fd, op_addr(fd, point))?;
+            fd.op_insert_before(c, point)?;
+            c
+        }
+    };
+    let used_out = out(fd, used_copy)?;
+    if let Some(other) = other_op.filter(|&o| o != used_copy) {
+        let other_out = out(fd, other)?;
+        fd.total_replace(other_out, used_out)?;
+        fd.op_destroy(other);
+    }
+    Ok(used_out)
 }
 
 impl RootPointer {
@@ -704,7 +759,10 @@ impl Split {
             self.in_subpieces(fd, in_vn, store_op)?
         };
         if fd.vn(store_root.pointer).has(VnFlags::ADDRTIED) {
-            return err("SplitDatatype: a STORE through an address-tied root pointer (duplicateToTemp, Funcdata::buildCopyTemp) is not implemented in ghidra-rs yet");
+            // RootPointer::duplicateToTemp: the STOREs must not change the root pointer
+            let new_root = build_copy_temp(fd, store_root.pointer, store_op)?;
+            update_type(fd, new_root, store_root.ptr_type);
+            store_root.pointer = new_root;
         }
         let store_ptrs = self.pointers(fd, &store_root, store_op, false)?;
         // the STORE stays, as the first of the smaller ones, so its INDIRECTs stay valid
