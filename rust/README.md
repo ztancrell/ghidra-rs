@@ -3039,6 +3039,20 @@ the full pass. Not seen to change an output: a constant or variable at the addre
 function loaded with `load addr`, two character sizes at one string address, a stale cover of a
 grouped variable.
 
+Integration of `m3-swsilent` and `m3-print5` (branch `m3-int5`, 2026-11-17). Full pass
+(`bars-queue.sh`), 127 pairs: 126 ran (desktop and Mac), and `s6void-m500`, lost when the Mac
+was taken out of the pass, ran again on the desktop. No pair has fewer identical functions, more
+silent misses or a different reference count than the slice 4 baseline. Switch corpus, of 2,004
+(2,005 for print): `pcc-r` 1987 (loud 18, silent 0), `pcc-t` 1986 (loud 19, silent 0),
+`paramdouble` 1988 (loud 16), `swfs-r`, `swfs-t`, `swfsc-r`, `swfsc-t` and `swsn-t` 1987 (loud
+17), `swsn-r` 1984 (loud 17, silent 3: 0x8d8f40, 0x8eabe0, 0x8ead90, silent before). `simple`
+print checks 194 / 194. M500 `pcc-r` and `pc-r` 494 / 495 (loud 1), `pcc-t` and `pc-t`
+495 / 495. The only silent misses left in the pass are in `swsn-r`: those three on switch and 3 on
+M500 (4 in the baseline); 0x47a6b0 is loud in every check. (Superseded: the switch counts of `m3-swsilent` and
+slice 5 above, which were derived or from single checks.) Varies with load: the "all outputs
+identical" count of `s6void-m500` is 499 / 500 here and 500 / 500 in the baseline (a reference
+timeout; identical 499 / 499 in both).
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The
