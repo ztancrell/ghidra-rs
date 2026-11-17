@@ -339,7 +339,9 @@ past 0x1000000 and 0x7c1f30, where the reference reads a garbage target. Details
   varnode); the value-set solver of rangeutil.cc is not used by jump tables. Not ported:
   `fail_callother` (stops with an error; 2 functions in obfuscated code), `fail_return`,
   retrying an unreachable-looking table, unrolled guards, multistage tables, overrides,
-  `JumpAssisted`, label recovery and guard folding (`recoverLabels`, after `paramdouble`).
+  `JumpAssisted` (superseded: ported on `worktree-agent-a852cab363d8d01f3`, see "Segment and
+  jump-assist user ops" below), label recovery and guard folding (`recoverLabels`, after
+  `paramdouble`).
 - Debugging: `GHIDRA_RS_JT_DEBUG=1|2` on ghidra-rs, and the reference patch's `DECOMP_JT_RAW`
   prints the C++ partial function.
 - Speed: Mall to `heritage` 9.4 s → 69.7 s; 49 s of it is one function (0xa4e8c2, a partial
@@ -1814,6 +1816,21 @@ M500 (4 in the baseline); 0x47a6b0 is loud in every check. (Superseded: the swit
 slice 5 above, which were derived or from single checks.) Varies with load: the "all outputs
 identical" count of `s6void-m500` is 499 / 500 here and 500 / 500 in the baseline (a reference
 timeout; identical 499 / 499 in both).
+
+### Segment and jump-assist user ops, branch `worktree-agent-a852cab363d8d01f3` (2026-11-17)
+
+`<segmentop>` and `<jumpassist>` are read (they were ignored silently in a `.pspec`), with
+`SegmentOp`, `JumpAssistOp`, `ExecutablePcode`, `ActionSegmentize`, `RuleSegment` and the
+`JumpAssisted` jump-table model. Two unit tests match `decomp_dbg` on 16-bit real mode x86
+(`segmentize`, and `RuleSegment` on constants); `JumpAssisted` has a hand-made test only.
+Details, the loud limits and the counts: `rust/README.md`, "Segment and jump-assist user ops".
+
+Next for 16-bit x86, in the order a decompile meets them: a stack space of the stack pointer's
+size (now loud in the stack rules), near and far pointers (`SegmentedResolver`,
+`sizeOfAltPointer`; now loud in type recovery), the SEGMENTOP cast rules and `opSegmentOp` in
+the printer, and a way to select the language and load a raw image from the console. This is
+processor breadth, which DESIGN.md (2026-11-14) puts after the mercs2 scripts and the project
+store.
 
 ## Running stages in parallel
 

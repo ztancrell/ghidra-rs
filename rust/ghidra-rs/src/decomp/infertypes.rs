@@ -783,6 +783,7 @@ pub(crate) fn infer_types(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     if !fd.typerecovery_start {
         return Ok(0);
     }
+    arch.no_segment_resolver("type recovery (ActionInferTypes)")?;
     if fd.infer_passes >= 7 {
         if fd.infer_passes == 7 {
             fd.warning_header("Type propagation algorithm not settling");
@@ -1004,6 +1005,7 @@ pub(crate) fn constant_ptr(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         return Ok(0);
     }
     fd.constptr_passes += 1;
+    arch.no_segment_resolver("constant pointers (ActionConstantPtr)")?;
     let addr_size = arch.spec.stack_pointer.2;
     let mut count = 0;
     for vn in fd.loc_space(CONST_SPACE) {

@@ -437,6 +437,18 @@ impl<'a> Printer<'a> {
                 self.vn(ins[2]);
                 self.out.str(")");
             }
+            // TypeOpSegment::printRaw (ActionSegmentize)
+            Opcode::Segmentop => {
+                self.assign(id);
+                let space = self.space_name(ins[0]);
+                self.out.str("segmentop(");
+                self.out.str(space);
+                self.out.str(",");
+                self.vn(ins[1]);
+                self.out.str(",");
+                self.vn(ins[2]);
+                self.out.str(")");
+            }
             opc => return err(format!("print raw: {opc:?} is made by later stages, not ported yet")),
         }
         Ok(())

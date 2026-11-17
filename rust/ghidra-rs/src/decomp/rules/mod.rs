@@ -31,6 +31,7 @@ mod modulo;
 mod piece;
 mod pool;
 pub(crate) mod ptrarith;
+mod segment;
 mod stackvars;
 mod subpiece;
 mod subvar;
@@ -60,6 +61,7 @@ use floatrules::*;
 use modulo::*;
 use piece::*;
 use ptrarith::*;
+use segment::*;
 use stackvars::*;
 use subpiece::*;
 use subvar::*;
@@ -241,6 +243,7 @@ pub(crate) const OPPOOL1: &[Rule] = &[
     r("int2floatcollapse", "analysis", &[FloatInt2float], int2float_collapse),
     r("ptraddundo", "typerecovery", &[Ptradd], ptradd_undo),
     r("ptrsubundo", "typerecovery", &[Ptrsub], ptrsub_undo),
+    r("segment", "segment", &[Segmentop], rule_segment),
     r("piecepathology", "protorecovery", &[Piece], piece_pathology),
     r("doubleload", "doubleload", &[Piece], double_load),
     r("doublestore", "doubleprecis", &[Store], double_store),

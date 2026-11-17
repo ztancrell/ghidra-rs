@@ -137,6 +137,8 @@ pub struct Funcdata {
     pub(crate) infer_passes: u32,
     /// `ActionConstantPtr::localcount`
     pub(crate) constptr_passes: u32,
+    /// `ActionSegmentize::localcount`: the action ran
+    pub(crate) segmentize_done: bool,
     /// `typerecovery_exceeded`: inference gave up after 7 passes
     pub(crate) typerecovery_exceeded: bool,
     /// the high variables (stage S7, `variable.rs`)
@@ -199,6 +201,7 @@ impl Funcdata {
             typerecovery_start: false,
             infer_passes: 0,
             constptr_passes: 0,
+            segmentize_done: false,
             typerecovery_exceeded: false,
             highs: super::variable::Highs::default(),
             next_alive: 0,
@@ -725,20 +728,33 @@ impl Funcdata {
 
     /// Port of `Funcdata::opStackLoad`: a LOAD of `size` bytes at stack offset `off`, computed
     /// from the stack pointer `sp` (space, offset, size) just before `op`; `ram` is the space the
-    /// stack lives in; `stackref` is a stack pointer to reuse (`buildParam`), none to read the
-    /// register afresh. Returns the loaded value.
+    /// stack lives in and `seg` its segment op, if it has one (`Arch::stack_segment`); `stackref`
+    /// is a stack pointer to reuse (`buildParam`), none to read the register afresh. Returns the
+    /// loaded value.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn op_stack_load(
         &mut self,
         sp: (u32, u64, u32),
-        ram: u32,
+        (ram, seg): (u32, Option<(u32, u32)>),
         uniq: u32,
         off: u64,
         size: u32,
         op: OpId,
         stackref: Option<VarnodeId>,
     ) -> Result<VarnodeId> {
-        let addout = self.create_stack_ref(sp, uniq, off, op, stackref)?;
+        let mut addout = self.create_stack_ref(sp, uniq, off, op, stackref)?;
+        if let Some((base_size, addr_size)) = seg {
+            // createStackRef: the stack's space is segmented, so the full address is
+            // `SEGMENTOP(space, 0, SP + off)`, right after the ADD
+            let addop = self.vn(addout).def.ok_or_else(|| LowlevelError("stack reference without its op".into()))?;
+            let segop = self.new_op(Opcode::Segmentop, self.op(op).seq.addr);
+            let segout = self.new_unique_out(addr_size, uniq, segop);
+            let spc = self.new_varnode_space(ram);
+            let base = self.new_constant(base_size, 0);
+            self.op_set_all_input(segop, &[spc, base, addout])?;
+            self.op_insert_after(segop, addop)?;
+            addout = segout;
+        }
         let addop = self.vn(addout).def.ok_or_else(|| LowlevelError("stack reference without its op".into()))?;
         let addr = self.op(op).seq.addr;
         let loadop = self.new_op(Opcode::Load, addr);
@@ -751,7 +767,8 @@ impl Funcdata {
     }
 
     /// Port of `Funcdata::createStackRef` (inserted before `op`; `stackref` reuses a stack pointer):
-    /// `u = SP + off`. x86 declares no segment op, so there is no `SEGMENTOP` around it.
+    /// `u = SP + off`. The `SEGMENTOP` around it in a segmented space is made by the caller,
+    /// `op_stack_load`.
     fn create_stack_ref(
         &mut self,
         sp: (u32, u64, u32),

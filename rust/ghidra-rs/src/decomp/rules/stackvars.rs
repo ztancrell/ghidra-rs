@@ -32,7 +32,11 @@ fn correct_spacebase(fd: &Funcdata, arch: &Arch, vn: VarnodeId, spc: u32) -> Res
     if (v.space, v.offset, v.size) != (Space::Sleigh(sp), off, size) {
         return err("Unable to find entry for spacebase register");
     }
-    Ok((arch.spec.stack_container == spc).then_some(Space::Stack))
+    if arch.spec.stack_container != spc {
+        return Ok(None);
+    }
+    arch.no_narrow_stack()?;
+    Ok(Some(Space::Stack))
 }
 
 /// Port of `RuleLoadVarnode::vnSpacebase`: `vn` as a space base plus a constant.

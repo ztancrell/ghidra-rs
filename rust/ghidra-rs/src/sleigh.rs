@@ -287,6 +287,9 @@ pub struct Sleigh {
     /// the .pspec `<register_data>` registers with `vector_lane_sizes` (x86: XMM, YMM, ZMM):
     /// name and lane sizes
     pub laned: Vec<(String, String)>,
+    /// the .pspec `<segmentop>` and `<jumpassist>` elements, in document order: the decompiler
+    /// decodes them into its user ops (`decomp::userop`)
+    pub(crate) userop_specs: Vec<crate::xml::Element>,
     /// the `.sla` `bigendian` attribute
     pub big_endian: bool,
     /// user-defined op names by index
@@ -699,9 +702,17 @@ impl Sleigh {
 
     /// Load a `.sla`; context defaults come from the `.pspec` of the same name next to it, if any.
     pub fn load(path: &Path) -> Result<Sleigh> {
-        let (context, tracked, incidental, laned) = match std::fs::read_to_string(path.with_extension("pspec")) {
-            Ok(text) => {
-                let root = crate::xml::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let pspec = path.with_extension("pspec");
+        Self::load_with_pspec(path, pspec.exists().then_some(pspec.as_path()))
+    }
+
+    /// Load a `.sla` with the processor spec `pspec` (a language whose `.pspec` is not named
+    /// after its `.sla`, as the 16-bit x86 languages on `x86.sla`); `None`: no processor spec.
+    pub fn load_with_pspec(path: &Path, pspec: Option<&Path>) -> Result<Sleigh> {
+        let (context, tracked, incidental, laned, userop_specs) = match pspec {
+            Some(pspec) => {
+                let text = std::fs::read_to_string(pspec).map_err(|e| format!("{}: {e}", pspec.display()))?;
+                let mut root = crate::xml::parse(&text).map_err(|e| format!("{}: {e}", pspec.display()))?;
                 let incidental = root.find("incidentalcopy").map_or(Ok(Vec::new()), |el| {
                     el.kids_named("register").map(|r| r.req("name").map(str::to_string)).collect::<Result<Vec<_>>>()
                 })?;
@@ -710,14 +721,21 @@ impl Sleigh {
                         .filter_map(|r| Some((r.attr("name")?.to_string(), r.attr("vector_lane_sizes")?.to_string())))
                         .collect()
                 });
-                (pspec_sets(&root, "context_set")?, pspec_sets(&root, "tracked_set")?, incidental, laned)
+                let (context, tracked) = (pspec_sets(&root, "context_set")?, pspec_sets(&root, "tracked_set")?);
+                // `Architecture::parseProcessorConfig` reads these as children of the root
+                let userops = std::mem::take(&mut root.kids)
+                    .into_iter()
+                    .filter(|k| k.name == "segmentop" || k.name == "jumpassist")
+                    .collect();
+                (context, tracked, incidental, laned, userops)
             }
-            Err(_) => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            None => (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
         };
         let mut sl = Self::load_with_context(path, &context)?;
         sl.tracked = tracked;
         sl.incidental = incidental;
         sl.laned = laned;
+        sl.userop_specs = userop_specs;
         Ok(sl)
     }
 
@@ -872,6 +890,7 @@ impl Sleigh {
             tracked: Vec::new(),
             incidental: Vec::new(),
             laned: Vec::new(),
+            userop_specs: Vec::new(),
             userops,
         })
     }
@@ -1796,6 +1815,11 @@ impl Sleigh {
     /// The name of user-defined p-code op `index` (CALLOTHER's first input).
     pub fn userop_name(&self, index: u64) -> Option<&str> {
         self.userops.get(usize::try_from(index).ok()?).and_then(|n| n.as_deref())
+    }
+
+    /// The index of the user-defined p-code op `name` (`UserOpManage::getOp(name)`).
+    pub fn userop_index(&self, name: &str) -> Option<u64> {
+        self.userops.iter().position(|n| n.as_deref() == Some(name)).map(|i| i as u64)
     }
 
     pub fn fmt_varnode(&self, v: &Varnode) -> String {

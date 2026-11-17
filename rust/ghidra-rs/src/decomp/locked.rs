@@ -284,7 +284,7 @@ pub(crate) fn func_link(fd: &mut Funcdata, arch: &Arch, c: CallId) -> Result<boo
                 fd.new_constant(size, 0)
             }
             Some(Storage::Stack { offset, size }) => {
-                let v = fd.op_stack_load(spec.stack_pointer, spec.stack_container, uniq, *offset, *size, op, None)?;
+                let v = fd.op_stack_load(spec.stack_pointer, arch.stack_segment(), uniq, *offset, *size, op, None)?;
                 if !setplaceholder {
                     // funcLinkInput: the first stack parameter is marked, not made the
                     // placeholder slot
