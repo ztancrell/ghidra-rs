@@ -116,9 +116,6 @@ pub(crate) fn err<T>(msg: impl Into<String>) -> Result<T> {
 /// first (`VarnodeData::operator<`).
 type RegKey = (u32, u64, std::cmp::Reverse<u32>);
 
-/// Size of an external-reference symbol: a pointer (`ExternRefSymbol::buildNameType`).
-const EXTERNREF_SIZE: u64 = 4;
-
 /// How much of a section bfd loads (`Section::zero_tail`).
 fn loaded_len(s: &crate::analysis::Section) -> usize {
     s.data.len().saturating_sub(s.zero_tail as usize)
@@ -156,6 +153,9 @@ pub struct Arch {
     /// `map externalref`: the slots holding a reference to an external function
     /// external-reference slots and the address each refers to (`map externalref`)
     externrefs: HashMap<u64, u64>,
+    /// the names `map externalref` gives its slots (`ExternRefSymbol`; without one the symbol
+    /// is named after the address it refers to)
+    externref_names: HashMap<u64, String>,
     /// `option readonly`: read-only memory propagates as constants (`readonlypropagate`)
     pub(crate) readonly_propagate: bool,
     /// `option nanignore all`: every FLOAT_NAN is taken as false (`nan_ignore_all`)
@@ -210,6 +210,7 @@ impl Arch {
             laned,
             readonly,
             externrefs: HashMap::new(),
+            externref_names: HashMap::new(),
             readonly_propagate: false,
             nan_ignore_all: false,
             types: type_factory,
@@ -237,6 +238,16 @@ impl Arch {
         self.externrefs.insert(slot, target);
     }
 
+    /// The name `map externalref <slot> <refaddr> <name>` gives the slot's symbol.
+    pub(crate) fn name_externref(&mut self, slot: u64, name: String) {
+        self.externref_names.insert(slot, name);
+    }
+
+    /// The name given to the symbol of an external-reference slot, if any.
+    pub(crate) fn externref_name(&self, slot: u64) -> Option<&str> {
+        self.externref_names.get(&slot).map(String::as_str)
+    }
+
     /// The address an external-reference slot refers to (`queryExternalRefFunction`).
     pub(crate) fn externref_target(&self, slot: u64) -> Option<u64> {
         self.externrefs.get(&slot).copied()
@@ -257,6 +268,11 @@ impl Arch {
         Ok(())
     }
 
+    /// Size of an external-reference symbol: a pointer (`ExternRefSymbol::buildNameType`).
+    pub(crate) fn externref_size(&self) -> u32 {
+        self.spec.stack_pointer.2
+    }
+
     /// Whether a ram varnode at `off` of `size` bytes is read-only, as `Funcdata::newVarnode`
     /// flags it (`Scope::queryProperties`): the property of its first byte, unless an
     /// external-reference symbol contains it (`ScopeInternal::addExternalRef` clears its
@@ -265,8 +281,9 @@ impl Arch {
     /// varnode at that entry.
     pub(crate) fn is_readonly(&self, off: u64, size: u32) -> bool {
         let end = off + u64::from(size);
-        let in_externref = (off.saturating_sub(EXTERNREF_SIZE - 1)..=off)
-            .any(|slot| self.externrefs.contains_key(&slot) && end <= slot + EXTERNREF_SIZE);
+        let ptr = u64::from(self.externref_size());
+        let in_externref =
+            (off.saturating_sub(ptr - 1)..=off).any(|slot| self.externrefs.contains_key(&slot) && end <= slot + ptr);
         !in_externref && self.readonly.iter().any(|&(s, e)| s <= off && off < e)
     }
 

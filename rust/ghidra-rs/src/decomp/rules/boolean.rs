@@ -167,6 +167,12 @@ fn evaluate_pair(fd: &Funcdata, op1: OpId, op2: OpId, depth: i32) -> Result<Matc
     })
 }
 
+/// `BooleanExpressionMatch::verifyCondition`'s test of two CBRANCH conditions: the same or
+/// complementary, to its `maxDepth` of 1.
+pub(crate) fn correlated(fd: &Funcdata, vn1: VarnodeId, vn2: VarnodeId) -> Result<bool> {
+    Ok(evaluate(fd, vn1, vn2, 1)? != Match::Uncorrelated)
+}
+
 /// Port of `BooleanMatch::evaluate`.
 fn evaluate(fd: &Funcdata, vn1: VarnodeId, vn2: VarnodeId, depth: i32) -> Result<Match> {
     if vn1 == vn2 {

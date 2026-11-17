@@ -298,6 +298,27 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    487 / 495, `pcc-t` and `pc-t` 479 / 495; silent only 0x47a6b0; M8 all 55 checks identical (print 7 / 7).
    Full pass: `simple` 190, 190, 188, 188 / 194; switch `pcc-r` 1810 / 2005, `pcc-t` 1817 / 2005, each with 60
    silent that older switch checks already list (see the Decided entry of 2026-11-16).
+   Branch `m3-swsilent` (2026-11-16): the jump-table partial function runs with the `stackvars` rules
+   (fallback without them when its stack heritage is not ported), `fail_return`, a wider loud test of
+   `ActionConditionalExe`, dead code in the join space. Switch corpus `paramdouble` 1947 -> 1999 / 2004
+   (silent 57 -> 0), `swsn-r` 1943 -> 1994 (silent 61 -> 3), `swfs-r` 1937 -> 1991 (silent 60 -> 0, loud 7 -> 13);
+   3 functions identical before are loud now (4 in `swsn-r`). The other switch checks and M500 not rerun.
+   Superseded by the review fixes on the same branch (a recovered table must not depend on an INDIRECT of a
+   stack varnode the unported `RuleAliasUpdate` may remove, or, in the fallback, on a guard reading the stack;
+   `fail_return` uses the spec's `<returnaddress>`): `paramdouble` 1988, `swsn-r` 1984 (silent 3), `swfs-r` 1982
+   (silent 0) of 2004; 12 functions identical on master are loud in `swfs-r` (14 in `swsn-r` and
+   `paramdouble`). M500 `s8r`, `swfs-r`, `swfs-t`, `fs-t` at their counts, 0x47a6b0 loud instead of silent.
+   Slice 5 on branch `m3-print5` (2026-11-16): labels of spliced blocks, function and external reference
+   symbols as variables, `VariablePiece` groups, string and function pointer constants. M500 `pcc-r` and `pc-r`
+   494 / 495, `pcc-t` and `pc-t` 495 / 495, no loud miss, silent only 0x47a6b0; M8 all 55 checks identical.
+   Switch `pcc-r` 1944 / 2005 (silent 61), `pcc-t` 1943 / 2005 (silent 62); all in older switch checks except
+   0x23caea8 (`pcc-t`), open: the read-only write warning of `fillinReadOnly` is not ported.
+   Superseded: the slice 4 counts above.
+   Follow-up: that case is loud now (`print C` fails on a written read-only address); switch `pcc-t` loud 1,
+   silent 61, every switch silent in an older check. Superseded: "silent 62" and "open" in the two lines above.
+   Integration `m3-int5` (2026-11-17), full pass clean against the slice 4 baseline: switch `pcc-r` 1987 / 2005,
+   `pcc-t` 1986 / 2005, silent 0; the other switch checks 1984 to 1988 of 2004; `simple` print 194 / 194; the only
+   silent misses left are in `swsn-r` (3 on switch, 3 on M500). Superseded: the switch counts in the lines above.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

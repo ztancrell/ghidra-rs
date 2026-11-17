@@ -87,11 +87,9 @@ pub(crate) struct BlockBasic {
     pub(crate) joined: bool,
     /// `f_duplicate_block`: made by `nodeSplitBlockEdge` (its label is `dup_`)
     pub(crate) duplicated: bool,
-    /// `mergeRange` ran (`spliceBlockBasic`): the C++ cover may hold two ranges, which
-    /// `start`/`stop` do not keep, so `getEntryAddr` is not known
-    pub(crate) spliced: bool,
-    /// the ranges of the cover once spliced (`mergeRange`), which `contains` reads; empty: the
-    /// one range `start`..=`stop`
+    /// the ranges of the cover once spliced (`mergeRange`, before `insertRange` joins the
+    /// overlapping ones), which `contains` and `entry_addr` read; empty: the one range
+    /// `start`..=`stop`
     pub(crate) cover: Vec<(u64, u64)>,
     /// the immediate dominator (`immed_dom`), none for the entry
     pub(crate) idom: Option<BlockId>,
@@ -104,6 +102,30 @@ pub(crate) struct BlockGraph {
     pub(crate) list: Vec<BlockId>,
     /// the last `structureLoops` found more than one root (`Funcdata::blocks_unreachable`)
     pub(crate) unreachable: bool,
+}
+
+impl BlockBasic {
+    /// Port of `BlockBasic::getEntryAddr`: the start of the cover's one range, else of the
+    /// range holding the first op (`first_op`, its address), else that address; none for a
+    /// block of several ranges without ops (the invalid address). The cover is the
+    /// `RangeList` `mergeRange` builds: `insertRange` joins ranges that overlap, not ranges
+    /// that only touch.
+    pub(crate) fn entry_addr(&self, first_op: Option<u64>) -> Option<u64> {
+        let mut ranges = self.cover.clone();
+        ranges.sort_unstable();
+        let mut tree: Vec<(u64, u64)> = Vec::new();
+        for (first, last) in ranges {
+            match tree.last_mut() {
+                Some(prev) if first <= prev.1 => prev.1 = prev.1.max(last),
+                _ => tree.push((first, last)),
+            }
+        }
+        if tree.len() <= 1 {
+            return Some(tree.first().map_or(self.start, |r| r.0));
+        }
+        let addr = first_op?;
+        Some(tree.iter().find(|r| (r.0..=r.1).contains(&addr)).map_or(addr, |r| r.0))
+    }
 }
 
 impl BlockGraph {
@@ -137,7 +159,6 @@ impl BlockGraph {
             flip_path: false,
             joined: false,
             duplicated: false,
-            spliced: false,
             cover: Vec::new(),
             mark: false,
             entry_point: false,
@@ -715,6 +736,22 @@ impl BlockGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `getEntryAddr`: touching ranges stay apart (the entry is the range of the first op),
+    /// overlapping ranges join into one.
+    #[test]
+    fn entry_addr_of_a_spliced_cover() {
+        let mut g = BlockGraph::default();
+        let b = g.new_block(0x20);
+        assert_eq!(g.block(b).entry_addr(None), Some(0x20));
+        g.block_mut(b).start = 0x10;
+        g.block_mut(b).cover = vec![(0x20, 0x2f), (0x10, 0x1f)];
+        assert_eq!(g.block(b).entry_addr(Some(0x24)), Some(0x20));
+        assert_eq!(g.block(b).entry_addr(Some(0x40)), Some(0x40));
+        assert_eq!(g.block(b).entry_addr(None), None);
+        g.block_mut(b).cover = vec![(0x20, 0x2f), (0x10, 0x20)];
+        assert_eq!(g.block(b).entry_addr(Some(0x24)), Some(0x10));
+    }
 
     /// A diamond whose fall-through arm is listed first: the reverse post-order visits the
     /// fall-through arm last, so the branch arm gets the lower index (flow.cc + block.cc).

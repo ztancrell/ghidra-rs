@@ -694,7 +694,7 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
   on), `cs-r cs-t fsc-r fsc-t` (S9 `setcasts`: `print raw` after it, and `finalstructure`
   with it on), `swfs-r swfs-t swsn-r swsn-t swfsc-r swfsc-t` (`finalstructure` with case
   labels, `switchnorm`, and `finalstructure` with case labels and `setcasts` on) and
-  `pc-r pc-t pcc-r pcc-t` (`print C`, S9 slices 1, 2, 3A, 3B and 4, `pcc` with `setcasts` on; see "C printing").
+  `pc-r pc-t pcc-r pcc-t` (`print C`, S9 slices 1, 2, 3A, 3B, 4 and 5, `pcc` with `setcasts` on; see "C printing").
 - `JOBS` (default `nproc`), `TIMEOUT` (seconds per function and engine, default 120 as for every bar here; 0x4c48d0 of M500 takes
   the reference about 485 s and ghidra-rs about 600 s alone, so at 120 s it counts as a function
   the reference does not finish), `OUT`
@@ -1091,7 +1091,7 @@ instruction limit); ghidra-rs takes 49 s on it, the reference had not finished a
 Not ported, and why: `fail_callother` (an address made by a CALLOTHER; ghidra-rs stops with
 an error: 2 functions in obfuscated code, 0x1c3c0d9 and 0x1c3c0fa), `fail_return`
 (`testForReturnAddress`; superseded: "not heritaged yet": since slice 3B a target traced to
-the input at stack offset 0 fails loudly in flow.rs), the retry of
+the input at stack offset 0 fails loudly in flow.rs; superseded again: ported on `m3-swsilent`, see "Switch corpus silent misses"), the retry of
 a table whose switch looks unreachable (it needs a guard folded to a constant; it is taken as
 complete), `checkUnrolledGuard`, multistage tables, overrides, `JumpAssisted`.
 
@@ -2671,6 +2671,7 @@ counts as the table; M8 all 55 checks as before. Not run: the full pass (`bars-q
   - `testForReturnAddress` (`fail_return`, "Treating indirect jump as return") fails loudly
     when the jump's target traces through COPY, INDIRECT and INT_AND by a constant to the
     input at stack offset 0.
+    Superseded (branch `m3-swsilent`): ported, the jump becomes a RETURN with that warning.
   - Audited and not reachable: "Subroutine does not return" and "Does not return" (ghidra-rs
     has no non-returning prototype, and `fail_callother` fails loudly), "Function flow out of
     bounds" (flow covers the whole space and inlining is not ported), `ActionPrototypeWarnings`
@@ -2845,6 +2846,212 @@ divergence is in an earlier stage. Two M500 pairs run on the Mac (`r5dtlocksv`, 
 M500 misses above that now print identically are the check. Not seen in a check: `LZCOUNT` (no
 M500 function failed on it before), and which of the two field-extraction forms (`sym.field`,
 `x.field`) the 19 functions take.
+
+### Switch corpus silent misses (branch `m3-swsilent`, 2026-11-16)
+
+The 60 silent misses of `swfs-r` and `swfsc-r` on the switch corpus (the same 60 functions), by
+cause:
+
+| cause | functions | now |
+|---|---|---|
+| the jump-table partial function ran without the `stackvars` rules, so a jump through a stack slot (SecuROM code past 0x1000000) was not recovered ("Too many branches", the jump became a call) | 56 | identical |
+| the same, and the jump goes to the return address (`testForReturnAddress`, `fail_return`) | 1 (0x1b0d29d) | identical |
+| the same, and the stack heritage of the partial function needs the value-set range of an indexed stack LOAD (`LoadGuard`, not ported) | 1 (0x1b0c190) | loud |
+| the same, and the jump reads a stack varnode through the INDIRECT of a STORE that `RuleAliasUpdate` collapses in the C++ (`ActionRestructureVarnode`, not ported) | 1 (0x1c69c5a) | loud |
+| `ActionConditionalExe` (not ported) removes a block re-testing an equal condition held in another varnode | 1 (0x5a3c30) | loud |
+
+What changed:
+
+- The partial function of jump-table recovery runs with `RuleLoadVarnode` and `RuleStoreVarnode`,
+  as in the C++ (`action.rs`; superseded: "runs without the `stackvars` rules" in "Stage R5" and
+  the notes on `jumptable::fold_constants` above). When its stack heritage fails on a path not
+  ported, flow.rs builds the partial function without the two rules (`Flow::build_partial`, with
+  `fold_constants`, as before this branch). A table that one does not give either ends the
+  decompile with the first error when the jump depends on the stack pointer; otherwise the jump
+  fails as in the C++ (warning, the jump becomes a call).
+- A table that fails while the jump reads a stack varnode through the INDIRECT of a STORE is tried
+  on the partial function without the stack rules, and fails loudly when that gives none. The
+  INDIRECT of a call is not checked.
+- `fail_return` is ported: the jump becomes a RETURN, with "Treating indirect jump as return".
+- The loud test of `ActionConditionalExe` compares the two conditions as `verifySameCondition`
+  does (`BooleanMatch`, same or complementary), not only one shared varnode, and passes a block
+  holding an op `testRemovability` never moves (a call, LOAD, STORE, INDIRECT, an address-tied
+  output), which the C++ leaves alone. In the partial function the test stays one shared varnode.
+- `ActionDeadCode` covers the join space (never heritaged, dead code after the first pass): an
+  unused `j{EDX,EAX}:8` call output goes, as in the reference (0x4f3366 in `swfs-t`).
+
+Switch corpus, of the 2,004 functions the reference finishes (before: the full pass on
+8f3c8d178c; after: the reference outputs of one `bars.sh` run, ghidra-rs rerun on them with the
+final build):
+
+| check | before | after |
+|---|---|---|
+| `paramdouble` | 1947 (loud 0, silent 57) | 1999 (loud 5, silent 0) |
+| `swsn-r` | 1943 (loud 0, silent 61) | 1994 (loud 7, silent 3) |
+| `swfs-r` | 1937 (loud 7, silent 60) | 1991 (loud 13, silent 0) |
+
+Identical before and loud now: 0x546d40, 0x5629d0, 0x78e7d0 (no table from either partial
+function, the jump depends on the stack pointer, the indexed stack LOAD error; the reference fails
+these tables too) and 0x23f4238 in `swsn-r` (a multistage table, `switchnorm` not ported; in
+`swfs-r` it was loud before, `mergeAddrTied`). The 3 silent left in `swsn-r` (0x8d8f40, 0x8eabe0,
+0x8ead90: the global at 0x00b0511c prints as `code() *` in the reference, `xunknown4` in
+ghidra-rs) are not in the 60 and were not traced; the count says they were silent before (61 = 58
+of the 60 + 3). M8: all 55 checks identical. Not run on the final build: `swfsc-r`, `swfs-t`, `swsn-t`, `pcc-*` on
+the switch corpus, and M500 (0x4f3366 alone is identical in `swfs-t`). No unit test was added: the
+functions above are the check. A panic of ghidra-rs prints before the buffered console output,
+so `decomp-diff.sh` cuts its message and `bars.sh` counts it as silent, not loud.
+
+Review fixes (second commit on `m3-swsilent`). A review of the first commit found paths that could
+still differ silently; each now fails loudly. Superseded by this paragraph: "the stack offset 0"
+of `fail_return`, "is tried on the partial function without the stack rules", "The INDIRECT of a
+call is not checked", "In the partial function the test stays one shared varnode", and the counts
+above.
+
+- `fail_return` compares with the spec's `<returnaddress>` (`CompilerSpec::return_address`, the
+  C++ `defaultReturnAddr`: space, offset and size), not a fixed 4-byte stack offset 0.
+- INDIRECTs of stack varnodes (of a STORE or of a call; `RuleAliasUpdate` after
+  `ActionRestructureVarnode`, neither ported): the table is recovered a second time on a copy of
+  the partial function with all of them removed. A different result (another table, or a table
+  against none) fails loudly, and so does a table that fails while the jump reads one. There is no
+  retry on the partial function without the stack rules any more. Not proven: that removing only
+  some of them (what the C++ alias analysis may do) gives the same table when removing all or none
+  does.
+- The partial function without the stack rules (the fallback when the stack heritage is not
+  ported): a table from it also fails loudly when a guard (`analyzeGuards`,
+  `jumptable::guard_conditions`) reads the stack through a LOAD the jump does not read.
+- `ActionConditionalExe`: the wider test (`BooleanMatch`) also in the partial function, where the
+  C++ runs `multicse`.
+
+On the 124 functions whose state the first commit changed or left not identical (every check of
+the table above, `bars.sh` on that list), against the first commit: 6 identical -> loud on the
+INDIRECT test (0x1cdbf0e, 0x7913d0, 0x7bb710, 0x7bf170, 0x898690, 0x898850; the reference fails
+these tables too), 0x502b80 and 0x5c37f0 identical -> loud on the guard test (0x5c37f0 was loud in
+`swfs-r` already), 0x5a3c30 identical -> loud in `paramdouble` (it was loud in the two later
+checks). No function became silent, none became identical. On the list: `paramdouble` 110 / 124
+(loud 14), `swsn-r` 106 / 124 (loud 15, silent 3: the three above), `swfs-r` 104 / 124 (loud 20).
+Outside that list, the whole switch corpus at `paramdouble`, the first commit's ghidra-rs against
+this one (`decomp-diff.sh` with the old build in the reference's place): 2036 / 2050 outputs equal;
+the 14 that differ all end in an error now: the 9 above, 0x1c69c5a (loud before, new wording),
+0x807a80 (identical -> loud, `ActionConditionalExe` in the partial function), 0x831db0 (identical ->
+loud, the INDIRECT test), and 0x2285c9b and 0x7c1f30, which the reference does not finish. Counts
+from that, of the 2,004: `paramdouble` 1999 -> 1988 (loud 16, silent 0; confirmed by `bars.sh`),
+`swsn-r` 1994 -> 1984 (loud 17, silent 3), `swfs-r` 1991 -> 1982 (loud 22, silent 0); against
+master 1947, 1943, 1937.
+M8: all 55 checks identical. M500 (`bars.sh`): `s8r` and `swfs-r` 498 / 499 as before, their one miss
+0x47a6b0 loud now (silent before: the wider `ActionConditionalExe` test); `swfs-t` 493 / 499 and
+`fs-t` 489 / 495 (loud 6 each, `mergeAddrTied`), unchanged. Not rerun: `swsn-r`, `swfs-r` on the
+whole switch corpus, and the other switch checks.
+
+### C printing, slice 5: spliced labels, linked variables, VariablePiece, strings (branch `m3-print5`, 2026-11-16)
+
+- `block.rs`, `printc.rs`: the label of a spliced block. `BlockBasic::entry_addr` is
+  `getEntryAddr`: the cover's ranges joined as `RangeList::insertRange` joins them (overlapping
+  ranges, not touching ones), then the start of the one range, or of the range holding the first
+  op. The `spliced` mark of a block is gone; the cover is kept as before.
+- `printc.rs`: a global variable whose storage is a whole function (one byte) or a whole external
+  reference (a pointer) prints as that symbol's name (`pushSymbolDetail`, the type-locked symbol
+  `setSymbolProperties` links when the varnode is made). `map externalref`'s third word, the
+  name, is now kept (`Arch::externref_name`); without one the name is the address and `_exref`.
+- `variable.rs`, `merge.rs`: `VariablePiece` and `VariableGroup`. `mergeAddrTied` groups
+  overlapping address-tied varnodes of different sizes (`groupWith`); the extended cover,
+  `HighVariable::merge` with pieces (`transferPiece`, `mergeGroups`), `blockIntersection`,
+  `mergeTestRequired`, `mergeTestAdjacent`, `collectInputs`, `inflateTest` and the PIECE and
+  SUBPIECE cases of `markInternalCopies` read them.
+- `printc.rs`: string constants (`pushPtrCharConstant`, `printCharacterConstant`): a constant
+  pointer to characters in read-only memory prints as the quoted string, read 32 bytes at a time
+  up to 2048 as `StringManagerUnicode::getStringData` reads it, escaped by `printUnicode`.
+  Function pointer constants (`pushPtrCodeConstant`): the name of the function at the address.
+  The second was not in the slice's list; the switch sample showed it (4 and 5 of 287).
+- Still loud: a variable that is part of an external reference or larger than the function or
+  external reference at its address (`pushPartialSymbol` of a code pointer,
+  `pushMismatchSymbol`), the label of a block of several ranges without ops, the groups of
+  proto-partial PIECEs (`groupPartials`). Not checked against the C++: a segmented constant
+  (`resolveConstant` with a segment op) and opaque strings; neither exists in the checks.
+
+| check | M8 | M500 before | M500 | switch before | switch |
+|---|---|---|---|---|---|
+| `pcc-r` | 7 / 7 | 487 / 495 (loud 7, silent 1) | 494 / 495 (loud 0, silent 1) | 1810 / 2005 (loud 135, silent 60) | 1944 / 2005 (loud 0, silent 61) |
+| `pc-r` | 7 / 7 | 487 / 495 (loud 7, silent 1) | 494 / 495 (loud 0, silent 1) | not run | not run |
+| `pcc-t` | 7 / 7 | 479 / 495 (loud 16, silent 0) | 495 / 495 (loud 0, silent 0) | 1817 / 2005 (loud 128, silent 60) | 1943 / 2005 (loud 0, silent 62) |
+| `pc-t` | 7 / 7 | 479 / 495 (loud 16, silent 0) | 495 / 495 (loud 0, silent 0) | not run | not run |
+
+The M500 silent miss is still 0x47a6b0 (`pcc-r`, `pc-r`). No loud miss is left on M500 or the
+switch corpus (superseded: the loud lists of the slice 4 section above). M8: all 55 checks
+identical on the functions the reference finishes. The seven functions that failed in
+`mergeAddrTied` (0x402c20, 0x405990, 0x4c0070, 0x62f0d0, 0x757810, 0x7586e0 of M500 and one of
+the switch sample) were run on all 55 checks: no silent miss; five loud misses, all older
+errors before merging (0x62f0d0 an indexed stack LOAD in `r5dtlock`, `r5dtlocksv`, `r5slock`,
+`r5s`; 0x4c0070 `ActionParamDouble` in `r5s`).
+
+Switch silents: the 61 of `pcc-r` are all silent in `swfs-r`, `swsn-r` or `swfsc-r` (those three
+rerun on the 63 silent functions). Of the 62 of `pcc-t`, 61 are silent in `swfs-t`, `swsn-t` or
+`swfsc-t`; one is new and is not covered by an older check: 0x23caea8 prints without the
+reference's comments `WARNING (jumptable): Read-only address (ram,0x00429700) is written` and
+`WARNING: Read-only address ... is written` (6 lines, 3 addresses). The warning of
+`Funcdata::fillinReadOnly` for a written read-only varnode is not ported (`action.rs`,
+`varnode_props`, folds only the reads); the function was loud before this slice, so the gap did
+not show. It is open: port the warning or make the case loud. A first try that warned for every
+written read-only varnode before heritage printed too many warnings and was dropped.
+
+Not run: the other 51 checks on M500, `simple`, `r5d-adc`, `pc-r` and `pc-t` on the switch
+corpus, the full pass (`bars-queue.sh`), the Mac. Not seen in a check: a wide string (`L"..."`),
+a truncated string, a function symbol as a one-byte variable, a big-endian PIECE or SUBPIECE in
+`markInternalCopies`. Unit tests added: `entry_addr_of_a_spliced_cover` (block.rs) and
+`codepoints` (printc.rs).
+
+Follow-up on the same branch: the written read-only address is loud. `print C` fails with "the
+warning for a written read-only address (fillinReadOnly) is not ported" when, with `option
+readonly on`, an op that is not a marker writes read-only memory, before heritage
+(`Funcdata::readonly_write`, set in `varnode_props`) or at the print (`action.rs`,
+`readonly_written`). The test is wider than the C++ one: it leaves out `!isAddrForce() ||
+!hasNoDescend()` and the one warning per op. Cost: one function, 0x23caea8 on switch `pcc-t`,
+silent before and loud now; nothing else changed. Switch `pcc-t` 1943 / 2005 (loud 1, silent 61),
+`pcc-r` 1944 / 2005 (loud 0, silent 61, as before: 0x23caea8 prints identically with rules on);
+M500 `pcc-r` and `pc-r` 494 / 495 (silent 1: 0x47a6b0), `pcc-t` and `pc-t` 495 / 495, no loud
+miss; M8 print checks 7 / 7. Every switch silent is now silent in an older switch check.
+(Superseded: "silent 62" of `pcc-t` in the table, "one is new" and "It is open" above.) Not
+rerun after the follow-up: the 51 other checks on M8, which the change cannot reach (only
+`print C` reads the flag).
+
+Review fixes on the same branch:
+
+- `variable.rs`: `vn_cover_dirty` goes through `h_cover_dirty` (`HighVariable::coverDirty`), so
+  a varnode whose cover goes stale also marks the extended covers of the pieces its high
+  intersects (`markExtendCoverDirty`). Before, only the high's own cover was marked.
+- `console.rs`: `load addr` adds the function to the global scope (`IfcAddrrangeLoad`,
+  `addFunction`), as `map function` does; `decomp-diff.sh` uses it for a function the prelude
+  lacks. A function already mapped at the address stays as it is (the C++ warns of the overlap
+  and adds a second symbol; not ported).
+- `printc.rs`, `printlanguage.rs`: the string read at an address is kept (`PrintC::strings`,
+  `StringManager::stringMap`), so a second constant at the address prints the same characters
+  whatever its character size. The C++ keeps the map for the session, this for one `print C`.
+- `mod.rs`: one size for an external-reference symbol, `Arch::externref_size` (the pointer
+  size; superseded: the constant `EXTERNREF_SIZE`, 4, beside `stack_pointer.2`).
+- `action.rs`: `readonly_written` moved out of the doc comment of `varnode_props`.
+
+After them: M8 all 55 checks identical, each line equal to the run before the fixes. M500
+`pcc-r` and `pc-r` 494 / 495 (silent 1: 0x47a6b0), `pcc-t` and `pc-t` 495 / 495, `nm-r`
+498 / 499 (silent 1: 0x47a6b0, its baseline), `nm-t` 499 / 499 (baseline 493 / 499, loud 6: the
+six `mergeAddrTied` functions of this slice). No function changed state with the fixes, though
+`load addr` is live: the prelude lacks 1 function of M8, 98 of M500 and 25 of `r5d-adc` (none of
+`switch` or `simple`). Not run after them: the switch corpus, `r5d-adc`, the other M500 checks,
+the full pass. Not seen to change an output: a constant or variable at the address of a
+function loaded with `load addr`, two character sizes at one string address, a stale cover of a
+grouped variable.
+
+Integration of `m3-swsilent` and `m3-print5` (branch `m3-int5`, 2026-11-17). Full pass
+(`bars-queue.sh`), 127 pairs: 126 ran (desktop and Mac), and `s6void-m500`, lost when the Mac
+was taken out of the pass, ran again on the desktop. No pair has fewer identical functions, more
+silent misses or a different reference count than the slice 4 baseline. Switch corpus, of 2,004
+(2,005 for print): `pcc-r` 1987 (loud 18, silent 0), `pcc-t` 1986 (loud 19, silent 0),
+`paramdouble` 1988 (loud 16), `swfs-r`, `swfs-t`, `swfsc-r`, `swfsc-t` and `swsn-t` 1987 (loud
+17), `swsn-r` 1984 (loud 17, silent 3: 0x8d8f40, 0x8eabe0, 0x8ead90, silent before). `simple`
+print checks 194 / 194. M500 `pcc-r` and `pc-r` 494 / 495 (loud 1), `pcc-t` and `pc-t`
+495 / 495. The only silent misses left in the pass are in `swsn-r`: those three on switch and 3 on
+M500 (4 in the baseline); 0x47a6b0 is loud in every check. (Superseded: the switch counts of `m3-swsilent` and
+slice 5 above, which were derived or from single checks.) Varies with load: the "all outputs
+identical" count of `s6void-m500` is 499 / 500 here and 500 / 500 in the baseline (a reference
+timeout; identical 499 / 499 in both).
 
 ## Speed
 

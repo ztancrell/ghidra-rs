@@ -960,6 +960,9 @@ Open, failing loudly:
 - The jump-table partial function still runs without the two rules and with
   `jumptable::fold_constants` (the C++ has `stackvars` on there and `fillinReadOnly`); the tree
   builder leaves them out of the `jumptable` root (`action.rs`).
+  Superseded (branch `m3-swsilent`): the partial function runs with the two rules; without them
+  and with `fold_constants` only as the fallback when its stack heritage reaches a path not
+  ported (`Flow::build_partial`, flow.rs).
 
 Checks, at `break start assignhigh` with types printed (`DECOMP_RAW_EXTRA=1`).
 `r1-options.sh` now also writes `rust/tools/corpus/r5s-options.txt` (`r5-options.txt` with
@@ -1782,6 +1785,35 @@ printing, slice 4". M500 `pcc-r` and `pc-r` 487 / 495 (loud 7, silent 1: 0x47a6b
 older switch checks). Next, by M500 misses: `mergeAddrTied` (VariablePiece) 6 with types on, labels of spliced
 blocks 5, a variable linked to a function or external reference 3, string constants 2.
 (Superseded: the "Next" list of the merged section above.)
+
+### S9 slice 5, branch `m3-print5` (2026-11-16)
+
+Labels of spliced blocks (`getEntryAddr`), variables that are a whole function or external
+reference symbol, `VariablePiece` groups (`mergeAddrTied`, `groupWith`), string constants and
+function pointer constants. Details: rust/README.md, "C printing, slice 5". M500 `pcc-r` and
+`pc-r` 494 / 495 (loud 0, silent 1: 0x47a6b0), `pcc-t` and `pc-t` 495 / 495; M8 all 55 checks
+identical. Switch `pcc-r` 1944 / 2005 (loud 0, silent 61), `pcc-t` 1943 / 2005 (loud 0, silent 62);
+all silents are in older switch checks except 0x23caea8 (`pcc-t`), open: the "Read-only address
+is written" warning of `fillinReadOnly` is not ported. Not run: the full pass. Next: that warning;
+then the switch silents of the earlier stages.
+Follow-up: 0x23caea8 is loud (`print C` fails on a written read-only address, the unported
+warning): switch `pcc-t` 1943 / 2005 (loud 1, silent 61), every switch silent in an older check.
+Next: port the `fillinReadOnly` warning. (Superseded: "silent 62" and "open" above.)
+(Superseded: the counts and the "Next" list of the slice 4 section above.)
+
+Integration of `m3-swsilent` and `m3-print5` (branch `m3-int5`, 2026-11-17). Full pass
+(`bars-queue.sh`), 127 pairs: 126 ran (desktop and Mac), and `s6void-m500`, lost when the Mac
+was taken out of the pass, ran again on the desktop. No pair has fewer identical functions, more
+silent misses or a different reference count than the slice 4 baseline. Switch corpus, of 2,004
+(2,005 for print): `pcc-r` 1987 (loud 18, silent 0), `pcc-t` 1986 (loud 19, silent 0),
+`paramdouble` 1988 (loud 16), `swfs-r`, `swfs-t`, `swfsc-r`, `swfsc-t` and `swsn-t` 1987 (loud
+17), `swsn-r` 1984 (loud 17, silent 3: 0x8d8f40, 0x8eabe0, 0x8ead90, silent before). `simple`
+print checks 194 / 194. M500 `pcc-r` and `pc-r` 494 / 495 (loud 1), `pcc-t` and `pc-t`
+495 / 495. The only silent misses left in the pass are in `swsn-r`: those three on switch and 3 on
+M500 (4 in the baseline); 0x47a6b0 is loud in every check. (Superseded: the switch counts of `m3-swsilent` and
+slice 5 above, which were derived or from single checks.) Varies with load: the "all outputs
+identical" count of `s6void-m500` is 499 / 500 here and 500 / 500 in the baseline (a reference
+timeout; identical 499 / 499 in both).
 
 ## Running stages in parallel
 

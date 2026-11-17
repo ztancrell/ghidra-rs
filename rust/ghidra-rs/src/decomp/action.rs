@@ -158,11 +158,9 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
         ],
     ));
     // oppool2 (stage R5): the `typerecovery` pointer rules and the `stackvars` rules.
-    // ponytail: the jump-table partial function still folds its constant loads itself
-    // (`jumptable::fold_constants`) and runs without the `stackvars` rules, which the C++ has
-    // on there; switch them on with `fillinReadOnly` when `fold_constants` goes.
-    let pool2 =
-        super::rules::select(super::rules::OPPOOL2, |rl| rule_on(rl) && !(jumptable && rl.group == "stackvars"));
+    // The `stackvars` rules are on in the jump-table partial function too, as in the C++
+    // (superseded: "runs without the `stackvars` rules"; see [`jumptable_partial`]).
+    let pool2 = super::rules::select(super::rules::OPPOOL2, rule_on);
     mainloop.push(t.pool("oppool2", pool2));
     mainloop.extend(leaves(
         &mut t,
@@ -275,11 +273,14 @@ const PARTIAL_SKIP: &[&str] = &[
 /// The `jumptable` root action (`buildDefaultGroups`: groups `base`, `noproto`, `analysis`, ...)
 /// run on the partial function of jump-table recovery (`Funcdata::stageJumpTable`): the tree of
 /// [`universal`] with the `jumptable` groups, every ported rule on (`togglerule` and `option
-/// currentaction` reach only the `decompile` root), less the actions of [`PARTIAL_SKIP`]. The
-/// rules of later stages (R3 to R5, with `RuleLoadVarnode`) are missing from it; `jumptable.rs`
-/// folds the read-only loads they would resolve.
-pub(crate) fn jumptable_partial(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
-    match tree(true, &std::collections::HashSet::new()).perform(fd, arch)? {
+/// currentaction` reach only the `decompile` root), less the actions of [`PARTIAL_SKIP`].
+/// `stack` false leaves out the `stackvars` rules (`RuleLoadVarnode`, `RuleStoreVarnode`), for
+/// the partial function flow.rs falls back to when the stack heritage reaches a path not
+/// ported; `jumptable::fold_constants` then folds the read-only loads. Superseded: "the rules
+/// of later stages (R3 to R5, with `RuleLoadVarnode`) are missing from it".
+pub(crate) fn jumptable_partial(fd: &mut Funcdata, arch: &Arch, stack: bool) -> Result<()> {
+    let off: &[&str] = if stack { &[] } else { &["rule:loadvarnode", "rule:storevarnode"] };
+    match tree(true, &off.iter().map(|s| s.to_string()).collect()).perform(fd, arch)? {
         super::actiontree::Outcome::Complete => Ok(()),
         super::actiontree::Outcome::Break(at) => err(format!("the jumptable action stopped at {at}")),
     }
@@ -452,6 +453,21 @@ fn unreachable(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     super::coreaction::unreachable(fd, arch)
 }
 
+/// Whether an op that is not a marker writes read-only memory, where `Funcdata::fillinReadOnly`
+/// warns "Read-only address (...) is written" (with `option readonly on`). The warning is not
+/// ported, so `print C` fails for such a function. This is wider than the C++ test: it leaves
+/// out `!isAddrForce() || !hasNoDescend()` and the one warning per op.
+pub(crate) fn readonly_written(fd: &Funcdata, arch: &Arch) -> bool {
+    let ram = Space::Sleigh(arch.sleigh.code_space());
+    arch.readonly_propagate
+        && fd.loc_all().into_iter().any(|vn| {
+            let v = fd.vn(vn);
+            v.space == ram
+                && v.def.is_some_and(|d| !matches!(fd.op(d).opc, Opcode::Indirect | Opcode::Multiequal))
+                && arch.is_readonly(v.offset, v.size)
+        })
+}
+
 /// Port of `ActionVarnodeProps::apply` on the first pass (before heritage): with
 /// `option readonly on`, each free read of read-only memory becomes the constant the image
 /// holds there (`Funcdata::fillinReadOnly`). The rest of the action needs later passes
@@ -465,6 +481,7 @@ fn varnode_props(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     if !arch.readonly_propagate {
         return Ok(changes);
     }
+    fd.readonly_write |= readonly_written(fd, arch);
     let ram = Space::Sleigh(arch.sleigh.code_space());
     let mut reads = Vec::new();
     for op in fd.blocks.ops() {

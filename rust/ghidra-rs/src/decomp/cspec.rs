@@ -54,6 +54,8 @@ pub(crate) struct CompilerSpec {
     pub(crate) stack_pointer: (u32, u64, u32),
     /// `<stackpointer space=..>`: the space the stack lives in (the stack space's container)
     pub(crate) stack_container: u32,
+    /// `<returnaddress>` (`Architecture::defaultReturnAddr`); `None` when the spec has none
+    pub(crate) return_address: Option<Storage>,
     /// `<global>`: the ranges the global scope owns (space, first, last); a varnode inside one
     /// is `persist` and `addrtied`
     pub(crate) global: Vec<(u32, u64, u64)>,
@@ -203,7 +205,7 @@ impl CompilerSpec {
         models.eval_called = eval_called.map(|n| models.find(&n)).transpose()?;
         let (stack_pointer, stack_container) =
             stack_pointer.ok_or_else(|| LowlevelError("No stack pointer specified".into()))?;
-        Ok(CompilerSpec { stack_pointer, stack_container, models, injects, align_map, global })
+        Ok(CompilerSpec { stack_pointer, stack_container, return_address: retaddr, models, injects, align_map, global })
     }
 }
 
