@@ -1482,7 +1482,14 @@ impl PrintC<'_> {
             return err("print C: part of a symbol without a data-type is not ported");
         };
         if i64::from(off) + i64::from(size) > i64::from(self.fd.types.size(sty)) {
-            return err("print C: a variable past the end of its symbol (pushMismatchSymbol) is not ported");
+            // pushMismatchSymbol: at the symbol's address but larger, its name after an underscore
+            if off == 0 {
+                let name = format!("_{}", self.fd.symtab.symbol(sym).name);
+                return self.push_atom(Atom::Text(name));
+            }
+            return err(
+                "print C: a variable past the end of its symbol, not at its start (pushMismatchSymbol) is not ported",
+            );
         }
         self.push_partial_symbol(sym, i64::from(off), size, is_read.then_some(vn))
     }

@@ -1178,6 +1178,8 @@ answers a locked stack parameter's type (10 functions typed `ESP + 4` as `int4 *
   (MapState, RangeHint, AliasChecker, symbols), `ActionMappedLocalSync`.
   Superseded (branch `m3-aliasupdate`): `ActionRestructureVarnode` is ported for the partial
   function of jump-table recovery (`mapstate.rs`), not for the function itself.
+  Superseded again ("Local symbols", 2026-11-17): both actions are ported for the function
+  itself too.
 
 Review fixes and merges (2026-11-14). Fixed after an independent review:
 
@@ -1859,7 +1861,8 @@ varmap.cc (`MapState`, `RangeHint`, the full `AliasChecker`, `createEntry`,
 `namevars` (symbols that exist before it) and the printer read. Also open: the loud misses
 `pcd` reaches (`namevars` `getExactPiece`, indexed stack LOADs in heritage, STORE guards in
 merge, `HeapSequence`, `ActionConditionalExe`), and whether a default-options run should fail
-while a pool rule is missing. (Superseded: `ActionConditionalExe` is ported, `condexe.rs`.)
+while a pool rule is missing. (Superseded: `ActionConditionalExe` is ported, `condexe.rs`;
+`restructure_varnode` and `mapped_local_sync` are ported, see "Local symbols" below.)
 
 End sweep of the branch before the merge of `m3-aliasupdate` (final build): all 56 checks on
 M8 identical. M500: `pcd` 422 / 497 (loud 75, silent 0: 51 `namevars` `getExactPiece`, 16
@@ -1905,6 +1908,64 @@ switch corpus (Superseded: the derived counts above): `paramdouble` 1995 / 2004 
 1996 / 2005 (loud 9). Open: 0x5861aa and 0x7c74c0, identical at `paramdouble` in the `m3-int5`
 pass, are loud there before and after these fixes ("a second table after the partial function's
 action failed"). Details in `rust/README.md`, "Review fixes" of the alias analysis section.
+
+### Local symbols: `restructure_varnode` and `mapped_local_sync` (2026-11-17)
+
+The two leaves left in `D` are ported for the `decompile` root, so `D` is empty and `pcd` runs
+the whole default action tree (the eight pool rules of `default-options.txt` are still off).
+What was ported and which readers of the symbols changed: `rust/README.md`, "Local symbols".
+
+New check `pmd`: `print map` and `print raw` (with `DECOMP_MAP_EXTRA` and `DECOMP_RAW_EXTRA`) at
+`break start startcleanup`, default options: the symbols and the typed ops right after
+`mapped_local_sync`.
+
+Counts. The reference now runs both actions, so its output differs from the baseline's in
+most functions with stack variables. "Before" is `m3-default` for `pcd` and the `m3-int5` pass
+for the rest.
+
+| check | before | now |
+|---|---|---|
+| `pcd` M8 | 8 / 8 | 8 / 8 |
+| `pcd` M500 | 422 / 497 (loud 75, silent 0) | 463 / 499 (loud 36, silent 0) |
+| `pcd` simple | 184 / 200 (loud 16) | 188 / 200 (loud 12, silent 0) |
+| `pmd` M8, M500, simple | new | 8 / 8, 470 / 499 (loud 29, silent 0), 190 / 200 (loud 10, silent 0) |
+| `pcc-r`, `pc-r` M500 | 494 / 495 (loud 1) | 495 / 495 |
+| `pcc-t`, `pc-t` M500 | 495 / 495 | 495 / 495 |
+| `nm-r` M500 | 498 / 499 (loud 1) | 499 / 499 |
+| `nm-t` M500 | 499 / 499 | 499 / 499 |
+| `paramdouble`, `s7t` M500 | 500 / 500, 499 / 499 | 500 / 500, 499 / 499 |
+| `r5s` M500 | 446 / 499 (loud 53) | 483 / 499 (loud 16, silent 0) |
+| the six print and naming checks, simple | 194 / 194 (`nm-*` not in the pass) | 194 / 194; `nm-r`, `nm-t` 200 / 200 |
+| `r5s` simple | not in the pass | 192 / 200 (loud 8, silent 0) |
+| switch: `paramdouble`, `swfs-r`, `swsn-r`, `pcc-t` | 1995 / 2004, 1996, 1993 (silent 3), 1996 / 2005 (`m3-default` review fixes) | the same counts, the same functions in the same states |
+
+Where they ran: `pcd` and `pmd` (M8, simple, M500), `r5s` (simple, M500), `pcc-t` (simple,
+M500) and `nm-t` (simple) on the desktop with the final code. The other lines, and the switch
+corpus, on the two-machine queue at commit 083ac6a7b5 of the task branch (not kept: squashed),
+which lacks only the loud stack input of `ActionUnjustifiedParams` below and a unit test; at
+that commit `pmd` and `r5s` on simple had 0x581bf6 silent. (`r5s` M500 with the final code on
+the loaded desktop: 482 / 498, loud 16, one more reference timeout.) Not run: the other checks of the
+full pass (the ones with `localrecovery` off or the two actions skipped do not reach the
+port in the function itself; all of them reach it in the jump-table partial function).
+
+`pcd` M500 by function: 47 loud before are identical now (the `namevars` pieces of a symbol,
+STORE guards in merge), 6 identical before are loud now, none is silent:
+
+| functions | cause | needs |
+|---|---|---|
+| 0x5cee30, 0x5d8680, 0x5d87c0 | `subflow`: a logical value in a join varnode (0x5cee30: symbols and ops equal to the reference at the five hits of `break start restructure_varnode` before it) | join addresses in `subflow` |
+| 0x4b8e50, 0x74c9b0 | `RuleStringCopy` finds the symbol of `restructure_varnode` | `StringSequence` (constseq.cc) |
+| 0x6b21e0 | heritage: an indexed stack LOAD | `ValueSetSolver` |
+
+The 36 loud of `pcd` M500: 17 indexed stack LOAD in heritage and 9 load or store guard in
+`restructure_varnode` (both need `ValueSetSolver`), 5 `StringSequence`, 3 join `subflow`, 2
+`HeapSequence`. `pcd` simple: 1 identical before is loud now (0x4ea611, a guard in
+`restructure_varnode`), 5 loud before are identical.
+
+Found by `pmd` and `r5s` on simple: 0x581bf6 was silent. `ActionUnjustifiedParams` passed over
+a stack input in the middle of a parameter slot (it looked at register inputs only); the C++
+widens it (`adjustInputVarnodes`, not ported). It fails loudly now. In `pcd` the function was
+loud later anyway (`StringSequence`), which hid it.
 
 ## Running stages in parallel
 

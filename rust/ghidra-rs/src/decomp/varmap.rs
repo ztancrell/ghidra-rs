@@ -2,15 +2,17 @@
 //! offsets the local scope owns (`ScopeLocal` and its range tree), `ScopeLocal::markNotMapped`,
 //! and `ActionRestrictLocal`.
 //!
-//! Local symbols (database.cc) are not ported: the scope holds only the locked parameters of the
-//! function's own prototype. `ScopeLocal::restructureVarnode` (MapState, RangeHint, the alias
-//! checker) builds symbols, so `ActionRestructureVarnode` stays unported in the `decompile`
-//! root. The partial function of jump-table recovery has no types and no names: its symbols
-//! are the bare entries [`LocalSym`], made by `mapstate.rs`. (Superseded: "stays unported".)
+//! The symbols `ScopeLocal::restructureVarnode` builds (MapState, RangeHint, the alias checker:
+//! `mapstate.rs`) are the entries [`LocalSym`] here, range and flags, each with its symbol of
+//! the local scope (`Funcdata::symtab`) for the data-type and the name. The locked parameters
+//! of the function's own prototype are not symbols of the scope: they are read from the
+//! prototype. (Superseded: "Local symbols (database.cc) are not ported", "stays unported in
+//! the `decompile` root", "bare entries".)
 
 use super::fspec::{EffectKind, Storage};
 use super::funcdata::Funcdata;
 use super::opcode::Opcode;
+use super::scope::SymbolId;
 use super::varnode::{Space, VarnodeId, VnFlags};
 use super::{Arch, Result};
 use std::collections::HashSet;
@@ -32,6 +34,8 @@ pub(crate) struct LocalMap {
     /// the symbols `ScopeLocal::restructureVarnode` made ([`super::mapstate`]); a removed one
     /// keeps its index
     syms: Vec<LocalSym>,
+    /// `openParamRefs`: the last `restructureVarnode` saw an open reference into the parameters
+    pub(crate) open_param_refs: bool,
     /// their entries (`maptable` of the stack space), keyed by the index in `syms`
     entries: super::rangemap::RangeMap<usize>,
 }
@@ -44,6 +48,8 @@ pub(crate) struct LocalSym {
     pub(crate) off: u64,
     pub(crate) last: u64,
     pub(crate) noalias: bool,
+    /// its symbol of the local scope (`Funcdata::symtab`): the data-type and the name
+    pub(crate) id: SymbolId,
     /// category `fake_input` (`fakeInputSymbols`)
     pub(crate) fake_input: bool,
     live: bool,
@@ -78,6 +84,7 @@ impl LocalMap {
             param_last: 0,
             params: Vec::new(),
             syms: Vec::new(),
+            open_param_refs: false,
             entries: Default::default(),
         }
     }
@@ -103,24 +110,29 @@ impl LocalMap {
         &self.params
     }
 
-    /// `ScopeInternal::addSymbol` for an unnamed stack variable over `[off, off + size)`.
-    pub(crate) fn add_sym(&mut self, off: u64, size: u64, fake_input: bool) {
+    /// The entry of the unnamed stack variable `id` over `[off, off + size)`
+    /// (`Funcdata::add_local_sym` makes the two).
+    pub(crate) fn add_sym(&mut self, off: u64, size: u64, fake_input: bool, id: SymbolId) {
         let last = off.saturating_add(size.max(1) - 1);
-        self.syms.push(LocalSym { off, last, noalias: false, fake_input, live: true });
+        self.syms.push(LocalSym { off, last, noalias: false, id, fake_input, live: true });
         self.entries.insert(self.syms.len() - 1, off, last, super::rangemap::SUB_FIRST);
     }
 
-    /// `clearUnlockedCategory(-1)` (`fake_input` false) or `clearCategory(Symbol::fake_input)`.
+    /// `clearUnlockedCategory(-1)` (`fake_input` false) or `clearCategory(Symbol::fake_input)`:
+    /// the symbols removed, for `Funcdata::clear_local_syms`.
     // ponytail: removed symbols stay in `syms` (one set per pass of the action); compact the
     // list if a partial function with very many passes gets slow
-    pub(crate) fn clear_syms(&mut self, fake_input: bool) {
+    pub(crate) fn clear_syms(&mut self, fake_input: bool) -> Vec<SymbolId> {
+        let mut gone = Vec::new();
         for i in 0..self.syms.len() {
             let s = self.syms[i];
             if s.live && s.fake_input == fake_input {
                 self.entries.erase(i, s.off, s.last);
                 self.syms[i].live = false;
+                gone.push(s.id);
             }
         }
+        gone
     }
 
     /// The symbols in the order of the entry list (`rangemap->begin_list()`), by index.
@@ -145,8 +157,8 @@ impl LocalMap {
 
     /// The symbol loop of `ScopeLocal::markNotMapped` over `[off, last]`: each symbol under the
     /// range is removed (`removeSymbol`; none is typelocked), until a `fake_input` one stops it.
-    /// True when one did: the range then stays mapped.
-    fn unmap_syms(&mut self, off: u64, last: u64) -> bool {
+    /// True when one did: the range then stays mapped. The symbols removed go to `gone`.
+    fn unmap_syms(&mut self, off: u64, last: u64, gone: &mut Vec<SymbolId>) -> bool {
         while let Some(i) = self.entries.find_overlap(off, last) {
             let s = self.syms[i];
             if s.fake_input {
@@ -154,6 +166,7 @@ impl LocalMap {
             }
             self.entries.erase(i, s.off, s.last);
             self.syms[i].live = false;
+            gone.push(s.id);
         }
         false
     }
@@ -321,7 +334,9 @@ pub(crate) fn mark_not_mapped(fd: &mut Funcdata, space: Space, first: u64, sz: u
     let locked = locked_stack_params(fd);
     let other = fd.symtab.overlapping(super::scope::LOCAL, Space::Stack, first, sz).into_iter().any(|s| {
         let sym = fd.symtab.symbol(s);
+        // (the symbols of `restructureVarnode` are handled below)
         !(sym.flags.type_locked && sym.entries.iter().any(|e| locked.iter().any(|l| l.0 == e.offset)))
+            && !fd.localmap.syms.iter().any(|l| l.live && l.id == s)
     });
     if other {
         return super::err(
@@ -345,7 +360,12 @@ pub(crate) fn mark_not_mapped(fd: &mut Funcdata, space: Space, first: u64, sz: u
         }
         return Ok(());
     }
-    if sym_last.is_some_and(|l| fd.localmap.unmap_syms(first, l)) {
+    let mut gone = Vec::new();
+    let kept = sym_last.is_some_and(|l| fd.localmap.unmap_syms(first, l, &mut gone));
+    for id in gone {
+        fd.symtab.remove_symbol(id);
+    }
+    if kept {
         return Ok(()); // inputs in the stack space are not unmapped
     }
     fd.localmap.remove_range(first, sz);
@@ -605,13 +625,16 @@ mod tests {
     /// `markNotMapped` removes the symbols under a range until it meets a fake input.
     #[test]
     fn unmapping_removes_symbols_up_to_a_fake_input() {
+        use super::super::scope::SymbolId;
         let mut m = LocalMap::empty();
-        m.add_sym(0x10, 4, false);
-        m.add_sym(0x20, 4, true);
+        m.add_sym(0x10, 4, false, SymbolId(7));
+        m.add_sym(0x20, 4, true, SymbolId(8));
         assert!(m.find_container(0x12, 2).is_some() && m.find_container(0x12, 4).is_none());
-        assert!(!m.unmap_syms(0x8, 0x13));
+        let mut gone = Vec::new();
+        assert!(!m.unmap_syms(0x8, 0x13, &mut gone));
         assert!(!m.has_container(0x10, 4));
-        assert!(m.unmap_syms(0x1c, 0x23));
+        assert!(m.unmap_syms(0x1c, 0x23, &mut gone));
         assert!(m.has_container(0x20, 4));
+        assert_eq!(gone, [SymbolId(7)]);
     }
 }

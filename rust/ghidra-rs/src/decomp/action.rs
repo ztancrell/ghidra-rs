@@ -145,12 +145,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("spacebase", "base", c::spacebase),
             ("infertypes", "typerecovery", super::infertypes::infer_types),
             ("nonzeromask", "analysis", super::rules::nonzero_mask),
-            // the partial function of jump-table recovery has its port (`mapstate.rs`)
-            (
-                "restructure_varnode",
-                "localrecovery",
-                if jumptable { super::mapstate::restructure_varnode } else { not_ported },
-            ),
+            ("restructure_varnode", "localrecovery", super::mapstate::restructure_varnode),
         ],
     );
     mainloop.push(stackstall);
@@ -201,7 +196,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
     root.extend(leaves(
         &mut t,
         &[
-            ("mapped_local_sync", "localrecovery", not_ported),
+            ("mapped_local_sync", "localrecovery", super::mapstate::mapped_local_sync),
             // ActionStartCleanUp only records the varnode create index (`clean_up_index`), which
             // nothing ported reads
             ("startcleanup", "cleanup", c::nothing),
@@ -269,11 +264,10 @@ pub(crate) fn not_ported(_: &mut Funcdata, _: &Arch) -> Result<i32> {
 /// unported action reached in the partial fails the table and is reported, `flow.rs`). One
 /// of them can change which tables are recovered: `normalizebranches` (flips the CBRANCHs the
 /// guards are read from). Superseded: "Three of them"; `restructure_varnode` (the partial runs
-/// its port, `mapstate.rs`), `multicse`, `shadowvar` and `condconst` were entries until they
-/// were ported, and run in the partial.
+/// its port, `mapstate.rs`), `multicse`, `shadowvar`, `condconst` and `mapped_local_sync` were
+/// entries until they were ported, and run in the partial.
 const PARTIAL_SKIP: &[&str] = &[
     "funclinkoutonly",
-    "mapped_local_sync",
     "normalizebranches",
     // stage S7: the last `localrecovery` action, after merging (not in the `jumptable` groups);
     // it only sets the output prototype's types, which no recovered address reads

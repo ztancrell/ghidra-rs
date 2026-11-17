@@ -337,6 +337,14 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    table from a partial function made without the alias analysis; no output changes. Measured on the whole switch
    corpus: `paramdouble` 1995 / 2004, `swfs-r` 1996, `swsn-r` 1993 (silent 3), `pcc-r` 1997 / 2005, `pcc-t`
    1996 / 2005 (Superseded: the derived counts of the line above). Open: 0x5861aa and 0x7c74c0 loud at `paramdouble`.
+   Local symbols (2026-11-17): `restructure_varnode` and `mapped_local_sync` run in the `decompile` root (typed range
+   hints, symbols of the local scope, `syncVarnodesWithSymbols` with data-types), so `pcd` skips no action: M8
+   8 / 8, M500 463 / 499 (loud 36, silent 0), simple 188 / 200 (loud 12, silent 0). New check `pmd` (symbols and typed
+   ops after `mapped_local_sync`): M8 8 / 8, M500 470 / 499 (loud 29, silent 0). 47 M500 functions loud -> identical,
+   6 identical -> loud (join `subflow` 3, `StringSequence` 2, an indexed stack LOAD 1). Switch corpus unchanged
+   (`paramdouble` 1995 / 2004, `swfs-r` 1996, `swsn-r` 1993 with the 3 silent, `pcc-t` 1996 / 2005). Superseded: "`restructure_varnode`
+   and `mapped_local_sync` stay skipped" and "M500 415 / 497" above. Open: `ValueSetSolver` (26 of the 36 loud),
+   `StringSequence`, `adjustInputVarnodes` (0x581bf6 was silent in `pmd`, loud now).
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

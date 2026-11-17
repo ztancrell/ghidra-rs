@@ -19,7 +19,7 @@ use crate::decomp::subflow::{FlowKind, SubvariableFlow};
 /// `big`: it may be 8 bytes.
 fn shrink(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, mask: u64, sext: bool, big: bool) -> Result<i32> {
     let kind = FlowKind { aggressive: false, sext, big };
-    match SubvariableFlow::new(fd, arch, vn, mask, kind)?.do_trace()? {
+    match SubvariableFlow::new(fd, vn, mask, kind)?.do_trace()? {
         Some(replacement) => {
             replacement.apply(fd, arch)?;
             Ok(1)

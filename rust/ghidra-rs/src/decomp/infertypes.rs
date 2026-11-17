@@ -253,6 +253,125 @@ pub(crate) fn sub_type(fd: &mut Funcdata, arch: &Arch, t: TypeId, off: i64) -> R
     Ok(fd.types.sub_type(t, off))
 }
 
+/// `Datatype::Nearest`: an arrayed component near an offset.
+#[derive(Debug, Clone, Copy)]
+struct Nearest {
+    offset: i64,
+    el_size: i64,
+    distance: i64,
+}
+
+/// `TypeSpacebase::MAX_ARRAY_SLACK_FORWARD` and `MAX_ARRAY_SLACK_BACKWARD`.
+const MAX_ARRAY_SLACK: (i64, i64) = (128, 8);
+
+/// `TypeArray::nearestArrayedComponentForward` or `Backward`; no other ported type has an
+/// arrayed component, and a struct or union is not ported.
+fn array_nearest(fd: &Funcdata, t: TypeId, off: i64, forward: bool) -> Result<Option<Nearest>> {
+    match fd.types.get(t).kind {
+        Kind::Array { elem, .. } => {
+            let (size, el_size) = (i64::from(fd.types.size(t)), i64::from(fd.types.align_size(elem)));
+            Ok(if forward {
+                (off <= 0).then_some(Nearest { offset: off, el_size, distance: -off })
+            } else {
+                (off >= 0).then_some(Nearest { offset: off, el_size, distance: (off - size).max(0) })
+            })
+        }
+        Kind::Fields(_) => err("nearestArrayedComponent of a struct or union: not implemented in ghidra-rs yet"),
+        _ => Ok(None),
+    }
+}
+
+/// Port of `TypeSpacebase::nearestArrayedComponentForward` and `Backward` on the local scope:
+/// the array symbol holding stack offset `off`, or the nearest one after it (before it) within
+/// the slack.
+fn spacebase_nearest(fd: &Funcdata, arch: &Arch, off: i64, forward: bool) -> Result<Option<Nearest>> {
+    use super::scope::LOCAL;
+    let addr = off as u64 & calc_mask(arch.spec.stack_pointer.2);
+    // an entry's symbol type, its start and its offset into the symbol
+    let entry = |(sym, ei): (super::scope::SymbolId, usize)| {
+        let s = fd.symtab.symbol(sym);
+        (s.ty, s.entries[ei].offset, s.entries[ei].piece.unwrap_or(0))
+    };
+    let mut max = if forward { MAX_ARRAY_SLACK.0 } else { MAX_ARRAY_SLACK.1 };
+    match fd.symtab.find_container(LOCAL, Space::Stack, addr, 1, None)?.map(entry) {
+        Some((ty, start, 0)) => {
+            let struct_off = addr.wrapping_sub(start) as i64;
+            let found = match ty {
+                Some(t) => array_nearest(fd, t, struct_off, forward)?,
+                None => None,
+            };
+            if let Some(r) = found {
+                return Ok(Some(Nearest { offset: struct_off, ..r }));
+            }
+        }
+        // the search goes farther back when no symbol is at the offset
+        _ => max = MAX_ARRAY_SLACK.0,
+    }
+    let mut next = addr;
+    loop {
+        let Some((ty, start, 0)) = fd.symtab.find_symbol_near(LOCAL, Space::Stack, next, forward).map(entry) else {
+            return Ok(None);
+        };
+        next = start;
+        let struct_off = addr.wrapping_sub(next) as i64;
+        let size = ty.map_or(0, |t| i64::from(fd.types.size(t)));
+        let found = match ty {
+            Some(t) => array_nearest(fd, t, if forward { 0 } else { size }, forward)?,
+            None => None,
+        };
+        if let Some(r) = found {
+            let distance = if forward { r.distance - struct_off } else { r.distance + struct_off - size };
+            if distance > max {
+                return Ok(None);
+            }
+            // farther than the whole data-type, the reference is treated as an array access
+            if distance <= size || ty.is_some_and(|t| fd.types.meta(t) == Meta::Array) {
+                return Ok(Some(Nearest { offset: struct_off, distance, ..r }));
+            }
+        }
+        let gone = if forward { next.wrapping_sub(addr) } else { addr.wrapping_sub(next) };
+        if gone >= max as u64 {
+            return Ok(None);
+        }
+    }
+}
+
+/// Port of `Datatype::nearestArrayedComponent`: the offset of the array component of `t`
+/// nearest to `off` (for the stack's space-base type: of the array symbol), preferring the
+/// element size `hint`. The global scope holds no array symbol while the rules run.
+pub(crate) fn nearest_arrayed_component(
+    fd: &mut Funcdata,
+    arch: &Arch,
+    t: TypeId,
+    off: i64,
+    hint: u32,
+) -> Result<Option<i64>> {
+    let (before, after) = match fd.types.get(t).kind {
+        Kind::Spacebase { scope: GLOBAL_SCOPE, .. } => (None, None),
+        Kind::Spacebase { .. } => (spacebase_nearest(fd, arch, off, false)?, spacebase_nearest(fd, arch, off, true)?),
+        _ => (array_nearest(fd, t, off, false)?, array_nearest(fd, t, off, true)?),
+    };
+    Ok(match (before, after) {
+        (None, None) => None,
+        (None, Some(a)) => Some(a.offset),
+        (Some(b), None) => Some(b.offset),
+        (Some(b), Some(a)) => {
+            if hint != 1 && b.el_size != a.el_size {
+                if b.el_size == i64::from(hint) {
+                    return Ok(Some(b.offset));
+                }
+                if a.el_size == i64::from(hint) {
+                    return Ok(Some(a.offset));
+                }
+            }
+            match sub_type(fd, arch, t, off)? {
+                Some((_, newoff)) if newoff == b.offset || newoff == a.offset => Some(newoff),
+                _ => Some(if a.distance <= b.distance { a.offset } else { b.offset }),
+            }
+        }
+    })
+}
+
 fn sign_extend(v: u64, bit: u32) -> i64 {
     let sh = 63 - bit;
     ((v << sh) as i64) >> sh

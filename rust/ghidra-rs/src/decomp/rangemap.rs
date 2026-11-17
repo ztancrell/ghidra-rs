@@ -5,7 +5,8 @@
 //! depend on the insertion history, so the multiset is reproduced with libstdc++'s placement of
 //! equal keys (`_M_insert_equal`, the hinted `_M_insert_equal_`).
 //!
-//! Not ported: `find_first_after`, `find_last_before` (nothing ported calls them).
+//! `find_first_after` and `find_last_before` are `after` and `before`. (Superseded: "Not ported:
+//! `find_first_after`, `find_last_before`".)
 
 /// The sub-sort of a record (`SymbolRange::EntrySubsort`: space index, offset).
 pub(crate) type Subsort = (u32, u64);
@@ -226,11 +227,48 @@ impl<K: Copy + PartialEq> RangeMap<K> {
     pub(crate) fn find_overlap(&self, point: u64, end: u64) -> Option<K> {
         self.tree.get(self.lower_bound(point, SUB_FIRST)).filter(|p| p.first <= end).map(|p| p.key)
     }
+
+    /// Port of `rangemap::find_first_after(point)` and the walk forward from it: the record of
+    /// the first sub-range after `point` whose record starts after it, then every later
+    /// sub-range's, in multiset order.
+    pub(crate) fn after(&self, point: u64) -> impl Iterator<Item = K> + '_ {
+        // find_end: past the sub-ranges holding the point
+        let mut i = self.upper_bound(point, SUB_LAST);
+        if let Some(p) = self.tree.get(i).filter(|p| p.first <= point) {
+            i = self.upper_bound(p.last, SUB_LAST);
+        }
+        let at = self.tree[i..].iter().position(|p| point < p.a).map_or(self.tree.len(), |n| i + n);
+        self.tree[at..].iter().map(|p| p.key)
+    }
+
+    /// Port of `rangemap::find_last_before(point)` and the walk backward from it: the record of
+    /// the last sub-range before `point` whose record ends before it, then every earlier
+    /// sub-range's.
+    pub(crate) fn before(&self, point: u64) -> impl Iterator<Item = K> + '_ {
+        let begin = self.lower_bound(point, SUB_FIRST);
+        let at = self.tree[..begin].iter().rposition(|p| p.b < point).map_or(0, |n| n + 1);
+        self.tree[..at].iter().rev().map(|p| p.key)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `after` and `before` leave out the records holding the point and walk on from the
+    /// nearest one.
+    #[test]
+    fn records_after_and_before_a_point() {
+        let mut m = RangeMap::default();
+        m.insert('a', 0, 3, SUB_FIRST);
+        m.insert('b', 8, 11, SUB_FIRST);
+        m.insert('c', 16, 19, SUB_FIRST);
+        assert_eq!(m.after(9).collect::<Vec<_>>(), ['c']);
+        assert_eq!(m.after(4).collect::<Vec<_>>(), ['b', 'c']);
+        assert_eq!(m.before(9).collect::<Vec<_>>(), ['a']);
+        assert_eq!(m.before(16).collect::<Vec<_>>(), ['b', 'a']);
+        assert_eq!(m.before(0).count(), 0);
+    }
 
     /// A record inside an earlier one is listed before it (it sorts by its last point), and
     /// both hold the inner points.
