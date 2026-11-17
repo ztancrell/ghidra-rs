@@ -894,25 +894,27 @@ fn untied_call_intersection(fd: &mut Funcdata, tied: HighId, untied: HighId) -> 
     if h_is(fd, tied, VnFlags::PERSIST) {
         return Ok(false);
     }
-    tied_varnode(fd, tied)?;
+    let rep = tied_varnode(fd, tied)?;
     if fd.highs.affecting.is_none() {
-        fd.highs.affecting = Some(stack_affecting_ops(fd)?);
+        fd.highs.affecting = Some(stack_affecting_ops(fd));
     }
     let ui = |o| op_uindex(fd, o);
-    let set = fd.highs.affecting.as_ref().map(|s| s.intersects(h_cover(fd, untied), &ui));
+    // StackAffectingOps::affectsTest: a STORE with a guard only changes what its range holds
+    let (space, off) = (fd.vn(rep).space, fd.vn(rep).offset);
+    let affects = |op: OpId| {
+        fd.op(op).opc != super::opcode::Opcode::Store
+            || fd.heritage.store_guards.iter().find(|g| g.op == op).is_none_or(|g| g.is_guarded(space, off))
+    };
+    let set = fd.highs.affecting.as_ref().map(|s| s.intersects(h_cover(fd, untied), &ui, &affects));
     Ok(set.unwrap_or(false))
 }
 
-/// Port of `StackAffectingOps::populate`: every call, sorted by block
-/// (`PcodeOpSet::finalize`). The STOREs of valid store guards would join, with `affectsTest`
-/// reading the guard's analysed range, which is not ported (`heritage_guard.rs`): fail while
-/// one exists. Without them `affectsTest` is always true.
-fn stack_affecting_ops(fd: &Funcdata) -> Result<OpSet> {
-    if super::heritage_guard::has_valid_guards(fd, true) {
-        return err("merge: a STORE guard of the stack heritage pass would affect a merge (StackAffectingOps), and its range needs the value-set analysis (ValueSetSolver): not implemented in ghidra-rs yet");
-    }
-    let ops = fd.qlst.iter().map(|&c| fd.call(c).op).map(|op| (op_block_index(fd, op), fd.op(op).order, op));
-    Ok(OpSet::finalize(ops.collect()))
+/// Port of `StackAffectingOps::populate`: every call and the STORE of every valid store guard,
+/// sorted by block (`PcodeOpSet::finalize`).
+fn stack_affecting_ops(fd: &Funcdata) -> OpSet {
+    let calls = fd.qlst.iter().map(|&c| fd.call(c).op);
+    let stores = fd.heritage.store_guards.iter().filter(|g| g.is_valid(fd, super::opcode::Opcode::Store)).map(|g| g.op);
+    OpSet::finalize(calls.chain(stores).map(|op| (op_block_index(fd, op), fd.op(op).order, op)).collect())
 }
 
 /// Port of `Varnode::copyShadow`: the two hold the same value through COPYs.

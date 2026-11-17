@@ -57,6 +57,7 @@ mod subfloat;
 mod subflow;
 mod transform;
 mod types;
+mod valueset;
 mod variable;
 mod varmap;
 mod varnode;

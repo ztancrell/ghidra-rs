@@ -375,11 +375,11 @@ impl OpSet {
         set
     }
 
-    /// Port of `Cover::intersect(const PcodeOpSet &, Varnode *)` (`affectsTest` always true):
+    /// Port of `Cover::intersect(const PcodeOpSet &, Varnode *)` (`affects` is `affectsTest`):
     /// some op lies strictly inside `cover`. Ported with its walk exactly: after a block it
     /// tested, the set's block index is not refreshed, so the set block right after it is
     /// skipped when the cover moves on.
-    pub(crate) fn intersects(&self, cover: &Cover, ui: &dyn Fn(OpId) -> u32) -> bool {
+    pub(crate) fn intersects(&self, cover: &Cover, ui: &dyn Fn(OpId) -> u32, affects: &dyn Fn(OpId) -> bool) -> bool {
         let Some(&(first, _)) = self.ops.first() else { return false };
         let mut set_block = 0;
         let mut op_index = self.starts[0];
@@ -401,7 +401,7 @@ impl OpSet {
                 let op_max = self.starts.get(set_block).copied().unwrap_or(self.ops.len());
                 while op_index < op_max {
                     let pt = Pt::Op(self.ops[op_index].1);
-                    if cblock.contain(pt, ui) && cblock.boundary(pt, ui) == 0 {
+                    if cblock.contain(pt, ui) && cblock.boundary(pt, ui) == 0 && affects(self.ops[op_index].1) {
                         return true;
                     }
                     op_index += 1;
@@ -493,12 +493,12 @@ mod tests {
         cover.blocks.insert(2, CoverBlock { start: Pt::Op(OpId(10)), stop: Pt::End });
         cover.blocks.insert(4, CoverBlock { start: Pt::Begin, stop: Pt::End });
         // the block 2 call is before the cover starts; the C++ walk then skips block 4's call
-        assert!(!set.intersects(&cover, &ui));
+        assert!(!set.intersects(&cover, &ui, &|_| true));
         cover.blocks.insert(2, CoverBlock { start: Pt::Op(OpId(3)), stop: Pt::End });
-        assert!(set.intersects(&cover, &ui));
+        assert!(set.intersects(&cover, &ui, &|_| true));
         // a cover starting at block 4 reaches its call
         cover.blocks.remove(&2);
-        assert!(set.intersects(&cover, &ui));
-        assert!(!OpSet::default().intersects(&cover, &ui));
+        assert!(set.intersects(&cover, &ui, &|_| true));
+        assert!(!OpSet::default().intersects(&cover, &ui, &|_| true));
     }
 }

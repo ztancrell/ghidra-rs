@@ -1,7 +1,7 @@
 //! Port of `CircleRange` (rangeutil.cc): a range of integers on a circle (wrapping modulo the
-//! varnode size), with a step, as jump-table recovery uses it to bound a switch variable. The
-//! value-set solver of rangeutil.cc (`ValueSetSolver`) is not ported: jump-table recovery does
-//! not use it.
+//! varnode size), with a step, as jump-table recovery uses it to bound a switch variable, and
+//! its push-forward half for the value-set solver of rangeutil.cc (`valueset.rs`).
+//! (Superseded: "`ValueSetSolver` is not ported".)
 
 use super::opcode::Opcode;
 use super::varnode::VarnodeId;
@@ -635,6 +635,413 @@ impl CircleRange {
     }
 }
 
+/// `sign_extend(val, bit)` (address.hh): sign-extend from bit index `bit`.
+fn sign_extend_bit(val: u64, bit: u32) -> i64 {
+    let sa = 63u32.wrapping_sub(bit) & 63;
+    ((val as i64) << sa) >> sa
+}
+
+/// The range of a boolean result that may be true or false.
+const BOTH_BOOLEANS: CircleRange = CircleRange { left: 0, right: 2, mask: 0xff, isempty: false, step: 1 };
+
+/// The value-set half of `CircleRange` (push-forward, containers, widening), which
+/// `valueset.rs` uses. A shift by a count past the word follows the reference build (x86-64:
+/// the count modulo 64).
+impl CircleRange {
+    /// `isFull`
+    pub(crate) fn is_full(&self) -> bool {
+        !self.isempty && self.step == 1 && self.left == self.right
+    }
+    fn stepv(&self) -> u64 {
+        u64::from(self.step)
+    }
+
+    /// `normalize`: one form for every full range
+    fn normalize(&mut self) {
+        if self.left == self.right {
+            self.left = if self.step != 1 { self.left % self.stepv() } else { 0 };
+            self.right = self.left;
+        }
+    }
+
+    /// `getMaxInfo`: the highest bit index (+1) a value of the range may set
+    fn max_info(&self) -> i32 {
+        let half = self.mask ^ (self.mask >> 1);
+        if self.contains(half) {
+            return 64 - half.leading_zeros() as i32;
+        }
+        let lz = |v: u64| if half & v == 0 { v.leading_zeros() } else { (!v & self.mask).leading_zeros() };
+        64 - lz(self.right).min(lz(self.left)) as i32
+    }
+
+    /// `contains(const CircleRange &)`
+    pub(crate) fn contains_range(&self, o: &CircleRange) -> bool {
+        if self.isempty {
+            return o.isempty;
+        }
+        if o.isempty {
+            return true;
+        }
+        if self.step > o.step && !o.is_single() {
+            return false;
+        }
+        if self.left == self.right {
+            return true;
+        }
+        if o.left == o.right || self.left % self.stepv() != o.left % self.stepv() {
+            return false;
+        }
+        if self.left == o.left && self.right == o.right {
+            return true;
+        }
+        match overlaps(self.left, self.right, o.left, o.right) {
+            b'c' => true,
+            b'b' => self.right == o.right,
+            _ => false,
+        }
+    }
+
+    /// `minimalContainer`: the smallest range holding both; true when it is everything
+    pub(crate) fn minimal_container(&mut self, o: &CircleRange, max_step: u32) -> bool {
+        if self.is_single() && o.is_single() {
+            let (min, max) = if self.left < o.left { (self.left, o.left) } else { (o.left, self.left) };
+            let diff = max - min;
+            if diff > 0 && diff <= u64::from(max_step) && diff.is_power_of_two() {
+                self.step = diff as u32;
+                self.left = min;
+                self.right = max.wrapping_add(diff) & self.mask;
+                return false;
+            }
+        }
+        let a_right = self.right.wrapping_sub(self.stepv()).wrapping_add(1);
+        let b_right = o.right.wrapping_sub(o.stepv()).wrapping_add(1);
+        self.step = 1;
+        self.mask |= o.mask;
+        match overlaps(self.left, a_right, o.left, b_right) {
+            b'a' => {
+                let vacant1 = self.left.wrapping_add(self.mask.wrapping_sub(b_right)).wrapping_add(1);
+                let vacant2 = o.left.wrapping_sub(a_right);
+                if vacant1 < vacant2 {
+                    (self.left, self.right) = (o.left, a_right);
+                } else {
+                    self.right = b_right;
+                }
+            }
+            b'f' => {
+                let vacant1 = o.left.wrapping_add(self.mask.wrapping_sub(a_right)).wrapping_add(1);
+                let vacant2 = self.left.wrapping_sub(b_right);
+                if vacant1 < vacant2 {
+                    self.right = b_right;
+                } else {
+                    (self.left, self.right) = (o.left, a_right);
+                }
+            }
+            b'b' => self.right = b_right,
+            b'c' => self.right = a_right,
+            b'd' => (self.left, self.right) = (o.left, b_right),
+            b'e' => (self.left, self.right) = (o.left, a_right),
+            _ => (self.left, self.right) = (0, 0),
+        }
+        self.normalize();
+        self.left == self.right
+    }
+
+    /// `invert`: the complement, with step 1
+    pub(crate) fn invert(&mut self) {
+        self.step = 1;
+        self.complement();
+    }
+
+    /// `pushForwardUnary`: the values of `in1` through `opc`; false when they form no range
+    pub(crate) fn push_forward_unary(&mut self, opc: Opcode, in1: &CircleRange, in_size: u32, out_size: u32) -> bool {
+        if in1.isempty {
+            self.isempty = true;
+            return true;
+        }
+        let st = in1.stepv();
+        match opc {
+            Opcode::Cast | Opcode::Copy => *self = *in1,
+            Opcode::IntZext => {
+                self.isempty = false;
+                self.step = in1.step;
+                self.mask = calc_mask(out_size);
+                if in1.left == in1.right {
+                    self.left = in1.left % st;
+                    self.right = in1.mask.wrapping_add(1).wrapping_add(self.left);
+                } else {
+                    self.left = in1.left;
+                    self.right = in1.right.wrapping_sub(st) & in1.mask;
+                    if self.right < self.left {
+                        return false;
+                    }
+                    self.right = self.right.wrapping_add(st);
+                }
+            }
+            Opcode::IntSext => {
+                self.isempty = false;
+                self.step = in1.step;
+                self.mask = calc_mask(out_size);
+                if in1.left == in1.right {
+                    let rem = in1.left % st;
+                    self.right = calc_mask(in_size) >> 1;
+                    self.left = (calc_mask(out_size) ^ self.right).wrapping_add(rem);
+                    self.right = self.right.wrapping_add(1).wrapping_add(rem);
+                } else {
+                    self.left = sign_extend(in1.left, in_size, out_size);
+                    self.right = sign_extend(in1.right.wrapping_sub(st) & in1.mask, in_size, out_size);
+                    if (self.right as i64) < (self.left as i64) {
+                        return false;
+                    }
+                    self.right = self.right.wrapping_add(st) & self.mask;
+                }
+            }
+            Opcode::Int2comp => {
+                self.isempty = false;
+                self.step = in1.step;
+                self.mask = in1.mask;
+                self.right = (!in1.left).wrapping_add(1).wrapping_add(st) & self.mask;
+                self.left = (!in1.right).wrapping_add(1).wrapping_add(st) & self.mask;
+                self.normalize();
+            }
+            Opcode::IntNegate => {
+                self.isempty = false;
+                self.step = in1.step;
+                self.mask = in1.mask;
+                self.left = (!in1.right).wrapping_add(st) & self.mask;
+                self.right = (!in1.left).wrapping_add(st) & self.mask;
+                self.normalize();
+            }
+            Opcode::BoolNegate | Opcode::FloatNan => *self = BOTH_BOOLEANS,
+            _ => return false,
+        }
+        true
+    }
+
+    /// `pushForwardBinary`
+    pub(crate) fn push_forward_binary(
+        &mut self,
+        opc: Opcode,
+        in1: &CircleRange,
+        in2: &CircleRange,
+        in_size: u32,
+        out_size: u32,
+        max_step: u32,
+    ) -> bool {
+        if in1.isempty || in2.isempty {
+            self.isempty = true;
+            return true;
+        }
+        let (st1, st2) = (in1.stepv(), in2.stepv());
+        match opc {
+            Opcode::Ptrsub | Opcode::IntAdd => {
+                self.isempty = false;
+                self.mask = in1.mask | in2.mask;
+                let m = self.mask;
+                if in1.left == in1.right || in2.left == in2.right {
+                    self.step = in1.step.min(in2.step);
+                    self.left = in1.left.wrapping_add(in2.left) % self.stepv();
+                    self.right = self.left;
+                } else if in2.is_single() {
+                    self.step = in1.step;
+                    self.left = in1.left.wrapping_add(in2.left) & m;
+                    self.right = in1.right.wrapping_add(in2.left) & m;
+                } else if in1.is_single() {
+                    self.step = in2.step;
+                    self.left = in2.left.wrapping_add(in1.left) & m;
+                    self.right = in2.right.wrapping_add(in1.left) & m;
+                } else {
+                    self.step = in1.step.min(in2.step);
+                    let st = self.stepv();
+                    let size1 = if in1.left < in1.right {
+                        in1.right - in1.left
+                    } else {
+                        in1.mask.wrapping_sub(in1.left - in1.right).wrapping_add(st1)
+                    };
+                    self.left = in1.left.wrapping_add(in2.left) & m;
+                    self.right =
+                        in1.right.wrapping_sub(st1).wrapping_add(in2.right).wrapping_sub(st2).wrapping_add(st) & m;
+                    let sizenew = if self.left < self.right {
+                        self.right - self.left
+                    } else {
+                        m.wrapping_sub(self.left - self.right).wrapping_add(st)
+                    };
+                    if sizenew < size1 {
+                        self.right = self.left;
+                    }
+                    self.normalize();
+                }
+            }
+            Opcode::IntMult => {
+                self.isempty = false;
+                self.mask = in1.mask | in2.mask;
+                let m = self.mask;
+                let const_val;
+                if in1.is_single() {
+                    const_val = in1.left;
+                    self.step = in2.step;
+                } else if in2.is_single() {
+                    const_val = in2.left;
+                    self.step = in1.step;
+                } else {
+                    return false;
+                }
+                let mut tmp = const_val as u32;
+                while self.step < max_step {
+                    if tmp & 1 != 0 {
+                        break;
+                    }
+                    self.step <<= 1;
+                    tmp >>= 1;
+                }
+                let st = self.stepv();
+                let whole = 64 - m.leading_zeros() as i32;
+                if in1.max_info() + in2.max_info() > whole {
+                    self.left = in1.left.wrapping_mul(in2.left) % st;
+                    self.right = self.left;
+                    self.normalize();
+                    return true;
+                }
+                let last = in1.right.wrapping_sub(st1).wrapping_mul(in2.right.wrapping_sub(st2));
+                if const_val & (m ^ (m >> 1)) != 0 {
+                    self.left = last & m;
+                    self.right = in1.left.wrapping_mul(in2.left).wrapping_add(st) & m;
+                } else {
+                    self.left = in1.left.wrapping_mul(in2.left) & m;
+                    self.right = last.wrapping_add(st) & m;
+                }
+            }
+            Opcode::IntLeft => {
+                if !in2.is_single() {
+                    return false;
+                }
+                self.isempty = false;
+                self.mask = in1.mask;
+                self.step = in1.step;
+                let sa = in2.left as u32;
+                let mut tmp = sa;
+                while self.step < max_step && tmp > 0 {
+                    self.step <<= 1;
+                    tmp -= 1;
+                }
+                self.left = in1.left.wrapping_shl(sa) & self.mask;
+                self.right = in1.right.wrapping_shl(sa) & self.mask;
+                let whole = 64 - self.mask.leading_zeros();
+                if (in1.max_info() as u32).wrapping_add(sa) > whole {
+                    self.right = self.left;
+                    self.normalize();
+                    return true;
+                }
+            }
+            Opcode::Subpiece => {
+                if !in2.is_single() {
+                    return false;
+                }
+                self.isempty = false;
+                let sa = (in2.left as u32).wrapping_mul(8);
+                self.mask = calc_mask(out_size);
+                self.step = if sa == 0 { in1.step } else { 1 };
+                let range = in1.right.abs_diff(in1.left);
+                if range == 0 || range.wrapping_shr(sa) > self.mask {
+                    (self.left, self.right) = (0, 0);
+                } else {
+                    self.left = in1.left.wrapping_shr(sa) & self.mask;
+                    self.right = in1.right.wrapping_sub(st1).wrapping_shr(sa).wrapping_add(self.stepv()) & self.mask;
+                    self.normalize();
+                }
+            }
+            Opcode::IntRight => {
+                if !in2.is_single() {
+                    return false;
+                }
+                self.isempty = false;
+                let sa = in2.left as u32;
+                self.mask = calc_mask(out_size);
+                self.step = 1;
+                if in1.left < in1.right {
+                    self.left = in1.left.wrapping_shr(sa);
+                    self.right = in1.right.wrapping_sub(st1).wrapping_shr(sa).wrapping_add(1);
+                } else {
+                    self.left = 0;
+                    self.right = in1.mask.wrapping_shr(sa);
+                }
+                if self.left == self.right {
+                    self.right = self.left.wrapping_add(1) & self.mask;
+                }
+            }
+            Opcode::IntSright => {
+                if !in2.is_single() {
+                    return false;
+                }
+                self.isempty = false;
+                let sa = in2.left as u32;
+                self.mask = calc_mask(out_size);
+                self.step = 1;
+                let bit = (8 * in_size).wrapping_sub(1);
+                let mut val_left = sign_extend_bit(in1.left, bit);
+                let mut val_right = sign_extend_bit(in1.right, bit);
+                if val_left >= val_right {
+                    val_right = (self.mask >> 1) as i64;
+                    val_left = sign_extend_bit(val_right.wrapping_add(1) as u64, bit);
+                }
+                self.left = val_left.wrapping_shr(sa) as u64 & self.mask;
+                self.right = (val_right.wrapping_sub(st1 as i64).wrapping_shr(sa).wrapping_add(1) as u64) & self.mask;
+                if self.left == self.right {
+                    self.right = self.left.wrapping_add(1) & self.mask;
+                }
+            }
+            Opcode::IntEqual
+            | Opcode::IntNotequal
+            | Opcode::IntSless
+            | Opcode::IntSlessequal
+            | Opcode::IntLess
+            | Opcode::IntLessequal
+            | Opcode::IntCarry
+            | Opcode::IntScarry
+            | Opcode::IntSborrow
+            | Opcode::BoolXor
+            | Opcode::BoolAnd
+            | Opcode::BoolOr
+            | Opcode::FloatEqual
+            | Opcode::FloatNotequal
+            | Opcode::FloatLess
+            | Opcode::FloatLessequal => *self = BOTH_BOOLEANS,
+            _ => return false,
+        }
+        true
+    }
+
+    /// `pushForwardTrinary` (PTRADD only)
+    pub(crate) fn push_forward_trinary(
+        &mut self,
+        opc: Opcode,
+        ins: [&CircleRange; 3],
+        in_size: u32,
+        out_size: u32,
+        max_step: u32,
+    ) -> bool {
+        if opc != Opcode::Ptradd {
+            return false;
+        }
+        let mut tmp = CircleRange::default();
+        tmp.push_forward_binary(Opcode::IntMult, ins[1], ins[2], in_size, in_size, max_step)
+            && self.push_forward_binary(Opcode::IntAdd, ins[0], &tmp, in_size, out_size, max_step)
+    }
+
+    /// `widen`: move the unstable boundary to that of `o`, which holds this range
+    pub(crate) fn widen(&mut self, o: &CircleRange, left_is_stable: bool) {
+        if left_is_stable {
+            let st = self.stepv();
+            let (lmod, rmod) = (self.left % st, o.right % st);
+            self.right =
+                if rmod <= lmod { o.right.wrapping_add(lmod - rmod) } else { o.right.wrapping_sub(rmod - lmod) };
+            self.right &= self.mask;
+        } else {
+            self.left = o.left & self.mask;
+        }
+        self.normalize();
+    }
+}
+
 pub(crate) fn pcode_left(v: u64, sa: u64) -> u64 {
     if sa >= 64 {
         0
@@ -772,5 +1179,32 @@ mod tests {
         let mut a = CircleRange::new(0, 5, 4, 1);
         assert_eq!(a.circle_union(&CircleRange::single(5, 4)), 0);
         assert_eq!((a.left, a.right), (0, 6));
+    }
+
+    #[test]
+    fn value_set_ranges() {
+        let index = CircleRange::new(0, 10, 4, 1);
+        let mut r = CircleRange::default();
+        // i + 4 for i in [0, 10)
+        assert!(r.push_forward_binary(Opcode::IntAdd, &index, &CircleRange::single(4, 4), 4, 4, 32));
+        assert_eq!((r.left, r.right, r.step), (4, 14, 1));
+        // i * 4: the step grows to 4
+        assert!(r.push_forward_binary(Opcode::IntMult, &index, &CircleRange::single(4, 4), 4, 4, 32));
+        assert_eq!((r.left, r.right, r.step), (0, 40, 4));
+        // a wrapping byte range is two pieces once zero-extended
+        assert!(!r.push_forward_unary(Opcode::IntZext, &CircleRange::new(0xf0, 0x10, 1, 1), 1, 4));
+        // two single values a power of two apart make a stepped range
+        let mut c = CircleRange::single(4, 4);
+        assert!(!c.minimal_container(&CircleRange::single(8, 4), 32));
+        assert_eq!((c.left, c.right, c.step), (4, 12, 4));
+        // widening to a landmark keeps the step and takes its right boundary
+        let landmark = CircleRange::new(0, 0x20, 4, 1);
+        let mut w = CircleRange::new(0, 8, 4, 4);
+        assert!(landmark.contains_range(&w) && !w.contains_range(&landmark));
+        w.widen(&landmark, true);
+        assert_eq!((w.left, w.right, w.step), (0, 0x20, 4));
+        let mut inv = landmark;
+        inv.invert();
+        assert_eq!((inv.left, inv.right), (0x20, 0));
     }
 }

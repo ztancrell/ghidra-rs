@@ -10,7 +10,7 @@
 //! Ported: the passes over the register and unique spaces (pass 0, the one `break start
 //! paramdouble` first shows). Spaces heritaged in later passes (ram, the stack) need the
 //! main loop's other actions to be reached and fail loudly here, as do the paths only they use
-//! (load guards, stack placeholders, revisited markers, overlapping parameter guards).
+//! (stack placeholders, revisited markers, overlapping parameter guards).
 
 use super::block::BlockId;
 use super::fspec::{Containment, EffectKind};
@@ -208,6 +208,8 @@ pub(crate) struct Heritage {
     /// `Heritage::loadGuard`, `storeGuard`
     pub(crate) load_guards: Vec<super::heritage_guard::LoadGuard>,
     pub(crate) store_guards: Vec<super::heritage_guard::LoadGuard>,
+    /// `loadCopyOps`: the COPYs `guardLoads` made in this pass
+    pub(crate) load_copy_ops: Vec<OpId>,
 }
 
 impl Default for Heritage {
@@ -228,6 +230,7 @@ impl Default for Heritage {
             stack_guard_search: false,
             load_guards: Vec::new(),
             store_guards: Vec::new(),
+            load_copy_ops: Vec::new(),
         }
     }
 }
@@ -314,8 +317,8 @@ pub(crate) fn heritage(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
     if let Some(free) = free_stores {
         super::heritage_guard::reprocess_free_stores(fd, arch, &free)?;
     }
-    // analyzeNewLoadGuards: the value-set analysis is not ported (heritage_guard.rs);
-    // handleNewLoadCopies: guardLoads makes no COPYs
+    super::heritage_guard::analyze_new_load_guards(fd, arch)?;
+    super::heritage_guard::handle_new_load_copies(fd)?;
     fd.heritage.pass += 1;
     Ok(())
 }
@@ -725,7 +728,7 @@ fn guard(fd: &mut Funcdata, arch: &Arch, range: &MemRange, c: &mut Collected) ->
         guard_calls(fd, arch, range, &mut c.write, addrtied)?;
         guard_returns(fd, arch, range, global)?;
         guard_stores(fd, arch, range, &mut c.write)?;
-        super::heritage_guard::guard_loads(fd, range.space, addrtied)?;
+        super::heritage_guard::guard_loads(fd, range.space, range.off, range.size, addrtied)?;
     }
     Ok(())
 }

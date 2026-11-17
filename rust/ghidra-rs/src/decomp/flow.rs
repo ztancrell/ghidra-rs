@@ -683,10 +683,9 @@ impl Flow<'_> {
                 let mut mode = Mode::Exact;
                 // `ActionRestructureVarnode` or `RuleAliasUpdate` reached a path ghidra-rs does
                 // not port (`mapstate.rs`): the partial function is made without them and its
-                // table tested below. When its stack heritage does too (the value-set ranges
-                // of an indexed stack LOAD), the table is recovered from the partial function
-                // without the `stackvars` rules instead, and that error is kept for a table
-                // that one does not give (below).
+                // table tested below. When its stack heritage does too, the table is recovered
+                // from the partial function without the `stackvars` rules instead, and that
+                // error is kept for a table that one does not give (below).
                 if let (Err(e), true) = (&res, std::env::var_os("GHIDRA_RS_JT_DEBUG").is_some()) {
                     eprintln!("jumptable partial in {:#x}: {e}", self.fd.entry);
                 }
