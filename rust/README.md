@@ -3320,6 +3320,22 @@ Checks (reference `decomp_dbg`, same options as the bars):
   `pcc-t`, `swfs-r`, `swfs-t`, `swsn-r`, `swsn-t`, `swfsc-r`, `swfsc-t`: the 7 identical in all
   nine; the other two identical in `pcc-r`, `pcc-t`, `swfs-r`, `swsn-r`, `swfsc-r`, loud in
   `paramdouble`, `swfs-t`, `swsn-t`, `swfsc-t`.
+- The whole corpora, in two steps (the committed build). A function with no load or store
+  guard takes no new code path, so its result is that of the `m3-default` pass. Step one runs
+  the check with ghidra-rs alone and `GHIDRA_RS_GUARD_DEBUG` and lists the functions with a
+  guard, in the function or its partial function; step two runs those against the reference.
+  Switch corpus (2,050): `paramdouble` 68 with a guard, 66 / 66 identical (the reference does
+  not finish 2); `pcc-r` 98, 96 / 96; `pcc-t` 68, 66 / 66; `swsn-t` 68, 66 / 66. M500 `pcd`: 26
+  with a guard, 18 / 25 identical, 7 loud (6 `getExactPiece`, 1 `HeapSequence`, all loud before;
+  the reference times out on 0x6b21e0). Silent 0 in all five, no function identical before is
+  anything else now.
+- Counts derived from that and the `m3-default` pass, not from a run of every function against
+  the reference: switch `paramdouble` 1995 -> 2002 / 2004 (loud 2: 0x5861aa, 0x7c74c0), `pcc-r`
+  1997 -> 2004 / 2005 (loud 1), `pcc-t` 1996 -> 2003 / 2005 (loud 2); M500 `pcd` 422 -> 440 / 497
+  (loud 75 -> 57: 18 of the 22 guard functions are identical, 4 are loud on another port).
+- M8, 11 checks (`heritage`, `paramdouble`, `s4`, `r5`, `s7t`, `s8r`, `r5s`, `fs-t`, `pcc-r`,
+  `pcc-t`, `pcd`): identical in each. Not run: the other 45 checks on M8, the other switch
+  checks on the whole corpus, M500 beyond `pcd`.
 - One unit test (`rangeutil.rs`, `value_set_ranges`): push-forward, container and widening on
   hand-computed ranges. The solver has no unit test; it is checked only through the functions
   above.

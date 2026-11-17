@@ -337,6 +337,12 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    table from a partial function made without the alias analysis; no output changes. Measured on the whole switch
    corpus: `paramdouble` 1995 / 2004, `swfs-r` 1996, `swsn-r` 1993 (silent 3), `pcc-r` 1997 / 2005, `pcc-t`
    1996 / 2005 (Superseded: the derived counts of the line above). Open: 0x5861aa and 0x7c74c0 loud at `paramdouble`.
+   Value-set analysis and the stack guards (2026-11-17): `ValueSetSolver` and the load and store guard ranges
+   (`valueset.rs`, `heritage_guard.rs`) with their readers in the alias rule, the range hints and the merge test.
+   Derived from the functions with a guard run against the reference: switch `paramdouble` 2002 / 2004, `pcc-r`
+   2004 / 2005, `pcc-t` 2003 / 2005; M500 `pcd` 440 / 497 (loud 57), silent 0. 0x5861aa and 0x7c74c0 traced: the
+   reference's partial function fails too and its later tables come from the half-simplified clone, left loud.
+   Superseded: the switch counts and "Open" of the line above, `pcd` 415 / 497 in the `m3-default` line.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
