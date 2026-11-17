@@ -1956,6 +1956,12 @@ applied over a fresh analysis (`analyze --store`). It holds none of the other it
 does not record who set a fact: everything in the file is an edit, everything else is analysis.
 See `rust/README.md`, "Project store and the editing scripts".
 
+mercs2's eight remaining scripts read this program too (2026-11-17, `rust/ghidra-rs/src/exports.rs`,
+`ghidra-rs export`; the editing options of two of them write the store through `edit`). One of
+them, ExportAbiCandidates, greps Java's decompiled C: its command takes that C from files verified
+identical to Java's and fails loudly without them, so it is the first consumer waiting for S10
+outside the decompiler. See `rust/README.md`, "The read-only scripts".
+
 ## Where to diverge from Ghidra, and where not
 
 Keep exactly as Ghidra:

@@ -374,6 +374,16 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    from 20422 to 36602 of 37635 (36178 with the same body size). Not ported, failing by name:
    ExportBindings `--recover`, AuditRecoveredFunctions `--remove-empty`. Details in
    `rust/README.md`, "Project store and the editing scripts".
+   Superseded: "Not ported, failing by name: ExportBindings `--recover`, AuditRecoveredFunctions
+   `--remove-empty`". On branch `worktree-agent-adca953958c1688b0` (2026-11-17) mercs2's eight
+   remaining scripts are commands (`exports.rs`): the read-only ones under `ghidra-rs export`,
+   the two editing options under `edit`. So each of the 17 scripts of
+   `mercs2-decomp/tools/ghidra/` has a command; `Decompile.java` and the C that
+   ExportAbiCandidates greps still wait for S10 (`abi-candidates` fails loudly without C verified
+   identical to Java's). On the Java project's functions seven of the eight outputs have Java's
+   rows but for body and reference differences of the analysis; where Ghidra's answer cannot be
+   known (an instruction in two bodies here) a command stops. Details and counts in
+   `rust/README.md`, "The read-only scripts".
 
 ## Open questions
 

@@ -307,6 +307,11 @@ impl<'a> Project<'a> {
         self.owners.get(&s)?.iter().min().copied()
     }
 
+    /// The functions whose bodies hold the instruction at `a`.
+    pub fn owners_at(&self, a: u32) -> &[u32] {
+        self.owners.get(&a).map_or(&[], |v| v)
+    }
+
     /// The instruction has a CALL_RETURN flow override.
     pub fn call_return(&self, a: u32) -> bool {
         self.an.insns.get(&a).is_some_and(|i| self.an.call_return(a, i))
