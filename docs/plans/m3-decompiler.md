@@ -1815,6 +1815,13 @@ slice 5 above, which were derived or from single checks.) Varies with load: the 
 identical" count of `s6void-m500` is 499 / 500 here and 500 / 500 in the baseline (a reference
 timeout; identical 499 / 499 in both).
 
+After `m3-int5` (2026-11-17): the "Read-only address is written" warning of `fillinReadOnly` is
+ported (`action.rs`, `readonly_written`: once per op, not for a marker, not for an
+address-forced varnode nothing reads) and `print C` no longer fails on the case. 0x23caea8 is
+identical; switch `pcc-t` 1987 / 2005 (loud 18, silent 0), M500 print checks at their counts, M8
+all 55 checks as the baseline. Details: rust/README.md, the end of "C printing, slice 5".
+(Superseded: "0x23caea8 is loud" and "Next: port the `fillinReadOnly` warning" above.)
+
 ## Running stages in parallel
 
 Strict chain first: S0 → S1a → S1b → S2. After S2 the work fans out. Under the cap of two

@@ -319,6 +319,8 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    Integration `m3-int5` (2026-11-17), full pass clean against the slice 4 baseline: switch `pcc-r` 1987 / 2005,
    `pcc-t` 1986 / 2005, silent 0; the other switch checks 1984 to 1988 of 2004; `simple` print 194 / 194; the only
    silent misses left are in `swsn-r` (3 on switch, 3 on M500). Superseded: the switch counts in the lines above.
+   After `m3-int5` (2026-11-17): the `fillinReadOnly` write warning is ported, 0x23caea8 identical; switch
+   `pcc-t` 1987 / 2005 (loud 18, silent 0). Superseded: "that case is loud now" and `pcc-t` 1986 above.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

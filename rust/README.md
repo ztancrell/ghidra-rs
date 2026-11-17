@@ -887,7 +887,9 @@ Stage S1b (branch `m3-s1b`) runs the universal action up to `heritage`: after `f
   on the first pass; an unreachable block is an error until block removal is ported in S4),
   `varnodeprops` (with `option readonly on`, a free read of read-only memory becomes the
   constant the image holds there, read as `loadFill` reads: on into later sections, zero where
-  none is; the reads are taken in the varnodes' location order, as `beginLoc` walks them). `normalizesetup` and `funclinkoutonly`
+  none is; the reads are taken in the varnodes' location order, as `beginLoc` walks them; an op
+  writing read-only memory warns "Read-only address (ram,0x...) is written", see the end of
+  "C printing, slice 5"). `normalizesetup` and `funclinkoutonly`
   are not in the `decompile` root's groups and are left out.
 - Read-only memory is the loader's read-only sections (bfd's `SEC_READONLY`: PE sections
   without `IMAGE_SCN_MEM_WRITE`, `Section::readonly`) plus `readonly` commands; a varnode is
@@ -3018,7 +3020,10 @@ M500 `pcc-r` and `pc-r` 494 / 495 (silent 1: 0x47a6b0), `pcc-t` and `pc-t` 495 /
 miss; M8 print checks 7 / 7. Every switch silent is now silent in an older switch check.
 (Superseded: "silent 62" of `pcc-t` in the table, "one is new" and "It is open" above.) Not
 rerun after the follow-up: the 51 other checks on M8, which the change cannot reach (only
-`print C` reads the flag).
+`print C` reads the flag). (Superseded: the warning is ported and the loud failure, the flag
+`Funcdata::readonly_write` and the whole-function test are gone; see "After `m3-int5`" at the
+end of this section. `action.rs`, `readonly_written`, is now the written branch of
+`fillinReadOnly`.)
 
 Review fixes on the same branch:
 
@@ -3059,6 +3064,23 @@ M500 (4 in the baseline); 0x47a6b0 is loud in every check. (Superseded: the swit
 slice 5 above, which were derived or from single checks.) Varies with load: the "all outputs
 identical" count of `s6void-m500` is 499 / 500 here and 500 / 500 in the baseline (a reference
 timeout; identical 499 / 499 in both).
+
+After `m3-int5` (2026-11-17): the read-only write warning. `varnodeprops` has the written branch
+of `Funcdata::fillinReadOnly` (`action.rs`, `readonly_written`). With `option readonly on`, an
+op that writes read-only memory warns `Read-only address (ram,0x...) is written` at its
+address, once (`OpFlags::WARNING`, the C++ `PcodeOp::warning`), unless the varnode is
+address-forced and nothing reads it (`!isAddrForce() || !hasNoDescend()`). A marker (INDIRECT,
+MULTIEQUAL) is only flagged. The warning goes through `Funcdata::warning`, so a jump-table
+partial function adds its own `WARNING (jumptable):` line. A written read-only varnode also
+skips the zero replacement of the same action, as in the C++, where the read-only branch comes
+first. `print C` no longer fails on the case. 0x23caea8 is identical in switch `pcc-t` and
+`pcc-r` (6 warning lines at 3 addresses). Switch `pcc-t` 1987 / 2005 (loud 18, silent 0; `m3-int5`
+1986, loud 19). M500 `pcc-r` and `pc-r` 494 / 495 (loud 1),
+`pcc-t` and `pc-t` 495 / 495; M8 all 55 checks as the baseline. Not run: `pcc-r` on the whole
+switch corpus, `simple`, the full pass. Not seen: a marker writing read-only memory, an
+address-forced write of it that nothing reads, a second visit of a warned op (0x23caea8 is the
+only function of the corpora known to write read-only memory). Still wider than the C++: the
+zero replacement runs for a read-only varnode that is only read, or with `option readonly off`.
 
 ## Speed
 

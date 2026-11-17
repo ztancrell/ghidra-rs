@@ -52,6 +52,9 @@ impl OpFlags {
     pub(crate) const NONPRINTING: OpFlags = OpFlags(8192);
     /// `special_print`: a call printing the NEW before it (`checkNewToConstructor`, stage S7)
     pub(crate) const SPECIAL_PRINT: OpFlags = OpFlags(16384);
+    /// `warning` (an additional flag in C++): the op was seen writing read-only memory
+    /// (`Funcdata::fillinReadOnly`), so it warns at most once
+    pub(crate) const WARNING: OpFlags = OpFlags(1 << 18);
 
     pub(crate) fn has(self, f: OpFlags) -> bool {
         self.0 & f.0 != 0
