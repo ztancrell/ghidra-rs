@@ -344,10 +344,13 @@ fn evaluate_pair(fd: &Funcdata, op1: OpId, op2: OpId, depth: i32) -> Result<Matc
     })
 }
 
-/// `BooleanExpressionMatch::verifyCondition`'s test of two CBRANCH conditions: the same or
-/// complementary, to its `maxDepth` of 1.
-pub(crate) fn correlated(fd: &Funcdata, vn1: VarnodeId, vn2: VarnodeId) -> Result<bool> {
-    Ok(evaluate(fd, vn1, vn2, 1)? != Match::Uncorrelated)
+/// Port of `BooleanExpressionMatch::verifyCondition` on two CBRANCHs (to its `maxDepth` of 1):
+/// none when their conditions are uncorrelated, else whether one branches where the other does
+/// not (`getFlip`).
+pub(crate) fn condition_flip(fd: &Funcdata, op: OpId, iop: OpId) -> Result<Option<bool>> {
+    let m = evaluate(fd, inp(fd, op, 1)?, inp(fd, iop, 1)?, 1)?;
+    let flipped = |o: OpId| fd.op(o).flags.has(OpFlags::BOOLEAN_FLIP);
+    Ok((m != Match::Uncorrelated).then(|| (m == Match::Complementary) ^ flipped(op) ^ flipped(iop)))
 }
 
 /// Port of `BooleanMatch::evaluate`.
@@ -822,13 +825,7 @@ pub(super) fn or_predicate(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32>
         }
     } else {
         // the CBRANCHs share a condition, and the zero sets have complementary paths
-        let m = evaluate(fd, inp(fd, c0.cbranch, 1)?, inp(fd, c1.cbranch, 1)?, 1)?;
-        if m == Match::Uncorrelated {
-            return Ok(0);
-        }
-        let flip = (m == Match::Complementary)
-            ^ fd.op(c0.cbranch).flags.has(OpFlags::BOOLEAN_FLIP)
-            ^ fd.op(c1.cbranch).flags.has(OpFlags::BOOLEAN_FLIP);
+        let Some(flip) = condition_flip(fd, c0.cbranch, c1.cbranch)? else { return Ok(0) };
         let both = orpred_path_is_true(fd, &b0, &c0) == orpred_path_is_true(fd, &b1, &c1);
         if both != flip {
             return Ok(0); // one path hits both zero sets

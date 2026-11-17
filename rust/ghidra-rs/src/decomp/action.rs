@@ -168,7 +168,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("determinedbranch", "unreachable", c::determined_branch),
             ("unreachable", "unreachable", c::unreachable),
             ("nodejoin", "nodejoin", c::node_join),
-            ("conditionalexe", "conditionalexe", c::conditional_exe),
+            ("conditionalexe", "conditionalexe", super::condexe::conditional_exe),
             ("condconst", "analysis", super::condconst::conditional_const),
         ],
     ));

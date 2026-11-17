@@ -3093,6 +3093,10 @@ Ported on the branch:
   (`returnsplit.rs`) for `conditionalmove`.
 - `ActionParamDouble`: a stack trial that is a PIECE is split in two (`checkInputSplit`,
   `ParamActive::splitTrial`).
+- `ActionConditionalExe` (`condexe.rs`, all of `ConditionalExecution`): a block testing a
+  condition again is removed and its values flow to the matching side
+  (`BlockGraph::removeFromFlowSplit` in `block.rs`). Before, finding such a block failed
+  loudly. Still loud: a read of a removed op from inside the removed block (`opUnsetInput`).
 - `TypeSpacebase::getSubType` reads the local scope's symbols (`infertypes::sub_type`), so
   `setcasts` casts the address of a named stack variable as the C++ does.
 
@@ -3100,8 +3104,9 @@ Counts: see the plan, "Default options". Superseded by this section: "not ported
 `multicse`, `shadowvar` and `condconst`" (stage R1), "Not ported from the table row:
 `threewaycomp` ... `conditionalmove` and `orpredicate`" (stages R2 and R5), the
 `PARTIAL_SKIP` list with `multicse`, `shadowvar`, `condconst` (stage S3), "`prototypewarnings`,
-which is `not_ported`" (C printing), and "splitting a stack trial that is a PIECE" as a loud
-miss (stage R5 slice 3).
+which is `not_ported`" (C printing), "splitting a stack trial that is a PIECE" as a loud
+miss (stage R5 slice 3), and "0x47a6b0 is loud in every check" (the `ActionConditionalExe`
+removal, integration `m3-int5`).
 
 ## Speed
 

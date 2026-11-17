@@ -2338,7 +2338,7 @@ fn remove_do_nothing_block(fd: &mut Funcdata, arch: &Arch, bb: BlockId) -> Resul
 }
 
 // ---------------------------------------------------------------------------------------
-// ActionLikelyTrash, ActionUnjustifiedParams, ActionNodeJoin, ActionConditionalExe
+// ActionLikelyTrash, ActionUnjustifiedParams, ActionNodeJoin
 
 /// Port of `ActionLikelyTrash::apply`: an input register the model calls likely trash, whose
 /// value reaches only INDIRECTs, partial copies and masks, is cut off there.
@@ -2499,59 +2499,6 @@ pub(crate) fn unjustified_params(fd: &mut Funcdata, arch: &Arch) -> Result<i32> 
 /// `ActionNodeJoin`: ported in [`super::nodejoin`] (stage S8).
 pub(crate) fn node_join(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     super::nodejoin::node_join(fd, arch)
-}
-
-/// `ActionConditionalExe`: a block re-testing the condition of the block that decided how it
-/// was reached is removed (condexe.cc), which is not ported; finding a candidate on the same
-/// condition (`BooleanMatch`, as `verifySameCondition`) fails loudly.
-pub(crate) fn conditional_exe(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
-    if fd.blocks.unreachable {
-        return Ok(0);
-    }
-    for &ib in &fd.blocks.list {
-        let b = fd.blocks.block(ib);
-        if b.ins.len() != 2 || b.outs.len() != 2 {
-            continue;
-        }
-        let Some(&cb) = b.ops.last() else { continue };
-        if fd.op(cb).opc != Opcode::Cbranch {
-            continue;
-        }
-        let walk = |mut t: BlockId| {
-            while fd.blocks.block(t).outs.len() == 1 && fd.blocks.block(t).ins.len() == 1 {
-                t = fd.blocks.block(t).ins[0].point;
-            }
-            t
-        };
-        let init = walk(b.ins[0].point);
-        if fd.blocks.block(init).outs.len() != 2 || walk(b.ins[1].point) != init || init == ib {
-            continue;
-        }
-        let Some(&icb) = fd.blocks.block(init).ops.last() else { continue };
-        // verifySameCondition: `BooleanExpressionMatch::verifyCondition`, the same or the
-        // complementary condition, in the jump-table partial function too (superseded: "the C++ runs
-        // `multicse` there, ghidra-rs does not": both do)
-        if fd.op(icb).opc != Opcode::Cbranch {
-            continue;
-        }
-        if super::rules::boolean::correlated(fd, fd.op(cb).ins[1], fd.op(icb).ins[1])? {
-            // testRemovability, the part that needs no read analysis: an op of the block that
-            // can never move (a call, LOAD, STORE, INDIRECT, an address-tied output) leaves
-            // the block as it is
-            let fixed = b.ops[..b.ops.len() - 1].iter().any(|&o| {
-                let o = fd.op(o);
-                o.opc != Opcode::Multiequal
-                    && (o.is_call()
-                        || matches!(o.opc, Opcode::Load | Opcode::Store | Opcode::Indirect)
-                        || o.out.is_some_and(|v| fd.vn(v).has(VnFlags::ADDRTIED)))
-            });
-            if fixed {
-                continue;
-            }
-            return err("ActionConditionalExe: removing a re-tested condition is not implemented in ghidra-rs yet");
-        }
-    }
-    Ok(0)
 }
 
 /// `vn->getHigh()->getType()`: fails without high variables, as `Varnode::getHigh` does.
