@@ -694,7 +694,7 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
   on), `cs-r cs-t fsc-r fsc-t` (S9 `setcasts`: `print raw` after it, and `finalstructure`
   with it on), `swfs-r swfs-t swsn-r swsn-t swfsc-r swfsc-t` (`finalstructure` with case
   labels, `switchnorm`, and `finalstructure` with case labels and `setcasts` on) and
-  `pc-r pc-t pcc-r pcc-t` (`print C`, S9 slices 1, 2, 3A, 3B and 4, `pcc` with `setcasts` on; see "C printing").
+  `pc-r pc-t pcc-r pcc-t` (`print C`, S9 slices 1, 2, 3A, 3B, 4 and 5, `pcc` with `setcasts` on; see "C printing").
 - `JOBS` (default `nproc`), `TIMEOUT` (seconds per function and engine, default 120 as for every bar here; 0x4c48d0 of M500 takes
   the reference about 485 s and ghidra-rs about 600 s alone, so at 120 s it counts as a function
   the reference does not finish), `OUT`
@@ -2845,6 +2845,63 @@ divergence is in an earlier stage. Two M500 pairs run on the Mac (`r5dtlocksv`, 
 M500 misses above that now print identically are the check. Not seen in a check: `LZCOUNT` (no
 M500 function failed on it before), and which of the two field-extraction forms (`sym.field`,
 `x.field`) the 19 functions take.
+
+### C printing, slice 5: spliced labels, linked variables, VariablePiece, strings (branch `m3-print5`, 2026-11-16)
+
+- `block.rs`, `printc.rs`: the label of a spliced block. `BlockBasic::entry_addr` is
+  `getEntryAddr`: the cover's ranges joined as `RangeList::insertRange` joins them (overlapping
+  ranges, not touching ones), then the start of the one range, or of the range holding the first
+  op. The `spliced` mark of a block is gone; the cover is kept as before.
+- `printc.rs`: a global variable whose storage is a whole function (one byte) or a whole external
+  reference (a pointer) prints as that symbol's name (`pushSymbolDetail`, the type-locked symbol
+  `setSymbolProperties` links when the varnode is made). `map externalref`'s third word, the
+  name, is now kept (`Arch::externref_name`); without one the name is the address and `_exref`.
+- `variable.rs`, `merge.rs`: `VariablePiece` and `VariableGroup`. `mergeAddrTied` groups
+  overlapping address-tied varnodes of different sizes (`groupWith`); the extended cover,
+  `HighVariable::merge` with pieces (`transferPiece`, `mergeGroups`), `blockIntersection`,
+  `mergeTestRequired`, `mergeTestAdjacent`, `collectInputs`, `inflateTest` and the PIECE and
+  SUBPIECE cases of `markInternalCopies` read them.
+- `printc.rs`: string constants (`pushPtrCharConstant`, `printCharacterConstant`): a constant
+  pointer to characters in read-only memory prints as the quoted string, read 32 bytes at a time
+  up to 2048 as `StringManagerUnicode::getStringData` reads it, escaped by `printUnicode`.
+  Function pointer constants (`pushPtrCodeConstant`): the name of the function at the address.
+  The second was not in the slice's list; the switch sample showed it (4 and 5 of 287).
+- Still loud: a variable that is part of an external reference or larger than the function or
+  external reference at its address (`pushPartialSymbol` of a code pointer,
+  `pushMismatchSymbol`), the label of a block of several ranges without ops, the groups of
+  proto-partial PIECEs (`groupPartials`). Not checked against the C++: a segmented constant
+  (`resolveConstant` with a segment op) and opaque strings; neither exists in the checks.
+
+| check | M8 | M500 before | M500 | switch before | switch |
+|---|---|---|---|---|---|
+| `pcc-r` | 7 / 7 | 487 / 495 (loud 7, silent 1) | 494 / 495 (loud 0, silent 1) | 1810 / 2005 (loud 135, silent 60) | 1944 / 2005 (loud 0, silent 61) |
+| `pc-r` | 7 / 7 | 487 / 495 (loud 7, silent 1) | 494 / 495 (loud 0, silent 1) | not run | not run |
+| `pcc-t` | 7 / 7 | 479 / 495 (loud 16, silent 0) | 495 / 495 (loud 0, silent 0) | 1817 / 2005 (loud 128, silent 60) | 1943 / 2005 (loud 0, silent 62) |
+| `pc-t` | 7 / 7 | 479 / 495 (loud 16, silent 0) | 495 / 495 (loud 0, silent 0) | not run | not run |
+
+The M500 silent miss is still 0x47a6b0 (`pcc-r`, `pc-r`). No loud miss is left on M500 or the
+switch corpus (superseded: the loud lists of the slice 4 section above). M8: all 55 checks
+identical on the functions the reference finishes. The seven functions that failed in
+`mergeAddrTied` (0x402c20, 0x405990, 0x4c0070, 0x62f0d0, 0x757810, 0x7586e0 of M500 and one of
+the switch sample) were run on all 55 checks: no silent miss; five loud misses, all older
+errors before merging (0x62f0d0 an indexed stack LOAD in `r5dtlock`, `r5dtlocksv`, `r5slock`,
+`r5s`; 0x4c0070 `ActionParamDouble` in `r5s`).
+
+Switch silents: the 61 of `pcc-r` are all silent in `swfs-r`, `swsn-r` or `swfsc-r` (those three
+rerun on the 63 silent functions). Of the 62 of `pcc-t`, 61 are silent in `swfs-t`, `swsn-t` or
+`swfsc-t`; one is new and is not covered by an older check: 0x23caea8 prints without the
+reference's comments `WARNING (jumptable): Read-only address (ram,0x00429700) is written` and
+`WARNING: Read-only address ... is written` (6 lines, 3 addresses). The warning of
+`Funcdata::fillinReadOnly` for a written read-only varnode is not ported (`action.rs`,
+`varnode_props`, folds only the reads); the function was loud before this slice, so the gap did
+not show. It is open: port the warning or make the case loud. A first try that warned for every
+written read-only varnode before heritage printed too many warnings and was dropped.
+
+Not run: the other 51 checks on M500, `simple`, `r5d-adc`, `pc-r` and `pc-t` on the switch
+corpus, the full pass (`bars-queue.sh`), the Mac. Not seen in a check: a wide string (`L"..."`),
+a truncated string, a function symbol as a one-byte variable, a big-endian PIECE or SUBPIECE in
+`markInternalCopies`. Unit tests added: `entry_addr_of_a_spliced_cover` (block.rs) and
+`codepoints` (printc.rs).
 
 ## Speed
 

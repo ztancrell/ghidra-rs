@@ -175,9 +175,13 @@ impl Console {
             }
             ["break", "start", action] if self.arch.is_some() => self.break_start = Some(action.to_string()),
             // `map externalref <slot> <refaddr> [<name>]`: the slot's symbol (read-only lookups skip it)
-            ["map", "externalref", slot, refaddr, ..] => {
+            ["map", "externalref", slot, refaddr, name @ ..] => {
                 let arch = self.arch.as_mut().ok_or("map externalref: no program loaded")?;
-                arch.add_externref(u64::from(addr(Some(slot))?), u64::from(addr(Some(refaddr))?));
+                let slot = u64::from(addr(Some(slot))?);
+                arch.add_externref(slot, u64::from(addr(Some(refaddr))?));
+                if let Some(name) = name.first() {
+                    arch.name_externref(slot, name.to_string());
+                }
             }
             ["option", "readonly", on @ ("on" | "off")] => {
                 let arch = self.arch.as_mut().ok_or("option: no program loaded")?;

@@ -156,6 +156,9 @@ pub struct Arch {
     /// `map externalref`: the slots holding a reference to an external function
     /// external-reference slots and the address each refers to (`map externalref`)
     externrefs: HashMap<u64, u64>,
+    /// the names `map externalref` gives its slots (`ExternRefSymbol`; without one the symbol
+    /// is named after the address it refers to)
+    externref_names: HashMap<u64, String>,
     /// `option readonly`: read-only memory propagates as constants (`readonlypropagate`)
     pub(crate) readonly_propagate: bool,
     /// `option nanignore all`: every FLOAT_NAN is taken as false (`nan_ignore_all`)
@@ -210,6 +213,7 @@ impl Arch {
             laned,
             readonly,
             externrefs: HashMap::new(),
+            externref_names: HashMap::new(),
             readonly_propagate: false,
             nan_ignore_all: false,
             types: type_factory,
@@ -235,6 +239,16 @@ impl Arch {
     /// `map externalref <slot> ...`
     pub(crate) fn add_externref(&mut self, slot: u64, target: u64) {
         self.externrefs.insert(slot, target);
+    }
+
+    /// The name `map externalref <slot> <refaddr> <name>` gives the slot's symbol.
+    pub(crate) fn name_externref(&mut self, slot: u64, name: String) {
+        self.externref_names.insert(slot, name);
+    }
+
+    /// The name given to the symbol of an external-reference slot, if any.
+    pub(crate) fn externref_name(&self, slot: u64) -> Option<&str> {
+        self.externref_names.get(&slot).map(String::as_str)
     }
 
     /// The address an external-reference slot refers to (`queryExternalRefFunction`).

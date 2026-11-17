@@ -1925,7 +1925,6 @@ fn splice_block_basic(fd: &mut Funcdata, bl: BlockId) -> Result<()> {
     b.cover = cover;
     b.start = b.start.min(start);
     b.stop = b.stop.max(stop);
-    b.spliced = true;
     fd.blocks.splice_block(bl);
     structure_reset(fd)
 }
