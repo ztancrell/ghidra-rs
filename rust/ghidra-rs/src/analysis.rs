@@ -2,6 +2,7 @@
 //! Ghidra's auto-analysis produces for the scripts in `main.rs` (ExportFunctions, ExportGaps).
 //! Every executable section is disassembled; results are reported for `.text`. See rust/README.md "Analysis" for what is and isn't covered.
 
+use crate::queue::{priority, Analyzer, Kind, Manager};
 use crate::sleigh::Sleigh;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -386,36 +387,54 @@ impl Analysis {
                 run.clear();
             }
         }
-        for &s in &seeds {
-            an.funcs.insert(s);
-            queue.push(s);
+        // Discovery's analyzers, run by Ghidra's task queue at Ghidra's priorities. Disassembly
+        // and Subroutine References (a function at each call target) are `descend`, inside the
+        // analyzer that brings the code.
+        #[derive(Clone, Copy)]
+        enum Task {
+            EntryPoints,
+            StartSearch,
+            AddressTables,
+            StartSearchAfterData,
         }
-        loop {
-            an.descend(img, sl, &mut p, &mut owner, &mut queue, &mut Vec::new());
-            // Function Start Search: prologue patterns in bytes no code covers yet.
-            let before = an.funcs.len();
-            for sec in exec() {
-                let d = &sec.data;
-                for o in 1..d.len() {
-                    let a = sec.addr + o as u32;
-                    if owner[(a - an.code_lo) as usize] != 0 {
-                        continue;
+        let analyzer = |name, kind, priority, id| Analyzer { name, kind, priority, id };
+        let mut mgr = Manager::new(vec![
+            // with External Entry References and the RTTI analyzer: the seeds
+            analyzer("Disassemble Entry Points", Kind::Byte, priority::BLOCK_ANALYSIS, Task::EntryPoints),
+            analyzer("Function Start Search", Kind::Byte, priority::CODE_ANALYSIS + 2, Task::StartSearch),
+            analyzer("Create Address Tables", Kind::Byte, priority::DATA_TYPE_PROPOGATION - 1, Task::AddressTables),
+            analyzer(
+                "Function Start Search After Data",
+                Kind::Data,
+                priority::DATA_TYPE_PROPOGATION - 2,
+                Task::StartSearchAfterData,
+            ),
+        ]);
+        mgr.notify(Kind::Byte, &exec().map(|s| s.addr).collect());
+        while let Some((task, _)) = mgr.next_task() {
+            let before = an.funcs.clone();
+            let mut data = BTreeSet::new();
+            match task {
+                Task::EntryPoints => {
+                    for &s in &seeds {
+                        an.funcs.insert(s);
+                        queue.push(s);
                     }
-                    if pair_hit(d, o, &PRE_FILL, &POST_FILL) || pair_hit(d, o, &PRE_JMP, &POST_JMP) {
-                        an.funcs.insert(a);
-                        queue.push(a);
-                        an.descend(img, sl, &mut p, &mut owner, &mut queue, &mut Vec::new());
-                    }
+                    an.descend(img, sl, &mut p, &mut owner, &mut queue, &mut Vec::new());
+                }
+                // the tables come after everything the seeds reach, so stray pointers cannot
+                // claim their bytes
+                Task::AddressTables => {
+                    data.extend(&tables_queue);
+                    queue.append(&mut tables_queue);
+                    an.descend(img, sl, &mut p, &mut owner, &mut queue, &mut Vec::new());
+                }
+                Task::StartSearch | Task::StartSearchAfterData => {
+                    an.start_search(img, sl, &mut p, &mut owner, &mut queue)
                 }
             }
-            if an.funcs.len() == before {
-                if tables_queue.is_empty() {
-                    break;
-                }
-                // after everything the seeds reach, so stray pointers cannot claim their bytes
-                queue.append(&mut tables_queue);
-                an.descend(img, sl, &mut p, &mut owner, &mut queue, &mut Vec::new());
-            }
+            mgr.notify(Kind::Data, &data);
+            mgr.notify(Kind::Function, &an.funcs.difference(&before).copied().collect());
         }
         an.funcs.retain(|a| an.insns.contains_key(a));
         an.shared_returns();
@@ -451,6 +470,38 @@ impl Analysis {
         }
         an.stack_purges(img);
         Ok(an)
+    }
+
+    /// Function Start Search: functions at prologue patterns in bytes no code covers yet, each
+    /// disassembled when found; again while a sweep finds one.
+    fn start_search(
+        &mut self,
+        img: &Image,
+        sl: &Sleigh,
+        p: &mut crate::sleigh::Parse,
+        owner: &mut [u8],
+        queue: &mut Vec<u32>,
+    ) {
+        loop {
+            let before = self.funcs.len();
+            for sec in img.sections.iter().filter(|s| s.exec) {
+                let d = &sec.data;
+                for o in 1..d.len() {
+                    let a = sec.addr + o as u32;
+                    if owner[(a - self.code_lo) as usize] != 0 {
+                        continue;
+                    }
+                    if pair_hit(d, o, &PRE_FILL, &POST_FILL) || pair_hit(d, o, &PRE_JMP, &POST_JMP) {
+                        self.funcs.insert(a);
+                        queue.push(a);
+                        self.descend(img, sl, p, owner, queue, &mut Vec::new());
+                    }
+                }
+            }
+            if self.funcs.len() == before {
+                return;
+            }
+        }
     }
 
     fn decode(&self, img: &Image, sl: &Sleigh, p: &mut crate::sleigh::Parse, a: u32, fold: &mut Fold) -> Option<Ins> {

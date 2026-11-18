@@ -200,6 +200,15 @@ ghidra-rs analyze orig/Mercenaries2.analysis.exe --functions-from build/function
 
 What discovery does, after Ghidra's analyzers:
 
+- the order: Ghidra's task queue (`queue.rs`, a port of `AutoAnalysisManager`,
+  `AnalysisTaskList`, `AnalysisScheduler` and `AnalysisPriority`; no background commands yet).
+  A change notifies the analyzers of its type (blocks, code, functions, data), each queues one
+  task at its priority, and the first task of the lowest priority runs next. Discovery's
+  analyzers in it: Disassemble Entry Points (200, the seeds), Function Start Search (402),
+  Function Start Search After Data (898, after the tables) and Create Address Tables (899).
+  Shared Return Calls and the non-returning functions run after the queue, as before (Java:
+  398 and 302, on each batch of new functions or code). The facts are byte for byte the ones
+  of the loop it replaces (both function sets, 2026-11-18);
 - disassembles every executable section by recursive descent from the exports, the entry
   point and RTTI vftable slots (MSVC CompleteObjectLocator -> TypeDescriptor); call targets
   become functions;
