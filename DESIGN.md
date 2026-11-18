@@ -450,6 +450,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `func` record otherwise 18, `override` 5, no single kind 27); fix 1 (INT_ZEXT/INT_SEXT size data, as
    `SymbolicPropogator`) gives 340 (loud 31, silent 128). Superseded: the 328 above. `extrapop` and stack
    variables need the order of Ghidra's analysis queue, not ported.
+   Ghidra's task queue ported (`queue.rs`, branch `analysis-queue`, on the base merged with the
+   Function Start Search bits fix: 343, loud 31, silent 125); X86 Function Callee Purge runs in it:
+   347 (loud 31, silent 121), plain discovery 187 -> 189; Java-unknown purges derived here 2,182 ->
+   1,743. Superseded: "not ported" above. Left: CreateFunctionCmd's thunks, the RTTI analyzer's
+   priority, Shared Return and no-return per batch.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
@@ -509,7 +514,8 @@ scripts live", decided 2026-11-15 (plain files, see Decided).
 - 2026-11-17: Choices of S10 slice 3 made without the user, to confirm or change (`rust/README.md`,
   "Stage S10, slice 3"): `PseudoDisassembler.checkPseudoBody` is ported whole although, with the
   references of all discovered code at once, it loses 452 labels of SecuROM's code that Java has
-  (Ghidra's order of analysis is not ported: its task queue would be the next port); `--facts`
+  (Ghidra's order of analysis is not ported: its task queue would be the next port; superseded
+  2026-11-18: the queue is ported, `queue.rs`, with discovery and the purge in it); `--facts`
   fails without Ghidra's strings model file; a Function ID comment with a mangled name stays
   `underived` until the demangler is ported.
 - 2026-11-17: Claude's call (1d, "Pieces of symbols"), awaiting the user: where the C++ orders by

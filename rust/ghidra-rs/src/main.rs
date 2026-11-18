@@ -413,7 +413,10 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     // --facts: the functions discovery finds without the seeds are the ones Ghidra's
     // auto-analysis worked on; a seeded one stands for a function a script made afterwards
     let plain = match &facts {
-        Some(_) if !seeds.is_empty() => Some(analysis::Analysis::run(&img, &sl, &[], false)?.funcs),
+        Some(_) if !seeds.is_empty() => {
+            let a = analysis::Analysis::run(&img, &sl, &[], false)?;
+            Some((a.funcs, a.callee_purges))
+        }
         _ => None,
     };
     // a store made on another binary or seed set fails before any analysis
@@ -500,11 +503,14 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
             let model = std::fs::read_to_string(&model_path).map_err(|e| format!("{}: {e}", model_path.display()))?;
             let strings =
                 ghidra_rs::strings::Model::parse(&model).map_err(|e| format!("{}: {e}", model_path.display()))?;
+            // the purges of auto-analysis: of the run without seeds, where seeds were given
+            let callee_purges = plain.as_ref().map_or_else(|| an.callee_purges.clone(), |p| p.1.clone());
             let mut w = create(&p)?;
             let inputs = ghidra_rs::factsout::Inputs {
                 fid: &fid,
                 protos: protos.as_ref(),
-                analyzed: plain.as_ref(),
+                analyzed: plain.as_ref().map(|p| &p.0),
+                purges: &callee_purges,
                 cspec: &cspec,
                 strings: Some(&strings),
             };

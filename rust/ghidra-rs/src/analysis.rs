@@ -222,6 +222,8 @@ pub struct Analysis {
     pub table_slots: BTreeMap<u32, u32>, // Create Address Tables (`disassemble` with constants): slot -> pointer
     fpu_ip: Option<(u32, u64)>,          // FPUInstructionPointer, which x87 constructors set to inst_start
     purge: HashMap<u32, u32>,            // function -> bytes its RETs pop (RET n), where they agree
+    /// The purge X86 Function Callee Purge set, by function (`callee_purge`); none is unknown.
+    pub callee_purges: HashMap<u32, u32>,
     reg_space: u32,
     /// Flow overrides of the project store (`store.rs`), by instruction: CALL_RETURN (true) or
     /// none (false) in place of what `call_return` derives. Empty without a store.
@@ -339,6 +341,7 @@ impl Analysis {
             table_slots: BTreeMap::new(),
             fpu_ip: None,
             purge: HashMap::new(),
+            callee_purges: HashMap::new(),
             reg_space: 0,
             overrides: HashMap::new(),
             fixed_bodies: BTreeMap::new(),
@@ -396,6 +399,8 @@ impl Analysis {
             StartSearch,
             AddressTables,
             StartSearchAfterData,
+            SharedReturns,
+            Purge,
         }
         let analyzer = |name, kind, priority, id| Analyzer { name, kind, priority, id };
         let mut mgr = Manager::new(vec![
@@ -409,9 +414,13 @@ impl Analysis {
                 priority::DATA_TYPE_PROPOGATION - 2,
                 Task::StartSearchAfterData,
             ),
+            // ponytail: Java runs Shared Return Calls at 398 on each batch of new functions; here
+            // once, after the other analyzers, on all of them (the walk's port takes one set)
+            analyzer("Shared Return Calls", Kind::Byte, priority::LOW_PRIORITY, Task::SharedReturns),
+            analyzer("X86 Function Callee Purge", Kind::Function, priority::FUNCTION_ANALYSIS, Task::Purge),
         ]);
         mgr.notify(Kind::Byte, &exec().map(|s| s.addr).collect());
-        while let Some((task, _)) = mgr.next_task() {
+        while let Some((task, set)) = mgr.next_task() {
             let before = an.funcs.clone();
             let mut data = BTreeSet::new();
             match task {
@@ -432,44 +441,99 @@ impl Analysis {
                 Task::StartSearch | Task::StartSearchAfterData => {
                     an.start_search(img, sl, &mut p, &mut owner, &mut queue)
                 }
+                Task::SharedReturns => {
+                    an.funcs.retain(|a| an.insns.contains_key(a));
+                    an.shared_returns();
+                }
+                Task::Purge => an.callee_purge(img, &set),
             }
             mgr.notify(Kind::Data, &data);
             mgr.notify(Kind::Function, &an.funcs.difference(&before).copied().collect());
         }
-        an.funcs.retain(|a| an.insns.contains_key(a));
-        an.shared_returns();
         if exact {
             an.funcs = extra.iter().copied().filter(|a| an.insns.contains_key(a)).collect();
         }
         an.compute_bodies();
-        // Non-returning functions: no RETURN anywhere in the body; then redo the bodies.
+        an.find_noreturn();
+        an.stack_purges(img);
+        Ok(an)
+    }
+
+    /// X86 Function Callee Purge (`FunctionPurgeAnalysisCmd`) on the functions added since its
+    /// last turn, in address order: the operand of the body's first RET or RETF (by address,
+    /// among its first 2048 instructions; 0 without one); without a RET, the purge the function
+    /// a CALL_RETURN flow of the body reaches (the last one) has at this moment, unless that
+    /// function does not return. A purge once set stays: a function keeps the purge of the
+    /// code and functions there were at its turn (unknown where none came out).
+    // ponytail: the body is the one of this turn, not of the moment the function was made, and
+    // the non-returning functions are this analysis's rule on this turn's bodies (Java's
+    // analyzer runs at 302 with its own rule); both kept for this turn only
+    fn callee_purge(&mut self, img: &Image, set: &BTreeSet<u32>) {
+        let known = self.noreturn.clone();
+        self.compute_bodies();
+        self.find_noreturn();
+        for &f in set.iter().filter(|f| self.funcs.contains(f)) {
+            if self.callee_purges.contains_key(&f) {
+                continue;
+            }
+            let mut backup = None;
+            let mut purge = None;
+            for &a in self.bodies[&f].iter().take(2048) {
+                let i = &self.insns[&a];
+                if i.flow == Flow::Return {
+                    let sec = img.block_of(a).unwrap();
+                    let b = &sec.data[(a - sec.addr) as usize..];
+                    let b = &b[b.iter().take_while(|&&x| matches!(x, 0xf2 | 0xf3 | 0x66)).count()..];
+                    // an IRET is no "ret" or "retf": the search goes on
+                    purge = match b {
+                        [0xc2 | 0xca, lo, hi, ..] => Some(u16::from_le_bytes([*lo, *hi]) as u32),
+                        [0xc3 | 0xcb, ..] => Some(0),
+                        _ => continue,
+                    };
+                    break;
+                }
+                if matches!(i.flow, Flow::Jump | Flow::Call | Flow::CallInd) && self.call_return(a, i) {
+                    backup = Some(i);
+                }
+            }
+            let purge = purge.or_else(|| {
+                let t = backup?.target.filter(|t| self.funcs.contains(t) && !self.noreturn.contains(t))?;
+                self.callee_purges.get(&t).copied()
+            });
+            if let Some(n) = purge {
+                self.callee_purges.insert(f, n);
+            }
+        }
+        self.noreturn = known;
+    }
+
+    /// Non-returning functions: no RETURN anywhere in the body; then redo the bodies.
+    fn find_noreturn(&mut self) {
         for _ in 0..4 {
-            let n = an.noreturn.len();
-            let found: Vec<u32> = an
+            let n = self.noreturn.len();
+            let found: Vec<u32> = self
                 .bodies
                 .iter()
                 .filter(|(_, b)| {
                     !b.iter().any(|a| {
-                        let i = &an.insns[a];
+                        let i = &self.insns[a];
                         // a JMP [slot] thunk to a non-returning import does not return either
                         i.flow == Flow::Return
                             || i.flow == Flow::JumpInd
-                                && !an.tables.contains_key(a)
-                                && !i.slot.is_some_and(|s| an.noreturn.contains(&s))
+                                && !self.tables.contains_key(a)
+                                && !i.slot.is_some_and(|s| self.noreturn.contains(&s))
                             || i.flow == Flow::Jump
-                                && i.target.is_some_and(|t| an.funcs.contains(&t) && !an.noreturn.contains(&t))
+                                && i.target.is_some_and(|t| self.funcs.contains(&t) && !self.noreturn.contains(&t))
                     })
                 })
                 .map(|(&f, _)| f)
                 .collect();
-            an.noreturn.extend(found);
-            if an.noreturn.len() == n {
+            self.noreturn.extend(found);
+            if self.noreturn.len() == n {
                 break;
             }
-            an.compute_bodies();
+            self.compute_bodies();
         }
-        an.stack_purges(img);
-        Ok(an)
     }
 
     /// Function Start Search: functions at prologue patterns in bytes no code covers yet, each
@@ -1626,34 +1690,6 @@ impl Analysis {
 
     pub fn purge(&self, f: u32) -> Option<u32> {
         self.purge.get(&f).copied()
-    }
-
-    /// Ghidra's `FunctionPurgeAnalysisCmd`: the bytes the first RET of the body (by address,
-    /// among its first 2048 instructions) pops; without a RET, the purge of the function the
-    /// last jump out of the body calls (a jump with a `CALL_RETURN` override).
-    // ponytail: Ghidra takes the callee's purge as it is when this function is analysed (in
-    // address order); here the callee is always worked out first, 8 jumps deep at most
-    pub fn ret_purge(&self, img: &Image, f: u32, depth: u32) -> Option<u32> {
-        let mut backup = None;
-        for &a in self.bodies.get(&f)?.iter().take(2048) {
-            let i = &self.insns[&a];
-            match i.flow {
-                Flow::Return => {
-                    let sec = img.block_of(a)?;
-                    let b = &sec.data[(a - sec.addr) as usize..];
-                    let b = &b[b.iter().take_while(|&&x| matches!(x, 0xf2 | 0xf3 | 0x66)).count()..];
-                    return match b {
-                        [0xc2 | 0xca, lo, hi, ..] => Some(u16::from_le_bytes([*lo, *hi]) as u32),
-                        [0xc3 | 0xcb, ..] => Some(0),
-                        _ => None, // IRET
-                    };
-                }
-                Flow::Jump => backup = i.target.filter(|t| *t != f && self.funcs.contains(t)).or(backup),
-                _ => {}
-            }
-        }
-        let t = backup.filter(|t| depth < 8 && !self.noreturn.contains(t))?;
-        self.ret_purge(img, t, depth + 1)
     }
 
     pub fn body_size(&self, f: u32) -> u64 {

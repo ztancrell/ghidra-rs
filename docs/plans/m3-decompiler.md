@@ -2127,7 +2127,8 @@ to confirm, and the loader is one module (`decomp/facts.rs`) that another source
   register holds, Function ID's plate comments. mercs2 with Java's function set: `func` 81.2%,
   `data` 84.9%, `string` 90.5%, `comments` 71.0% equal (superseded: "`func` 80.6% ... `data`
   47.1%" above); `ghidra-diff.sh` M8 identical 2 / 7, M500 173 / 499. Not ported: the
-  demangler, Ghidra's order of analysis (its task queue), switch-case labels, the loader's and
+  demangler, Ghidra's order of analysis (its task queue; superseded 2026-11-18: ported, `queue.rs`,
+  with discovery and the purge analyzer in it), switch-case labels, the loader's and
   RTTI structures.
 
 Still before the gate: the eight actions (item 1), the misses default options reach (item 2),
