@@ -125,7 +125,7 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   (reached only by jumps) where Java has none. Asked whether to change discovery or accept an
   exception, the user said: "Fix function and any related problems so it prevents it down the
   line." First step (`rust/README.md`, "What discovery does"): Shared Return Calls is a port of
-  SharedReturnAnalysisCmd's walk. 0x861190 itself is still made (open: see the README).
+  SharedReturnAnalysisCmd's walk. Resolved (2026-11-18): Java 12.2 also makes 0x861190 and its FoldSlotFragments removes it as its own owner ("refit failed Object has been deleted.") and goes on; `fold-slot-fragments` does the same now (`rust/README.md`, "Resolved (2026-11-18)"). Superseded: "0x861190 itself is still made (open)".
 
 ## Milestones
 
@@ -442,8 +442,8 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `rust/README.md`, "Project store and the editing scripts". Superseded in part (review of
    `m3-int6`, 2026-11-17): store version 2 replays its records in edit order, names its binary
    and seed set, and is applied after the constants pass; with those fixes
-   `fold-slot-fragments` stops loudly on mercs2 at 0x861190 (an owner its own walk removes,
-   where Java ends with an exception), so the 36602 is the old build's count.
+   `fold-slot-fragments` reports an owner its own walk removes as "refit failed Object has been
+   deleted." and goes on, as Java 12.2 does (2026-11-18; before it stopped loudly at 0x861190), so the 36602 is the old build's count (now 36856 / 779 / 164).
 
 ## Open questions
 

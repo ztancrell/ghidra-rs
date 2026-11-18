@@ -547,11 +547,11 @@ pub fn fold_slot_fragments(p: &mut Project, original: &str, rewrites: &str, out:
                 flow.entry(a).or_default().extend(reached);
             }
             if !s.p.an.funcs.contains(&a) {
-                // the walk folded the owner itself: Java goes on with the deleted function, and
-                // its next call on it throws, which ends the script
-                return Err(format!(
-                    "FoldSlotFragments: the walk from 0x{a:08x} removed that owner itself (Java ends with an exception here)"
-                ));
+                // the walk folded the owner itself (it only walks with a flow entry, so Java's
+                // setBody comes next): Java reads the deleted function's body and setBody throws
+                // "Object has been deleted." into the script's catch, which reports and goes on
+                writeln!(s.out, "0x{a:08x},refit failed Object has been deleted.").map_err(io)?;
+                continue;
             }
             if s.p.thunked(a).is_some_and(|target| !s.original.contains(&target)) {
                 s.unthunk(a);

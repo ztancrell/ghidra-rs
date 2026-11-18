@@ -252,7 +252,8 @@ measured again. Of the 329 extra, 153 are call targets, 98 Function Start Search
 Shared Return targets and 2 seeds; 71 of the 98 and 45 of the 153 are functions of the final
 Java project (made there by RecoverFunctions). Superseded: 22,388 / 935 / 365 (112 of them
 Shared Return targets). Note that `functions-analysis.csv` (2026-10-14) was made by Ghidra
-12.2 (`/opt/ghidra`), the source here is 12.3.
+12.1.2_DEV (`/opt/ghidra` is 12.2), the source here is 12.3. Superseded: "made by Ghidra 12.2",
+the README's earlier statement; see the 12.2 trace under "Against Java" below.
 
 `name`, `exported`, `vtable_class` and `lua` match on 99.9% or more of the rows; `fid` is
 always 0. Superseded (branch `fid`): `fid` and the library names come from Function ID, see
@@ -777,7 +778,7 @@ ghidra-rs only are 36864 / 771 / 2338 with the fixes against 36610 / 1025 / 2336
 build: `recover-functions` creates 16406 (16150 before) once it runs after the constants pass.
 The fixed store is 16488 lines (16449 `function`, 35 `code`, 3 `noreturn`).
 
-With the Shared Return port (2026-11-17) `fold-slot-fragments` still stops at 0x00861190; the
+With the Shared Return port (2026-11-17) `fold-slot-fragments` stopped at 0x00861190 (superseded: see "Resolved" below); the
 three other commands give 36861 / 774 / 2314 (`recover-functions` creates 16417, the store has
 16498 records). Why 0x861190 is still made: 0x8614c7 (`JMP 0x861190`, in 0x8613d0) jumps back
 before 0x8613d0; nothing falls into 0x861190 (0x861183-0x86118f is INT3 padding), no
@@ -788,7 +789,26 @@ functions and 0x8613d0's body (260 bytes) holds 0x861190-0x861197, but 0x861190 
 Walking SharedReturnAnalysisCmd by hand (also with the cache stale, and with
 CreateFunctionCmd's queue and `subtractBodyFromExisting`) creates 0x861190 in every order tried,
 so the rule that leaves it out is not found; seeding discovery with all of Java's plain
-functions still creates it. Open.
+functions still creates it. Not found, and not needed: see "Resolved" below.
+
+Resolved (2026-11-18): `fold-slot-fragments` no longer stops at 0x00861190. A fresh headless
+Ghidra 12.2_DEV run (`rust/tools/ghidra/TraceFunctions.java` logs the analyzers' calls) does
+create 0x861190 (a queued CreateFunctionCmd makes it and nothing removes it), so ghidra-rs's
+discovery agreeing with Java there was right. `functions-analysis.csv` (2026-10-14) is from Ghidra
+12.1.2_DEV, not 12.2, and the 12.2 chain differs: RecoverFunctions 15,938 created,
+FoldSlotFragments 2,183 removed and 1,438 refit (12.1.2: 2,204 / 1,438), ClearFalseNoReturn 1
+cleared (458 call sites). Plain discovery against that 12.2 trace is 22,390 / 899 / 325 in both /
+Java only / ghidra-rs only (against the 12.1.2 CSV 22,386 / 937 / 329). Java 12.2's
+FoldSlotFragments removes 0x861190 as an owner of its own walk, writes `0x00861190,removed` and
+then `0x00861190,refit failed Object has been deleted.` (the setBody call throws into the script's
+catch), and goes on. `fold-slot-fragments` does the same now. The four commands on a fresh store
+give: `recover-functions` 16,417 created, `add-relocated-entries` 43, `clear-false-noreturn` 3
+cleared (2 call sites; 12.2: 1 cleared, 458 call sites, not explained), `fold-slot-fragments` 2,163
+removed, 1,425 refit, 1 refit failed (0x00861190), 2 rounds; the store has 23,398 records. Against
+Java 12.2 that is 2,163 against 2,183 removed and 1,425 against 1,438 refit. The final `.text`
+function set against the facts export (from the 12.1.2-era project) is 36,856 in both, 779 Java only,
+164 ghidra-rs only (36,602 / 1,033 / 180 before the review fixes). Superseded: the text before this
+note, which says the fold stops and the rule that leaves 0x861190 out is not found; there is no such rule.
 
 Not compared: flow overrides against the 3365 of the facts export (ghidra-rs derives them and
 has no export of them), functions outside `.text`, body ranges beyond their size. The shadow
