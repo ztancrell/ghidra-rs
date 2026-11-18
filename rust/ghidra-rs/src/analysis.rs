@@ -258,7 +258,7 @@ const PRE_FILL: [Pat; 6] = [
     &[(0xc2, 0xff), (0, 0x03), (0, 0xff)],
 ];
 const PRE_JMP: [Pat; 2] = [&[(0xe9, 0xff), (0, 0), (0, 0), (0, 0), (0, 0)], &[(0xeb, 0xff), (0, 0)]];
-const POST_ALL: [Pat; 18] = [
+const POST_FILL: [Pat; 19] = [
     &[(0x55, 0xff), (0x8b, 0xff), (0xec, 0xff)],
     &[(0x55, 0xff), (0x89, 0xff), (0xe5, 0xff)],
     &[(0x83, 0xff), (0xec, 0xff), (0x00, 0x83)],
@@ -291,12 +291,23 @@ const POST_ALL: [Pat; 18] = [
     &[(0x53, 0xff), (0x56, 0xff), (0x8b, 0xff), (0xf0, 0xff)],
     &[(0x56, 0xff), (0x57, 0xff), (0x8b, 0xff), (0xf9, 0xff)],
     &[(0x56, 0xff), (0x57, 0xff), (0x8b, 0xff), (0xf1, 0xff)],
+    &[(0x55, 0xff), (0x57, 0xff), (0x56, 0xff), (0x53, 0xff)],
 ];
-const POST_AFTER_JMP: [usize; 4] = [0, 4, 5, 6]; // indexes into POST_ALL
-const POST_EXTRA: Pat = &[(0x55, 0xff), (0x57, 0xff), (0x56, 0xff), (0x53, 0xff)];
+const POST_JMP: [Pat; 4] = [POST_FILL[0], POST_FILL[4], POST_FILL[5], POST_FILL[6]];
 
 fn matches(bytes: &[u8], pat: Pat) -> bool {
     bytes.len() >= pat.len() && pat.iter().zip(bytes).all(|(&(v, m), &b)| b & m == v & m)
+}
+
+/// PatternPairSet.createFinalPatterns: a prepattern/postpattern pair of `<patternpairs
+/// totalbits="32" postbits="16">` is a pattern only when the postpattern has 16 fixed bits and
+/// both together 32 (`getNumFixedBits`); e.g. `CC` + `SUB ESP,small` (8 + 19 bits) is none.
+/// True when such a pair matches with the postpattern at `d[o]`.
+fn pair_hit(d: &[u8], o: usize, pres: &[Pat], posts: &[Pat]) -> bool {
+    let bits = |p: Pat| p.iter().map(|&(_, m)| m.count_ones()).sum::<u32>();
+    pres.iter().filter(|p| o >= p.len() && matches(&d[o - p.len()..o], p)).any(|&pre| {
+        posts.iter().any(|&post| bits(post) >= 16 && bits(pre) + bits(post) >= 32 && matches(&d[o..], post))
+    })
 }
 
 impl Analysis {
@@ -390,11 +401,7 @@ impl Analysis {
                     if owner[(a - an.code_lo) as usize] != 0 {
                         continue;
                     }
-                    let at = &d[o..];
-                    let pre = |list: &[Pat]| list.iter().any(|p| o >= p.len() && matches(&d[o - p.len()..o], p));
-                    let hit = (pre(&PRE_FILL) && (POST_ALL.iter().any(|p| matches(at, p)) || matches(at, POST_EXTRA)))
-                        || (pre(&PRE_JMP) && POST_AFTER_JMP.iter().any(|&i| matches(at, POST_ALL[i])));
-                    if hit {
+                    if pair_hit(d, o, &PRE_FILL, &POST_FILL) || pair_hit(d, o, &PRE_JMP, &POST_JMP) {
                         an.funcs.insert(a);
                         queue.push(a);
                         an.descend(img, sl, &mut p, &mut owner, &mut queue, &mut Vec::new());
@@ -1684,7 +1691,15 @@ impl RangeSet {
 
 #[cfg(test)]
 mod tests {
-    use super::RangeSet;
+    use super::{pair_hit, RangeSet, POST_FILL, PRE_FILL};
+
+    #[test]
+    fn pattern_pairs_need_their_bits() {
+        // `CC` + `SUB ESP,8`: 8 + 19 fixed bits, below totalbits 32; `CC CC` + it: 35
+        let d = [0x90, 0xcc, 0x83, 0xec, 0x08, 0xcc, 0xcc, 0x83, 0xec, 0x08];
+        assert!(!pair_hit(&d, 2, &PRE_FILL, &POST_FILL));
+        assert!(pair_hit(&d, 7, &PRE_FILL, &POST_FILL));
+    }
 
     #[test]
     fn range_set_add_remove() {
