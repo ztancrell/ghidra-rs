@@ -119,6 +119,14 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   measured (`tools/facts-diff.sh`) and is listed in `rust/README.md`, "Stage S10, slice 3".
   Superseded: the part of the open question of S10 slice 2 that let "a rule of Ghidra's analyzers
   ported with an approximation" stand as the way to go.
+- 2026-11-18: The check tooling caches the reference decompiler's outputs. The user: "I would
+  first check to make sure the files need rebuilt or not. If so build. If not, dont build."
+  Confirmed: each reference output is kept under a content hash of every input that can affect
+  it (the reference build, the binary, the `.sla` files, options, prelude, the function's
+  script, the command line, the `DECOMP_*` environment); the same hash reuses it, a new one
+  reruns; file dates are not enough. A timeout or any failed or incomplete reference run is
+  never cached. ghidra-rs always reruns. `REFCACHE=0` turns it off (`decomp-diff.sh`,
+  rust/README.md).
 
 ## Milestones
 
