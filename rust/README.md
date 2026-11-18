@@ -5176,7 +5176,7 @@ Superseded (2026-11-18, branch `analysis-queue`): the queue is ported and the pu
 (`Analysis::callee_purge`; `ret_purge` is removed); 0x4b6580 (`JMP 0x57b780`, size 5 in Java's
 facts) was made right after 0x57b780 in Java 12.2's trace (`gap-row3-java/creators.log`), as
 CreateFunctionCmd makes a thunk's target first; it is no function made before its code. On the
-merged base the count is 2,182, now 1,743; see "Ghidra's task queue and the purge".
+merged base the count is 2,182, then 1,743, now 1,769 (superseded: "now 1,743"); see "Ghidra's task queue and the purge".
 
 **Fix 1: INT_ZEXT and INT_SEXT size data** (`Exporter::accesses`). `SymbolicPropogator`'s
 INT_ZEXT and INT_SEXT cases make a READ reference with the input varnode, as its COPY case does;
@@ -5206,7 +5206,8 @@ discovery's analyzers the facts of both function sets are byte for byte the base
 order, and sets a purge only where it finds one: the first RET (or RETF) of the body by
 address, among its first 2048 instructions; without one, the purge the function its last
 CALL_RETURN flow reaches has at that moment (so a thunk-like `JMP` to a function later in the
-same batch gets none). A purge is never set again. 471 functions go from a purge to Java's
+same batch gets none). A known purge is never set again (superseded: "a purge is never set
+again"; an unknown one is looked for again, see "Body changes" below). 471 functions go from a purge to Java's
 `unknown` (0x402fb0: base 4), 42 the other way (below). ghidra-rs worked the purge out
 from the finished body, the callee first
 (`Analysis::ret_purge`, removed). The `extrapop` of the facts is now the purge of that turn,
@@ -5237,6 +5238,45 @@ row is not affected. `analyze --facts` with Java's function list takes 77 s (bas
 purge turn recomputes the bodies and the non-returning functions of that moment; plain 53 s
 (base 47 s), measured under the same load, one run each.
 
+**Body changes** (`analysis-queue`, after `52566ad440`). Java's AutoAnalysisManager sends
+FUNCTION_ADDED and FUNCTION_BODY_CHANGED alike to `functionDefined`, so the purge analyzer
+gets a function again when its body changes, and `analyzeFunction` looks again where the purge
+is still unknown (or past 128). After each task the bodies are computed as a purge turn
+computes them (`Analysis::turn_bodies`), and a function whose body differs from the last
+notification is notified; the purge turn uses those bodies. Bodies and the non-returning
+functions of a turn now take only functions with an instruction (CreateFunctionCmd makes none
+without one): 45 to 51 call targets that were never decoded counted as empty, non-returning
+functions before; alone, this changes no record. The fallback to a CALL_RETURN flow also takes
+a computed jump (COMPUTED_CALL_TERMINATOR).
+
+| auto-analysis functions, Java's function list | queue | body changes |
+|---|---|---|
+| `extrapop` equal | 18,004 | 17,979 |
+| Java `unknown`, ghidra-rs known | 1,743 | 1,769 |
+| Java known, ghidra-rs `unknown` | 1,388 | 1,387 |
+| stack variables equal | 12,218 | 12,215 |
+
+(Plain discovery: equal 17,966 both; Java `unknown` here known 1,722 -> 1,723; Java known here
+`unknown` 534 -> 533.) 29 records change: 3 non-thunks get Java's purge (both the facts and a
+fresh Java 12.2 analysis agree); 26 are 5-byte thunks whose target's purge Java leaves
+unknown. Here their `JMP` to a function is a derived CALL_RETURN, so the retry takes the
+target's purge once the target has one; in Java a thunk has no purge of its own
+(`FunctionDB.getStackPurgeSize` returns the thunked function's). These 26 wait for the thunk
+port (below). Own facts: M8 4 / 7 and 2 / 7 unchanged; M500 with Java's function list 346 / 499
+(loud 31, silent 122), plain discovery 189 / 499 (loud 128, silent 182). The one newly silent
+function, 0x5409f0, calls 0x536700, one of the 26 (`unknown` -> 8). `analyze --facts` takes
+82 s with Java's function list and 78 s plain, under a heavier load than the runs above (load
+average 11), one run each.
+
+**Java's own purges are not the facts' on thunks.** A fresh Java 12.2 auto-analysis
+(`rust/target/gap-row3-java/proj`, dumped by `tools/ghidra/DumpPurges.java`;
+`extrapop` = purge + 4) and the facts (`mercs2.facts`, mercs2's project after its pipeline)
+disagree on 663 thunks of the auto-analysis functions. Of the 702 5-byte functions in the
+1,743, Java 12.2 gives 594 the purge ghidra-rs has (0x4b6580: thunk of 0x57b780, purge 0;
+the facts say `unknown`), and leaves 99 unknown. 489 thunks of the 1,388 are known in both
+the facts and Java 12.2. A faithful thunk port can therefore move about 99 of the 1,743 and
+about 489 of the 1,388, not the 702.
+
 Not modelled, ranked by what is left of the 1,743:
 
 - CreateFunctionCmd's thunks: a new function that is a `JMP` makes a function at its target
@@ -5244,7 +5284,9 @@ Not modelled, ranked by what is left of the 1,743:
   unknown in the same batch. 702 of the 1,743 are 5-byte functions. 0x4b6580 (`JMP 0x57b780`, Java
   `unknown`) keeps 4: 0x57b780 is no function at its turn here, so its body runs on to the RET. A first port (the simple
   flow only, bodies of the turn) brought 1,743 to 1,418 but made 313 functions Java does not
-  have (plain discovery against Java 12.2's list); not kept.
+  have (plain discovery against Java 12.2's list); not kept. A faithful port needs the body
+  each function had when it was made (`getFunctionContaining` and the body containment check of
+  `CreateThunkFunctionCmd.applyTo` run on it) and `getThunkedAddr`'s p-code register tracking.
 - the RTTI analyzer runs at 599 in Java, after the first purge turn; here its functions are
   seeds of the first turn (0x417290 `ADD ECX,8; JMP`: Java 4, here `unknown`; 42 functions of
   the new "Java known, here unknown").

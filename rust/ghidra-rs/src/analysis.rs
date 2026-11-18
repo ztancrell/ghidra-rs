@@ -420,8 +420,11 @@ impl Analysis {
             analyzer("X86 Function Callee Purge", Kind::Function, priority::FUNCTION_ANALYSIS, Task::Purge),
         ]);
         mgr.notify(Kind::Byte, &exec().map(|s| s.addr).collect());
+        // the bodies of the last notification, for FUNCTION_ADDED and FUNCTION_BODY_CHANGED, and
+        // the non-returning functions they were computed with
+        let mut notified: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+        let mut turn_noreturn = HashSet::new();
         while let Some((task, set)) = mgr.next_task() {
-            let before = an.funcs.clone();
             let mut data = BTreeSet::new();
             match task {
                 Task::EntryPoints => {
@@ -445,10 +448,20 @@ impl Analysis {
                     an.funcs.retain(|a| an.insns.contains_key(a));
                     an.shared_returns();
                 }
-                Task::Purge => an.callee_purge(img, &set),
+                Task::Purge => an.callee_purge(img, &set, &turn_noreturn),
             }
             mgr.notify(Kind::Data, &data);
-            mgr.notify(Kind::Function, &an.funcs.difference(&before).copied().collect());
+            // AutoAnalysisManager sends both FUNCTION_ADDED and FUNCTION_BODY_CHANGED to
+            // functionDefined: a function is new to the function analyzers when it has a body it
+            // did not have at the last notification (bodies as a purge turn computes them; the
+            // purge changes none, and its turn uses the bodies computed here)
+            if !matches!(task, Task::Purge) {
+                let known = an.turn_bodies();
+                turn_noreturn = std::mem::replace(&mut an.noreturn, known);
+                let defined = an.bodies.iter().filter(|(f, b)| notified.get(*f) != Some(*b)).map(|(&f, _)| f).collect();
+                mgr.notify(Kind::Function, &defined);
+                notified = an.bodies.clone();
+            }
         }
         if exact {
             an.funcs = extra.iter().copied().filter(|a| an.insns.contains_key(a)).collect();
@@ -459,21 +472,22 @@ impl Analysis {
         Ok(an)
     }
 
-    /// X86 Function Callee Purge (`FunctionPurgeAnalysisCmd`) on the functions added since its
-    /// last turn, in address order: the operand of the body's first RET or RETF (by address,
-    /// among its first 2048 instructions; 0 without one); without a RET, the purge the function
-    /// a CALL_RETURN flow of the body reaches (the last one) has at this moment, unless that
-    /// function does not return. A purge once set stays: a function keeps the purge of the
-    /// code and functions there were at its turn (unknown where none came out).
+    /// X86 Function Callee Purge (`FunctionPurgeAnalysisCmd`) on the functions added or with a
+    /// changed body since its last turn, in address order: the operand of the body's first RET
+    /// or RETF (by address, among its first 2048 instructions; 0 without one); without a RET,
+    /// the purge the function a CALL_RETURN flow of the body (CALL_TERMINATOR or
+    /// COMPUTED_CALL_TERMINATOR, the last one) reaches has at this moment, unless that function
+    /// does not return. Only a function whose purge is unknown (or past 128) is looked at again
+    /// (`analyzeFunction`); a known one stays. `turn_noreturn`: the non-returning functions the
+    /// bodies were computed with (`turn_bodies`).
     // ponytail: the body is the one of this turn, not of the moment the function was made, and
     // the non-returning functions are this analysis's rule on this turn's bodies (Java's
     // analyzer runs at 302 with its own rule); both kept for this turn only
-    fn callee_purge(&mut self, img: &Image, set: &BTreeSet<u32>) {
-        let known = self.noreturn.clone();
-        self.compute_bodies();
-        self.find_noreturn();
-        for &f in set.iter().filter(|f| self.funcs.contains(f)) {
-            if self.callee_purges.contains_key(&f) {
+    fn callee_purge(&mut self, img: &Image, set: &BTreeSet<u32>, turn_noreturn: &HashSet<u32>) {
+        let known = std::mem::replace(&mut self.noreturn, turn_noreturn.clone());
+        for &f in set.iter().filter(|f| self.bodies.contains_key(f)) {
+            // analyzeFunction: only a purge that is unknown (or past ±128) is looked for again
+            if self.callee_purges.get(&f).is_some_and(|&n| n <= 128) {
                 continue;
             }
             let mut backup = None;
@@ -492,12 +506,12 @@ impl Analysis {
                     };
                     break;
                 }
-                if matches!(i.flow, Flow::Jump | Flow::Call | Flow::CallInd) && self.call_return(a, i) {
+                if matches!(i.flow, Flow::Jump | Flow::Call | Flow::CallInd | Flow::JumpInd) && self.call_return(a, i) {
                     backup = Some(i);
                 }
             }
             let purge = purge.or_else(|| {
-                let t = backup?.target.filter(|t| self.funcs.contains(t) && !self.noreturn.contains(t))?;
+                let t = backup?.target.filter(|t| self.bodies.contains_key(t) && !self.noreturn.contains(t))?;
                 self.callee_purges.get(&t).copied()
             });
             if let Some(n) = purge {
@@ -505,6 +519,17 @@ impl Analysis {
             }
         }
         self.noreturn = known;
+    }
+
+    /// The bodies and non-returning functions of a purge turn: bodies of the functions that
+    /// have an instruction (CreateFunctionCmd makes none without one), the non-returning
+    /// functions of this analysis's rule on them. Returns the non-returning functions to
+    /// restore after the turn.
+    fn turn_bodies(&mut self) -> HashSet<u32> {
+        let known = self.noreturn.clone();
+        self.compute_bodies();
+        self.find_noreturn();
+        known
     }
 
     /// Non-returning functions: no RETURN anywhere in the body; then redo the bodies.
@@ -523,7 +548,7 @@ impl Analysis {
                                 && !self.tables.contains_key(a)
                                 && !i.slot.is_some_and(|s| self.noreturn.contains(&s))
                             || i.flow == Flow::Jump
-                                && i.target.is_some_and(|t| self.funcs.contains(&t) && !self.noreturn.contains(&t))
+                                && i.target.is_some_and(|t| self.bodies.contains_key(&t) && !self.noreturn.contains(&t))
                     })
                 })
                 .map(|(&f, _)| f)
@@ -1466,7 +1491,7 @@ impl Analysis {
         match i.flow {
             Flow::Call => i.target.is_some_and(|t| self.noreturn.contains(&t)),
             Flow::CallInd => i.slot.is_some_and(|s| self.noreturn.contains(&s)),
-            Flow::Jump => i.target.is_some_and(|t| self.funcs.contains(&t)),
+            Flow::Jump => i.target.is_some_and(|t| self.funcs.contains(&t) && self.insns.contains_key(&t)),
             _ => false,
         }
     }
@@ -1505,7 +1530,7 @@ impl Analysis {
     }
 
     pub fn compute_bodies(&mut self) {
-        self.bodies = self.funcs.iter().map(|&f| (f, self.body_of(f))).collect();
+        self.bodies = self.funcs.iter().filter(|f| self.insns.contains_key(f)).map(|&f| (f, self.body_of(f))).collect();
     }
 
     /// Each function's stack purge, as Ghidra sets it from the function's returns: the `n` of
