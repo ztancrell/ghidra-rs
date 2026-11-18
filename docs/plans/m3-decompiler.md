@@ -2172,6 +2172,17 @@ binary's; `mercs2-exports.sh --compare` 4 identical, 4017b0 and 593c10 the same 
 another order, 401780 not identical (6,553 of Java's 6,560 lines), as on the export branch.
 Details: `rust/README.md`, "Integration `m3-int7`". Not run: M500, the full pass, the Mac.
 
+Full pass (2026-11-18, 249c32cf94, the tip of `m3-int7`; `m3-int7-249c32cf94.summary`): 133 /
+133 pairs, silent 0 in every pair, none worse than `m3-int6`. Improved: `r5s` M500 identical
+498 -> 499; `r5slock` and `r5dtlocksv` M500 467 -> 469 (loud 31 -> 30); `pmd` M500 496 -> 497,
+reference finished 499 -> 500. The `m3-int6` note "reference finished 498 instead of 499
+(0x6b21e0)" did not show: all three finished 499; 0x6b21e0 still times out and another function
+finished instead (120 s timeouts move with load by about one function per run). "All outputs
+identical" is one lower in 16 M500 lines (not traced). 109 pairs ran on the desktop, the 24 left
+after a power cut under `bars-queue.sh` (13 desktop, 11 Mac, after the Mac matched the desktop
+on `pc-r-m500`; its stale prelude was regenerated, `cksum` 285336359 as on the desktop).
+Superseded: "Not run: M500, the full pass, the Mac" above and the 498 note of `m3-int6`.
+
 ## Running stages in parallel
 
 Strict chain first: S0 → S1a → S1b → S2. After S2 the work fans out. Under the cap of two

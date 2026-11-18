@@ -1136,7 +1136,10 @@ Added in stage S2. All run both engines through `decomp-diff.sh` and keep their 
     file renamed into place, so a killed run leaves no half entry. Each clone (the Mac's under
     `bars-queue.sh` too) keeps its own cache; delete the directory to empty it. Measured
     2026-11-18 on M500 (`pcc-r pcc-t pcd r5s swfs-r paramdouble`, 12 jobs): 1,416 s with
-    `REFCACHE=0`, 1,436 s cold, 1,180 s warm (2,988 files, 255 MB); ghidra-rs's own runs stay.
+    `REFCACHE=0`, 1,436 s cold, 1,180 s warm (2,988 files, 255 MB; warm about 18% below cold);
+    ghidra-rs's own runs stay and dominate. The warm `pcd` line differed on one function,
+    0x4c48d0, at the 120 s timeout edge: the reference finished it in 118 s, then ghidra-rs
+    timed out. That is load jitter, not a stale cache entry.
 
 ```sh
 BREAK=paramdouble VERBOSE=1 rust/tools/decomp-diff.sh m8
@@ -1249,6 +1252,10 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
 reached over ssh (the MacBook, `192.168.254.18`). It puts the pairs of `LIST=1 bars.sh` in one
 queue, M500, r5d-adc and switch first and M8 last, and runs two workers: local and the Mac. Each
 takes the next pair when it is free, so the faster machine runs more of them.
+
+Note (2026-11-18): the script's default `REMOTE` and the git remote `mac` below still say
+`192.168.254.18`; the Mac is at `192.168.254.10` since 2026-11-18 (DHCP). Set `REMOTE` until
+the default is decided; the script is unchanged.
 
 ```sh
 NOLOCK=1 CORPORA=m8 rust/tools/bars-queue.sh       # a test: the local worker skips heavy-run
@@ -4950,7 +4957,7 @@ guard hint with a pointer whose target has the step's size (the code new in this
 `ptrsubcharconstant` changing an output without facts (the checks with it on give the counts
 above, and no line of the M8 baseline moved).
 
-Full pass (2026-11-18, `bars-queue.sh` on `ff58230822`, desktop and Mac): 132 of 133 pairs, the Mac dropped off the network and lost `swsn-t-switch`, rerun on the desktop: 2001 / 2004 (loud 3, silent 0). Silent 0 in every pair. No pair has fewer identical functions or more silent misses than the `m3-int5` baseline; `r5s`, `r5slock` and `r5dtlocksv` M500 have reference finished 498 instead of 499 (0x6b21e0, the reference no longer finishes it), while their identical counts rose (`r5s` 446 -> 498, `r5slock` and `r5dtlocksv` 451 -> 467). Switch: `paramdouble` 2002 / 2004, `swfs-r` 2003, `swsn-r` 2003, `swfs-t` and `swsn-t` 2001. Superseded: "Not run: the full pass" above.
+Full pass (2026-11-18, `bars-queue.sh` on `ff58230822`, desktop and Mac): 132 of 133 pairs, the Mac dropped off the network and lost `swsn-t-switch`, rerun on the desktop: 2001 / 2004 (loud 3, silent 0). Silent 0 in every pair. No pair has fewer identical functions or more silent misses than the `m3-int5` baseline; `r5s`, `r5slock` and `r5dtlocksv` M500 have reference finished 498 instead of 499 (0x6b21e0, the reference no longer finishes it), while their identical counts rose (`r5s` 446 -> 498, `r5slock` and `r5dtlocksv` 451 -> 467). Switch: `paramdouble` 2002 / 2004, `swfs-r` 2003, `swsn-r` 2003, `swfs-t` and `swsn-t` 2001. Superseded: "Not run: the full pass" above. Superseded (full pass of `m3-int7`): the reference finished 499 in all three `r5s`, `r5slock` and `r5dtlocksv` M500 lines; see "Integration `m3-int7`".
 
 ### Integration `m3-int6`: review fixes (2026-11-17)
 
@@ -5028,6 +5035,36 @@ the Mall speed counts of 29,240 are measurements of their dates). Not run on `m3
 and the full pass (the switch, `simple` and `r5d-adc` corpora), the Mac, `cargo test
 --release`, `ghidra-diff.sh` and `facts-diff.sh`, and the shadow diff against Java's
 `config/abi_callers.csv` (only the two ghidra-rs binaries were compared).
+
+Full pass (2026-11-18, `bars.sh` on 249c32cf94, the tip of `m3-int7`, `TIMEOUT` 120; summary
+`rust/target/baselines/m3-int7-249c32cf94.summary`, 133 lines, compared with
+`m3-int6-1c9dc419e3.summary`): 133 / 133 pairs, silent 0 in every pair, no pair with fewer
+identical functions or more silent misses than `m3-int6`. Lines that moved:
+
+- `r5s-m500`: reference finished 498 -> 499, identical 498 -> 499.
+- `r5slock-m500` and `r5dtlocksv-m500`: reference finished 498 -> 499, identical 467 -> 469,
+  loud 31 -> 30.
+- `pmd-m500`: reference finished 499 -> 500, identical 496 -> 497 (loud 3).
+- "all outputs identical" one lower in 16 M500 lines: 500 -> 499 in `r4`, `r5d`, `s6`,
+  `s6callee`, `s6int4`, `s6void`, `s8`, `s8r`, `subvar`, `svs6`, `swsn-r` and `swsn-t`;
+  499 -> 498 in `r5`, `r5c` and `r5typed`; 491 -> 490 in `svlock`. `stack-m500` outputs with
+  stack SSA 319 -> 318. Their reference-finished, identical, loud and silent counts did not
+  move; which function each lost was not traced.
+
+The `m3-int6` note that `r5s`, `r5slock` and `r5dtlocksv` M500 have reference finished 498
+instead of 499 (0x6b21e0) did not show on this pass: all three finished 499. 0x6b21e0 still
+times out; another function, which timed out before, finished instead. Reference timeouts at
+120 s move with machine load by about one function per run.
+
+How the pass ran: 109 pairs on the desktop, then a power cut; the 24 missing pairs ran under
+`bars-queue.sh`, 13 on the desktop and 11 on the Mac. The Mac first matched the desktop on
+`pc-r-m500` (the same summary line, the same 5 misses). The Mac's prelude was stale (from
+before the Shared Return port) and was regenerated; it now matches the desktop's (`cksum`
+285336359).
+
+Superseded: "Not run on `m3-int7`: M500 and the full pass ..., the Mac" above (the rest of that
+list still holds: `cargo test --release`, `ghidra-diff.sh`, `facts-diff.sh` and the shadow diff
+against Java were not run).
 
 ## Speed
 

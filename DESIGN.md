@@ -438,6 +438,9 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    function changed; the mercs2 shadow check is byte-identical to `m3-int6`'s; `mercs2-exports.sh --compare` 4
    identical, 2 call-contexts the same references in another order, 0x00401780 not identical (one reference more),
    as on the export branch. Not run: M500, the full pass. See `rust/README.md`, "Integration `m3-int7`".
+   Full pass 2026-11-18 (249c32cf94): 133 / 133 pairs, silent 0 in every pair, none worse than `m3-int6`;
+   `r5s`, `r5slock`, `r5dtlocksv` and `pmd` M500 gained identical functions. Superseded: "Not run: M500, the full
+   pass". Merged to master with the reference-output cache of `decomp-diff.sh`.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
