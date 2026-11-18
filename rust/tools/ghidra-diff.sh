@@ -11,7 +11,9 @@
 #                console decompiler: names, types, prototypes, comments)
 #   FACTS=0      ghidra-rs without the facts (the prelude, as decomp_dbg)
 #   FACTS=<file> ghidra-rs with another facts file, such as the one ghidra-rs derives itself
-#                (`analyze --facts`, tools/facts-own.sh)
+#                (`analyze --facts`, tools/facts-own.sh). A missing or empty file prints
+#                `<corpus>: FACTS missing: <file>` (or `FACTS empty`) in place of the summary
+#                line, before any Java or ghidra-rs work, and exits 1 (no fallback to Java's facts)
 #   SKIP         DECOMP_SKIP_ACTIONS for the console engine (actions left out; none by default)
 #   CLASSIFY=<actions>  also run decomp_dbg with the prelude (and `option readonly off`) twice,
 #                as it is and with these actions skipped, and mark each miss `skip` when the
@@ -45,6 +47,10 @@ name=$(basename "$corpus" .txt)
 list=$(grep -v '^#' "$corpus" | awk 'NF { print $1 }')
 ref=${GHIDRA_REF:-$rust/target/ghidra-ref}
 case $ref in */.*) echo "GHIDRA_REF $ref: Ghidra refuses a path component starting with '.'" >&2; exit 1 ;; esac
+if [ "$ENGINE" != ref ] && [ -n "$FACTS" ] && [ "$FACTS" != 0 ]; then
+    [ -f "$FACTS" ] || { echo "$name: FACTS missing: $FACTS"; exit 1; }
+    [ -s "$FACTS" ] || { echo "$name: FACTS empty: $FACTS"; exit 1; }
+fi
 export SLEIGHHOME=$root TIMEOUT=${TIMEOUT:-120}
 export BIN=${BIN:-$HOME/projects/mercs/mercs2-decomp/orig/Mercenaries2.analysis.exe}
 export PRELUDE=${PRELUDE:-$rust/target/decomp-check/mercs2.prelude}

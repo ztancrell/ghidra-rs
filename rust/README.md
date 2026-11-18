@@ -4330,7 +4330,10 @@ enumerations, pointer-relative data-types, bit fields, display formats. The decl
 function with a locked prototype was not ported before and is not now.
 
 **The check.** `tools/ghidra-diff.sh` now gives ghidra-rs the facts (`FACTS=0`: the prelude,
-as before) and, with `CLASSIFY=<actions>`, marks each miss `skip` or `own`: `decomp_dbg` runs
+as before; since 2026-11-18 a `FACTS=<file>` that is missing or empty stops the run with
+`<corpus>: FACTS missing: <file>` or `FACTS empty: <file>` and exit 1, before any Java or
+ghidra-rs work; before, a missing file fell back to the Java facts and an empty one ran with no
+facts, both silently) and, with `CLASSIFY=<actions>`, marks each miss `skip` or `own`: `decomp_dbg` runs
 with the prelude twice, with and without those actions, and a function whose two outputs
 differ needs the actions (`skip`). It is a guide: `decomp_dbg` has no data symbols, so an
 action can matter with the facts and not without them (0x73a340: `multicse` on a read-only
@@ -4620,6 +4623,10 @@ the Java project's; the eight actions skipped as in slice 1):
 | ghidra-rs's own, with Java's functions | identical 2 / 7 (loud 2, silent 3) | identical 171 / 499 (loud 71, silent 257) |
 | ghidra-rs's own, plain discovery | identical 1 / 7 (loud 2, silent 4) | identical 90 / 499 (loud 156, silent 253) |
 
+Superseded (2026-11-18): the three rows above are with the eight actions skipped, before they
+were ported; the counts of `m3-int7` with default options are in "Integration `m3-int7`", the
+own-facts gap.
+
 With Java's functions the console output of ghidra-rs is byte for byte the output it gives
 with the Java facts on 377 of the 500 M500 functions, and on M8 on all five that print:
 0x40a110 and 0x58d030 are Java's C, and 0x401000, 0x73a340 and 0x4042e0 miss it in the same
@@ -4834,6 +4841,9 @@ in slice 1; both rows run with this build):
 |---|---|---|
 | before (the facts of slice 2) | identical 2 / 7 (loud 2, silent 3) | identical 171 / 499 (loud 71, silent 257) |
 | after | identical 2 / 7 (loud 2, silent 3) | identical 173 / 499 (loud 71, silent 255) |
+
+Superseded (2026-11-18): see the own-facts gap of "Integration `m3-int7`" (328 / 499 with
+Java's functions, default options).
 
 M500: 0x4e9230 and 0x6ee4c0 were silent and are identical; no other function changes its
 state. M8: the same seven states. 0x401080 still reads an `underived` function (an import the
@@ -5065,6 +5075,22 @@ before the Shared Return port) and was regenerated; it now matches the desktop's
 Superseded: "Not run on `m3-int7`: M500 and the full pass ..., the Mac" above (the rest of that
 list still holds: `cargo test --release`, `ghidra-diff.sh`, `facts-diff.sh` and the shadow diff
 against Java were not run).
+
+The own-facts gap (2026-11-18, `ghidra-diff.sh` on 249c32cf94, the same code as master's, the
+full pipeline against Java Ghidra with default options; inputs kept in `rust/target/gap7/`):
+
+| facts | M8 | M500 |
+|---|---|---|
+| the Java project's | identical 7 / 7 (loud 0, silent 0) | Java finished 499 / 500, identical 461 / 499 (loud 22, silent 16) |
+| ghidra-rs's own, Java's function list (`analyze --functions-from`, 73 s) | identical 4 / 7 (loud 2, silent 1) | identical 328 / 499 (loud 31, silent 140) |
+| ghidra-rs's own, plain discovery (65 s) | identical 2 / 7 (loud 2, silent 3) | identical 177 / 499 (loud 122, silent 200) |
+
+The first attempt's own-facts counts were not valid: `ghidra-diff.sh` was given facts paths
+that did not resolve, fell back to the Java facts without a word and printed the Java row.
+`ghidra-diff.sh` now stops on a missing or empty `FACTS` file (see "Stage S10, slice 1").
+Superseded: the own-facts M500 counts 171 and 173 / 499 (Java's functions) and 90 / 499 (plain
+discovery) of S10 slices 2 and 3, with the eight actions skipped, and `ghidra-diff.sh` in the
+"Not run" list above.
 
 ## Speed
 

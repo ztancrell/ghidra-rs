@@ -2183,6 +2183,15 @@ after a power cut under `bars-queue.sh` (13 desktop, 11 Mac, after the Mac match
 on `pc-r-m500`; its stale prelude was regenerated, `cksum` 285336359 as on the desktop).
 Superseded: "Not run: M500, the full pass, the Mac" above and the 498 note of `m3-int6`.
 
+Own-facts gap (2026-11-18, `ghidra-diff.sh` on 249c32cf94, default options, M500 (M8)): Java
+facts 461 / 499 identical, loud 22, silent 16 (7 / 7); own facts with Java's function list
+(`analyze --functions-from`, 73 s) 328 / 499, loud 31, silent 140 (4 / 7, loud 2, silent 1);
+own facts with plain discovery (65 s) 177 / 499, loud 122, silent 200 (2 / 7, loud 2, silent
+3). The first attempt's own-facts counts were invalid: `ghidra-diff.sh` fell back to the Java
+facts; it now stops on a missing or empty `FACTS` file. Inputs in `rust/target/gap7/`.
+Superseded: the own-facts M500 counts 171 -> 173 (Java's functions) and 90 (plain discovery) of
+S10 slices 2 and 3 (eight actions skipped).
+
 ## Running stages in parallel
 
 Strict chain first: S0 → S1a → S1b → S2. After S2 the work fans out. Under the cap of two

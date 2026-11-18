@@ -441,6 +441,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    Full pass 2026-11-18 (249c32cf94): 133 / 133 pairs, silent 0 in every pair, none worse than `m3-int6`;
    `r5s`, `r5slock`, `r5dtlocksv` and `pmd` M500 gained identical functions. Superseded: "Not run: M500, the full
    pass". Merged to master with the reference-output cache of `decomp-diff.sh`.
+   Own-facts gap 2026-11-18 (`ghidra-diff.sh`, 249c32cf94, default options, M500 identical of 499): Java facts
+   461 (loud 22, silent 16); own facts with Java's function list 328 (loud 31, silent 140); own facts with plain
+   discovery 177 (loud 122, silent 200). A first attempt was invalid (`ghidra-diff.sh` fell back to the Java facts;
+   it now stops on a missing or empty `FACTS` file). Superseded: the own-facts M500 counts 171 and 173 of S10 slices
+   2 and 3 above (eight actions skipped). See `rust/README.md`, "Integration `m3-int7`".
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
