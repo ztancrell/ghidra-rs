@@ -126,6 +126,14 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   exception, the user said: "Fix function and any related problems so it prevents it down the
   line." First step (`rust/README.md`, "What discovery does"): Shared Return Calls is a port of
   SharedReturnAnalysisCmd's walk. Resolved (2026-11-18): Java 12.2 also makes 0x861190 and its FoldSlotFragments removes it as its own owner ("refit failed Object has been deleted.") and goes on; `fold-slot-fragments` does the same now (`rust/README.md`, "Resolved (2026-11-18)"). Superseded: "0x861190 itself is still made (open)".
+- 2026-11-18: The check tooling caches the reference decompiler's outputs. The user: "I would
+  first check to make sure the files need rebuilt or not. If so build. If not, dont build."
+  Confirmed: each reference output is kept under a content hash of every input that can affect
+  it (the reference build, the binary, the `.sla` files, options, prelude, the function's
+  script, the command line, the `DECOMP_*` environment); the same hash reuses it, a new one
+  reruns; file dates are not enough. A timeout or any failed or incomplete reference run is
+  never cached. ghidra-rs always reruns. `REFCACHE=0` turns it off (`decomp-diff.sh`,
+  rust/README.md).
 
 ## Milestones
 

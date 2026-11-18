@@ -160,6 +160,9 @@ references; only names and types differ.
   SHLD or SHRD (64-bit arithmetic in register pairs), `rust/tools/corpus/r5d-adc.txt` (R5 slice 3).
 - Every check on these corpora runs from one script, `rust/tools/bars.sh` (rust/README.md,
   "Every check at once").
+- The reference's outputs are cached (2026-11-18) under `rust/target/ref-cache/`, keyed by a
+  content hash of every input that can change them; a pass reruns the reference only where
+  one changed, and ghidra-rs always (rust/README.md, `REFCACHE` of `decomp-diff.sh`).
 - **Mall**: all 37,600 `.text` functions (speed and crash check only).
 
 ## Stages

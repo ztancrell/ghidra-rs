@@ -24,6 +24,13 @@
 #              status 124 or 137) keeps only the line `decomp-diff.sh: timed out after N s`, so a
 #              reference cut off mid-print counts as failed, never as finished
 #   BIN        the game binary (default ~/projects/mercs/mercs2-decomp/orig/Mercenaries2.analysis.exe)
+#   REFCACHE=0 run the reference for every function; otherwise its output is reused from
+#              rust/target/ref-cache/ when the content hash of all its inputs matches a stored run:
+#              decomp_dbg, BIN, the prelude, the .sla/.ldefs/.pspec/.cspec files under SLEIGHHOME,
+#              every DECOMP_* variable (the patch reads them), the command line and the function's
+#              script (address, options, break, print). Only a finished run with exit status 0
+#              that refbad (below) accepts is stored, never a timeout, error or crash; a stored run
+#              is reused only when it took less than TIMEOUT. ghidra-rs always runs
 # Each function is selected with `load function <name>`, its name taken from the prelude (which maps
 # every function, FID names included; `load addr` for one it lacks). Outputs are compared from that
 # line on: everything before it is the shared prelude.
@@ -99,8 +106,26 @@ one() {
         for ((i = 0; i < CONTINUES; i++)); do echo continue; echo "$PRINT"; done
         echo quit
     } > "$s"
-    eng "$out/ref/$a" "$DECOMP" -i "$s"
+    refeng "$out/ref/$a" "$s"
     eng "$out/rust/$a" "$GHIDRA_RS" decompile -i "$s"
+}
+# refeng <output> <script>: the reference through the cache (REFCACHE above). A cache file is the
+# run's seconds on line 1, then its output; written to a temporary file and renamed, so a killed
+# run never leaves half of one
+refeng() {
+    local o=$1 s=$2 k t
+    [ "$REFCACHE" = 0 ] && { eng "$o" "$DECOMP" -i "$s"; return; }
+    k=$refcache/$({ echo "$refkey"; cat "$s"; } | sha256sum | cut -c1-64)
+    if [ -f "$k" ] && [ "$(head -1 "$k")" -lt "$TIMEOUT" ] 2>/dev/null; then
+        tail -n +2 "$k" > "$o"
+        return
+    fi
+    t=$(date +%s)
+    eng "$o" "$DECOMP" -i "$s"
+    t=$(($(date +%s) - t))
+    if [ "$st" = 0 ] && ! refbad "$o"; then
+        { echo "$t"; cat "$o"; } > "$k.$$" && mv "$k.$$" "$k"
+    fi
 }
 # eng <output> <engine command...>: run one engine under TIMEOUT, keep its output from the load line,
 # and from before it only a panic or stack overflow message (ghidra-rs prints one ahead of the
@@ -110,14 +135,28 @@ eng() {
     local o=$1; shift
     timeout "$TIMEOUT" "$@" </dev/null 2>&1 | sed -n -e '/^init> load \(function\|addr\)/,$p' \
         -e '/^init> load \(function\|addr\)/,$!{/panicked at\|has overflowed its stack/p}' > "$o"
-    case ${PIPESTATUS[0]} in 124|137) echo "decomp-diff.sh: timed out after $TIMEOUT s" > "$o" ;; esac
+    st=${PIPESTATUS[0]}
+    case $st in 124|137) echo "decomp-diff.sh: timed out after $TIMEOUT s" > "$o" ;; esac
 }
-export -f one eng
 # the reference failed: an error, or no decompile result (a timed-out run has none)
 refbad() {
     grep -q 'Low-level ERROR\|Unable to proceed\|Execution error\|parsing error' "$1" ||
         ! grep -q '^Decompilation complete\|^Break at' "$1"
 }
+export -f one refeng eng refbad
+export refcache=$rust/target/ref-cache
+if [ "$REFCACHE" != 0 ]; then
+    mkdir -p "$refcache"
+    # the inputs shared by every function of this run (refeng adds the function's script)
+    export refkey=$(
+        {
+            echo "ref-cache 1: $DECOMP -i <script> </dev/null"
+            sha256sum "$DECOMP" "$BIN" "$PRELUDE" | cut -c1-64
+            find "$SLEIGHHOME/Ghidra/Processors" -path '*/data/languages/*' -type f \( -name '*.sla' -o \
+                -name '*.ldefs' -o -name '*.pspec' -o -name '*.cspec' \) | LC_ALL=C sort | xargs sha256sum
+            env | grep '^DECOMP_' | LC_ALL=C sort
+        } | sha256sum | cut -c1-64)
+fi
 if [ -n "$STOP" ]; then
     for a in $list; do
         one "$a"

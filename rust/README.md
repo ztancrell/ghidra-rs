@@ -1120,6 +1120,23 @@ Added in stage S2. All run both engines through `decomp-diff.sh` and keep their 
     diff.
   - `CONTINUES=N`: after the print, run `continue` and the print again N times.
   - `OUT=<dir>`: set the output directory.
+  - `REFCACHE=0`: run the reference for every function. Otherwise each reference output is
+    kept in `rust/target/ref-cache/` (one file per run, named by a content hash) and reused
+    while that hash is the same: a full pass reruns only ghidra-rs where nothing the reference
+    reads has changed. The hash covers `decomp_dbg` itself (so a rebuild from a new
+    `decomp-ref.patch` or C++ sources misses; `ref.stamp` only records the committed trees),
+    `BIN`, the prelude, every `.sla`, `.ldefs`, `.pspec` and `.cspec` under `SLEIGHHOME`'s
+    `Ghidra/Processors`, every `DECOMP_*` variable (`DECOMP_SKIP_ACTIONS`, `DECOMP_RAW_EXTRA`,
+    `DECOMP_JT_RAW` and the others the patch reads; set-but-empty counts), the command line,
+    and the function's script (address, the options file's lines, `BREAK`, `PRINT`,
+    `CONTINUES`). File dates play no part. Only a run that exits 0 and that the reference
+    finished (no error, a `Decompilation complete` or `Break at` line) is stored, never a
+    timeout, error or crash, since those depend on load; the run's seconds are stored with it
+    and a stored run is reused only when it took less than `TIMEOUT`. Writes go to a temporary
+    file renamed into place, so a killed run leaves no half entry. Each clone (the Mac's under
+    `bars-queue.sh` too) keeps its own cache; delete the directory to empty it. Measured
+    2026-11-18 on M500 (`pcc-r pcc-t pcd r5s swfs-r paramdouble`, 12 jobs): 1,416 s with
+    `REFCACHE=0`, 1,436 s cold, 1,180 s warm (2,988 files, 255 MB); ghidra-rs's own runs stay.
 
 ```sh
 BREAK=paramdouble VERBOSE=1 rust/tools/decomp-diff.sh m8
@@ -1223,6 +1240,8 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
 - The switch corpus is `tools/corpus/switch.txt` (2,050 functions with a jump table; superseded:
   `rust/target/stk/switch.txt` of an agent's worktree).
 - `LIST=1 bars.sh` prints the `<check> <corpus>` pairs it would run and runs nothing.
+- The reference's outputs come from `decomp-diff.sh`'s cache (`rust/target/ref-cache/`, see
+  `REFCACHE` above) wherever their inputs are unchanged; `REFCACHE=0 bars.sh` runs it everywhere.
 
 ### One pass on two machines: `tools/bars-queue.sh`
 
