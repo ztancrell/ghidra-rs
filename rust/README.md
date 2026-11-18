@@ -204,7 +204,10 @@ What discovery does, after Ghidra's analyzers:
   point and RTTI vftable slots (MSVC CompleteObjectLocator -> TypeDescriptor); call targets
   become functions;
 - Function Start Search: the definite `x86win_patterns.xml` prologue pairs (`CC`/`90`/`C3`/
-  `C9 C3`/`C2 nn 00` or `JMP` before a prologue) in bytes no code covers yet;
+  `C9 C3`/`C2 nn 00` or `JMP` before a prologue) in bytes no code covers yet; a pair counts only
+  with Ghidra's `totalbits="32" postbits="16"` (PatternPairSet: 16 fixed bits after, 32 in all),
+  so `CC` + `SUB ESP,small` (8 + 19 bits) is no start while `CC CC` + it is. Superseded
+  (2026-11-18): every pair counted;
 - switch tables `JMP [reg*4 + table]`, bounded by a preceding `CMP reg,imm` (else up to 1024
   entries while they point at code in the jump's own section); in a two-level switch
   (`MOVZX reg,byte ptr [idx + bytetable]` between them) the CMP bounds the byte table and the
@@ -819,6 +822,31 @@ Java 12.2 that is 2,163 against 2,183 removed and 1,425 against 1,438 refit. The
 function set against the facts export (from the 12.1.2-era project) is 36,856 in both, 779 Java only,
 164 ghidra-rs only (36,602 / 1,033 / 180 before the review fixes). Superseded: the text before this
 note, which says the fold stops and the rule that leaves 0x861190 out is not found; there is no such rule.
+
+Causes of the plain-discovery differences (2026-11-18). `rust/tools/ghidra/TraceCreators.java`
+(pre-script: the analyzer step after or in which each function was made, from the program's
+function events; 888 s headless, against about 7 hours for TraceFunctions.java) and
+`DumpAddressFacts.java` (post-script: function, instruction, byte before and references at listed
+addresses) explain the 899 Java only and 325 ghidra-rs only of the 12.2 trace. Java only: 319 made
+after Subroutine References (call targets in code ghidra-rs never decodes), 297 after Reference
+(Function Start Search's delayed creator: `<possiblefuncstart after="defined"/>`, `PUSH reg : MOV
+reg,[ESP+n]` after filler, at code only a pointer in data or a code constant names, e.g. vtable slot
+0xba8a64 -> 0x4129b0 and `MOV ECX,0x4036e0` at 0x402f15), 124 after Function Start Search After
+Code, 112 after Shared Return Calls, 27 after Call-Fixup Installer, 15 after Decompiler Switch
+Analysis, 4 after Non-Returning Functions - Discovered, 1 in Reference; 864 of them lie in bytes
+ghidra-rs never disassembles. ghidra-rs only: 191 where Java has no instruction and no reference,
+78 instructions with only DATA references, 49 jump targets, 7 others. Fixed: the pattern-pair bit
+threshold (above), 22,358 / 931 / 222 in both / Java only / ghidra-rs only (the 32 new Java only
+are call targets Java reaches from code ghidra-rs does not decode yet; they had been found through
+`CC` + `SUB ESP`). Not fixed: porting Function Start Search After Code with its delayed creator
+over the code the constants pass reaches gave 22,389 / 900 / 272 and made none of the 297, because
+the constants pass does not disassemble those targets (0x4036e0, 0x4129b0); that pass comes first.
+Superseded: 22,390 / 899 / 325 as the current plain-discovery count. With the fix, own plain facts
+(`analyze --protos --facts`, 71 s) against Java: M500 identical 177 / 499 (loud 128, silent 194;
+before 177, 122, 200), M8 identical 2 / 7 (loud 2, silent 3, as before). The shadow check's command
+(`--functions-from build/functions.csv --abi-callers`) writes 56,888 lines, against 56,918 from
+the main checkout's binary of 2026-11-18 11:42 (its commit not recorded); the difference is not
+examined.
 
 Not compared: flow overrides against the 3365 of the facts export (ghidra-rs derives them and
 has no export of them), functions outside `.text`, body ranges beyond their size. The shadow
