@@ -357,17 +357,19 @@ impl Analysis {
         }
         let mut seeds: Vec<u32> =
             img.exports.iter().map(|e| e.0).chain(img.entry).chain(extra.iter().copied()).collect();
-        // RTTI vftable slots (the RTTI analyzer makes a function of each)
+        seeds.retain(|&a| an.is_code(img, a));
+        // RTTI vftable slots: the RTTI analyzer (599) makes a function of each
+        // (`EHDataTypeUtilities.createFunctionIfNeeded`)
+        let mut rtti = Vec::new();
         let tables = crate::scripts::vftables(img);
         for &v in tables.keys() {
             for i in 0..4096 {
                 match img.read_u32(v + 4 * i) {
-                    Some(t) if an.is_code(img, t) && (i == 0 || !tables.contains_key(&(v + 4 * i))) => seeds.push(t),
+                    Some(t) if an.is_code(img, t) && (i == 0 || !tables.contains_key(&(v + 4 * i))) => rtti.push(t),
                     _ => break,
                 }
             }
         }
-        seeds.retain(|&a| an.is_code(img, a));
         let mut p = sl.new_parse();
         // 1: instruction start, 2: inside an instruction, 3: switch table
         let mut owner = vec![0u8; (an.code_hi - an.code_lo) as usize];
@@ -397,6 +399,7 @@ impl Analysis {
         enum Task {
             EntryPoints,
             StartSearch,
+            Rtti,
             AddressTables,
             StartSearchAfterData,
             SharedReturns,
@@ -404,9 +407,10 @@ impl Analysis {
         }
         let analyzer = |name, kind, priority, id| Analyzer { name, kind, priority, id };
         let mut mgr = Manager::new(vec![
-            // with External Entry References and the RTTI analyzer: the seeds
+            // with External Entry References: the seeds
             analyzer("Disassemble Entry Points", Kind::Byte, priority::BLOCK_ANALYSIS, Task::EntryPoints),
             analyzer("Function Start Search", Kind::Byte, priority::CODE_ANALYSIS + 2, Task::StartSearch),
+            analyzer("RTTI Analyzer", Kind::Byte, priority::REFERENCE_ANALYSIS - 1, Task::Rtti),
             analyzer("Create Address Tables", Kind::Byte, priority::DATA_TYPE_PROPOGATION - 1, Task::AddressTables),
             analyzer(
                 "Function Start Search After Data",
@@ -429,6 +433,13 @@ impl Analysis {
             match task {
                 Task::EntryPoints => {
                     for &s in &seeds {
+                        an.funcs.insert(s);
+                        queue.push(s);
+                    }
+                    an.descend(img, sl, &mut p, &mut owner, &mut queue, &mut Vec::new());
+                }
+                Task::Rtti => {
+                    for &s in &rtti {
                         an.funcs.insert(s);
                         queue.push(s);
                     }

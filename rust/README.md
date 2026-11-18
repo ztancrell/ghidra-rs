@@ -5176,7 +5176,7 @@ Superseded (2026-11-18, branch `analysis-queue`): the queue is ported and the pu
 (`Analysis::callee_purge`; `ret_purge` is removed); 0x4b6580 (`JMP 0x57b780`, size 5 in Java's
 facts) was made right after 0x57b780 in Java 12.2's trace (`gap-row3-java/creators.log`), as
 CreateFunctionCmd makes a thunk's target first; it is no function made before its code. On the
-merged base the count is 2,182, then 1,743, now 1,769 (superseded: "now 1,743"); see "Ghidra's task queue and the purge".
+merged base the count is 2,182, then 1,743 and 1,769, now 1,778 (superseded: "now 1,743", "now 1,769"); see "Ghidra's task queue and the purge".
 
 **Fix 1: INT_ZEXT and INT_SEXT size data** (`Exporter::accesses`). `SymbolicPropogator`'s
 INT_ZEXT and INT_SEXT cases make a READ reference with the input varnode, as its COPY case does;
@@ -5277,6 +5277,23 @@ the facts say `unknown`), and leaves 99 unknown. 489 thunks of the 1,388 are kno
 the facts and Java 12.2. A faithful thunk port can therefore move about 99 of the 1,743 and
 about 489 of the 1,388, not the 702.
 
+**The RTTI analyzer at 599** (`Task::Rtti`, after `e26bc48850`). Java's Windows x86 PE RTTI
+Analyzer is a byte analyzer at `REFERENCE_ANALYSIS.before()` (599), so it makes its functions
+(`EHDataTypeUtilities.createFunctionIfNeeded`: disassemble, then CreateFunctionCmd) after the
+first purge turn; the vftable slots are no longer seeds of Disassemble Entry Points. Superseded:
+"here its functions are seeds of the first turn". With Java's function list: `extrapop` equal
+17,979 -> 17,997, Java known here `unknown` 1,387 -> 1,360, Java `unknown` here known 1,769 ->
+1,778, stack variables equal 12,215 (unchanged); 0x417290 (`ADD ECX,8; JMP`) now 4, as Java.
+The 9 new Java-`unknown` ones (0x8d6470 .. 0x8e8f10, e.g. 0x8dc8b0 `SUB ECX,8; JMP 0x8dc8f0`,
+made by the RTTI analyzer in Java 12.2's trace) are adjustor stubs whose `JMP` reaches a
+function that has a purge by the later turn; here such a jump is a derived CALL_RETURN, in Java
+only Shared Return Calls makes it one (below), and Java 12.2 leaves them `unknown` too. Plain
+discovery: equal 17,966 -> 17,983, Java known here `unknown` 533 -> 506, Java `unknown` here
+known 1,723 -> 1,733. The function lists do not change (plain discovery against Java 12.2,
+`func` records of the facts in `.text`: 22,353 / 931 / 227 before and after). M8 and M500 the
+same for both rows (346 / 499 and 189 / 499), no function newly misses. `analyze --facts`
+111 s with Java's function list, 57 s plain, one run each under varying load.
+
 Not modelled, ranked by what is left of the 1,743:
 
 - CreateFunctionCmd's thunks: a new function that is a `JMP` makes a function at its target
@@ -5287,9 +5304,6 @@ Not modelled, ranked by what is left of the 1,743:
   have (plain discovery against Java 12.2's list); not kept. A faithful port needs the body
   each function had when it was made (`getFunctionContaining` and the body containment check of
   `CreateThunkFunctionCmd.applyTo` run on it) and `getThunkedAddr`'s p-code register tracking.
-- the RTTI analyzer runs at 599 in Java, after the first purge turn; here its functions are
-  seeds of the first turn (0x417290 `ADD ECX,8; JMP`: Java 4, here `unknown`; 42 functions of
-  the new "Java known, here unknown").
 - Shared Return Calls at 398 on each batch, the non-returning functions at 302, and the body
   each function had when it was made (here: the body of the turn, the non-returning functions
   of this analysis's rule on that turn's bodies, kept for the turn only).

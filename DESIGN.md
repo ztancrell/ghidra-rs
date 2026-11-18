@@ -459,6 +459,9 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    for again): 346 (loud 31, silent 122), Java-unknown derived here 1,769; the 26 new ones and
    0x5409f0 are thunks whose purge Java takes from the target. Superseded: 347 and 1,743 above.
    Java 12.2's own analysis and the facts disagree on 663 thunks (`rust/README.md`, "Body changes").
+   The RTTI analyzer runs at 599, after the first purge turn: Java-known derived `unknown` 1,387 ->
+   1,360, Java-unknown derived 1,769 -> 1,778 (9 adjustor stubs, a derived CALL_RETURN); M500 346.
+   Superseded: "Left: ... the RTTI analyzer's priority" above.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
