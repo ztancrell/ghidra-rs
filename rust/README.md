@@ -5092,6 +5092,60 @@ Superseded: the own-facts M500 counts 171 and 173 / 499 (Java's functions) and 9
 discovery) of S10 slices 2 and 3, with the eight actions skipped, and `ghidra-diff.sh` in the
 "Not run" list above.
 
+### The own-facts gap with Java's function list: causes and a first fix, branch `worktree-agent-a628570747560462f` (2026-11-18)
+
+**Attribution.** The 133 M500 functions that miss with ghidra-rs's own facts (Java's function
+list, `gap7/own-java.facts`) and not with the Java project's facts (125 silent, 8 loud) were
+traced by swapping one record kind at a time: the own facts with all of Java's records of that
+kind in their place (`underived` records of the kind dropped; `type` records a union), then
+`ghidra-diff.sh m500`. The unchanged own facts give 328 / 499 (loud 31, silent 140) again.
+
+| swapped in from Java | M500 identical (loud, silent) |
+|---|---|
+| nothing | 328 (31, 140) |
+| `func` with `type` and `ns` | 375 (21, 103) |
+| `data` | 371 (36, 92) |
+| only the `extrapop` of each `func` record | 351 (30, 118) |
+| only the `<symbollist>` (stack variables) of each `func` record | 343 (31, 125) |
+| `override` | 333 (31, 135) |
+| `data`, `func` with `type` and `ns`, and `override` together | 429 (21, 49) |
+| `body`, `label`, `string`, `undef`, `comments`, `wref`, `tracked` | 328 (31, 140) each |
+
+`extref` could not be swapped alone (its records name Java's namespace ids); not measured.
+Per function, the swaps that make it identical (`rust/target/gap-row2/causes.txt`):
+
+| cause | functions | example |
+|---|---|---|
+| `data` records (sizes and types of referenced data) | 43 (12 fixed below) | 0x402c20 |
+| `extrapop` (the function purge) | 23 | 0x404710 |
+| stack variables (`<symbollist>`) | 17 | 0x40dc10 |
+| the `func` record, neither part alone (both, or the prototype otherwise) | 14 silent, 4 loud | 0x40e770 |
+| `override` (CALL_RETURN: no-return and Shared Return, discovery's side) | 5 | 0x4f0370 |
+| no single kind (11 of them identical with `data`, `func` and `override` swapped together) | 23 silent, 4 loud | 0x402820 |
+
+Why `extrapop` and the stack variables differ (of 44,983 `func` records, 12,454 differ as text, symbol order included; the
+`extrapop` of 4,888): Java's `FunctionPurgeAnalysisCmd` runs when a function is added and never
+again. A function made before the code its body reaches was disassembled keeps an unknown purge
+although its finished body has a RET (0x4b6580: Java `unknown`, the RET at 0x57b7b8), and a
+CALL_RETURN tail takes the callee's purge as it is at that moment. 2,185 functions of Java's
+own auto-analysis (`functions-analysis.csv`) have an unknown purge in Java's facts where
+ghidra-rs derives one; 1,167 functions Java has a purge for are, here, seeded (not found by
+plain discovery) and get none. Both need the order of Ghidra's analysis queue, which is not
+ported; the `ponytail` notes of `Analysis::ret_purge` and `Exporter::locals` stand.
+
+**Fix 1: INT_ZEXT and INT_SEXT size data** (`Exporter::accesses`). `SymbolicPropogator`'s
+INT_ZEXT and INT_SEXT cases make a READ reference with the input varnode, as its COPY case does;
+ghidra-rs sized only COPY. A `MOVSX`/`MOVZX` of a direct address now sizes the data
+(0xdf5c2c: `undefined2`, as Java). Facts (`facts-diff.sh`, Java's functions): `data` equal
+230,455 -> 230,932 (84.9% -> 85.1%); 487 `data` and 24 `undef` records changed, nothing else.
+M500 own facts with Java's functions: 328 -> 340 / 499, loud 31 -> 31, silent 140 -> 128 (12
+functions fixed, none newly missing); M8 4 / 7 (loud 2, silent 1), unchanged. The decompiler is
+not touched; the Java-facts row is not affected.
+
+Superseded: "328 / 499 (loud 31, silent 140)" for own facts with Java's function list in the
+table of "Integration `m3-int7`" (now 340, loud 31, silent 128). Not run: plain discovery's
+own-facts row, the full pass, the Mac.
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The

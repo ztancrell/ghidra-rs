@@ -331,9 +331,10 @@ impl Exporter<'_> {
                 s if s == uniq => consts.get(&v.offset).copied(),
                 _ => None,
             };
-            // a COPY from memory is the one direct access the propagator sizes (its COPY case
-            // makes the reference); a direct write only counts as a write
-            if let Some(v) = op.ins.first().filter(|v| op.opc == 1 && v.space == code) {
+            // a COPY, INT_ZEXT or INT_SEXT from memory are the direct accesses the propagator
+            // sizes (those cases of `SymbolicPropogator.applyPcode` make the reference with the
+            // input varnode); a direct write only counts as a write
+            if let Some(v) = op.ins.first().filter(|v| matches!(op.opc, 1 | 17 | 18) && v.space == code) {
                 out.push((v.offset as u32, v.size, false));
             }
             if let Some(o) = op.out.as_ref().filter(|o| o.space == code) {

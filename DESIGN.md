@@ -446,6 +446,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    discovery 177 (loud 122, silent 200). A first attempt was invalid (`ghidra-diff.sh` fell back to the Java facts;
    it now stops on a missing or empty `FACTS` file). Superseded: the own-facts M500 counts 171 and 173 of S10 slices
    2 and 3 above (eight actions skipped). See `rust/README.md`, "Integration `m3-int7`".
+   Row 2 traced by swapping record kinds (`data` 43 functions, `extrapop` 23, stack variables 17, the
+   `func` record otherwise 18, `override` 5, no single kind 27); fix 1 (INT_ZEXT/INT_SEXT size data, as
+   `SymbolicPropogator`) gives 340 (loud 31, silent 128). Superseded: the 328 above. `extrapop` and stack
+   variables need the order of Ghidra's analysis queue, not ported.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

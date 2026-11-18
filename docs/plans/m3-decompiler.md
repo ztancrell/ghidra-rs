@@ -2192,6 +2192,13 @@ facts; it now stops on a missing or empty `FACTS` file. Inputs in `rust/target/g
 Superseded: the own-facts M500 counts 171 -> 173 (Java's functions) and 90 (plain discovery) of
 S10 slices 2 and 3 (eight actions skipped).
 
+Own-facts gap, row 2 (branch `worktree-agent-a628570747560462f`): the 133 M500 functions that
+miss with own facts and Java's function list but not with Java's facts, traced by swapping one
+record kind at a time: `data` 43, `extrapop` 23, stack variables 17, the `func` record otherwise
+18, `override` 5, no single kind 27 (`rust/README.md`). Fix 1, `SymbolicPropogator`'s INT_ZEXT
+and INT_SEXT cases size data: 340 / 499, loud 31, silent 128 (was 328, 31, 140); M8 unchanged.
+Superseded: the 328 / 499 above for own facts with Java's function list.
+
 ## Running stages in parallel
 
 Strict chain first: S0 → S1a → S1b → S2. After S2 the work fans out. Under the cap of two
