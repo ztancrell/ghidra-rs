@@ -424,6 +424,12 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    counts of the lines above, "`default-options.txt` holds 2 rules", "Open: `ValueSetSolver`", and "Blocked: eight
    actions" of S10 (ported; the checks against Java Ghidra not rerun). Full pass 2026-11-18: silent 0 in every pair, none worse than the baseline (Superseded: "Not run: the full pass"). See
    `rust/README.md`, "Integration `m3-int6`".
+   Integration `m3-int7` (2026-11-18): the Shared Return port with the `fold-slot-fragments` fix and the `export`
+   commands with `rust/tools/mercs2-exports.sh` merged. `cargo test` 164 passed; M8 all 57 checks equal to the
+   `m3-int6` baseline (silent 0); plain discovery on mercs2 makes 29,186 functions (superseded: 29,240), no M8
+   function changed; the mercs2 shadow check is byte-identical to `m3-int6`'s; `mercs2-exports.sh --compare` 4
+   identical, 2 call-contexts the same references in another order, 0x00401780 not identical (one reference more),
+   as on the export branch. Not run: M500, the full pass. See `rust/README.md`, "Integration `m3-int7`".
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

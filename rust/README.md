@@ -4552,7 +4552,9 @@ differs. mercs2 against `$GHIDRA_REF/mercs2.facts` (Java's 44,990 functions):
 | `ns` | 797 | 0 / 0 / 797 / 0 | 0% | the same | 0% |
 | `underived` | 0 | 10,414 extra | | 10,306 extra | |
 
-Plain discovery finds 29,240 functions, 26,507 of Java's 44,990. The mercs2 pipeline makes
+Plain discovery finds 29,240 functions, 26,507 of Java's 44,990 (superseded on `m3-int7`: 29,186
+with the Shared Return port; the share of Java's not measured again, see "Integration
+`m3-int7`"). The mercs2 pipeline makes
 functions after auto-analysis (see "Analysis" above), and `--functions-from` takes such a
 list: `FUNCS=java` gives it the entries of the Java facts, so that column measures everything
 but the function set. It is not a run without Java: the list comes from the Java project.
@@ -4968,6 +4970,45 @@ function changed state. Not run: the other 55 checks on M500, the switch, `simpl
 (no function failed there), a tie of `typeOrder` in `gatherParamSpacebaseRefs`, a `findOverlap`
 whose first sub-range differs from the lowest offset, a `RuleSwitchSingle` warning (the address
 format is the same for a 4-byte space).
+
+### Integration `m3-int7` (2026-11-18)
+
+Two branches merged on `m3-int7` (71ba24757c), on `m3-int6` (1c9dc419e3): f9ace1f270 (the
+Shared Return port d28ab90681 and the `fold-slot-fragments` fix for "refit failed Object has
+been deleted.", both on fc68a96873, the review fixes of the section above) and fbb2abc40d (the
+`export` commands and `tools/mercs2-exports.sh`). Counts on 71ba24757c, the desktop, `TIMEOUT`
+120:
+
+- `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` clean; `cargo test` (debug
+  profile) 164 passed, 0 failed.
+- Prelude (`decomp-diff.sh --prelude`, plain discovery on mercs2): 29,186 functions (1,022
+  imports), Function ID names 1,577; with the `m3-int6` binary 29,240 and 1,572. Of the `map
+  function` lines, 54 unnamed functions of `m3-int6` are gone, and five unnamed ones are now
+  named `_raise` by Function ID: 0x01ce7585, 0x022a83cd, 0x0232d0e0, 0x02396b42 and 0x023dff92.
+  For each of the five, the function 0x14d bytes on (0x01ce76d2, 0x022a851a, 0x0232d22d,
+  0x02396c8f, 0x023e00df) is among the 54. The only discovery change in the merge is the Shared
+  Return port, which makes fewer targets functions (see "What discovery does"); which of its
+  rules drops each of the 54 was not traced one by one. None of the eight M8 functions is in
+  the changed lines.
+- M8, all 57 checks: every line equal to the `m3-int6` baseline (`m3-int6-1c9dc419e3.summary`),
+  silent 0. No line moved.
+- Shadow check (`analyze orig/Mercenaries2.analysis.exe --functions-from build/functions.csv
+  --abi-callers config/register_abi.csv`, as mercs2's `tools/ghidra-rs-shadow.sh`): the output
+  of this binary and of the `m3-int6` binary are byte-identical (56,918 lines; both 37,926
+  functions, 38,546 references checked). With Java's function list as seeds the port changes
+  nothing there.
+- `tools/mercs2-exports.sh --functions $GHIDRA_REF/scripts/functions.csv --compare
+  $GHIDRA_REF/scripts/java`: `bindings.csv`, `mod-hook-owners.csv`, `boundaries.txt` and
+  `contexts-568900.txt` identical; `contexts-4017b0.txt` and `contexts-593c10.txt` the same
+  references in another order; `contexts-401780.txt` not identical (Java 6,560 lines, here
+  6,584, 6,553 in both), as in the table of "Switching mercs2's export scripts". All seven
+  files are byte-identical to the export branch's own run.
+
+Superseded by this section: "Plain discovery finds 29,240 functions" of stage S10 (now 29,186;
+the Mall speed counts of 29,240 are measurements of their dates). Not run on `m3-int7`: M500
+and the full pass (the switch, `simple` and `r5d-adc` corpora), the Mac, `cargo test
+--release`, `ghidra-diff.sh` and `facts-diff.sh`, and the shadow diff against Java's
+`config/abi_callers.csv` (only the two ghidra-rs binaries were compared).
 
 ## Speed
 
