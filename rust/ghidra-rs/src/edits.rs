@@ -10,13 +10,34 @@ use std::io::Write;
 
 type Res<T> = Result<T, String>;
 
-/// `Long.decode` of an address.
+/// `Long.decode` of an address: a sign, then `0x`, `0X` or `#` for hex, a leading `0` for
+/// octal, else decimal. What Java reads but is no 32-bit address is an error here.
 fn decode(s: &str) -> Res<u32> {
-    let n = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        Some(hex) => u32::from_str_radix(hex, 16),
-        None => s.parse(),
+    let err = || format!("address `{s}`: not a number Long.decode reads, or no 32-bit address");
+    let (neg, t) = match s.strip_prefix('-') {
+        Some(t) => (true, t),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
     };
-    n.map_err(|e| format!("address `{s}`: {e}"))
+    let (radix, digits) = match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).or_else(|| t.strip_prefix('#')) {
+        Some(hex) => (16, hex),
+        None if t.len() > 1 && t.starts_with('0') => (8, &t[1..]),
+        None => (10, t),
+    };
+    // Long.decode takes no second sign; from_str_radix would
+    if digits.starts_with(['+', '-']) {
+        return Err(err());
+    }
+    let n = i64::from_str_radix(digits, radix).map_err(|_| err())?;
+    u32::try_from(if neg { -n } else { n }).map_err(|_| err())
+}
+
+/// `line.split(",")`: Java drops the empty fields at the end.
+fn java_split(line: &str) -> Vec<&str> {
+    let mut f: Vec<&str> = line.split(',').collect();
+    while f.len() > 1 && f.last() == Some(&"") {
+        f.pop();
+    }
+    f
 }
 
 fn io(e: std::io::Error) -> String {
@@ -42,7 +63,7 @@ fn mnemonic(p: &Project, a: u32) -> String {
 /// AddRelocatedEntries.java: a function at each entry of `config/securom_functions.csv` (its
 /// text) that lies in none.
 pub fn add_relocated_entries(p: &mut Project, csv: &str) -> Res<()> {
-    let mut added = 0;
+    let (mut added, mut one_byte) = (0, 0);
     for line in csv.lines().filter(|l| l.starts_with("0x")) {
         let a = decode(line.split(',').next().unwrap_or(""))?;
         if p.function_containing(a).is_some() {
@@ -55,17 +76,19 @@ pub fn add_relocated_entries(p: &mut Project, csv: &str) -> Res<()> {
         if p.create_function(a) {
             added += 1;
         } else {
+            one_byte += 1;
             eprintln!("AddRelocatedEntries: 0x{a:08x} not created: no instruction decodes there (Java makes a one-byte function)");
         }
     }
     println!("AddRelocatedEntries: {added} functions added");
+    println!("AddRelocatedEntries: {one_byte} not created where Java makes a one-byte function");
     Ok(())
 }
 
 /// DefineTableFunctions.java: a function at every `.text` pointer of the data ranges
 /// `start end [start end]...` that lies in none.
 pub fn define_table_functions(p: &mut Project, args: &[String]) -> Res<()> {
-    let mut created = 0;
+    let (mut created, mut one_byte) = (0, 0);
     for [start, end] in args.as_chunks::<2>().0 {
         let (start, end) = (decode(start)?, decode(end)?);
         for at in (start..end.saturating_sub(3)).step_by(4) {
@@ -75,6 +98,7 @@ pub fn define_table_functions(p: &mut Project, args: &[String]) -> Res<()> {
             }
             p.disassemble(target);
             if !p.create_function(target) {
+                one_byte += 1;
                 eprintln!("DefineTableFunctions: {target:08x} not created: no instruction decodes there (Java makes a one-byte function)");
                 continue;
             }
@@ -83,6 +107,7 @@ pub fn define_table_functions(p: &mut Project, args: &[String]) -> Res<()> {
         }
     }
     println!("defined {created} functions");
+    println!("{one_byte} not defined where Java makes a one-byte function");
     Ok(())
 }
 
@@ -323,13 +348,13 @@ pub fn clear_false_noreturn(p: &mut Project, out: &mut dyn Write) -> Res<()> {
 
 /// FoldSlotFragments.java: folds wrapper-exit fragments back into their owners. `original`:
 /// the text of the original functions CSV; `rewrites`: the rewritten sites CSV (site,exit).
-/// `setBody` cannot fail on an overlap here (bodies may share instructions in this analysis).
+/// `setBody` fails on an overlap only for the instructions a body gains (`Project::set_body`).
 pub fn fold_slot_fragments(p: &mut Project, original: &str, rewrites: &str, out: &mut dyn Write) -> Res<()> {
     const WALK_LIMIT: usize = 20000;
     fn rows(csv: &str) -> Res<Vec<(u32, u32)>> {
         let row = |l: &str| {
-            let mut f = l.split(',');
-            Ok((decode(f.next().unwrap_or(""))?, f.next().map_or(Ok(0), decode)?))
+            let f = java_split(l);
+            Ok((decode(f[0])?, f.get(1).map_or(Ok(0), |s| decode(s))?))
         };
         csv.lines().skip(1).map(row).collect()
     }
@@ -428,34 +453,42 @@ pub fn fold_slot_fragments(p: &mut Project, original: &str, rewrites: &str, out:
             if self.p.an.insns[&at].flow != Flow::JumpInd {
                 return Ok(Vec::new()); // not a JMP
             }
-            let (sib, table) = match *bytes(at).unwrap_or(&[]) {
+            let code = bytes(at).unwrap_or(&[]);
+            // a segment override other than FS or GS changes nothing in a flat 32-bit image
+            let code = &code[code.iter().take_while(|b| matches!(b, 0x26 | 0x2e | 0x36 | 0x3e)).count()..];
+            let (sib, table) = match *code {
                 [0xff, 0x24, sib, d0, d1, d2, d3, ..] if sib >> 6 == 2 && sib & 7 == 5 => {
                     (sib, u32::from_le_bytes([d0, d1, d2, d3]))
                 }
-                // a prefix, or base + index*4 + table, where Java takes the last register of the
-                // operand: rare enough not to guess at
-                [0xff, 0x64 | 0xa4, sib, ..] if sib >> 6 == 2 => {
-                    return Err(format!("not ported: the switch at 0x{at:08x} has a base register"));
+                // base + index*4 + table: Java takes the last register of the operand, the index
+                [0xff, 0xa4, sib, d0, d1, d2, d3, ..] if sib >> 6 == 2 => (sib, u32::from_le_bytes([d0, d1, d2, d3])),
+                // an 8-bit table displacement: what Java's scalar of it is was not checked
+                [0xff, 0x64, sib, ..] if sib >> 6 == 2 => {
+                    return Err(format!("not ported: the switch at 0x{at:08x} has an 8-bit displacement"));
                 }
                 [0xff, ..] => return Ok(Vec::new()), // no register, scale 4 and table in the operand
                 _ => return Err(format!("not ported: the computed jump at 0x{at:08x} has a prefix")),
             };
-            let reg = (sib >> 3) & 7;
-            if reg == 4 {
+            const REGS: [&str; 8] = ["EAX", "ECX", "EDX", "EBX", "ESP", "EBP", "ESI", "EDI"];
+            let reg = REGS[usize::from((sib >> 3) & 7)];
+            if reg == "ESP" {
                 return Ok(Vec::new()); // no index register
             }
+            // `CMP reg, scalar` as the decoded instruction reads, any encoding (getRegister(0),
+            // getScalar(1).getUnsignedValue(): a negative scalar is above the 1024 limit)
             let (mut prev, mut bound) = (at, None);
             for _ in 0..3 {
                 let Some((&b, _)) = self.p.an.insns.range(..prev).next_back() else { break };
                 prev = b;
-                bound = match bytes(prev) {
-                    Some(&[0x83, m, i, ..]) if m == 0xf8 | reg => Some(i as i8 as u32),
-                    Some(&[0x81, m, i0, i1, i2, i3, ..]) if m == 0xf8 | reg => {
-                        Some(u32::from_le_bytes([i0, i1, i2, i3]))
-                    }
-                    Some(&[0x3d, i0, i1, i2, i3, ..]) if reg == 0 => Some(u32::from_le_bytes([i0, i1, i2, i3])),
-                    _ => None,
-                };
+                bound = text_at(self.p, prev).and_then(|(m, body, _)| {
+                    let (op0, op1) = body.split_once(',')?;
+                    let n = match (op1.strip_prefix('-'), op1.strip_prefix("0x")) {
+                        (Some(neg), _) => neg.strip_prefix("0x").map(|_| u32::MAX),
+                        (_, Some(hex)) => u32::from_str_radix(hex, 16).ok(),
+                        _ => op1.parse().ok(),
+                    };
+                    n.filter(|_| m == "CMP" && op0 == reg)
+                });
                 if bound.is_some() {
                     break;
                 }
@@ -514,8 +547,10 @@ pub fn fold_slot_fragments(p: &mut Project, original: &str, rewrites: &str, out:
                 flow.entry(a).or_default().extend(reached);
             }
             if !s.p.an.funcs.contains(&a) {
-                // the walk folded the owner itself: an invented function only jumps reach. Java
-                // goes on with the deleted function (and fails); its jump sources are owners now
+                // the walk folded the owner itself (it only walks with a flow entry, so Java's
+                // setBody comes next): Java reads the deleted function's body and setBody throws
+                // "Object has been deleted." into the script's catch, which reports and goes on
+                writeln!(s.out, "0x{a:08x},refit failed Object has been deleted.").map_err(io)?;
                 continue;
             }
             if s.p.thunked(a).is_some_and(|target| !s.original.contains(&target)) {
@@ -530,7 +565,10 @@ pub fn fold_slot_fragments(p: &mut Project, original: &str, rewrites: &str, out:
                 Some(reached) => {
                     let mut body: BTreeSet<u32> = s.p.an.bodies[&a].iter().copied().collect();
                     body.extend(reached);
-                    s.p.set_body(a, &body);
+                    if let Err(e) = s.p.set_body(a, &body) {
+                        writeln!(s.out, "0x{a:08x},refit failed {e}").map_err(io)?;
+                        continue;
+                    }
                 }
                 None => s.p.reflow(a),
             }

@@ -2748,7 +2748,7 @@ fn gather_param_spacebase_refs(fd: &mut Funcdata, arch: &Arch) -> Result<Vec<(u6
             continue;
         }
         let Some(out) = o.out else { continue };
-        let ct = super::infertypes::vn_type(fd, out);
+        let ct = super::infertypes::vn_type_facing(fd, out, "inputprototype")?;
         let dt = fd.types.ptr_to(ct).filter(|&t| fd.types.size(t) != 0);
         let dt = match dt {
             Some(t) => t,
@@ -2756,15 +2756,16 @@ fn gather_param_spacebase_refs(fd: &mut Funcdata, arch: &Arch) -> Result<Vec<(u6
         };
         refs.push((off, dt));
     }
-    // InputRef::operator<: by address, bigger data-types first, then the more specific
-    refs.sort_by(|a, b| {
+    // refs.sort() with InputRef::operator<: by address, bigger data-types first, then the more
+    // specific (`typeOrder <= 0`, true both ways on a tie: libstdc++'s list sort decides)
+    super::stdsort::list_sort(&mut refs, |a, b| {
         let (sa, sb) = (fd.types.size(a.1), fd.types.size(b.1));
-        a.0.cmp(&b.0).then_with(|| match () {
-            _ if a.1 == b.1 => std::cmp::Ordering::Equal,
-            _ if sa != sb => sb.cmp(&sa),
-            _ if fd.types.order(a.1, b.1) <= 0 => std::cmp::Ordering::Less,
-            _ => std::cmp::Ordering::Greater,
-        })
+        match () {
+            _ if a.0 != b.0 => a.0 < b.0,
+            _ if a.1 == b.1 => false,
+            _ if sa != sb => sb < sa,
+            _ => fd.types.order(a.1, b.1) <= 0,
+        }
     });
     let mut kept: Vec<(u64, super::types::TypeId)> = Vec::new();
     for r in refs {

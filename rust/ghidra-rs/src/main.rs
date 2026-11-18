@@ -6,13 +6,24 @@ use std::path::PathBuf;
 const USAGE: &str = "usage: ghidra-rs disasm <binary> [--func <symbol>|--addr <hex>] [--count N] [--pcode] [--sla <file>]
        ghidra-rs analyze <pe32> [--functions <csv>] [--gaps <csv>] [--abi-callers <register_abi.csv> <out.csv> [--data-pointers]]
                          [--decomp-prelude <out>] [--facts <out> [--protos <file>]] [--seeds <csv> | --functions-from <csv>]... [--store <file>] [--sla <file>]
-       ghidra-rs edit <pe32> --store <file> [--seeds <csv> | --functions-from <csv>]... [--sla <file>] <command>
+       ghidra-rs edit <pe32> --store <file> [--new-store] [--seeds <csv> | --functions-from <csv>]... [--sla <file>] <command>
            commands: add-relocated-entries <securom_functions.csv>
                      define-table-functions <start> <end> [<start> <end>]...
                      recover-functions <audit.csv>
                      clear-false-noreturn <report.csv>
                      fold-slot-fragments <functions-original.csv> <slot-rewrites.csv> <report.csv>
                      create-function <addr> | remove-function <addr> | reflow <addr>
+                     export-bindings <out.csv> --recover
+                     audit-recovered-functions <recovery.csv> <audit.csv> --remove-empty
+       ghidra-rs export <pe32> [--store <file>] [--facts <file>] [--seeds <csv> | --functions-from <csv>]... [--sla <file>] <command>
+           commands: mod-hook-owners <sites.csv> <out.csv>
+                     slot-owners <slots.csv> <out.csv>
+                     boundaries <out.txt> <addr>...
+                     call-contexts <target> <out.txt>
+                     audit-recovered-functions <recovery.csv> <audit.csv>
+                     library-evidence <markers.csv> <out.csv>      (needs --facts)
+                     bindings <out.csv>
+                     abi-candidates <out.csv> <out.txt> [<verified-c-dir>]   (needs --facts)
        ghidra-rs decompile -i <script>
        ghidra-rs datatest [--ref <decomp_dbg>] <test.xml|dir>...";
 
@@ -28,8 +39,8 @@ fn run() -> Result<(), String> {
     if args.len() >= 2 && args[0] == "analyze" {
         return analyze(&args[1], &args[2..]);
     }
-    if args.len() >= 2 && args[0] == "edit" {
-        return edit(&args[1], &args[2..]);
+    if args.len() >= 2 && (args[0] == "edit" || args[0] == "export") {
+        return edit(&args[1], &args[2..], args[0] == "edit");
     }
     if args.len() == 3 && args[0] == "decompile" && args[1] == "-i" {
         let stdout = std::io::stdout();
@@ -228,11 +239,15 @@ fn read_seeds(path: &str) -> Result<Vec<u32>, String> {
 }
 
 /// `edit`: runs one editing command on the analysis of a 32-bit PE with the project store laid
-/// over it, and writes the store back. The five mercs2 editing scripts are `edits.rs`; the
-/// script options that are not ported fail by name.
-fn edit(path: &str, args: &[String]) -> Result<(), String> {
-    use ghidra_rs::{analysis, edits, store};
-    let (mut file, mut seeds, mut exact) = (None, Vec::new(), false);
+/// over it, and writes the store back. The five mercs2 editing scripts are `edits.rs`, the
+/// editing options of two more are `exports.rs`.
+/// `export` (`write` false): one of mercs2's read-only scripts (`exports.rs`) on the same
+/// program, with the references of the code beyond the function bodies, as `--abi-callers`
+/// reads them. The store is optional and is not written; when given, it must exist and have
+/// been made on the same binary and seed set.
+fn edit(path: &str, args: &[String], write: bool) -> Result<(), String> {
+    use ghidra_rs::{analysis, edits, exports, store};
+    let (mut file, mut seeds, mut exact, mut facts, mut new_store) = (None, Vec::new(), false, None, false);
     let mut sla = std::env::var_os("GHIDRA_RS_SLA").map(PathBuf::from).unwrap_or_else(|| Sleigh::sla_path("x86"));
     let mut it = args.iter();
     let mut command = None;
@@ -241,9 +256,14 @@ fn edit(path: &str, args: &[String]) -> Result<(), String> {
             command = Some(flag.as_str());
             break;
         }
+        if flag == "--new-store" {
+            new_store = true;
+            continue;
+        }
         let val = it.next().cloned().ok_or(format!("{flag} needs a value"))?;
         match flag.as_str() {
             "--store" => file = Some(val),
+            "--facts" if !write => facts = Some(val),
             "--sla" => sla = PathBuf::from(val),
             "--seeds" | "--functions-from" => {
                 exact |= flag == "--functions-from";
@@ -253,22 +273,32 @@ fn edit(path: &str, args: &[String]) -> Result<(), String> {
         }
     }
     let rest: Vec<&str> = it.map(String::as_str).collect();
-    let (Some(file), Some(command)) = (file, command) else { return Err(USAGE.into()) };
-    // the editing options of mercs2's other scripts
-    if matches!(command, "export-bindings" | "audit-recovered-functions") {
-        return Err(format!(
-            "not ported: {command} (ExportBindings.java --recover, AuditRecoveredFunctions.java --remove-empty)"
-        ));
+    let Some(command) = command else { return Err(USAGE.into()) };
+    if write && file.is_none() {
+        return Err(USAGE.into());
     }
     let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
     let img = analysis::Image::from_pe(&data).map_err(|e| format!("{path}: {e}"))?;
     let sl = Sleigh::load(&sla)?;
-    let base = analysis::Analysis::run(&img, &sl, &seeds, exact)?;
-    // a store that is not there yet starts empty
-    let before =
-        if std::path::Path::new(&file).exists() { store::Store::load(&file)? } else { store::Store::default() };
+    let basis = store::Basis::new(&data, &seeds, exact);
+    let exists = file.as_deref().is_some_and(|f| std::path::Path::new(f).exists());
+    let before = match (file.as_deref(), exists, new_store) {
+        (None, _, false) => store::Store::new(basis),
+        (Some(f), true, false) => store::Store::load(f)?,
+        (Some(_), false, true) if write => store::Store::new(basis),
+        (Some(f), true, true) => return Err(format!("{f}: exists; --new-store makes a store only where none is")),
+        (Some(f), false, false) => return Err(format!("{f}: no such store (--new-store makes one)")),
+        _ => return Err(USAGE.into()),
+    };
+    before.check(basis).map_err(|e| format!("{}: {e}", file.as_deref().unwrap_or(path)))?;
+    let mut base = analysis::Analysis::run(&img, &sl, &seeds, exact)?;
+    // the scripts run after auto-analysis, its constants pass included, as `analyze --store`
+    base.disassemble(&img, &sl, &[], true);
     let mut an = base.clone();
     before.apply(&mut an, &img, &sl)?;
+    if !write {
+        an.disassemble(&img, &sl, &[], true);
+    }
     let mut p = store::Project::new(&img, &sl, an, before);
     let read = |f: &str| std::fs::read_to_string(f).map_err(|e| format!("{f}: {e}"));
     let report = |f: &str| std::fs::File::create(f).map(std::io::BufWriter::new).map_err(|e| format!("{f}: {e}"));
@@ -280,7 +310,14 @@ fn edit(path: &str, args: &[String]) -> Result<(), String> {
             }
         })
     };
+    // the commands of `exports.rs`: the read-only ones end here
+    let exported = exports::run(&mut p, command, &rest, facts.as_deref(), write)?;
+    if exported && !write {
+        return Ok(());
+    }
     match (command, rest.as_slice()) {
+        _ if exported => {}
+        _ if !write => return Err(format!("unknown export command or wrong arguments: {command}\n{USAGE}")),
         ("add-relocated-entries", [csv]) => edits::add_relocated_entries(&mut p, &read(csv)?)?,
         ("define-table-functions", ranges) if !ranges.is_empty() && ranges.len() % 2 == 0 => {
             let ranges: Vec<String> = ranges.iter().map(|r| r.to_string()).collect();
@@ -307,8 +344,12 @@ fn edit(path: &str, args: &[String]) -> Result<(), String> {
         }
         _ => return Err(format!("unknown edit command or wrong arguments: {command}\n{USAGE}")),
     }
+    let Some(file) = file else { return Err(USAGE.into()) };
     let (funcs, text) = (p.an.funcs.len(), p.finish(base)?.to_string());
-    std::fs::write(&file, &text).map_err(|e| format!("{file}: {e}"))?;
+    // a whole new file in place of the old, never half of one
+    let part = format!("{file}.part");
+    std::fs::write(&part, &text).map_err(|e| format!("{part}: {e}"))?;
+    std::fs::rename(&part, &file).map_err(|e| format!("{part} -> {file}: {e}"))?;
     println!("{file}: {} records, {funcs} functions", text.lines().count() - 1);
     Ok(())
 }
@@ -375,10 +416,22 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
         Some(_) if !seeds.is_empty() => Some(analysis::Analysis::run(&img, &sl, &[], false)?.funcs),
         _ => None,
     };
+    // a store made on another binary or seed set fails before any analysis
+    let store = match store {
+        Some(p) => {
+            let s = ghidra_rs::store::Store::load(&p)?;
+            s.check(ghidra_rs::store::Basis::new(&data, &seeds, exact)).map_err(|e| format!("{p}: {e}"))?;
+            Some(s)
+        }
+        None => None,
+    };
     let mut an = analysis::Analysis::run(&img, &sl, &seeds, exact)?;
-    // the project's edits, over the fresh analysis and before anything reads it
-    if let Some(p) = &store {
-        ghidra_rs::store::Store::load(p)?.apply(&mut an, &img, &sl)?;
+    // the project's edits, before anything reads the analysis. Java's order: auto-analysis,
+    // the constants pass included, then the scripts' edits; `edit` proves the store on the
+    // same base
+    if let Some(s) = &store {
+        an.disassemble(&img, &sl, &[], true);
+        s.apply(&mut an, &img, &sl)?;
     }
     if let Some((csv, _)) = &abi {
         // The script disassembles a contract entry analysis never reached (a vtable-only function).

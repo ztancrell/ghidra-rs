@@ -2157,6 +2157,18 @@ the S10 checks against Java Ghidra.
 
 Full pass (2026-11-18, `bars-queue.sh` on `ff58230822`, desktop and Mac): 132 of 133 pairs, the Mac dropped off the network and lost `swsn-t-switch`, rerun on the desktop: 2001 / 2004 (loud 3, silent 0). Silent 0 in every pair. No pair has fewer identical functions or more silent misses than the `m3-int5` baseline; `r5s`, `r5slock` and `r5dtlocksv` M500 have reference finished 498 instead of 499 (0x6b21e0, the reference no longer finishes it), while their identical counts rose (`r5s` 446 -> 498, `r5slock` and `r5dtlocksv` 451 -> 467). Switch: `paramdouble` 2002 / 2004, `swfs-r` 2003, `swsn-r` 2003, `swfs-t` and `swsn-t` 2001. Superseded: "Not run: the full pass" above.
 
+### Integration `m3-int7` (2026-11-18)
+
+The Shared Return port with the `fold-slot-fragments` fix (f9ace1f270, on the `m3-int6`
+review fixes fc68a96873) and the `export` commands with `tools/mercs2-exports.sh` (fbb2abc40d)
+are merged on `m3-int7` (71ba24757c). Measured on the tip (the desktop, `TIMEOUT` 120):
+`cargo test` 164 passed; fmt and clippy clean; the prelude has 29,186 functions (`m3-int6`:
+29,240; 54 gone, five more named `_raise`; no M8 function among them); M8 all 57 checks equal to
+the `m3-int6` baseline, silent 0; the mercs2 shadow check byte-identical to the `m3-int6`
+binary's; `mercs2-exports.sh --compare` 4 identical, 4017b0 and 593c10 the same references in
+another order, 401780 not identical (6,553 of Java's 6,560 lines), as on the export branch.
+Details: `rust/README.md`, "Integration `m3-int7`". Not run: M500, the full pass, the Mac.
+
 ## Running stages in parallel
 
 Strict chain first: S0 → S1a → S1b → S2. After S2 the work fans out. Under the cap of two
@@ -2218,6 +2230,12 @@ removed functions, fixed bodies, no-return flags, flow overrides, thunk marks an
 applied over a fresh analysis (`analyze --store`). It holds none of the other items above, and it
 does not record who set a fact: everything in the file is an edit, everything else is analysis.
 See `rust/README.md`, "Project store and the editing scripts".
+
+mercs2's eight remaining scripts read this program too (2026-11-17, `rust/ghidra-rs/src/exports.rs`,
+`ghidra-rs export`; the editing options of two of them write the store through `edit`). One of
+them, ExportAbiCandidates, greps Java's decompiled C: its command takes that C from files verified
+identical to Java's and fails loudly without them, so it is the first consumer waiting for S10
+outside the decompiler. See `rust/README.md`, "The read-only scripts".
 
 ## Where to diverge from Ghidra, and where not
 

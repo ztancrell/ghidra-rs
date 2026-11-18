@@ -119,6 +119,13 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   measured (`tools/facts-diff.sh`) and is listed in `rust/README.md`, "Stage S10, slice 3".
   Superseded: the part of the open question of S10 slice 2 that let "a rule of Ghidra's analyzers
   ported with an approximation" stand as the way to go.
+- 2026-11-17: Functions ghidra-rs's discovery makes and Java Ghidra does not are fixed in
+  discovery, not accepted as exceptions. FoldSlotFragments stopped with "the walk from
+  0x00861190 removed that owner itself": 0x861190 is a function of ghidra-rs's own discovery
+  (reached only by jumps) where Java has none. Asked whether to change discovery or accept an
+  exception, the user said: "Fix function and any related problems so it prevents it down the
+  line." First step (`rust/README.md`, "What discovery does"): Shared Return Calls is a port of
+  SharedReturnAnalysisCmd's walk. Resolved (2026-11-18): Java 12.2 also makes 0x861190 and its FoldSlotFragments removes it as its own owner ("refit failed Object has been deleted.") and goes on; `fold-slot-fragments` does the same now (`rust/README.md`, "Resolved (2026-11-18)"). Superseded: "0x861190 itself is still made (open)".
 
 ## Milestones
 
@@ -417,6 +424,12 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    counts of the lines above, "`default-options.txt` holds 2 rules", "Open: `ValueSetSolver`", and "Blocked: eight
    actions" of S10 (ported; the checks against Java Ghidra not rerun). Full pass 2026-11-18: silent 0 in every pair, none worse than the baseline (Superseded: "Not run: the full pass"). See
    `rust/README.md`, "Integration `m3-int6`".
+   Integration `m3-int7` (2026-11-18): the Shared Return port with the `fold-slot-fragments` fix and the `export`
+   commands with `rust/tools/mercs2-exports.sh` merged. `cargo test` 164 passed; M8 all 57 checks equal to the
+   `m3-int6` baseline (silent 0); plain discovery on mercs2 makes 29,186 functions (superseded: 29,240), no M8
+   function changed; the mercs2 shadow check is byte-identical to `m3-int6`'s; `mercs2-exports.sh --compare` 4
+   identical, 2 call-contexts the same references in another order, 0x00401780 not identical (one reference more),
+   as on the export branch. Not run: M500, the full pass. See `rust/README.md`, "Integration `m3-int7`".
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
@@ -432,7 +445,25 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    Mercenaries2.analysis.exe the store brings the `.text` functions shared with the Java project
    from 20422 to 36602 of 37635 (36178 with the same body size). Not ported, failing by name:
    ExportBindings `--recover`, AuditRecoveredFunctions `--remove-empty`. Details in
-   `rust/README.md`, "Project store and the editing scripts".
+   `rust/README.md`, "Project store and the editing scripts". Superseded in part (review of
+   `m3-int6`, 2026-11-17): store version 2 replays its records in edit order, names its binary
+   and seed set, and is applied after the constants pass; with those fixes
+   `fold-slot-fragments` reports an owner its own walk removes as "refit failed Object has been
+   deleted." and goes on, as Java 12.2 does (2026-11-18; before it stopped loudly at 0x861190), so the 36602 is the old build's count (now 36856 / 779 / 164).
+   Superseded: "Not ported, failing by name: ExportBindings `--recover`, AuditRecoveredFunctions
+   `--remove-empty`". On branch `worktree-agent-adca953958c1688b0` (2026-11-17) mercs2's eight
+   remaining scripts are commands (`exports.rs`): the read-only ones under `ghidra-rs export`,
+   the two editing options under `edit`. So each of the 17 scripts of
+   `mercs2-decomp/tools/ghidra/` has a command; `Decompile.java` and the C that
+   ExportAbiCandidates greps still wait for S10 (`abi-candidates` fails loudly without C verified
+   identical to Java's). On the Java project's functions seven of the eight outputs have Java's
+   rows but for body and reference differences of the analysis; where Ghidra's answer cannot be
+   known (an instruction in two bodies here) a command stops. Details and counts in
+   `rust/README.md`, "The read-only scripts". The four outputs that are byte-identical to
+   Java (mod-hook-owners, boundaries, bindings, call-contexts of 0x00568900) have a drop-in
+   wrapper for mercs2, `rust/tools/mercs2-exports.sh`. It needs the Java project's function
+   list. `call-contexts` reference order (Java's creation order) stays a known difference.
+   See `rust/README.md`, "Switching mercs2's export scripts".
 
 ## Open questions
 

@@ -1918,7 +1918,7 @@ fn reg_of(key: &str) -> &str {
 
 /// Operands as Ghidra's Java `Instruction.toString` prints them: memory addresses (a direct
 /// branch target, `[0x...]`) as 8-digit `0x%08x`; scalars as they are; `, ` between operands as `,`.
-fn ghidra_operands(body: &str, branch: bool) -> String {
+pub(crate) fn ghidra_operands(body: &str, branch: bool) -> String {
     let body = body.replace(", ", ","); // Java joins operands with a bare comma
     let body = body.as_str();
     if branch {

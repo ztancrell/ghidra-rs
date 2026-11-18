@@ -10,7 +10,7 @@
 //! `HeapSequence` fails loudly". No type is an opaque string (`isOpaqueString`) here.
 
 use super::*;
-use crate::decomp::infertypes::vn_type;
+use crate::decomp::infertypes::vn_type_facing;
 use crate::decomp::locked::param_symbol;
 use crate::decomp::types::TypeId;
 
@@ -20,7 +20,7 @@ pub(super) fn string_copy(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> 
         return Ok(0);
     }
     let outvn = out(fd, op)?;
-    let ct = vn_type(fd, outvn);
+    let ct = vn_type_facing(fd, outvn, "RuleStringCopy")?;
     if !fd.types.is_char_print(ct) || !fd.vn(outvn).has(VnFlags::ADDRTIED) {
         return Ok(0);
     }
@@ -39,7 +39,7 @@ pub(super) fn string_store(fd: &mut Funcdata, op: OpId, arch: &Arch) -> Result<i
     if !is_const(fd, inp(fd, op, 2)?) {
         return Ok(0);
     }
-    let pt = vn_type(fd, inp(fd, op, 1)?);
+    let pt = vn_type_facing(fd, inp(fd, op, 1)?, "RuleStringStore")?;
     match fd.types.ptr_to(pt) {
         Some(ct) if fd.types.is_char_print(ct) && heap_sequence_valid(fd, arch, ct, op)? => {
             err("RuleStringStore: HeapSequence::transform (the string copy user-op, constseq.cc) not implemented in ghidra-rs yet")

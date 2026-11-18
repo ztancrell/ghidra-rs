@@ -28,6 +28,19 @@ pub(crate) fn vn_type(fd: &mut Funcdata, vn: VarnodeId) -> TypeId {
     }
 }
 
+/// `Varnode::getTypeReadFacing` / `getTypeDefFacing`: the varnode's data-type, unless it needs
+/// resolution (a union, or a pointer to one, ...): `unionresolve.cc` is not ported, so that fails
+/// loudly, naming `who`.
+pub(crate) fn vn_type_facing(fd: &mut Funcdata, vn: VarnodeId, who: &str) -> Result<TypeId> {
+    let t = vn_type(fd, vn);
+    if fd.types.needs_resolution(t) {
+        return err(format!(
+            "{who}: a data-type needing resolution (getTypeReadFacing, unionresolve.cc) is not implemented in ghidra-rs yet"
+        ));
+    }
+    Ok(t)
+}
+
 /// Port of `Varnode::updateType(ct, lock, override)`.
 pub(crate) fn update_type(fd: &mut Funcdata, vn: VarnodeId, ct: TypeId, mut lock: bool, overrid: bool) -> bool {
     if fd.types.meta(ct) == Meta::Unknown {
