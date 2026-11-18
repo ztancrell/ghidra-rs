@@ -6,7 +6,7 @@ use std::path::PathBuf;
 const USAGE: &str = "usage: ghidra-rs disasm <binary> [--func <symbol>|--addr <hex>] [--count N] [--pcode] [--sla <file>]
        ghidra-rs analyze <pe32> [--functions <csv>] [--gaps <csv>] [--abi-callers <register_abi.csv> <out.csv> [--data-pointers]]
                          [--decomp-prelude <out>] [--facts <out> [--protos <file>]] [--seeds <csv> | --functions-from <csv>]... [--store <file>] [--sla <file>]
-       ghidra-rs edit <pe32> --store <file> [--seeds <csv> | --functions-from <csv>]... [--sla <file>] <command>
+       ghidra-rs edit <pe32> --store <file> [--new-store] [--seeds <csv> | --functions-from <csv>]... [--sla <file>] <command>
            commands: add-relocated-entries <securom_functions.csv>
                      define-table-functions <start> <end> [<start> <end>]...
                      recover-functions <audit.csv>
@@ -232,7 +232,7 @@ fn read_seeds(path: &str) -> Result<Vec<u32>, String> {
 /// script options that are not ported fail by name.
 fn edit(path: &str, args: &[String]) -> Result<(), String> {
     use ghidra_rs::{analysis, edits, store};
-    let (mut file, mut seeds, mut exact) = (None, Vec::new(), false);
+    let (mut file, mut seeds, mut exact, mut new_store) = (None, Vec::new(), false, false);
     let mut sla = std::env::var_os("GHIDRA_RS_SLA").map(PathBuf::from).unwrap_or_else(|| Sleigh::sla_path("x86"));
     let mut it = args.iter();
     let mut command = None;
@@ -240,6 +240,10 @@ fn edit(path: &str, args: &[String]) -> Result<(), String> {
         if !flag.starts_with("--") {
             command = Some(flag.as_str());
             break;
+        }
+        if flag == "--new-store" {
+            new_store = true;
+            continue;
         }
         let val = it.next().cloned().ok_or(format!("{flag} needs a value"))?;
         match flag.as_str() {
@@ -263,10 +267,17 @@ fn edit(path: &str, args: &[String]) -> Result<(), String> {
     let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
     let img = analysis::Image::from_pe(&data).map_err(|e| format!("{path}: {e}"))?;
     let sl = Sleigh::load(&sla)?;
-    let base = analysis::Analysis::run(&img, &sl, &seeds, exact)?;
-    // a store that is not there yet starts empty
-    let before =
-        if std::path::Path::new(&file).exists() { store::Store::load(&file)? } else { store::Store::default() };
+    let basis = store::Basis::new(&data, &seeds, exact);
+    let before = match (std::path::Path::new(&file).exists(), new_store) {
+        (true, false) => store::Store::load(&file)?,
+        (false, true) => store::Store::new(basis),
+        (true, true) => return Err(format!("{file}: exists; --new-store makes a store only where none is")),
+        (false, false) => return Err(format!("{file}: no such store (--new-store makes one)")),
+    };
+    before.check(basis).map_err(|e| format!("{file}: {e}"))?;
+    let mut base = analysis::Analysis::run(&img, &sl, &seeds, exact)?;
+    // the scripts run after auto-analysis, its constants pass included, as `analyze --store`
+    base.disassemble(&img, &sl, &[], true);
     let mut an = base.clone();
     before.apply(&mut an, &img, &sl)?;
     let mut p = store::Project::new(&img, &sl, an, before);
@@ -308,7 +319,10 @@ fn edit(path: &str, args: &[String]) -> Result<(), String> {
         _ => return Err(format!("unknown edit command or wrong arguments: {command}\n{USAGE}")),
     }
     let (funcs, text) = (p.an.funcs.len(), p.finish(base)?.to_string());
-    std::fs::write(&file, &text).map_err(|e| format!("{file}: {e}"))?;
+    // a whole new file in place of the old, never half of one
+    let part = format!("{file}.part");
+    std::fs::write(&part, &text).map_err(|e| format!("{part}: {e}"))?;
+    std::fs::rename(&part, &file).map_err(|e| format!("{part} -> {file}: {e}"))?;
     println!("{file}: {} records, {funcs} functions", text.lines().count() - 1);
     Ok(())
 }
@@ -375,10 +389,22 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
         Some(_) if !seeds.is_empty() => Some(analysis::Analysis::run(&img, &sl, &[], false)?.funcs),
         _ => None,
     };
+    // a store made on another binary or seed set fails before any analysis
+    let store = match store {
+        Some(p) => {
+            let s = ghidra_rs::store::Store::load(&p)?;
+            s.check(ghidra_rs::store::Basis::new(&data, &seeds, exact)).map_err(|e| format!("{p}: {e}"))?;
+            Some(s)
+        }
+        None => None,
+    };
     let mut an = analysis::Analysis::run(&img, &sl, &seeds, exact)?;
-    // the project's edits, over the fresh analysis and before anything reads it
-    if let Some(p) = &store {
-        ghidra_rs::store::Store::load(p)?.apply(&mut an, &img, &sl)?;
+    // the project's edits, before anything reads the analysis. Java's order: auto-analysis,
+    // the constants pass included, then the scripts' edits; `edit` proves the store on the
+    // same base
+    if let Some(s) = &store {
+        an.disassemble(&img, &sl, &[], true);
+        s.apply(&mut an, &img, &sl)?;
     }
     if let Some((csv, _)) = &abi {
         // The script disassembles a contract entry analysis never reached (a vtable-only function).

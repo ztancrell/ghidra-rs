@@ -119,6 +119,13 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   measured (`tools/facts-diff.sh`) and is listed in `rust/README.md`, "Stage S10, slice 3".
   Superseded: the part of the open question of S10 slice 2 that let "a rule of Ghidra's analyzers
   ported with an approximation" stand as the way to go.
+- 2026-11-17: Functions ghidra-rs's discovery makes and Java Ghidra does not are fixed in
+  discovery, not accepted as exceptions. FoldSlotFragments stopped with "the walk from
+  0x00861190 removed that owner itself": 0x861190 is a function of ghidra-rs's own discovery
+  (reached only by jumps) where Java has none. Asked whether to change discovery or accept an
+  exception, the user said: "Fix function and any related problems so it prevents it down the
+  line." First step (`rust/README.md`, "What discovery does"): Shared Return Calls is a port of
+  SharedReturnAnalysisCmd's walk. Resolved (2026-11-18): Java 12.2 also makes 0x861190 and its FoldSlotFragments removes it as its own owner ("refit failed Object has been deleted.") and goes on; `fold-slot-fragments` does the same now (`rust/README.md`, "Resolved (2026-11-18)"). Superseded: "0x861190 itself is still made (open)".
 
 ## Milestones
 
@@ -432,7 +439,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    Mercenaries2.analysis.exe the store brings the `.text` functions shared with the Java project
    from 20422 to 36602 of 37635 (36178 with the same body size). Not ported, failing by name:
    ExportBindings `--recover`, AuditRecoveredFunctions `--remove-empty`. Details in
-   `rust/README.md`, "Project store and the editing scripts".
+   `rust/README.md`, "Project store and the editing scripts". Superseded in part (review of
+   `m3-int6`, 2026-11-17): store version 2 replays its records in edit order, names its binary
+   and seed set, and is applied after the constants pass; with those fixes
+   `fold-slot-fragments` reports an owner its own walk removes as "refit failed Object has been
+   deleted." and goes on, as Java 12.2 does (2026-11-18; before it stopped loudly at 0x861190), so the 36602 is the old build's count (now 36856 / 779 / 164).
 
 ## Open questions
 

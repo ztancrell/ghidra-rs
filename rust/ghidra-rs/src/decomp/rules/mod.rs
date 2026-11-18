@@ -385,8 +385,12 @@ fn switch_single(fd: &mut Funcdata, op: OpId, arch: &Arch) -> Result<i32> {
     let n = jt.targets.len();
     let all_match = n != 1 && jt.targets.iter().all(|&t| t == target);
     if n != 1 || !is_const(fd, inp(fd, op, 0)?) {
-        // `printRaw` of a 4-byte ram address
-        let mut msg = format!("Switch with 1 destination removed at 0x{:08x}", fd.op(op).seq.addr);
+        // `printRaw` of the op's code address
+        let size = arch.sleigh.spaces[arch.sleigh.code_space() as usize].size;
+        let mut msg = format!(
+            "Switch with 1 destination removed at {}",
+            crate::decomp::printc::raw_offset(size, fd.op(op).seq.addr)
+        );
         if all_match {
             msg.push_str(&format!(" : {n} cases all go to same destination"));
         }

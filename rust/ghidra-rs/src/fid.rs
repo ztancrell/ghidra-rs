@@ -431,7 +431,8 @@ pub struct Applied {
 /// then the family alone, once there are `MAGIC_MULTIPLE_LIBRARY_LIMIT` of them).
 fn plate_comment(names: &[String], ms: &[Match]) -> String {
     const MAGIC_MULTIPLE_LIBRARY_LIMIT: usize = 5;
-    // without demangled names the most optimistic count is that of `names`
+    // without demangled names the most optimistic count is that of `names`, so "Multiple Matches
+    // With Same Base Name" (a count of 1 with several names) cannot occur here
     let kind = if names.len() == 1 { "Single Match" } else { "Multiple Matches With Different Base Names" };
     let mut s = format!("Library Function - {kind}\n");
     for n in names.iter().take(4) {

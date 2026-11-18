@@ -1203,41 +1203,135 @@ impl Analysis {
         (!cases.is_empty()).then_some((table, cases))
     }
 
-    /// SharedReturnAnalysisCmd with "assume contiguous functions": an unconditional jump past
-    /// the next function entry (or before the previous one) is a tail call, so its target
-    /// becomes a function, unless a conditional jump or a fallthrough also reaches it.
+    /// SharedReturnAnalysisCmd with "assume contiguous functions" (x86's default) and without
+    /// conditional branches, run as the FUNCTION analyzer is: first on every function
+    /// discovery made, then on the functions each run created, until none is created. The jump
+    /// scan set is built per function of the run as `checkAboveFunction` /
+    /// `checkBelowFunction` build it (from the previous function's entry to the next one's,
+    /// a single-range body taken out again), and the jump sources in it are walked in address
+    /// order with Java's cached "function after / before the source", whose staleness decides
+    /// some targets. A target becomes a function when an unconditional jump (a jump's first
+    /// flow reference) passes the next function entry or goes before the previous one, no
+    /// conditional flow reaches it, no instruction falls into it and it is not a lone return
+    /// (`checkIfCouldHaveFallThruTo`). The functions are created after the walk (Java queues
+    /// them with `AutoAnalysisManager.createFunction`).
     fn shared_returns(&mut self) {
         let mut cond = HashSet::new();
-        let mut fall = HashSet::new();
-        for (&a, i) in &self.insns {
+        for i in self.insns.values() {
             if i.flow == Flow::CondJump {
                 cond.extend(i.target);
             }
-            if i.falls_through() && !matches!(i.flow, Flow::Call | Flow::CallInd) {
-                fall.insert(a + i.len as u32);
-            }
         }
-        loop {
-            let mut new = Vec::new();
-            for (&src, i) in &self.insns {
-                let Some(t) = i.target.filter(|t| i.flow == Flow::Jump && self.insns.contains_key(t)) else { continue };
-                if self.funcs.contains(&t) || cond.contains(&t) || fall.contains(&t) {
+        let mut set: Vec<u32> = self.funcs.iter().copied().collect();
+        while !set.is_empty() {
+            let mut scan = RangeSet::default();
+            for &f in &set {
+                // checkAboveFunction
+                let prev = self.funcs.range(..f).next_back().copied().unwrap_or(0);
+                scan.add(prev, f);
+                // checkBelowFunction
+                let body = self.body_ranges(f);
+                if body.len() > 1 {
+                    body.iter().for_each(|&(lo, hi)| scan.add(lo, hi));
+                }
+                let next = self.funcs.range(f + 1..).next().map_or(u32::MAX, |&n| n - 1);
+                scan.add(f, next);
+                if body.len() <= 1 {
+                    body.iter().for_each(|&(lo, hi)| scan.remove(lo, hi));
+                }
+            }
+            let mut created = BTreeSet::new();
+            // Java's cache: None is null, Some(None) is Address.NO_ADDRESS
+            let (mut after, mut before): (Option<Option<u32>>, Option<Option<u32>>) = (None, None);
+            let after_of = |a: u32| self.funcs.range(a + 1..).next().copied();
+            let before_of = |a: u32| self.funcs.range(..a).next_back().copied();
+            for (&src, i) in scan.ranges().flat_map(|(lo, hi)| self.insns.range(lo..=hi)) {
+                // the first flow reference: the jump's target, or a computed jump's lowest case
+                let dest = match i.flow {
+                    Flow::Jump => i.target,
+                    Flow::JumpInd => self.tables.get(&src).and_then(|c| c.iter().min().copied()),
+                    _ => None,
+                };
+                let Some(dest) = dest else { continue };
+                if cond.contains(&dest) {
                     continue;
                 }
-                let far = if t > src {
-                    self.funcs.range(src + 1..).next().is_some_and(|&next| t >= next)
+                if src < dest {
+                    if after == Some(None) {
+                        continue;
+                    }
+                    if after.is_none_or(|a| a.is_some_and(|a| a <= src)) {
+                        after = Some(after_of(src));
+                        if after == Some(None) {
+                            continue;
+                        }
+                    }
+                    if after.flatten().is_some_and(|a| dest >= a) {
+                        self.shared_target(dest, &mut created);
+                    }
                 } else {
-                    self.funcs.range(..src).next_back().is_some_and(|&prev| t < prev)
-                };
-                if far {
-                    new.push(t);
+                    if after.is_none() {
+                        after = Some(after_of(src));
+                    }
+                    if before == Some(None) {
+                        let Some(a) = after.flatten() else { continue };
+                        if src < a {
+                            continue;
+                        }
+                        before = None;
+                        after = Some(after_of(src));
+                    }
+                    let keep = before.is_some() && after.is_some_and(|a| a.is_none_or(|a| src < a));
+                    if !keep {
+                        before = Some(before_of(src));
+                        if before == Some(None) {
+                            continue;
+                        }
+                    }
+                    if before.flatten().is_some_and(|b| dest < b) {
+                        self.shared_target(dest, &mut created);
+                    }
                 }
             }
-            if new.is_empty() {
-                break;
-            }
-            self.funcs.extend(new);
+            self.funcs.extend(&created);
+            set = created.into_iter().collect();
         }
+    }
+
+    /// SharedReturnAnalysisCmd.createFunction: nothing for an existing function (its jump
+    /// overrides are derived, see `call_return`), else a function unless something could fall
+    /// into the target (`checkIfCouldHaveFallThruTo`): no instruction there, an instruction
+    /// whose fallthrough is the target, or a lone terminator (a return).
+    fn shared_target(&self, dest: u32, created: &mut BTreeSet<u32>) {
+        if self.funcs.contains(&dest) {
+            return;
+        }
+        let Some(i) = self.insns.get(&dest) else { return };
+        if i.flow == Flow::Return {
+            return;
+        }
+        let falls_in = self.insns.range(..dest).next_back().is_some_and(|(&a, p)| {
+            a + p.len as u32 == dest
+                && p.falls_through()
+                && !(matches!(p.flow, Flow::Call | Flow::CallInd) && self.call_return(a, p))
+        });
+        if !falls_in {
+            created.insert(dest);
+        }
+    }
+
+    /// The address ranges of a function's body (Ghidra's body AddressSet): its instructions'
+    /// bytes, adjacent ones merged.
+    fn body_ranges(&self, f: u32) -> Vec<(u32, u32)> {
+        let mut out: Vec<(u32, u32)> = Vec::new();
+        for a in self.body_of(f) {
+            let hi = a + self.insns[&a].len as u32 - 1;
+            match out.last_mut() {
+                Some(last) if last.1.checked_add(1) == Some(a) => last.1 = hi,
+                _ => out.push((a, hi)),
+            }
+        }
+        out
     }
 
     /// Ghidra's CALL_RETURN flow override at an instruction, which ghidra-rs derives: a call of
@@ -1545,4 +1639,64 @@ fn utf16_strings(s: &Section, from: u32, to: u32) -> Vec<std::ops::RangeInclusiv
         }
     }
     out
+}
+
+/// Disjoint inclusive address ranges (Ghidra's AddressSet, for one space), first -> last.
+#[derive(Default)]
+struct RangeSet(BTreeMap<u32, u32>);
+
+impl RangeSet {
+    fn add(&mut self, mut lo: u32, mut hi: u32) {
+        // merge every range that overlaps or touches [lo, hi]
+        let touching: Vec<(u32, u32)> = self
+            .0
+            .range(..=hi.saturating_add(1))
+            .rev()
+            .take_while(|&(_, &h)| h.saturating_add(1) >= lo)
+            .map(|(&l, &h)| (l, h))
+            .collect();
+        for (l, h) in touching {
+            self.0.remove(&l);
+            lo = lo.min(l);
+            hi = hi.max(h);
+        }
+        self.0.insert(lo, hi);
+    }
+
+    fn remove(&mut self, lo: u32, hi: u32) {
+        let hit: Vec<(u32, u32)> =
+            self.0.range(..=hi).rev().take_while(|&(_, &h)| h >= lo).map(|(&l, &h)| (l, h)).collect();
+        for (l, h) in hit {
+            self.0.remove(&l);
+            if l < lo {
+                self.0.insert(l, lo - 1);
+            }
+            if h > hi {
+                self.0.insert(hi + 1, h);
+            }
+        }
+    }
+
+    fn ranges(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.0.iter().map(|(&l, &h)| (l, h))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RangeSet;
+
+    #[test]
+    fn range_set_add_remove() {
+        let mut s = RangeSet::default();
+        s.add(10, 20);
+        s.add(30, 40);
+        s.add(21, 29); // touches both
+        assert_eq!(s.ranges().collect::<Vec<_>>(), [(10, 40)]);
+        s.remove(15, 35);
+        assert_eq!(s.ranges().collect::<Vec<_>>(), [(10, 14), (36, 40)]);
+        s.add(0, u32::MAX);
+        s.remove(0, 5);
+        assert_eq!(s.ranges().collect::<Vec<_>>(), [(6, u32::MAX)]);
+    }
 }

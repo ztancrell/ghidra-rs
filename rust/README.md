@@ -62,7 +62,7 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   call-fixup injection), `block.rs` (basic blocks, spanning tree, dominators), `actiontree.rs`
   (the action framework: groups, repeat, breakpoints, `continue`), `heritage.rs` (SSA: phi
   placement and renaming), `action.rs` (the universal
-  action up to `paramdouble`), `print.rs` (`print raw`), `stdsort.rs` (libstdc++'s `std::sort`), `rangemap.rs` (the
+  action up to `paramdouble`), `print.rs` (`print raw`), `stdsort.rs` (libstdc++'s `std::sort` and `std::list::sort`), `rangemap.rs` (the
   `rangemap` template the scopes' maps use), `scope.rs` (symbols, default names), `namevars.rs`
   (`ActionNameVars`), and `print C` in three layers: `prettyprint.rs` (`EmitPrettyPrint`: tokens,
   line breaking, indents), `printlanguage.rs` (the operator stack, parentheses, number base) and
@@ -77,7 +77,7 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   reads becoming constants) and `decomp/inject.rs` (the snippet parser).
 - `tools/rangemap_ref.cc`: the C++ `rangemap` template on the data of the unit tests of
   `decomp/rangemap.rs` (multiset order, record order, `find`).
-- `tools/stdsort_ref.cc`, `ghidra-rs/tests/data/stdsort-gxx.txt`: libstdc++ `std::sort` tie orders
+- `tools/stdsort_ref.cc`, `ghidra-rs/tests/data/stdsort-gxx.txt`: libstdc++ `std::sort` and `std::list::sort` tie orders
   that `decomp/stdsort.rs` must reproduce.
 - `tools/decomp-ref.sh`, `tools/decomp-ref.patch`: build the reference decompiler `decomp_dbg`.
 - `tools/decomp-diff.sh`: runs a corpus on both decompilers and compares; `tools/decomp-show.sh`,
@@ -205,8 +205,19 @@ What discovery does, after Ghidra's analyzers:
   jump table has as many entries as its largest byte plus one;
 - Create Address Tables: runs of 2+ code pointers in data are disassembled, without making
   functions;
-- Shared Return Calls with contiguous functions: an unconditional jump past the next function
-  entry (or before the previous one) makes its target a function;
+- Shared Return Calls with contiguous functions (`Analysis::shared_returns`, a port of
+  SharedReturnAnalysisCmd's walk): the jump scan set is built per function as Java's
+  `checkAboveFunction`/`checkBelowFunction` build it, the sources are walked in address order
+  with Java's cached "function after / before the source" (whose staleness decides some
+  targets), and a target becomes a function when an unconditional jump passes the next
+  function entry or goes before the previous one, no conditional flow reaches it, no
+  instruction falls into it (a call counts, as `getFallFrom`) and it is not a lone return. The
+  functions are created after each walk, and the next walk runs on them alone. Not modelled:
+  Java runs the analyzer on each batch of functions its other analyzers add, and the batch
+  decides the scan set and the cache; here the first walk takes every function discovery made
+  at once. Superseded (2026-11-17): every unconditional jump past the next entry or before the
+  previous one made its target a function, a call did not count as falling into a target, and a
+  lone return could become a function;
 - imports are read from the import directory through the loaded image (the mercs2 image keeps
   its IAT in `.rdata` and the directory in `.securom`);
 - `callees`/`callers` count, like Ghidra's `getCalledFunctions`: direct CALLs, JMPs to a
@@ -234,6 +245,15 @@ pipeline's `build/functions*.csv` from 2026-10-14 predate those steps. Column ra
 |---|---|---|---|---|---|---|---|
 | plain discovery | `functions-analysis.csv` (import only, 23,323) | 22,388 common, 935 missing, 365 extra | 95.7% | 87.7% (87.6%) | 88.5% (88.4%) | 87.6% (80.4%) | (no reference) |
 | `--functions-from` fresh export | fresh export (functions and gaps) | 37,633 of 37,635 | 99.1% | 97.2% (94.6%) | 97.5% (97.2%) | 89.9% (83.1%) | 39,243 of 39,557 identical (ours: 39,368 rows) |
+
+With the Shared Return port (2026-11-17) plain discovery has 22,386 common, 937 missing and
+329 extra functions (`.text`, against `functions-analysis.csv`); the other columns were not
+measured again. Of the 329 extra, 153 are call targets, 98 Function Start Search hits, 76
+Shared Return targets and 2 seeds; 71 of the 98 and 45 of the 153 are functions of the final
+Java project (made there by RecoverFunctions). Superseded: 22,388 / 935 / 365 (112 of them
+Shared Return targets). Note that `functions-analysis.csv` (2026-10-14) was made by Ghidra
+12.1.2_DEV (`/opt/ghidra` is 12.2), the source here is 12.3. Superseded: "made by Ghidra 12.2",
+the README's earlier statement; see the 12.2 trace under "Against Java" below.
 
 `name`, `exported`, `vtable_class` and `lua` match on 99.9% or more of the rows; `fid` is
 always 0. Superseded (branch `fid`): `fid` and the library names come from Function ID, see
@@ -579,7 +599,7 @@ script's own run time in Ghidra was not measured here.
 ## Project store and the editing scripts
 
 ```sh
-ghidra-rs edit <pe32> --store <file> [--seeds <csv> | --functions-from <csv>]... [--sla <file>] <command>
+ghidra-rs edit <pe32> --store <file> [--new-store] [--seeds <csv> | --functions-from <csv>]... [--sla <file>] <command>
 ghidra-rs analyze <pe32> ... --store <file>
 ```
 
@@ -592,32 +612,52 @@ decision of 2026-11-15: plain text in the project's repo, and every run starts f
 
 ### The file
 
-One file, one record per line, fields separated by one space, addresses as `0x%08x`. Records
-are written in the order they are applied and sorted by address within a kind, so a change
-is a small diff:
+One file, one record per line, fields separated by one space, addresses as `0x%08x`. The
+first line names what the store was made on: FNV-1a 64 hashes of the binary's bytes and of
+the seed set (a byte for `--functions-from`, then the `--seeds`/`--functions-from` entries
+sorted without repeats). The records that change what disassembly decodes or reads (`clear`,
+`noreturn`, `code`, `switch`, `override`) follow in the order the edits made them, since
+replaying them in another order gives another program ("code, then a clear inside what it
+decoded"; "code decoded behind a call, then the callee's no-return flag cleared"). The
+records that only set the final state (`function`, `body`, `thunk`) come last, sorted by
+address within a kind. A command appends to the first part and rewrites the second, so a
+change is still a small diff. `Store::apply` replays the file from top to bottom.
 
 ```text
-ghidra-rs-store 1
+ghidra-rs-store 2 binary 0x<16 hex> seeds 0x<16 hex>
 clear <first>-<last>               instructions overlapping the range are removed
 noreturn <addr> on|off             the no-return flag of a function (or import slot)
 switch <jump> <target>...          the targets of a computed jump
 code <addr>                        disassemble from here (flow is followed)
+override <addr> call_return|none   the flow override of an instruction
 function <entry> create|remove     a function analysis lacks, or one it has
 body <entry> <first>-<last>...     a fixed body in place of the flow from the entry
-override <addr> call_return|none   the flow override of an instruction
 thunk <entry> off|<target>         the function is (not) a thunk
 ```
 
-`analyze --store` applies it right after discovery, before anything reads the analysis, so
-`--functions`, `--gaps`, `--abi-callers` and `--decomp-prelude` (the decompiler's function
-list) all see the edited program. Bodies are computed again from the flow at the end, so a
-function re-flows whenever a neighbour is created or removed or a flag changes; only a `body`
-record pins one, and `edit reflow <addr>` drops that record.
+Superseded (2026-11-17, review of `m3-int6`): version 1 (first line `ghidra-rs-store 1`) wrote
+every kind sorted by address and applied all `clear`, then all `noreturn`, then all `code`
+records, which lost the order of the edits; it named no binary or seed set. Version 1 files
+are refused; make them again with `edit --new-store`.
 
-What fails instead of being skipped: a first line other than `ghidra-rs-store 1`, an unknown
-record, a malformed address or range, two records of one kind for one address, a `code`,
-`function`, `switch` or `override` address where no instruction decodes, a `body` or `thunk`
-of an address that is no function. There are no comment lines: a command rewrites the whole
+`analyze --store` follows Java's order: discovery and the constants pass (`disassemble` with
+constants, which Ghidra's auto-analysis runs before any script), then the store, and the
+bodies computed after both; only then the `--abi-callers` contract entries and the
+`--facts` passes, so `--functions`, `--gaps`, `--abi-callers`, `--facts` and
+`--decomp-prelude` (the decompiler's function list) all see the edited program. `edit` proves
+its store on the same base (discovery and the constants pass). Superseded: the store was
+applied right after discovery and the constants pass of `--abi-callers` and `--facts` ran
+after it, on a program `edit` never proved the store on. Bodies are computed again from the
+flow at the end, so a function re-flows whenever a neighbour is created or removed or a flag
+changes; only a `body` record pins one, and `edit reflow <addr>` drops that record.
+
+What fails instead of being skipped: a first line other than version 2's, a store made on
+another binary or seed set (`analyze --store` and `edit` both check; note that
+`--abi-callers` adds the targets of `securom_functions.csv` to the seeds, so its store must be
+made with those seeds too), an unknown record, a malformed address or range, an ordered record
+after the `function`/`body`/`thunk` records, two `function`, `body` or `thunk` records for one
+address, a `code`, `function`, `switch` or `override` address where no instruction decodes
+when its turn comes, a `body` or `thunk` of an address that is no function. There are no comment lines: a command rewrites the whole
 file and would drop them.
 
 ### What ghidra-rs derives, and what the store overrides
@@ -649,30 +689,47 @@ overrides, references made by hand.
 | `fold-slot-fragments <functions-original.csv> <slot-rewrites.csv> <report.csv>` | FoldSlotFragments.java | folds wrapper-exit fragments into their owners |
 | `create-function <addr>`, `remove-function <addr>`, `reflow <addr>` | | single edits |
 
-A store file that is not there yet starts empty. Each command analyses, applies the store,
-runs, and then proves the result: `Project::finish` applies the new store to the untouched
-analysis and compares instructions, functions, no-return flags, switch targets and bodies
-with what the command left. Any difference is an error and nothing is written.
+A missing store file is an error; `edit --new-store` makes a new one (and refuses a file that
+is there), so a mistyped `--store` path cannot start an empty store unnoticed. Superseded: a
+store file that was not there started empty. Each command analyses, applies the store, runs,
+and then proves the result: `Project::finish` applies the new store to the untouched analysis
+and compares instructions, functions, no-return flags, switch targets and bodies with what
+the command left. Any difference is an error and nothing is written. The store is written to
+`<file>.part` and then renamed over `<file>`, so a failed write leaves the old store whole.
 
 Not ported, failing by name before anything is loaded: `export-bindings` (ExportBindings.java
 `--recover`) and `audit-recovered-functions` (AuditRecoveredFunctions.java `--remove-empty`).
-Inside the ports, loud rather than guessed: a `fold-slot-fragments` switch whose operand has a
-base register or a prefix (`not ported: ...`), and a pointer or table word outside the image
-(Java throws there too).
+Inside the ports, loud rather than guessed: a `fold-slot-fragments` switch whose jump has an
+8-bit table displacement or a prefix other than a CS, DS, ES or SS override (`not ported:
+...`), and a pointer or table word outside the image (Java throws there too). The
+`fold-slot-fragments` switch guard is read from the decoded instruction (`CMP <index
+register>,<scalar>`, any encoding, as Java's `getRegister(0)` and `getScalar(1)`); a jump
+`[base + index*4 + table]` takes the index, as Java takes the last register of the operand.
+Superseded: the guard was matched on the bytes `83 /7`, `81 /7` and `3D` only (those are all
+the encodings of a 32-bit register compare without a prefix), and a base register failed.
+Addresses in the CSVs and arguments read as Java's `Long.decode` (sign, `0x`/`0X`/`#` hex,
+leading-`0` octal, decimal) and fields as `String.split(",")` (empty fields at the end
+dropped). Superseded: octal and `#` read as decimal or failed, and a trailing comma failed.
 
 Where a port cannot do what Java does:
 
 - Java makes a function of one undefined byte where nothing decodes. Here `create_function`
-  refuses; `add-relocated-entries` and `define-table-functions` print the address on stderr
-  and go on, `recover-functions` reports `no_entry_instruction` (it also stands for Java's
+  refuses; `add-relocated-entries` and `define-table-functions` print the address on stderr,
+  go on, and count those in their summary line ("... not created where Java makes a one-byte
+  function"), `recover-functions` reports `no_entry_instruction` (it also stands for Java's
   `disassembly_failed`, which Java tells apart by a return value that is true either way).
 - `recover-functions` reports `defined_data` only for address-table slots.
 - `clear-false-noreturn` has no defined data to clear and no fall-through overrides; the
   cleared item's text is ghidra-rs's disassembly; names are export names or `FUN_<addr>`.
-- `fold-slot-fragments`: `setBody` cannot fail on an overlap. Bodies here re-flow as soon as a
-  fragment goes, so "refit before->after" compares with the body at the start of the round
-  (Java's body until `setBody`). An owner that is itself folded by its own walk is skipped
-  (Java goes on with the deleted function).
+- `fold-slot-fragments`: `setBody` fails as Java's OverlappingFunctionException ("refit
+  failed Unable to create function at ... due to overlap with range [...]", the old body
+  kept), but only for the instructions the body gains: bodies the flow derives here may share
+  instructions, where Java's never do. The range named is the first such instruction, which
+  may not be the one Java names. Bodies here re-flow as soon as a fragment goes, so "refit
+  before->after" compares with the body at the start of the round (Java's body until
+  `setBody`). An owner that its own walk removes ends the command with an error, as Java's
+  next call on the deleted function throws. Superseded: `setBody` could not fail, and such an
+  owner was skipped.
 
 ### Against Java (Mercenaries2.analysis.exe, 2026-11-17)
 
@@ -706,6 +763,52 @@ The store after those four commands: 23128 records (18365 `function`, 2471 `over
 1434 `body`, 812 `thunk`, 43 `code`, 3 `noreturn`; 696 KB). An `edit` run takes 20 to 30 s of CPU on the
 shared desktop (the analysis, the command, the store applied twice; about 1.8 GB at the peak);
 `clear-false-noreturn` took 115 s of CPU.
+
+Superseded (2026-11-17, review of `m3-int6`): the tables above are from before the review
+fixes (store version 1, edits on discovery without the constants pass, `fold-slot-fragments`
+skipping an owner its own walk removed); rerun with that build, the four commands give the
+same 36602 / 1033 / 180. With the fixes, `fold-slot-fragments` stops on mercs2 with
+"FoldSlotFragments: the walk from 0x00861190 removed that owner itself": 0x861190 is a
+function in ghidra-rs's discovery (reached by jumps only) and an owner of a rewritten site,
+where Java has no function there (not in its facts export, its original functions or its fold
+report); the old build removed it in the same way and went on. The pipeline with the
+fixes is therefore not comparable yet. Without `fold-slot-fragments` (`recover-functions`,
+`add-relocated-entries`, `clear-false-noreturn`), the `.text` functions in both / Java only /
+ghidra-rs only are 36864 / 771 / 2338 with the fixes against 36610 / 1025 / 2336 with the old
+build: `recover-functions` creates 16406 (16150 before) once it runs after the constants pass.
+The fixed store is 16488 lines (16449 `function`, 35 `code`, 3 `noreturn`).
+
+With the Shared Return port (2026-11-17) `fold-slot-fragments` stopped at 0x00861190 (superseded: see "Resolved" below); the
+three other commands give 36861 / 774 / 2314 (`recover-functions` creates 16417, the store has
+16498 records). Why 0x861190 is still made: 0x8614c7 (`JMP 0x861190`, in 0x8613d0) jumps back
+before 0x8613d0; nothing falls into 0x861190 (0x861183-0x86118f is INT3 padding), no
+conditional flow reaches it, and 0x8613d0's body has more than one range (it runs on through
+0x861190, 0x5110f1 and 0x86119a), so every scan set with 0x8613d0 in it holds the jump. In
+Java's plain analysis (`functions-analysis.csv`) 0x5110f1 and 0x86119a are Shared Return
+functions and 0x8613d0's body (260 bytes) holds 0x861190-0x861197, but 0x861190 is no function.
+Walking SharedReturnAnalysisCmd by hand (also with the cache stale, and with
+CreateFunctionCmd's queue and `subtractBodyFromExisting`) creates 0x861190 in every order tried,
+so the rule that leaves it out is not found; seeding discovery with all of Java's plain
+functions still creates it. Not found, and not needed: see "Resolved" below.
+
+Resolved (2026-11-18): `fold-slot-fragments` no longer stops at 0x00861190. A fresh headless
+Ghidra 12.2_DEV run (`rust/tools/ghidra/TraceFunctions.java` logs the analyzers' calls) does
+create 0x861190 (a queued CreateFunctionCmd makes it and nothing removes it), so ghidra-rs's
+discovery agreeing with Java there was right. `functions-analysis.csv` (2026-10-14) is from Ghidra
+12.1.2_DEV, not 12.2, and the 12.2 chain differs: RecoverFunctions 15,938 created,
+FoldSlotFragments 2,183 removed and 1,438 refit (12.1.2: 2,204 / 1,438), ClearFalseNoReturn 1
+cleared (458 call sites). Plain discovery against that 12.2 trace is 22,390 / 899 / 325 in both /
+Java only / ghidra-rs only (against the 12.1.2 CSV 22,386 / 937 / 329). Java 12.2's
+FoldSlotFragments removes 0x861190 as an owner of its own walk, writes `0x00861190,removed` and
+then `0x00861190,refit failed Object has been deleted.` (the setBody call throws into the script's
+catch), and goes on. `fold-slot-fragments` does the same now. The four commands on a fresh store
+give: `recover-functions` 16,417 created, `add-relocated-entries` 43, `clear-false-noreturn` 3
+cleared (2 call sites; 12.2: 1 cleared, 458 call sites, not explained), `fold-slot-fragments` 2,163
+removed, 1,425 refit, 1 refit failed (0x00861190), 2 rounds; the store has 23,398 records. Against
+Java 12.2 that is 2,163 against 2,183 removed and 1,425 against 1,438 refit. The final `.text`
+function set against the facts export (from the 12.1.2-era project) is 36,856 in both, 779 Java only,
+164 ghidra-rs only (36,602 / 1,033 / 180 before the review fixes). Superseded: the text before this
+note, which says the fold stops and the rule that leaves 0x861190 out is not found; there is no such rule.
 
 Not compared: flow overrides against the 3365 of the facts export (ghidra-rs derives them and
 has no export of them), functions outside `.text`, body ranges beyond their size. The shadow
@@ -3725,6 +3828,8 @@ Readers of the symbols that changed with them:
 - `PrintC::pushMismatchSymbol` for a variable larger than the symbol at its address
   (`_xStack00000000`).
 - `linkSymbol` fails loudly where `handleSymbolConflict` would make a dynamic symbol.
+  (Superseded: the reference, Ghidra 12.3, has no `handleSymbolConflict`; `linkSymbol` links any
+  entry that is not a conflict, see "Integration `m3-int6`: review fixes".)
 - `RuleStringCopy` fails loudly on a character copied into a symbol of `restructure_varnode`
   (`StringSequence` is not ported).
 - Fixed on the way: `subflow.rs` and `subfloat.rs` read the size of a locked varnode's type
@@ -3734,7 +3839,8 @@ Readers of the symbols that changed with them:
 Not ported, each failing with an error that names it: a structure or union among the hints, a
 locked prototype with parameters, a piece of an array symbol as a data-type
 (`getTypePartialStruct`), a reference into the stack parameters of a locked prototype, a load or
-store guard whose pointer points to a union. (Superseded: "a valid load or store guard
+store guard whose pointer points to a union (since "Integration `m3-int6`: review fixes": whose
+pointer has a data-type that `needsResolution`, or points to a union). (Superseded: "a valid load or store guard
 (`MapState::addGuard`, the value-set ranges)" in this list: the integration `m3-int6` joined
 this port with `MapState::addGuard` of "Value-set analysis and the stack guards"; in the
 `decompile` root the guard's hint takes the data-type its pointer points to, see "Integration
@@ -4381,7 +4487,13 @@ a block that is not writable is a `wref` now.
 of match, up to four names, the libraries (family, version, variant; shortened from 5
 libraries on). Only where no matched name is mangled: Java shows the demangler's full form of
 a mangled name, which is not ported, and such a function keeps its `underived comments`
-record.
+record. "Multiple Matches With Same Base Name" (`numNames() > 1` and
+`getMostOptimisticCount() == 1`) is not ported, checked in the `m3-int6` review: with no
+mangled name the final list is the raw or the underscore-stripped names, whichever is
+shorter, so the count can reach 1 only through the demangled sets, and those are dropped
+as soon as one name does not demangle. That holds while the Microsoft demangler demangles no
+name without `?` or `@` (the test `fid.rs` uses for "mangled"), which was not checked in the
+demangler's sources.
 
 **Against Java** (mercs2, `FUNCS=java`; equal records and their share of Java's; each row adds
 its piece to the rows above it):
@@ -4501,7 +4613,11 @@ not have are gone (29 `trivial`, 14 `unconcluded`, 7 `violation`, 4 `unknown`: c
 bytes that are data now); 7 rows Java has are new with Java's status (4 `trivial`, 2
 `unknown`, 1 `unconcluded`); 1 row went from `ok` to Java's `unknown`; 1 row Java has is gone
 (0x56d910 called at 0x550c94, `ok` on both sides before: that code is no longer reached).
-`--functions` and `--gaps` give the same files, byte for byte.
+Why (traced in the `m3-int6` review): ghidra-rs had reached 0x550c94 from an offcut table
+entry, 0x550c74, in the `.securom` pointer run at 0x24d7780. Java's real entry there is
+0x550be0, reached through a pointer at 0xd17218 that ghidra-rs does not see: the only
+reference to that table is `PUSH 0xd17200` in `.securom` code at 0x24f5a6a, which ghidra-rs
+leaves undecoded. Superseded: "that code is no longer reached" gave no cause. `--functions` and `--gaps` give the same files, byte for byte.
 
 The checks against `decomp_dbg` do not read the facts: `bars.sh` with `CORPORA=m8` gives 55
 lines, each equal to the baseline's (`m3-int5-116d9d34da.summary`). `cargo fmt` and `clippy -D
@@ -4538,7 +4654,7 @@ their counts are each branch's, on its own base. Where two branches met, the cod
   element of an array) when that has the step's size, else unknown bytes of the step's size, as
   the C++; in the partial function it is always the unknown type. New here, on neither branch:
   the typed case, and a loud error for a pointer to a union (`getTypeReadFacing` needs the
-  union's resolution).
+  union's resolution; widened in "review fixes" below to any type that `needsResolution`).
 - `namevars.rs`, `finalizeDatatype`: `getExactPiece` of "pieces of symbols"
   (`infertypes::exact_piece`), and the piece's type is kept as in "Local symbols"
   (`type_finalized`). The loud "changing the data-type of a variable" is gone.
@@ -4604,6 +4720,44 @@ guard hint with a pointer whose target has the step's size (the code new in this
 above, and no line of the M8 baseline moved).
 
 Full pass (2026-11-18, `bars-queue.sh` on `ff58230822`, desktop and Mac): 132 of 133 pairs, the Mac dropped off the network and lost `swsn-t-switch`, rerun on the desktop: 2001 / 2004 (loud 3, silent 0). Silent 0 in every pair. No pair has fewer identical functions or more silent misses than the `m3-int5` baseline; `r5s`, `r5slock` and `r5dtlocksv` M500 have reference finished 498 instead of 499 (0x6b21e0, the reference no longer finishes it), while their identical counts rose (`r5s` 446 -> 498, `r5slock` and `r5dtlocksv` 451 -> 467). Switch: `paramdouble` 2002 / 2004, `swfs-r` 2003, `swsn-r` 2003, `swfs-t` and `swsn-t` 2001. Superseded: "Not run: the full pass" above.
+
+### Integration `m3-int6`: review fixes (2026-11-17)
+
+Six review findings on `m3-int6`, each checked against the C++ of this tree (Ghidra 12.3):
+
+- `namevars.rs`, `linkSymbol`: the reviewer read a newer Ghidra's `handleSymbolConflict`; this
+  tree's `Funcdata::linkSymbol` has none (it links any entry from `queryProperties` that is not a
+  conflict). The loud "a variable in the storage of another one's symbol (buildDynamicSymbol)"
+  (only for a symbol valid everywhere) is removed, so the port links as the reference does. It
+  fired on no M8 or M500 function.
+- `mapstate.rs`, `checkUnaliasedReturn`: the alias test is the C++ `alias <= off + (size - 1)`
+  (wrapping), not `alias < off + size`, which could overflow.
+- `getTypeReadFacing` / `getTypeDefFacing` (`infertypes::vn_type_facing`): `MapState::addGuard`,
+  `RuleStringCopy`, `RuleStringStore` and `gatherParamSpacebaseRefs` read the varnode's own
+  type, where the C++ resolves a type that `needsResolution` (a union, a pointer to one, a
+  one-element array, a one-field structure). `unionresolve.cc` is not ported, so such a type now
+  fails loudly there instead of being used unresolved.
+- `coreaction.rs`, `gatherParamSpacebaseRefs`: `refs.sort()` is `std::list::sort` with
+  `InputRef::operator<`, whose `typeOrder <= 0` holds both ways on a tie (a comparator a Rust
+  sort may panic on). `stdsort::list_sort` ports libstdc++'s bottom-up list merge sort, so the
+  order is the reference's in every case; its unit test pins g++'s order for a strict and a
+  non-strict `less` (`tools/stdsort_ref.cc`).
+- `RuleSwitchSingle`: the header warning prints the address with `AddrSpace::printRaw`
+  (`printc::raw_offset`), not a fixed eight digits.
+- `recoverNameRecommendationsForSymbols`: `findOverlap` is `ScopeInternal::findOverlap` on the
+  scope's `rangemap` (`Scope::find_overlap`): the first sub-range in the map's order, where the
+  port took the lowest entry offset and then the lowest symbol id.
+
+Counts, the desktop, `TIMEOUT` 120: `cargo test` 158 passed (157 and the new `list_sort_matches_gxx`);
+`cargo fmt` and `cargo clippy -D warnings` clean. M8, all 57 checks: every line equal to the
+`m3-int6` run. M500: `pcd` 493 / 499 (loud 6, silent 0), the same six misses; `pmd` 496 / 499
+with the reference timing out on 0x4c48d0 under load (another full pass ran on the machine),
+which rerun alone (`TIMEOUT` 600) is identical, so 497 / 500 (loud 3, silent 0) as before. No
+function changed state. Not run: the other 55 checks on M500, the switch, `simple` and
+`r5d-adc` corpora, the Mac. Not seen in a check: a type needing resolution at the four readers
+(no function failed there), a tie of `typeOrder` in `gatherParamSpacebaseRefs`, a `findOverlap`
+whose first sub-range differs from the lowest offset, a `RuleSwitchSingle` warning (the address
+format is the same for a 4-byte space).
 
 ## Speed
 
