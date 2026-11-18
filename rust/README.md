@@ -5308,6 +5308,15 @@ Not modelled, ranked by what is left of the 1,743:
   each function had when it was made (here: the body of the turn, the non-returning functions
   of this analysis's rule on that turn's bodies, kept for the turn only).
 - the Stack analyzer (903) on each later batch: here every purge turn comes before it.
+- discovery's analyzers are the old discovery at Java's priorities, not ports of Java's analyzers
+  (labelled in `Analysis::run`): Disassemble Entry Points puts every seed in at 200
+  (EntryPointAnalyzer's do-later set of suspect entries, at 599, is not modelled); Function Start
+  Search disassembles inline and repeats until nothing is new (Java searches once and queues
+  DisassembleCommand and CreateFunctionCmd at 400 and 401); Function Start Search After Data
+  sweeps everything and ignores its set (Java's FunctionStartDataPostAnalyzer searches the added
+  data for the `after="data"` patterns), and is notified with the table targets, not new data.
+- `RET n` is read unsigned: Java (the facts and Java 12.2) has extrapop 33175 for 0x1f682c0 (`RET 0x8193`, 0x8193 + 4),
+  so `getScalar(0).getSignedValue()` gives the positive value there.
 
 Not run: the full pass, the Mac, the shadow check (what `--abi` reads, the functions, bodies,
 non-returning functions and `Analysis::purge`, is unchanged).

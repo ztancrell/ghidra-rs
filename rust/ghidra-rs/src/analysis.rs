@@ -407,6 +407,15 @@ impl Analysis {
         }
         let analyzer = |name, kind, priority, id| Analyzer { name, kind, priority, id };
         let mut mgr = Manager::new(vec![
+            // Not Java's analyzers, the old discovery at their priorities (to port):
+            // - Disassemble Entry Points: EntryPointAnalyzer's do-later set (suspect entries,
+            //   REFERENCE_ANALYSIS.before()) is not modelled; all seeds go in at 200.
+            // - Function Start Search (402): one search, disassembly inline, skipping covered
+            //   bytes and repeating until nothing is new; Java searches once and queues
+            //   DisassembleCommand and CreateFunctionCmd at priority - 2 and - 1.
+            // - Function Start Search After Data (898): the same full sweep, ignoring its set;
+            //   Java's FunctionStartDataPostAnalyzer searches only the added data for the
+            //   after="data" patterns, and its notify set here is the table targets, not new data.
             // with External Entry References: the seeds
             analyzer("Disassemble Entry Points", Kind::Byte, priority::BLOCK_ANALYSIS, Task::EntryPoints),
             analyzer("Function Start Search", Kind::Byte, priority::CODE_ANALYSIS + 2, Task::StartSearch),
