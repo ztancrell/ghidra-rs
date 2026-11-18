@@ -2155,6 +2155,8 @@ logical value in a join varnode in `subflow` (0x5cee30, 0x5d8680, 0x5d87c0). Not
 other M500 checks, the switch, `simple` and `r5d-adc` corpora (the full pass comes next), and
 the S10 checks against Java Ghidra.
 
+Full pass (2026-11-18, `bars-queue.sh` on `ff58230822`, desktop and Mac): 132 of 133 pairs, the Mac dropped off the network and lost `swsn-t-switch`, rerun on the desktop: 2001 / 2004 (loud 3, silent 0). Silent 0 in every pair. No pair has fewer identical functions or more silent misses than the `m3-int5` baseline; `r5s`, `r5slock` and `r5dtlocksv` M500 have reference finished 498 instead of 499 (0x6b21e0, the reference no longer finishes it), while their identical counts rose (`r5s` 446 -> 498, `r5slock` and `r5dtlocksv` 451 -> 467). Switch: `paramdouble` 2002 / 2004, `swfs-r` 2003, `swsn-r` 2003, `swfs-t` and `swsn-t` 2001. Superseded: "Not run: the full pass" above.
+
 ## Running stages in parallel
 
 Strict chain first: S0 → S1a → S1b → S2. After S2 the work fans out. Under the cap of two

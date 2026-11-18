@@ -4603,6 +4603,8 @@ guard hint with a pointer whose target has the step's size (the code new in this
 `ptrsubcharconstant` changing an output without facts (the checks with it on give the counts
 above, and no line of the M8 baseline moved).
 
+Full pass (2026-11-18, `bars-queue.sh` on `ff58230822`, desktop and Mac): 132 of 133 pairs, the Mac dropped off the network and lost `swsn-t-switch`, rerun on the desktop: 2001 / 2004 (loud 3, silent 0). Silent 0 in every pair. No pair has fewer identical functions or more silent misses than the `m3-int5` baseline; `r5s`, `r5slock` and `r5dtlocksv` M500 have reference finished 498 instead of 499 (0x6b21e0, the reference no longer finishes it), while their identical counts rose (`r5s` 446 -> 498, `r5slock` and `r5dtlocksv` 451 -> 467). Switch: `paramdouble` 2002 / 2004, `swfs-r` 2003, `swsn-r` 2003, `swfs-t` and `swsn-t` 2001. Superseded: "Not run: the full pass" above.
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The

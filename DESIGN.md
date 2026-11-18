@@ -415,7 +415,7 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `swsn-r` 499 / 499; no function of the `m3-int5` baseline got worse (0x6b21e0 of `r5s` not compared: the
    reference no longer finishes it, as on the branches). Superseded: the `pcd` and `pmd` M500
    counts of the lines above, "`default-options.txt` holds 2 rules", "Open: `ValueSetSolver`", and "Blocked: eight
-   actions" of S10 (ported; the checks against Java Ghidra not rerun). Not run: the full pass. See
+   actions" of S10 (ported; the checks against Java Ghidra not rerun). Full pass 2026-11-18: silent 0 in every pair, none worse than the baseline (Superseded: "Not run: the full pass"). See
    `rust/README.md`, "Integration `m3-int6`".
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
