@@ -263,3 +263,32 @@ fn code_pointers_of_mixed_address_table_x86_32() {
     assert_eq!(an.table_slots.get(&0x402004), Some(&0x401030));
     assert!(an.insns.contains_key(&0x401030) && an.insns.contains_key(&0x401040));
 }
+
+// A block of data that is flagged executable (SecuROM's `Sdata`): an address table an
+// instruction refers to becomes pointers (OperandReferenceAnalyzer.createFlowTable) and
+// nothing is disassembled there; a pointer to another pointer is no code either.
+#[test]
+fn address_table_in_executable_data_x86_32() {
+    let sl = Sleigh::load(&Sleigh::sla_path("x86")).unwrap();
+    let mut text = vec![0x68, 0x00, 0x20, 0x40, 0x00, 0xc3]; // 401000 PUSH 0x402000; RET
+    text.resize(0x20, 0xcc);
+    let mut data = Vec::new();
+    // 402000: three pointers into the table itself, then a `RET`
+    for w in [0x402004u32, 0x402008, 0x402000] {
+        data.extend(w.to_le_bytes());
+    }
+    data.extend([0xc3, 0, 0, 0]);
+    data.resize(0x30, 0);
+    let img = Image {
+        sections: vec![
+            Section { name: ".text".into(), exec: true, readonly: true, zero_tail: 0, addr: 0x401000, data: text },
+            Section { name: "Sdata".into(), exec: true, readonly: false, zero_tail: 0, addr: 0x402000, data },
+        ],
+        ..Image::default()
+    };
+    let mut an = Analysis::run(&img, &sl, &[0x401000], true).unwrap();
+    an.disassemble(&img, &sl, &[], true);
+    assert_eq!(an.table_slots.get(&0x402000), Some(&0x402004));
+    assert_eq!(an.table_slots.get(&0x402008), Some(&0x402000));
+    assert!(an.insns.range(0x402000..0x402030).next().is_none());
+}

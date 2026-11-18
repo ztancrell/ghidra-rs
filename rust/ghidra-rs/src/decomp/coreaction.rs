@@ -26,12 +26,52 @@ fn calc_mask(size: u32) -> u64 {
     }
 }
 
-/// An action with nothing to do on x86 without locked prototypes, segment ops or overrides
-/// (`segmentize`, `internalstorage`; superseded: `paramdouble` was one until R5 slice 3, now
-/// `rules::param_double`). Superseded: `lanedivide` was one until R3
-/// (`lanedivide.rs`).
+/// An action with nothing to do on x86 without locked prototypes or overrides
+/// (`internalstorage`, `forcegoto`; superseded: `paramdouble` was one until R5 slice 3, now
+/// `rules::param_double`; `segmentize` was one until [`segmentize`]). Superseded: `lanedivide`
+/// was one until R3 (`lanedivide.rs`).
 pub(crate) fn nothing(_: &mut Funcdata, _: &Arch) -> Result<i32> {
     Ok(0)
+}
+
+/// Port of `ActionSegmentize::apply` (with `SegmentOp::unify`): once per function, every
+/// CALLOTHER of a `<segmentop>` user op becomes `SEGMENTOP(space, base, inner)`.
+pub(crate) fn segmentize(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
+    if fd.segmentize_done || arch.userops.segment_ops().next().is_none() {
+        return Ok(0);
+    }
+    fd.segmentize_done = true;
+    let mut count = 0;
+    for segdef in arch.userops.segment_ops() {
+        for segroot in fd.ops_created_with(Opcode::Callother) {
+            let ins = fd.op(segroot).ins.clone();
+            if fd.op(segroot).is_dead() || fd.vn(ins[0]).offset != segdef.index {
+                continue;
+            }
+            if ins.len() != 3 {
+                return err(format!("Segment op in wrong form at 0x{:08x}", fd.op(segroot).seq.addr));
+            }
+            // a constant input takes the size the op declares
+            let sized = |fd: &mut Funcdata, vn: VarnodeId, size: u32| match fd.vn(vn).is_constant() {
+                true => fd.new_constant(size, fd.vn(vn).offset),
+                false => vn,
+            };
+            let (base, inner) = if segdef.num_variable_terms() == 2 {
+                let base = sized(fd, ins[1], segdef.base_size);
+                (base, sized(fd, ins[2], segdef.inner_size))
+            } else {
+                let inner = sized(fd, ins[1], segdef.inner_size);
+                (fd.new_constant(4, 0), inner)
+            };
+            fd.op_set_opcode(segroot, Opcode::Segmentop);
+            let spc = fd.new_varnode_space(segdef.space);
+            fd.op_set_input(segroot, spc, 0)?;
+            fd.op_set_input(segroot, base, 1)?;
+            fd.op_set_input(segroot, inner, 2)?;
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1796,6 +1836,14 @@ pub(crate) fn deindirect(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             continue;
         }
         let mut vn = fd.op(op).ins[0];
+        // a function pointer with a prototype attached (`TypeCode::getPrototype`, which only
+        // the data-types of the facts of stage S10 carry) forces it on the call: not ported
+        if let Some(facts) = &arch.facts {
+            let ty = super::infertypes::vn_type(fd, vn);
+            if fd.types.ptr_to(ty).is_some_and(|to| facts.code_with_prototype(fd.types.strip_typedefs(to))) {
+                return err("deindirect: a call through a pointer to a function data-type with a prototype (forceSet) is not ported");
+            }
+        }
         while let Some(d) = fd.vn(vn).def.filter(|&d| fd.op(d).opc == Opcode::Copy) {
             vn = fd.op(d).ins[0];
         }
@@ -1807,8 +1855,8 @@ pub(crate) fn deindirect(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         } else {
             None
         };
-        let Some(entry) = target.filter(|e| arch.functions.contains_key(e)) else { continue };
-        let callee = arch.functions[&entry].proto.clone();
+        let Some(entry) = target else { continue };
+        let Some(callee) = arch.callee_proto(&mut fd.types, entry)? else { continue };
         let call = fd.call_mut(c);
         call.entry = Some(entry);
         call.known = true;
@@ -2338,7 +2386,7 @@ fn remove_do_nothing_block(fd: &mut Funcdata, arch: &Arch, bb: BlockId) -> Resul
 }
 
 // ---------------------------------------------------------------------------------------
-// ActionLikelyTrash, ActionUnjustifiedParams, ActionNodeJoin, ActionConditionalExe
+// ActionLikelyTrash, ActionUnjustifiedParams, ActionNodeJoin
 
 /// Port of `ActionLikelyTrash::apply`: an input register the model calls likely trash, whose
 /// value reaches only INDIRECTs, partial copies and masks, is cut off there.
@@ -2475,6 +2523,8 @@ fn trace_trash(fd: &Funcdata, vn: VarnodeId) -> Option<Vec<OpId>> {
 
 /// Port of `ActionUnjustifiedParams::apply`: an input that sits in a parameter entry but not
 /// justified would be widened (`adjustInputVarnodes`), which is not ported; it fails loudly.
+/// A stack input counts too (0x581bf6: one byte in the middle of a parameter slot; it was
+/// passed over without a word, which the check `pmd` showed).
 pub(crate) fn unjustified_params(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     let Some(m) = fd.proto.model else { return Ok(0) };
     let list = &arch.spec.models.get(m).input;
@@ -2483,7 +2533,6 @@ pub(crate) fn unjustified_params(fd: &mut Funcdata, arch: &Arch) -> Result<i32> 
         if !v.is_input() {
             continue;
         }
-        let Space::Sleigh(_) = v.space else { continue };
         // unjustifiedInputParam: an entry contains it, not at the justified offset
         let unjustified = (0..list.entries.len()).any(|i| {
             list.justified_contain(i, v.space, v.offset, v.size).is_some_and(|o| o != 0)
@@ -2499,59 +2548,6 @@ pub(crate) fn unjustified_params(fd: &mut Funcdata, arch: &Arch) -> Result<i32> 
 /// `ActionNodeJoin`: ported in [`super::nodejoin`] (stage S8).
 pub(crate) fn node_join(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     super::nodejoin::node_join(fd, arch)
-}
-
-/// `ActionConditionalExe`: a block re-testing the condition of the block that decided how it
-/// was reached is removed (condexe.cc), which is not ported; finding a candidate on the same
-/// condition (`BooleanMatch`, as `verifySameCondition`) fails loudly.
-pub(crate) fn conditional_exe(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
-    if fd.blocks.unreachable {
-        return Ok(0);
-    }
-    for &ib in &fd.blocks.list {
-        let b = fd.blocks.block(ib);
-        if b.ins.len() != 2 || b.outs.len() != 2 {
-            continue;
-        }
-        let Some(&cb) = b.ops.last() else { continue };
-        if fd.op(cb).opc != Opcode::Cbranch {
-            continue;
-        }
-        let walk = |mut t: BlockId| {
-            while fd.blocks.block(t).outs.len() == 1 && fd.blocks.block(t).ins.len() == 1 {
-                t = fd.blocks.block(t).ins[0].point;
-            }
-            t
-        };
-        let init = walk(b.ins[0].point);
-        if fd.blocks.block(init).outs.len() != 2 || walk(b.ins[1].point) != init || init == ib {
-            continue;
-        }
-        let Some(&icb) = fd.blocks.block(init).ops.last() else { continue };
-        // verifySameCondition: `BooleanExpressionMatch::verifyCondition`, the same or the
-        // complementary condition, in the jump-table partial function too (the C++ runs
-        // `multicse` there, ghidra-rs does not: `action::PARTIAL_SKIP`)
-        if fd.op(icb).opc != Opcode::Cbranch {
-            continue;
-        }
-        if super::rules::boolean::correlated(fd, fd.op(cb).ins[1], fd.op(icb).ins[1])? {
-            // testRemovability, the part that needs no read analysis: an op of the block that
-            // can never move (a call, LOAD, STORE, INDIRECT, an address-tied output) leaves
-            // the block as it is
-            let fixed = b.ops[..b.ops.len() - 1].iter().any(|&o| {
-                let o = fd.op(o);
-                o.opc != Opcode::Multiequal
-                    && (o.is_call()
-                        || matches!(o.opc, Opcode::Load | Opcode::Store | Opcode::Indirect)
-                        || o.out.is_some_and(|v| fd.vn(v).has(VnFlags::ADDRTIED)))
-            });
-            if fixed {
-                continue;
-            }
-            return err("ActionConditionalExe: removing a re-tested condition is not implemented in ghidra-rs yet");
-        }
-    }
-    Ok(0)
 }
 
 /// `vn->getHigh()->getType()`: fails without high variables, as `Varnode::getHigh` does.
@@ -2615,10 +2611,18 @@ pub(crate) fn output_prototype(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
 /// input varnodes (each one the model could pass is a trial, active when something reads it;
 /// a merged model resolves to its best member; `fillinMap` picks the used trials) and stored
 /// as the local scope's category-0 symbols (`FuncProto::updateInputTypes`,
-/// `ProtoStoreSymbol::setInput`). Without `restructure_varnode` (not ported) the scope has no
-/// fake inputs and no open parameter references, so those parts have nothing to do.
+/// `ProtoStoreSymbol::setInput`). The fake inputs of `restructure_varnode` go first, and a
+/// reference into the stack parameters that no input varnode covers is a trial too
+/// (`markActiveInputRefs`) or gets a symbol of its own (`addRefOnlySymbols`). Superseded:
+/// "Without `restructure_varnode` (not ported) the scope has no fake inputs and no open
+/// parameter references".
 pub(crate) fn input_prototype(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     use super::scope::{SymbolEntry, UseLimit, LOCAL};
+    fd.clear_local_syms(true); // clearCategory(Symbol::fake_input)
+    let refs = if fd.localmap.open_param_refs { gather_param_spacebase_refs(fd, arch)? } else { Vec::new() };
+    if fd.proto.locked.is_some() && !refs.is_empty() {
+        return err("ActionInputPrototype: a reference into the stack parameters of a locked prototype is not ported");
+    }
     if fd.proto.locked.is_none() {
         fd.symtab.clear_category(LOCAL, 0); // clearUnlockedInput
         let models = &arch.spec.models;
@@ -2645,6 +2649,20 @@ pub(crate) fn input_prototype(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
                 if let Some(t) = active.trials.last_mut() {
                     t.mark_active();
                 }
+            }
+        }
+        // markActiveInputRefs
+        for &(off, dt) in &refs {
+            let size = fd.types.size(dt);
+            if fd.has_input_intersection(Space::Stack, off, size)
+                || models.get(model).input.find_entry(Space::Stack, off, size).is_none()
+            {
+                continue;
+            }
+            active.register_trial(Space::Stack, off, size);
+            types.push(dt);
+            if let Some(t) = active.trials.last_mut() {
+                t.mark_active();
             }
         }
         // resolveModel: only a merged model is replaced (by its best member)
@@ -2693,8 +2711,69 @@ pub(crate) fn input_prototype(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             }
         }
     }
+    // addRefOnlySymbols
+    for (off, dt) in refs {
+        if fd.symtab.overlapping(LOCAL, Space::Stack, off, fd.types.size(dt)).is_empty() {
+            fd.add_local_sym(off, dt, false)?;
+        }
+    }
     fd.clear_dead_varnodes();
     Ok(0)
+}
+
+/// Port of `ActionInputPrototype::gatherParamSpacebaseRefs` (with `InputRef::dedup`): the
+/// stack offsets in the parameter range that a PTRSUB or a constant PTRADD off the stack
+/// pointer refers to, each with the data-type pointed to, sorted, less those inside an earlier
+/// one. (`unjustifiedInputParam` only widens a reference on a big-endian stack.)
+fn gather_param_spacebase_refs(fd: &mut Funcdata, arch: &Arch) -> Result<Vec<(u64, super::types::TypeId)>> {
+    use super::types::{Kind, Meta};
+    let mut refs = Vec::new();
+    let Some(sp) = super::heritage_guard::stack_pointer_input(fd, arch) else { return Ok(refs) };
+    let sb = fd.vn(sp).ty.and_then(|t| fd.types.ptr_to(t));
+    if !sb.is_some_and(|t| matches!(fd.types.get(t).kind, Kind::Spacebase { .. })) {
+        return Ok(refs);
+    }
+    let mask = fd.localmap.highest();
+    for op in fd.vn(sp).descend.iter().copied().collect::<Vec<_>>() {
+        let o = fd.op(op);
+        let off = match o.opc {
+            Opcode::Ptrsub => fd.vn(o.ins[1]).offset,
+            Opcode::Ptradd if fd.vn(o.ins[1]).is_constant() => {
+                fd.vn(o.ins[1]).offset.wrapping_mul(fd.vn(o.ins[2]).offset)
+            }
+            _ => continue,
+        } & mask;
+        let params = fd.localmap.params();
+        if !params.iter().any(|&(first, last)| first <= off && off <= last) {
+            continue;
+        }
+        let Some(out) = o.out else { continue };
+        let ct = super::infertypes::vn_type(fd, out);
+        let dt = fd.types.ptr_to(ct).filter(|&t| fd.types.size(t) != 0);
+        let dt = match dt {
+            Some(t) => t,
+            None => fd.types.base(1, Meta::Unknown),
+        };
+        refs.push((off, dt));
+    }
+    // InputRef::operator<: by address, bigger data-types first, then the more specific
+    refs.sort_by(|a, b| {
+        let (sa, sb) = (fd.types.size(a.1), fd.types.size(b.1));
+        a.0.cmp(&b.0).then_with(|| match () {
+            _ if a.1 == b.1 => std::cmp::Ordering::Equal,
+            _ if sa != sb => sb.cmp(&sa),
+            _ if fd.types.order(a.1, b.1) <= 0 => std::cmp::Ordering::Less,
+            _ => std::cmp::Ordering::Greater,
+        })
+    });
+    let mut kept: Vec<(u64, super::types::TypeId)> = Vec::new();
+    for r in refs {
+        match kept.last() {
+            Some(&(last, dt)) if r.0 >= last && r.0 - last < u64::from(fd.types.size(dt)) => {}
+            _ => kept.push(r),
+        }
+    }
+    Ok(kept)
 }
 
 /// Port of `ActionMapGlobals::apply` (`Funcdata::mapGlobals`): each run of overlapping
@@ -2712,9 +2791,11 @@ pub(crate) fn map_globals(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     // byte) or an external reference. Superseded: the query with one byte, which took a
     // function at an import's slot over the external reference holding the 4-byte varnode.
     let span = |e: &super::infertypes::Entry| if e.externref { ptr } else { 1 };
+    // With facts (stage S10) a data symbol holding the whole varnode links it too.
     let linked = |fd: &Funcdata, vn: VarnodeId| {
         let v = fd.vn(vn);
-        v.space == Space::Sleigh(arch.spec.stack_container) && query_global(arch, v.offset, v.size).is_some()
+        v.space == Space::Sleigh(arch.spec.stack_container)
+            && (query_global(arch, v.offset, v.size).is_some() || arch.data_holds(v.offset, v.size))
     };
     let all = fd.loc_all();
     let mut inconsistent = false;
@@ -2752,6 +2833,7 @@ pub(crate) fn map_globals(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         };
         let size = fd.types.size(ct);
         // queryProperties(addr, 1): a symbol over the first byte
+        super::facts::query_symbol(fd, arch, space, addr)?;
         let old = fd
             .symtab
             .find_container(GLOBAL, space, addr, 1, None)?
@@ -2795,6 +2877,7 @@ pub(crate) fn map_globals(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
                 if uncovered.get(k + 1).is_some_and(|&n| fd.vn(n).offset == uoff) {
                     continue;
                 }
+                super::facts::query_symbol(fd, arch, space, uoff)?;
                 if fd.symtab.find_container(GLOBAL, space, uoff, usize_, None)?.is_some() {
                     continue;
                 }
@@ -2819,6 +2902,147 @@ pub(crate) fn map_globals(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         fd.warning_header("Globals starting with '_' overlap smaller symbols at the same address");
     }
     Ok(0)
+}
+
+// ---------------------------------------------------------------------------------------
+// ActionMultiCse, ActionShadowVar
+
+/// The varnode a COPY reads, else the varnode itself ("allow for differences in copy
+/// propagation").
+fn through_copy(fd: &Funcdata, vn: VarnodeId) -> VarnodeId {
+    match fd.vn(vn).def {
+        Some(d) if fd.op(d).opc == Opcode::Copy => fd.op(d).ins[0],
+        _ => vn,
+    }
+}
+
+/// Port of `ActionMultiCse::preferredOutput`: whether `out2` replaces `out1`.
+fn multi_cse_preferred(fd: &Funcdata, out1: VarnodeId, out2: VarnodeId) -> bool {
+    let returned = |vn: VarnodeId| fd.vn(vn).descend.iter().any(|&op| fd.op(op).opc == Opcode::Return);
+    if returned(out1) {
+        return false;
+    }
+    if returned(out2) {
+        return true;
+    }
+    if !fd.vn(out1).has(VnFlags::ADDRTIED) {
+        if fd.vn(out2).has(VnFlags::ADDRTIED) {
+            return true;
+        }
+        return is_unique(fd, out1) && !is_unique(fd, out2);
+    }
+    false
+}
+
+/// Port of `ActionMultiCse::findMatch`: a MULTIEQUAL before `target` reading `vn` whose inputs
+/// are all functionally equal to the target's.
+fn multi_cse_find_match(fd: &Funcdata, bl: BlockId, target: OpId, vn: VarnodeId) -> Option<OpId> {
+    for &op in &fd.blocks.block(bl).ops {
+        if op == target {
+            break;
+        }
+        let ins = &fd.op(op).ins;
+        if !ins.iter().any(|&v| through_copy(fd, v) == vn) {
+            continue;
+        }
+        let tins = &fd.op(target).ins;
+        let same = ins.iter().enumerate().all(|(j, &v)| {
+            let in1 = through_copy(fd, v);
+            let in2 = through_copy(fd, tins[j]);
+            in1 == in2 || super::rules::func_eq_level(fd, in1, in2).0 == 0
+        });
+        if same {
+            return Some(op);
+        }
+    }
+    None
+}
+
+/// Port of `ActionMultiCse::processBlock`: removes one of two equivalent MULTIEQUALs of a block.
+fn multi_cse_block(fd: &mut Funcdata, bl: BlockId) -> Result<bool> {
+    let mut seen: HashSet<VarnodeId> = HashSet::new();
+    let mut found = None;
+    'ops: for &op in &fd.blocks.block(bl).ops {
+        match fd.op(op).opc {
+            Opcode::Copy => continue,
+            Opcode::Multiequal => {}
+            _ => break,
+        }
+        let ins: Vec<VarnodeId> = fd.op(op).ins.iter().map(|&v| through_copy(fd, v)).collect();
+        for &vn in &ins {
+            if seen.contains(&vn) {
+                if let Some(pair) = multi_cse_find_match(fd, bl, op, vn) {
+                    found = Some((pair, op));
+                    break 'ops;
+                }
+            }
+        }
+        seen.extend(ins);
+    }
+    let Some((pairop, targetop)) = found else { return Ok(false) };
+    let (Some(out1), Some(out2)) = (fd.op(pairop).out, fd.op(targetop).out) else {
+        return err("ActionMultiCse: a MULTIEQUAL without output");
+    };
+    if multi_cse_preferred(fd, out1, out2) {
+        fd.total_replace(out1, out2)?;
+        fd.op_destroy(pairop);
+    } else {
+        fd.total_replace(out2, out1)?;
+        fd.op_destroy(targetop);
+    }
+    Ok(true)
+}
+
+/// Port of `ActionMultiCse::apply`: common subexpression elimination of MULTIEQUALs.
+pub(crate) fn multi_cse(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
+    let mut count = 0;
+    for bl in fd.blocks.list.clone() {
+        while multi_cse_block(fd, bl)? {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// Port of `ActionShadowVar::apply`: a MULTIEQUAL at the start of a block with the inputs of an
+/// earlier one becomes a COPY of that one's output.
+pub(crate) fn shadow_var(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
+    let mut oplist = Vec::new();
+    for &bl in &fd.blocks.list {
+        let b = fd.blocks.block(bl);
+        // BlockBasic::getStart: the first address of the cover
+        let start = b.get_start();
+        let mut seen: HashSet<VarnodeId> = HashSet::new();
+        for &op in &b.ops {
+            let o = fd.op(op);
+            if o.seq.addr != start {
+                break;
+            }
+            if o.opc == Opcode::Multiequal && !seen.insert(o.ins[0]) {
+                oplist.push(op);
+            }
+        }
+    }
+    let mut count = 0;
+    for op in oplist {
+        let mut prev = fd.previous_op(op);
+        while let Some(op2) = prev {
+            prev = fd.previous_op(op2);
+            if fd.op(op2).opc != Opcode::Multiequal {
+                continue;
+            }
+            // as the C++, `op` is compared as it is now (a COPY after the first match)
+            let n = fd.op(op).ins.len();
+            if fd.op(op2).ins.len() < n || fd.op(op).ins[..] != fd.op(op2).ins[..n] {
+                continue;
+            }
+            let Some(out) = fd.op(op2).out else { continue };
+            fd.op_set_opcode(op, Opcode::Copy);
+            fd.op_set_all_input(op, &[out])?;
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 #[cfg(test)]

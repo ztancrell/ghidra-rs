@@ -1,7 +1,8 @@
 //! Reading the compiler specification (`.cspec`): port of the spec part of `architecture.cc`
 //! (`Architecture::parseCompilerConfig` and the elements it decodes) for what the decompiler
 //! uses so far: the stack pointer, the return address, the prototype models with
-//! `<resolveprototype>` and the evaluation models, and the `<callfixup>` snippets.
+//! `<resolveprototype>` and the evaluation models, the `<callfixup>` snippets and `<segmentop>`
+//! (`userop.rs`).
 //!
 //! Of `<data_organization>` the size-alignment map is read (struct layout, stage S6); `<global>`
 //! (the global scope's ranges) is skipped; any other element is an error, so a spec using
@@ -114,7 +115,12 @@ impl SleighNames<'_> {
 
 impl CompilerSpec {
     /// Read the `.cspec` text for the language `sleigh` decodes (`names`: its registers and spaces).
-    pub(crate) fn parse(text: &str, sleigh: &Sleigh, names: &SleighNames) -> Result<CompilerSpec> {
+    pub(crate) fn parse(
+        text: &str,
+        sleigh: &Sleigh,
+        names: &SleighNames,
+        userops: &mut super::userop::UserOps,
+    ) -> Result<CompilerSpec> {
         let root = xml::parse(text)?;
         if root.name != "compiler_spec" {
             return err(format!("expected <compiler_spec>, found <{}>", root.name));
@@ -196,6 +202,8 @@ impl CompilerSpec {
                     }
                 }
                 "returnaddress" => {}
+                // `UserOpManage::decodeSegmentOp`
+                "segmentop" => userops.decode(el, sleigh, names)?,
                 n => return err(format!("<compiler_spec>: <{n}> is not supported")),
             }
         }

@@ -24,6 +24,8 @@ use super::{LowlevelError, Result};
 pub(crate) const GLOBAL: ScopeId = ScopeId(0);
 /// The function's local scope (`Funcdata::localmap`).
 pub(crate) const LOCAL: ScopeId = ScopeId(1);
+/// `Symbol::fake_input`: the category of a stack input that is no parameter (`fakeInputSymbols`).
+pub(crate) const FAKE_INPUT: u32 = 3;
 
 /// Index of a scope in the [`Database`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -326,6 +328,25 @@ impl Database {
             }
         }
         Ok(best)
+    }
+
+    /// Port of `ScopeInternal::findSymbolAfter` (`after`) and `findSymbolBefore` without a use
+    /// point: the first entry valid everywhere among those starting after `off` (ending before
+    /// it) and the entries the map holds beyond.
+    pub(crate) fn find_symbol_near(
+        &self,
+        scope: ScopeId,
+        space: Space,
+        off: u64,
+        after: bool,
+    ) -> Option<(SymbolId, usize)> {
+        let map = self.scope(scope).maps.get(&space.index())?;
+        let in_use = |&(sym, _): &(SymbolId, usize)| self.symbol(sym).flags.addr_tied;
+        if after {
+            map.after(off).find(in_use)
+        } else {
+            map.before(off).find(in_use)
+        }
     }
 
     /// Port of `ScopeInternal::buildUndefinedName`: one more than the highest `$$undef` name.
@@ -654,6 +675,14 @@ impl Database {
     /// `Scope::setThisPointer`.
     pub(crate) fn set_this_pointer(&mut self, sym: SymbolId) {
         self.symbols[sym.0 as usize].this_ptr = true;
+    }
+
+    /// `Scope::setAttribute` of the type lock and the name lock (`Symbol::decodeHeader` sets
+    /// them from a symbol's record; `recoverNameRecommendationsForSymbols` locks a name).
+    pub(crate) fn lock_symbol(&mut self, sym: SymbolId, type_locked: bool, name_locked: bool) {
+        let f = &mut self.symbols[sym.0 as usize].flags;
+        f.type_locked |= type_locked;
+        f.name_locked |= name_locked;
     }
 }
 

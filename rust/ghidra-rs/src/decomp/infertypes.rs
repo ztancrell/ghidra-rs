@@ -221,9 +221,8 @@ pub(crate) fn sub_type(fd: &mut Funcdata, arch: &Arch, t: TypeId, off: i64) -> R
     if let Kind::Spacebase { scope, .. } = fd.types.get(t).kind {
         let addr = off as u64 & calc_mask(arch.spec.stack_pointer.2);
         if scope == GLOBAL_SCOPE {
-            if let Some(e) = query_global(arch, addr, 1) {
-                let ty = e.symbol_type(fd, arch);
-                return Ok(Some((ty, (addr - e.addr) as i64)));
+            if let Some(t) = global_target(fd, arch, addr)? {
+                return Ok(Some((t.ty, (addr - t.addr) as i64)));
             }
         }
         if scope != GLOBAL_SCOPE {
@@ -232,6 +231,18 @@ pub(crate) fn sub_type(fd: &mut Funcdata, arch: &Arch, t: TypeId, off: i64) -> R
             if let Some((poff, ty)) = super::varmap::LocalMap::locked_param_at(fd, addr) {
                 return Ok(Some((ty, (addr - poff) as i64)));
             }
+            // the symbols of the local scope (`queryContainer` without a use point: the
+            // address-tied ones)
+            if let Some((sym, ei)) = fd.symtab.find_container(super::scope::LOCAL, Space::Stack, addr, 1, None)? {
+                let s = fd.symtab.symbol(sym);
+                let e = &s.entries[ei];
+                let off = (addr - e.offset) as i64 + i64::from(e.piece.unwrap_or(0));
+                let ty = match s.ty {
+                    Some(t) => t,
+                    None => fd.types.base(e.size, Meta::Unknown),
+                };
+                return Ok(Some((ty, off)));
+            }
             if !fd.localmap.in_scope(addr, 1) {
                 return Ok(None);
             }
@@ -239,6 +250,125 @@ pub(crate) fn sub_type(fd: &mut Funcdata, arch: &Arch, t: TypeId, off: i64) -> R
         return Ok(Some((fd.types.base(1, Meta::Unknown), 0)));
     }
     Ok(fd.types.sub_type(t, off))
+}
+
+/// `Datatype::Nearest`: an arrayed component near an offset.
+#[derive(Debug, Clone, Copy)]
+struct Nearest {
+    offset: i64,
+    el_size: i64,
+    distance: i64,
+}
+
+/// `TypeSpacebase::MAX_ARRAY_SLACK_FORWARD` and `MAX_ARRAY_SLACK_BACKWARD`.
+const MAX_ARRAY_SLACK: (i64, i64) = (128, 8);
+
+/// `TypeArray::nearestArrayedComponentForward` or `Backward`; no other ported type has an
+/// arrayed component, and a struct or union is not ported.
+fn array_nearest(fd: &Funcdata, t: TypeId, off: i64, forward: bool) -> Result<Option<Nearest>> {
+    match fd.types.get(t).kind {
+        Kind::Array { elem, .. } => {
+            let (size, el_size) = (i64::from(fd.types.size(t)), i64::from(fd.types.align_size(elem)));
+            Ok(if forward {
+                (off <= 0).then_some(Nearest { offset: off, el_size, distance: -off })
+            } else {
+                (off >= 0).then_some(Nearest { offset: off, el_size, distance: (off - size).max(0) })
+            })
+        }
+        Kind::Fields(_) => err("nearestArrayedComponent of a struct or union: not implemented in ghidra-rs yet"),
+        _ => Ok(None),
+    }
+}
+
+/// Port of `TypeSpacebase::nearestArrayedComponentForward` and `Backward` on the local scope:
+/// the array symbol holding stack offset `off`, or the nearest one after it (before it) within
+/// the slack.
+fn spacebase_nearest(fd: &Funcdata, arch: &Arch, off: i64, forward: bool) -> Result<Option<Nearest>> {
+    use super::scope::LOCAL;
+    let addr = off as u64 & calc_mask(arch.spec.stack_pointer.2);
+    // an entry's symbol type, its start and its offset into the symbol
+    let entry = |(sym, ei): (super::scope::SymbolId, usize)| {
+        let s = fd.symtab.symbol(sym);
+        (s.ty, s.entries[ei].offset, s.entries[ei].piece.unwrap_or(0))
+    };
+    let mut max = if forward { MAX_ARRAY_SLACK.0 } else { MAX_ARRAY_SLACK.1 };
+    match fd.symtab.find_container(LOCAL, Space::Stack, addr, 1, None)?.map(entry) {
+        Some((ty, start, 0)) => {
+            let struct_off = addr.wrapping_sub(start) as i64;
+            let found = match ty {
+                Some(t) => array_nearest(fd, t, struct_off, forward)?,
+                None => None,
+            };
+            if let Some(r) = found {
+                return Ok(Some(Nearest { offset: struct_off, ..r }));
+            }
+        }
+        // the search goes farther back when no symbol is at the offset
+        _ => max = MAX_ARRAY_SLACK.0,
+    }
+    let mut next = addr;
+    loop {
+        let Some((ty, start, 0)) = fd.symtab.find_symbol_near(LOCAL, Space::Stack, next, forward).map(entry) else {
+            return Ok(None);
+        };
+        next = start;
+        let struct_off = addr.wrapping_sub(next) as i64;
+        let size = ty.map_or(0, |t| i64::from(fd.types.size(t)));
+        let found = match ty {
+            Some(t) => array_nearest(fd, t, if forward { 0 } else { size }, forward)?,
+            None => None,
+        };
+        if let Some(r) = found {
+            let distance = if forward { r.distance - struct_off } else { r.distance + struct_off - size };
+            if distance > max {
+                return Ok(None);
+            }
+            // farther than the whole data-type, the reference is treated as an array access
+            if distance <= size || ty.is_some_and(|t| fd.types.meta(t) == Meta::Array) {
+                return Ok(Some(Nearest { offset: struct_off, distance, ..r }));
+            }
+        }
+        let gone = if forward { next.wrapping_sub(addr) } else { addr.wrapping_sub(next) };
+        if gone >= max as u64 {
+            return Ok(None);
+        }
+    }
+}
+
+/// Port of `Datatype::nearestArrayedComponent`: the offset of the array component of `t`
+/// nearest to `off` (for the stack's space-base type: of the array symbol), preferring the
+/// element size `hint`. The global scope holds no array symbol while the rules run.
+pub(crate) fn nearest_arrayed_component(
+    fd: &mut Funcdata,
+    arch: &Arch,
+    t: TypeId,
+    off: i64,
+    hint: u32,
+) -> Result<Option<i64>> {
+    let (before, after) = match fd.types.get(t).kind {
+        Kind::Spacebase { scope: GLOBAL_SCOPE, .. } => (None, None),
+        Kind::Spacebase { .. } => (spacebase_nearest(fd, arch, off, false)?, spacebase_nearest(fd, arch, off, true)?),
+        _ => (array_nearest(fd, t, off, false)?, array_nearest(fd, t, off, true)?),
+    };
+    Ok(match (before, after) {
+        (None, None) => None,
+        (None, Some(a)) => Some(a.offset),
+        (Some(b), None) => Some(b.offset),
+        (Some(b), Some(a)) => {
+            if hint != 1 && b.el_size != a.el_size {
+                if b.el_size == i64::from(hint) {
+                    return Ok(Some(b.offset));
+                }
+                if a.el_size == i64::from(hint) {
+                    return Ok(Some(a.offset));
+                }
+            }
+            match sub_type(fd, arch, t, off)? {
+                Some((_, newoff)) if newoff == b.offset || newoff == a.offset => Some(newoff),
+                _ => Some(if a.distance <= b.distance { a.offset } else { b.offset }),
+            }
+        }
+    })
 }
 
 fn sign_extend(v: u64, bit: u32) -> i64 {
@@ -674,7 +804,13 @@ fn propagate_across_returns(fd: &mut Funcdata, arch: &Arch, st: &mut Infer) -> R
 
 /// Port of `TypeFactory::getExactPiece`: the piece of `ct` at `offset` of exactly `size` bytes.
 /// Partial structs, unions and enums are not ported (`sub_type` fails on their parents).
-fn exact_piece(fd: &mut Funcdata, arch: &Arch, mut ct: TypeId, offset: u64, size: u32) -> Result<Option<TypeId>> {
+pub(crate) fn exact_piece(
+    fd: &mut Funcdata,
+    arch: &Arch,
+    mut ct: TypeId,
+    offset: u64,
+    size: u32,
+) -> Result<Option<TypeId>> {
     let mut cur = offset as i64;
     let mut last = None;
     loop {
@@ -780,9 +916,11 @@ pub(crate) fn start_types(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
 /// Port of `ActionInferTypes::apply` (no type recommendations: `localrecovery` maps none).
 pub(crate) fn infer_types(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     symbol_types(fd, arch);
+    super::facts::symbol_types(fd, arch)?;
     if !fd.typerecovery_start {
         return Ok(0);
     }
+    arch.no_segment_resolver("type recovery (ActionInferTypes)")?;
     if fd.infer_passes >= 7 {
         if fd.infer_passes == 7 {
             fd.warning_header("Type propagation algorithm not settling");
@@ -861,6 +999,42 @@ pub(crate) fn query_global(arch: &Arch, addr: u64, size: u32) -> Option<Entry> {
     (0..slot).filter_map(|d| addr.checked_sub(d)).find(fits).map(|s| Entry { addr: s, externref: true })
 }
 
+/// The symbol of the global scope a constant may point at: where it starts, its data-type and
+/// whether that locks the pointer made to it (`Funcdata::spacebaseConstant`: a type-locked
+/// symbol whose type is not unknown).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Target {
+    pub(crate) addr: u64,
+    ty: TypeId,
+    locked: bool,
+    /// a string (an array of characters): a constant may point into the middle of it
+    chars: bool,
+}
+
+/// `Scope::queryContainer(addr, 1)` on the global scope with the symbol's data-type: a function
+/// or an external reference ([`query_global`]), or with the facts of stage S10 the data symbol
+/// holding `addr`. A data symbol of a composite data-type fails: pointers into it need the
+/// array and structure paths of `ActionConstantPtr::isPointer`, `RulePtrArith` and the printer.
+fn global_target(fd: &mut Funcdata, arch: &Arch, addr: u64) -> Result<Option<Target>> {
+    if let Some(e) = query_global(arch, addr, 1) {
+        return Ok(Some(Target { addr: e.addr, ty: e.symbol_type(fd, arch), locked: true, chars: false }));
+    }
+    let Some(facts) = &arch.facts else { return Ok(None) };
+    let Some(d) = facts.data_symbol(&mut fd.types, addr)? else { return Ok(None) };
+    let base = fd.types.strip_typedefs(d.ty);
+    // an array is pointed at by its first element (`getTypePointerStripArray`), and a string
+    // (an array of characters) anywhere inside (`ActionConstantPtr::isPointer`)
+    let array = fd.types.meta(base) == Meta::Array;
+    let chars = array && fd.types.first_field(base).is_some_and(|(_, elem)| fd.types.is_char_print(elem));
+    if !(array && (chars || d.addr == addr))
+        && (matches!(fd.types.meta(base), Meta::Struct | Meta::Union | Meta::Array) || fd.types.is_enum(base))
+    {
+        return err(format!("facts: a pointer into {}, a symbol of a composite data-type, is not ported", d.name));
+    }
+    let locked = d.type_locked && fd.types.meta(d.ty) != Meta::Unknown;
+    Ok(Some(Target { addr: d.addr, ty: d.ty, locked, chars }))
+}
+
 fn set_symcheck(fd: &mut Funcdata, vn: VarnodeId, complete: bool) {
     let f = &mut fd.vn_mut(vn).flags;
     f.clear(VnFlags::SYMCHECK_COMPLETE);
@@ -870,7 +1044,20 @@ fn set_symcheck(fd: &mut Funcdata, vn: VarnodeId, complete: bool) {
 
 /// Port of `ActionConstantPtr::isPointer` (ram is the only space pointers are inferred in;
 /// `infer_pointers` is on and no call input or function output is locked in the console).
-fn is_pointer(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, op: OpId, slot: usize) -> Option<Entry> {
+fn is_pointer(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, op: OpId, slot: usize) -> Result<Option<Target>> {
+    let Some(needexact) = pointer_candidate(fd, arch, vn, op, slot) else { return Ok(None) };
+    let off = fd.vn(vn).offset;
+    let Some(target) = global_target(fd, arch, off)? else { return Ok(None) };
+    if needexact && !target.chars && target.addr != off {
+        set_symcheck(fd, vn, false);
+        return Ok(None);
+    }
+    Ok(Some(target))
+}
+
+/// The tests of `ActionConstantPtr::isPointer` before the symbol is looked up: none when the
+/// constant is no pointer, else whether it must hit a symbol exactly.
+fn pointer_candidate(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, op: OpId, slot: usize) -> Option<bool> {
     set_symcheck(fd, vn, true);
     let ty = vn_type(fd, vn);
     let (off, size) = (fd.vn(vn).offset, fd.vn(vn).size);
@@ -917,12 +1104,7 @@ fn is_pointer(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, op: OpId, slot: usi
             return None;
         }
     }
-    let entry = query_global(arch, off, 1)?;
-    if needexact && entry.addr != off {
-        set_symcheck(fd, vn, false);
-        return None;
-    }
-    Some(entry)
+    Some(needexact)
 }
 
 /// Port of `Funcdata::spacebaseConstant` (the constant has the size of a ram address).
@@ -931,7 +1113,7 @@ fn spacebase_constant(
     arch: &Arch,
     op: OpId,
     slot: usize,
-    entry: &Entry,
+    entry: &Target,
     rampoint: u64,
 ) -> Result<()> {
     let ram = fd.ram.ok_or_else(|| super::LowlevelError("spacebaseConstant: no ram space".into()))?;
@@ -970,9 +1152,8 @@ fn spacebase_constant(
     set_symcheck(fd, newconst, true);
     fd.op_set_input(add_op, base, 0)?;
     fd.op_set_input(add_op, newconst, 1)?;
-    let entry_type = entry.symbol_type(fd, arch);
-    let ptr_entry = fd.types.pointer_strip_array(sz, entry_type, WS);
-    update_type(fd, outvn, ptr_entry, true, false);
+    let ptr_entry = fd.types.pointer_strip_array(sz, entry.ty, WS);
+    update_type(fd, outvn, ptr_entry, entry.locked, false);
     if extra != 0 {
         let e = match extra_op {
             Some(e) => {
@@ -1004,6 +1185,7 @@ pub(crate) fn constant_ptr(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         return Ok(0);
     }
     fd.constptr_passes += 1;
+    arch.no_segment_resolver("constant pointers (ActionConstantPtr)")?;
     let addr_size = arch.spec.stack_pointer.2;
     let mut count = 0;
     for vn in fd.loc_space(CONST_SPACE) {
@@ -1035,7 +1217,7 @@ pub(crate) fn constant_ptr(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
             _ => {}
         }
         let rampoint = fd.vn(vn).offset;
-        if let Some(entry) = is_pointer(fd, arch, vn, op, slot) {
+        if let Some(entry) = is_pointer(fd, arch, vn, op, slot)? {
             spacebase_constant(fd, arch, op, slot, &entry, rampoint)?;
             if opc == Opcode::IntAdd && slot == 1 {
                 fd.op_mut(op).ins.swap(0, 1);

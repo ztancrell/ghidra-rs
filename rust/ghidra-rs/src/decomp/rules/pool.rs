@@ -7,6 +7,9 @@ use super::*;
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Pool {
     perop: Vec<Vec<&'static Rule>>,
+    /// the rules the C++ pool would hold here that are not ported (`strict` in [`select`]): the
+    /// pool refuses to run without them
+    pub(super) missing: Vec<&'static str>,
 }
 
 impl Pool {
@@ -16,10 +19,19 @@ impl Pool {
 }
 
 /// The rules of `pool` the action keeps (its groups on, not switched off by `togglerule`),
-/// filed by opcode once (`ActionPool::addRule`).
-pub(crate) fn select(pool: &'static [Rule], on: impl Fn(&Rule) -> bool) -> Pool {
+/// filed by opcode once (`ActionPool::addRule`). `strict` (the `decompile` root): a kept rule
+/// that is not ported (a `u` entry of the tables) makes the pool fail when it is applied, so
+/// `option togglerule <rule> off` on both engines is the only way to run without it. Not
+/// `strict` (the `jumptable` root, which no option reaches): the rule is filed and fails on the
+/// first op it is tried on.
+pub(crate) fn select(pool: &'static [Rule], on: impl Fn(&Rule) -> bool, strict: bool) -> Pool {
     let mut perop: Vec<Vec<&'static Rule>> = Vec::new();
+    let mut missing = Vec::new();
     for rl in pool.iter().filter(|rl| on(rl)) {
+        if strict && rl.unported() {
+            missing.push(rl.name);
+            continue;
+        }
         for &opc in rl.ops {
             let i = opc as usize;
             if perop.len() <= i {
@@ -28,12 +40,18 @@ pub(crate) fn select(pool: &'static [Rule], on: impl Fn(&Rule) -> bool) -> Pool 
             perop[i].push(rl);
         }
     }
-    Pool { perop }
+    Pool { perop, missing }
 }
 
 /// Port of `ActionPool::apply`: every op in sequence-number order (ops made on the way are
 /// visited when they sort after the current one), the dead ones freed (`opDeadAndGone`).
 pub(crate) fn pool_apply(fd: &mut Funcdata, arch: &Arch, pool: &Pool) -> Result<i32> {
+    if !pool.missing.is_empty() {
+        return err(format!(
+            "pool rules not ported to ghidra-rs yet are on: {}. The reference runs them, so the result could differ silently; switch them off on both engines (`option togglerule <rule> off`)",
+            pool.missing.join(", ")
+        ));
+    }
     let mut count = 0;
     let mut cur = fd.op_after(None);
     while let Some(op) = cur {

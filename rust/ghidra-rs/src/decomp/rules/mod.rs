@@ -8,10 +8,14 @@
 //! folding ([`float`]); the `Funcdata` methods they need (`cseEliminateList`,
 //! `distributeIntMultAdd`, `totalReplaceConstant`, ...) are in `funcdata.rs`.
 //!
-//! The pool tables [`OPPOOL1`] and [`CLEANUP`] list the ported rules in the C++ order; a rule not
-//! listed is switched off on the reference side by the check (`rust/tools/corpus/r1-options.txt`,
-//! written by `rust/tools/r1-options.sh` from this table). x86 is little-endian, so the
-//! big-endian address arithmetic of the rules is left out.
+//! The pool tables [`OPPOOL1`], [`OPPOOL2`] and [`CLEANUP`] list every rule of the C++ pools in
+//! the C++ order (a test compares them with coreaction.cc): a ported rule as `r(...)`, one not
+//! ported as `u(...)`. The `decompile` root fails while a `u` rule is on, so the checks switch
+//! it off on both engines (`rust/tools/corpus/r1-options.txt` and the other options files,
+//! written by `rust/tools/r1-options.sh` from these tables). The script also keeps `aliasupdate`
+//! off in the older rule checks: it is ported, but in the function itself it fails on a guarded
+//! stack STORE. x86 is little-endian, so the big-endian address arithmetic of the rules is left
+//! out.
 
 mod arith;
 mod bitfield;
@@ -31,6 +35,8 @@ mod modulo;
 mod piece;
 mod pool;
 pub(crate) mod ptrarith;
+mod segment;
+mod split;
 mod stackvars;
 mod subpiece;
 mod subvar;
@@ -40,7 +46,7 @@ pub(crate) use boolean::{boolean_flip, op_normalize_flip};
 pub(crate) use compare::replace_lessequal;
 pub(crate) use cse::func_eq_level;
 pub(crate) use cse::func_equal;
-pub(crate) use double::param_double;
+pub(crate) use double::{is_floating_point_op, param_double};
 pub(crate) use pool::{nonzero_mask, pool_apply, select, Pool};
 
 use arith::*;
@@ -60,6 +66,8 @@ use floatrules::*;
 use modulo::*;
 use piece::*;
 use ptrarith::*;
+use segment::*;
+use split::*;
 use stackvars::*;
 use subpiece::*;
 use subvar::*;
@@ -94,6 +102,30 @@ const fn r(name: &'static str, group: &'static str, ops: &'static [Opcode], appl
     Rule { name, group, ops, apply }
 }
 
+/// A rule of the C++ pool that is not ported. The `decompile` root refuses to run while one is
+/// on (`pool::select`); in the `jumptable` root, which no option reaches, it fails on the first op
+/// it would be tried on. No table has one now (`segment` and `ptrsubcharconstant` were the last
+/// two): only the test below uses it, until the C++ pools gain a rule.
+#[cfg_attr(not(test), allow(dead_code))]
+const fn u(name: &'static str, group: &'static str, ops: &'static [Opcode]) -> Rule {
+    Rule { name, group, ops, apply: rule_not_ported }
+}
+
+fn rule_not_ported(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
+    let o = fd.op(op);
+    err(format!(
+        "a pool rule tried on {:?} at 0x{:08x} is not ported (rules/mod.rs: the `u` entries)",
+        o.opc, o.seq.addr
+    ))
+}
+
+impl Rule {
+    /// A `u` entry.
+    fn unported(&self) -> bool {
+        std::ptr::fn_addr_eq(self.apply, rule_not_ported as RuleFn)
+    }
+}
+
 use Opcode::*;
 
 /// The ported rules of `oppool1`, in `universalAction`'s order.
@@ -114,6 +146,7 @@ pub(crate) const OPPOOL1: &[Rule] = &[
     r("selectcse", "analysis", &[Subpiece, IntSright], select_cse),
     r("collect_terms", "analysis", &[IntAdd], collect_terms),
     r("pullsub_multi", "analysis", &[Subpiece], pullsub_multi),
+    r("pullsub_indirect", "analysis", &[Subpiece], pullsub_indirect),
     r("push_multi", "nodejoin", &[Multiequal], push_multi),
     r("sborrow", "analysis", &[IntSborrow], sborrow),
     r("scarry", "analysis", &[IntScarry], scarry),
@@ -150,6 +183,7 @@ pub(crate) const OPPOOL1: &[Rule] = &[
     r("shift2mult", "analysis", &[IntLeft], shift_2_mult),
     r("shiftpiece", "analysis", &[IntOr, IntXor, IntAdd], shift_piece),
     r("multicollapse", "analysis", &[Multiequal], multi_collapse),
+    r("aliasupdate", "analysis", &[Store, Call, Callind, Callother], alias_update),
     r("2comp2mult", "analysis", &[Int2comp], two_comp_2_mult),
     r("sub2add", "analysis", &[IntSub], sub_2_add),
     r("carryelim", "analysis", &[IntCarry], carry_elim),
@@ -159,6 +193,7 @@ pub(crate) const OPPOOL1: &[Rule] = &[
     r("sless2zero", "analysis", &[IntSless], sless_2_zero),
     r("equal2zero", "analysis", &[IntEqual, IntNotequal], equal_2_zero),
     r("equal2constant", "analysis", &[IntEqual, IntNotequal], equal_2_constant),
+    r("threewaycomp", "analysis", &[IntSless, IntSlessequal, IntEqual, IntNotequal], three_way_compare),
     r("xorcollapse", "analysis", &[IntEqual, IntNotequal], xor_collapse),
     r("addmultcollapse", "analysis", &[IntAdd, IntMult], add_mult_collapse),
     r("collapseconstants", "analysis", &[
@@ -169,6 +204,7 @@ pub(crate) const OPPOOL1: &[Rule] = &[
         FloatDiv, FloatMult, FloatSub, FloatNeg, FloatAbs, FloatSqrt, FloatInt2float,
         FloatFloat2float, FloatTrunc, FloatCeil, FloatFloor, FloatRound, Piece, Subpiece, Popcount,
         Lzcount], collapse_constants),
+    r("transformcpool", "analysis", &[Cpoolref], transform_cpool),
     r("propagatecopy", "analysis", &[Copy], propagate_copy),
     r("zexteliminate", "analysis", &[IntEqual, IntNotequal, IntLess, IntLessequal], zext_eliminate),
     r("slesstoless", "analysis", &[IntSless, IntSlessequal], sless_to_less),
@@ -209,6 +245,7 @@ pub(crate) const OPPOOL1: &[Rule] = &[
     r("signmod2nopt", "analysis", &[IntRight], sign_mod2n_opt),
     r("signmod2nopt2", "analysis", &[IntMult], sign_mod2n_opt2),
     r("signmod2opt", "analysis", &[IntAnd], sign_mod2_opt),
+    r("switchsingle", "analysis", &[Branchind], switch_single),
     r("condnegate", "analysis", &[Cbranch], cond_negate),
     r("boolnegate", "analysis", &[BoolNegate], bool_negate),
     r("lessequal", "analysis", &[BoolOr], less_equal),
@@ -229,11 +266,15 @@ pub(crate) const OPPOOL1: &[Rule] = &[
     r("subvar_and", "subvar", &[IntAnd], subvar_and),
     r("subvar_subpiece", "subvar", &[Subpiece], subvar_subpiece),
     r("splitflow", "subvar", &[Subpiece], split_flow),
+    r("ptrflow", "subvar", &[], ptr_flow),
     r("subvar_compzero", "subvar", &[IntNotequal, IntEqual], subvar_comp_zero),
     r("subvar_shift", "subvar", &[IntRight], subvar_shift),
     r("subvar_zext", "subvar", &[IntZext], subvar_ext),
     r("subvar_sext", "subvar", &[IntSext], subvar_ext),
     r("negatenegate", "analysis", &[IntNegate], negate_negate),
+    r("conditionalmove", "conditionalexe", &[Multiequal], conditional_move),
+    r("orpredicate", "conditionalexe", &[IntOr, IntXor], or_predicate),
+    r("funcptrencoding", "analysis", &[Callind], funcptr_encoding),
     r("subfloat_convert", "floatprecision", &[FloatFloat2float], subfloat_convert),
     r("floatcast", "floatprecision", &[FloatFloat2float, FloatTrunc], float_cast),
     r("ignorenan", "floatprecision", &[FloatNan], ignore_nan),
@@ -241,6 +282,7 @@ pub(crate) const OPPOOL1: &[Rule] = &[
     r("int2floatcollapse", "analysis", &[FloatInt2float], int2float_collapse),
     r("ptraddundo", "typerecovery", &[Ptradd], ptradd_undo),
     r("ptrsubundo", "typerecovery", &[Ptrsub], ptrsub_undo),
+    r("segment", "segment", &[Segmentop], rule_segment),
     r("piecepathology", "protorecovery", &[Piece], piece_pathology),
     r("doubleload", "doubleload", &[Piece], double_load),
     r("doublestore", "doubleprecis", &[Store], double_store),
@@ -268,9 +310,13 @@ pub(crate) const CLEANUP: &[Rule] = &[
     r("subright", "cleanup", &[Subpiece], sub_right),
     r("floatsigncleanup", "cleanup", &[IntAnd, IntXor], float_sign_cleanup),
     r("expandload", "cleanup", &[Load], expand_load),
+    r("ptrsubcharconstant", "cleanup", &[Ptrsub], ptrsub_char_constant),
     r("extensionpush", "cleanup", &[IntZext, IntSext], extension_push),
     r("piecestructure", "cleanup", &[Piece, IntZext], piece_structure),
     r("andstructure", "cleanup", &[IntAnd], and_structure),
+    r("splitcopy", "splitcopy", &[Copy], split_copy),
+    r("splitload", "splitpointer", &[Load], split_load),
+    r("splitstore", "splitpointer", &[Store], split_store),
     r("stringcopy", "constsequence", &[Copy], string_copy),
     r("stringstore", "constsequence", &[Store], string_store),
     r("bitfield_store", "bitfields", &[Store], bitfield_transform),
@@ -308,6 +354,56 @@ fn is_const(fd: &Funcdata, vn: VarnodeId) -> bool {
     fd.vn(vn).is_constant()
 }
 
+/// `RuleTransformCpool`: the constant pool (`CPoolRecord`) is not ported, so a CPOOLREF fails.
+fn transform_cpool(_: &mut Funcdata, _: OpId, _: &Arch) -> Result<i32> {
+    err("RuleTransformCpool: a CPOOLREF (the constant pool) is not implemented in ghidra-rs yet")
+}
+
+/// `RuleFuncPtrEncoding`: nothing to do while `Architecture::funcptr_align` is 0, and only a
+/// `<funcptr>` of the compiler spec sets it, which cspec.rs refuses.
+fn funcptr_encoding(_: &mut Funcdata, _: OpId, _: &Arch) -> Result<i32> {
+    Ok(0)
+}
+
+/// `RulePtrFlow`: its op list is empty unless the default data space is truncated
+/// (`<truncate_space>` of the `.ldefs`), and the console refuses a language that has one
+/// (`Sleigh::refuse_truncated`).
+fn ptr_flow(_: &mut Funcdata, _: OpId, _: &Arch) -> Result<i32> {
+    Ok(0)
+}
+
+/// Port of `RuleSwitchSingle`: a BRANCHIND whose block has one out edge becomes a BRANCH to the
+/// table's one destination, and the table goes (`Funcdata::removeJumpTable`).
+fn switch_single(fd: &mut Funcdata, op: OpId, arch: &Arch) -> Result<i32> {
+    let Some(bb) = fd.op(op).parent else { return Ok(0) };
+    if fd.blocks.block(bb).outs.len() != 1 {
+        return Ok(0);
+    }
+    let Some(jt) = fd.jumptables.iter().find(|jt| jt.op == op) else { return Ok(0) };
+    // labels must be recovered (`isLabelled`)
+    let (Some(&target), false) = (jt.targets.first(), jt.labels.is_empty()) else { return Ok(0) };
+    let n = jt.targets.len();
+    let all_match = n != 1 && jt.targets.iter().all(|&t| t == target);
+    if n != 1 || !is_const(fd, inp(fd, op, 0)?) {
+        // `printRaw` of a 4-byte ram address
+        let mut msg = format!("Switch with 1 destination removed at 0x{:08x}", fd.op(op).seq.addr);
+        if all_match {
+            msg.push_str(&format!(" : {n} cases all go to same destination"));
+        }
+        fd.warning_header(msg);
+    }
+    fd.op_set_opcode(op, Branch);
+    // newCodeRef: a one-byte annotation at the destination
+    let cref = fd.new_varnode(1, Space::Sleigh(arch.sleigh.code_space()), target);
+    fd.vn_set(cref, VnFlags::CODEREF);
+    fd.vn_clear(cref, VnFlags::PERSIST);
+    fd.vn_clear(cref, VnFlags::ADDRTIED);
+    fd.op_set_input(op, cref, 0)?;
+    fd.jumptables.retain(|jt| jt.op != op);
+    fd.structure.clear();
+    Ok(1)
+}
+
 /// `Varnode::loneDescend`.
 fn lone_descend(fd: &Funcdata, vn: VarnodeId) -> Option<OpId> {
     match fd.vn(vn).descend[..] {
@@ -340,7 +436,7 @@ fn uniq_out(fd: &mut Funcdata, size: u32, op: OpId) -> Result<VarnodeId> {
 
 /// A new op at `addr` with a unique output of `size` bytes and the inputs `ins` (`newOp`,
 /// `newUniqueOut`, `opSetInput`), inserted before `follow` (`opInsertBefore`): its output.
-fn insert_new(
+pub(crate) fn insert_new(
     fd: &mut Funcdata,
     opc: Opcode,
     addr: u64,
@@ -433,6 +529,61 @@ pub(super) mod testutil {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three tables hold every rule of the C++ pools (`universalAction`, coreaction.cc), in
+    /// its order and with its group: a rule missing from a table would be silently absent from
+    /// a run, so it must be listed, ported (`r`) or not (`u`).
+    #[test]
+    fn tables_list_every_rule_of_the_cpp_pools() {
+        let cpp =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Ghidra/Features/Decompiler/src/decompile/cpp");
+        // class -> rule name, from the constructors `RuleX(const string &g) : Rule(g, 0, "name")`
+        // (RulePtrFlow's is in ruleaction.cc: it takes the architecture too)
+        let mut names = std::collections::HashMap::from([("RulePtrFlow".to_string(), "ptrflow".to_string())]);
+        for file in std::fs::read_dir(&cpp).unwrap().map(|e| e.unwrap().path()) {
+            if file.extension().is_none_or(|x| x != "hh") {
+                continue;
+            }
+            for line in std::fs::read_to_string(&file).unwrap().lines() {
+                let l = line.trim_start();
+                let Some((class, rest)) = l.split_once("(const string &g") else { continue };
+                let Some((_, rule)) = rest.split_once(": Rule(") else { continue };
+                if let Some(name) = rule.split('"').nth(1) {
+                    names.insert(class.to_string(), name.to_string());
+                }
+            }
+        }
+        let core = std::fs::read_to_string(cpp.join("coreaction.cc")).unwrap();
+        let pool = |var: &str| -> Vec<(String, String)> {
+            let (first, last) = (format!("{var} = new ActionPool"), format!("addAction( {var} )"));
+            core.lines()
+                .skip_while(|l| !l.contains(&first))
+                .take_while(|l| !l.contains(&last))
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .filter_map(|l| l.split_once("new Rule"))
+                .map(|(_, r)| {
+                    let class = format!("Rule{}", r.split('(').next().unwrap());
+                    let name = names.get(&class).unwrap_or_else(|| panic!("no rule name for {class}"));
+                    (name.clone(), r.split('"').nth(1).unwrap().to_string())
+                })
+                .collect()
+        };
+        for (var, table) in [("actprop", OPPOOL1), ("actprop2", OPPOOL2), ("actcleanup", CLEANUP)] {
+            let ours: Vec<_> = table.iter().map(|rl| (rl.name.to_string(), rl.group.to_string())).collect();
+            assert_eq!(ours, pool(var), "{var}");
+        }
+    }
+
+    /// The `decompile` root refuses to apply a pool while a rule that is not ported is on; the
+    /// `jumptable` root files the rule, which fails on an op of its list.
+    #[test]
+    fn an_unported_rule_that_is_on_fails_the_pool() {
+        static TABLE: &[Rule] = &[u("segment", "segment", &[Segmentop])];
+        let strict = select(TABLE, |_| true, true);
+        assert_eq!(strict.missing, ["segment"]);
+        assert!(select(TABLE, |_| false, true).missing.is_empty());
+        assert!(select(TABLE, |_| true, false).missing.is_empty());
+    }
 
     #[test]
     fn shift_helpers_table() {

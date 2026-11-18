@@ -450,6 +450,9 @@ pub(crate) struct FuncProto {
     /// the return value `ActionOutputPrototype` stores (`ProtoStoreSymbol::outparam`): storage and
     /// data-type; none is `void`. The inputs are the local scope's category-0 symbols.
     pub(crate) out_param: Option<(Space, u64, TypeId)>,
+    /// `no_return`: the function does not return to its caller (only the facts of stage S10
+    /// say so)
+    pub(crate) no_return: bool,
 }
 
 impl FuncProto {
@@ -481,6 +484,7 @@ impl FuncProto {
     /// inject id; no-return comes with prototypes that can say so).
     pub(crate) fn copy_flow_effects(&mut self, other: &FuncProto) {
         self.inject = other.inject;
+        self.no_return = other.no_return;
     }
 
     /// Port of `FuncProto::copy`: this prototype becomes `other`'s (the call site's own fields
@@ -1475,6 +1479,33 @@ impl ParamActive {
             t.entry = Some(entry);
             t.offset = 0;
         }
+    }
+
+    /// Port of `ParamActive::splitTrial` (with `ParamTrial::splitHi` and `splitLo`, little
+    /// endian): trial `i` becomes two, the first of `sz` bytes at its address, the second the
+    /// rest in the next slot; both keep the flags and lose the entry.
+    pub(crate) fn split_trial(&mut self, i: usize, sz: u32) -> Result<()> {
+        if self.stackplaceholder >= 0 {
+            return err("Cannot split parameter when the placeholder has not been recovered");
+        }
+        let t = self.trials[i].clone();
+        for (j, other) in self.trials.iter_mut().enumerate() {
+            if j != i && other.slot > t.slot {
+                other.slot += 1;
+            }
+        }
+        let first = ParamTrial { size: sz, entry: None, offset: -1, ..t.clone() };
+        let second = ParamTrial {
+            off: t.off.wrapping_add(u64::from(sz)),
+            size: t.size - sz,
+            slot: t.slot + 1,
+            entry: None,
+            offset: -1,
+            ..t
+        };
+        self.trials.splice(i..=i, [first, second]);
+        self.slotbase += 1;
+        Ok(())
     }
 }
 

@@ -151,6 +151,14 @@ pub struct Ins {
     pub code_imms: Vec<u32>,   // immediates that point into an executable section
 }
 
+/// The references `Analysis::disassemble` goes by: every destination, and the destinations in
+/// executable blocks that a memory operand reads or writes (Ghidra's READ and WRITE references).
+#[derive(Default)]
+struct Refs {
+    dests: BTreeSet<u32>,
+    reads: HashSet<u32>,
+}
+
 /// A value of the local fold: a constant, or what a 4-byte register held where the fold
 /// began (or before the last call that clobbered it) plus an offset, as Ghidra's
 /// SymbolicPropogator keeps unknown registers as symbols.
@@ -168,6 +176,29 @@ pub struct Fold {
     regs: Vec<(u32, u64, u32, Option<Val>, bool)>,
     mem: Vec<(Val, Option<Val>, bool)>,
     whole: bool, // a whole-function walk (`propagate`): keeps more memory
+    /// the stack slots the last instruction read or wrote through a folded address: (offset
+    /// from ESP at the entry, bytes, written)
+    pub stack: Vec<(u32, u32, bool)>,
+    /// bytes of the last LOAD or STORE of the last instruction, 0 without one
+    pub mem_size: u32,
+    /// the memory the last instruction read or wrote through an address the fold knows (a
+    /// constant a register holds): (address, bytes, written)
+    pub data: Vec<(u32, u32, bool)>,
+    /// `AND ESP,mask` keeps a stack address (the mask applies to its offset), as Ghidra's
+    /// stack analysis has it; off for the walks of `propagate`
+    stack_and: bool,
+}
+
+impl Fold {
+    /// The offset from ESP at the entry that the 4-byte register at `reg` of the register
+    /// space `rs` holds, where it holds a stack address.
+    pub fn stack_offset(&self, rs: u32, reg: u64) -> Option<u32> {
+        match self.regs.iter().find(|f| f.0 == rs && f.1 < reg + 4 && reg < f.1 + f.2 as u64) {
+            Some(&(_, at, 4, Some(Val::S(0x10, d)), _)) if at == reg => Some(d),
+            Some(_) => None,
+            None => (reg == 0x10).then_some(0),
+        }
+    }
 }
 
 impl Ins {
@@ -176,6 +207,7 @@ impl Ins {
     }
 }
 
+#[derive(Clone)]
 pub struct Analysis {
     pub text_start: u32,
     pub text_end: u32,
@@ -190,6 +222,13 @@ pub struct Analysis {
     fpu_ip: Option<(u32, u64)>,          // FPUInstructionPointer, which x87 constructors set to inst_start
     purge: HashMap<u32, u32>,            // function -> bytes its RETs pop (RET n), where they agree
     reg_space: u32,
+    /// Flow overrides of the project store (`store.rs`), by instruction: CALL_RETURN (true) or
+    /// none (false) in place of what `call_return` derives. Empty without a store.
+    pub overrides: HashMap<u32, bool>,
+    /// Bodies the store sets (inclusive address ranges) in place of the flow from the entry.
+    pub fixed_bodies: BTreeMap<u32, Vec<(u32, u32)>>,
+    /// Thunk marks of the store: the thunked function, or `None` for "not a thunk".
+    pub thunks: HashMap<u32, Option<u32>>,
 }
 
 const MAX_STACK: [usize; 2] = [16, 1024]; // local fold, whole-function walk
@@ -289,6 +328,9 @@ impl Analysis {
             fpu_ip: None,
             purge: HashMap::new(),
             reg_space: 0,
+            overrides: HashMap::new(),
+            fixed_bodies: BTreeMap::new(),
+            thunks: HashMap::new(),
         };
         let (rs, list) = sl.registers();
         an.fpu_ip = list.iter().find(|r| r.0 == "FPUInstructionPointer").map(|r| (rs, r.1));
@@ -428,6 +470,9 @@ impl Analysis {
         // follows jumps (`descend` hands it to the target) and a call clobbers EAX/ECX/EDX/ESP.
         let (uniq, rs) = (sl.uniq_space(), self.reg_space);
         fold.regs.retain(|f| f.0 != uniq);
+        fold.stack.clear();
+        fold.mem_size = 0;
+        fold.data.clear();
         let val = |v: &crate::sleigh::Varnode, fold: &Fold| -> Option<(Val, bool)> {
             let mem = |x: u32| match fold.mem.iter().find(|m| m.0 == Val::C(x)) {
                 Some(m) => m.1.map(|v| (v, m.2)),
@@ -479,6 +524,16 @@ impl Analysis {
         }
         let mut computed = None;
         for op in &ops {
+            if matches!(op.opc, 2 | 3) {
+                // for the stack variables of `stack_uses`; nothing here reads these
+                let size = if op.opc == 2 { op.out.as_ref().map_or(0, |o| o.size) } else { op.ins[2].size };
+                fold.mem_size = size;
+                match op.ins.get(1).and_then(|v| val(v, fold)) {
+                    Some((Val::S(0x10, d), _)) => fold.stack.push((d, size, op.opc == 3)),
+                    Some((Val::C(x), _)) => fold.data.push((x, size, op.opc == 3)),
+                    _ => {}
+                }
+            }
             if op.opc == 3 {
                 let v = op.ins.get(2).and_then(|v| val(v, fold));
                 // a constant stored through a register, `MOV ECX,fn; MOV [EAX*8+t],ECX`: Ghidra's
@@ -548,6 +603,7 @@ impl Analysis {
                                     Val::S(b, d.wrapping_add(c))
                                 }
                                 (20, Val::S(b, d), Val::C(c)) => Val::S(b, d.wrapping_sub(c)),
+                                (27, Val::S(0x10, d), Val::C(m)) if fold.stack_and => Val::S(0x10, d & m),
                                 (20 | 26, x, y) if x == y => Val::C(0), // `XOR EDI,EDI`
                                 (20, Val::S(b, d), Val::S(b2, d2)) if b == b2 => Val::C(d.wrapping_sub(d2)),
                                 _ => return None,
@@ -579,7 +635,14 @@ impl Analysis {
                 // return address and the callee's purge (`RET n`), as Ghidra's
                 // handleFunctionSideEffects does for __stdcall's unknown extrapop; where the purge
                 // is unknown (no body, RETs that disagree, imports) ESP is a new symbol too.
-                let callee = if op.opc == 7 { Some(op.ins[0].offset as u32) } else { computed };
+                // a call through a slot with a known purge (an import, where the purges are Ghidra's)
+                let through = || {
+                    let v = &op.ins[0];
+                    let c = ops.iter().rev().find(|c| c.opc == 1 && c.out.as_ref().is_some_and(|o| o == v));
+                    let v = c.map_or(v, |c| &c.ins[0]);
+                    (v.space == code).then_some(v.offset as u32).filter(|s| self.purge.contains_key(s))
+                };
+                let callee = if op.opc == 7 { Some(op.ins[0].offset as u32) } else { through().or(computed) };
                 let esp = crate::sleigh::Varnode { space: rs, offset: 0x10, size: 4 };
                 let after = callee.and_then(|t| self.purge.get(&t)).zip(val(&esp, fold)).map(|(&n, (v, _))| match v {
                     Val::C(x) => Val::C(x.wrapping_add(4 + n)),
@@ -648,10 +711,17 @@ impl Analysis {
     /// code covers yet, without making functions. With `constants`, also the code Ghidra's
     /// analysis decodes beyond the function bodies, which reference checks see: code reached
     /// through code constants (`PUSH offset callback`, `MOV [g],offset fn`, SecuROM's
-    /// `PUSH next; PUSH callee; RET`, values the local fold computes) where `valid_subroutine`
-    /// accepts them, and the entries of address tables of code (`address_tables`), repeated
-    /// over what that reaches. Bodies stay as they are.
-    pub fn disassemble(&mut self, img: &Image, sl: &Sleigh, addrs: &[u32], constants: bool) {
+    /// `PUSH next; PUSH callee; RET`, values the local fold computes) where
+    /// OperandReferenceAnalyzer would disassemble (no table of addresses there, nothing reads or
+    /// writes the target, the instruction is no jump or call and does not compute with the
+    /// value, `valid_subroutine` accepts it), and the entries of address tables of code
+    /// (`address_tables`), repeated over what that reaches. An address table an instruction
+    /// refers to becomes pointers (`table_slots`). Bodies stay as they are. Returns the
+    /// instructions decoded by the descent from `addrs`.
+    // ponytail: the references a check sees are all of the instructions decoded so far, where
+    // Ghidra has those of the code it had disassembled when it asked (its analysis works in
+    // small steps from the entry points); a faithful order needs its task queue ported
+    pub fn disassemble(&mut self, img: &Image, sl: &Sleigh, addrs: &[u32], constants: bool) -> Vec<u32> {
         let mut owner = vec![0u8; (self.code_hi - self.code_lo) as usize];
         for (&a, i) in &self.insns {
             let o = (a - self.code_lo) as usize;
@@ -662,18 +732,51 @@ impl Analysis {
         let mut queue: Vec<u32> = addrs.iter().copied().filter(|&a| self.is_code(img, a)).collect();
         let mut p = sl.new_parse();
         let mut log: Vec<u32> = if constants { self.insns.keys().copied().collect() } else { Vec::new() };
+        let known = log.len();
         self.descend(img, sl, &mut p, &mut owner, &mut queue, &mut log);
+        let new = log[known..].to_vec();
         if constants {
             self.propagate(img, sl);
         }
         let mut checked = HashSet::new(); // targets asked once, as Ghidra's checkedTargets
         let mut asked = HashSet::new(); // pointer targets asked once
+        let min_table = Self::min_table(img);
+        // every reference destination so far, and those in executable blocks that a memory
+        // operand reads or writes (Ghidra's READ and WRITE references)
+        let mut refs = Refs::default();
+        refs.dests.extend(self.table_slots.values());
         while constants && !log.is_empty() {
+            for a in &log {
+                let i = &self.insns[a];
+                refs.dests.extend(i.refs.iter().chain(&i.code_imms).chain(&i.target));
+                refs.dests.extend(self.tables.get(a).into_iter().flatten());
+                refs.reads.extend(i.refs.iter().filter(|&&t| self.is_code(img, t)));
+            }
             let mut queue: Vec<u32> = Vec::new();
-            for t in log.iter().flat_map(|a| self.insns[a].code_imms.iter().copied()).collect::<Vec<_>>() {
-                if owner[(t - self.code_lo) as usize] == 0
-                    && checked.insert(t)
-                    && self.valid_subroutine(img, sl, &mut p, &owner, t, false)
+            let targets = |i: &Ins| i.refs.iter().chain(&i.code_imms).copied().collect::<Vec<_>>();
+            for (a, t) in
+                log.iter().flat_map(|&a| targets(&self.insns[&a]).into_iter().map(move |t| (a, t))).collect::<Vec<_>>()
+            {
+                let defined = self.is_code(img, t) && owner[(t - self.code_lo) as usize] != 0;
+                if defined || !checked.insert(t) {
+                    continue;
+                }
+                // OperandReferenceAnalyzer.getAddressTable, createFlowTable: an address table
+                // an instruction refers to becomes pointers, and nothing is disassembled there
+                let flows = !matches!(self.insns[&a].flow, Flow::Fall | Flow::Return);
+                if let Some(elems) = self.table_entry(img, &owner, &refs.dests, t, 3).filter(|e| e.len() >= min_table) {
+                    if !flows {
+                        self.make_table(img, &mut owner, &mut refs, t, &elems);
+                    }
+                    continue;
+                }
+                // "Subroutine References": not where something reads or writes the target, not
+                // from a jump or call, not a value the instruction computes with
+                if self.is_code(img, t)
+                    && !refs.reads.contains(&t)
+                    && !flows
+                    && !self.used_for_calculation(img, sl, &mut p, a, t)
+                    && self.valid_subroutine(img, sl, &mut p, &owner, &refs.dests, t, false, true)
                 {
                     queue.push(t);
                 }
@@ -684,16 +787,17 @@ impl Analysis {
                 // Pointers in referenced data first (the operand analyzer runs before
                 // Create Address Tables), then address tables over what is still undefined;
                 // code either reaches is checked for code constants again.
-                let mut queue = self.pointer_targets(img, sl, &mut p, &owner, &mut asked);
+                let mut queue = self.pointer_targets(img, sl, &mut p, &owner, &refs, &mut asked);
                 if queue.is_empty() {
-                    queue = self.address_tables(img, &owner);
-                    queue.extend(self.pointer_targets(img, sl, &mut p, &owner, &mut asked));
+                    queue = self.address_tables(img, sl, &mut p, &mut owner, &mut refs);
+                    queue.extend(self.pointer_targets(img, sl, &mut p, &owner, &refs, &mut asked));
                 }
                 queue.retain(|&t| owner[(t - self.code_lo) as usize] == 0);
                 self.descend(img, sl, &mut p, &mut owner, &mut queue, &mut log);
             }
         }
         self.funcs = funcs;
+        new
     }
 
     /// PseudoDisassembler.isValidSubroutine(entry, false), which Ghidra asks before it
@@ -703,15 +807,21 @@ impl Analysis {
     /// to its own fallthrough, and returns, jumps through a register or reaches a function;
     /// a single instruction must reach a function. With `existing` (isValidSubroutine(entry,
     /// true), asked for pointers in data), the flow may run through existing instructions and a
-    /// single instruction is enough. Not modelled: references into the body.
+    /// single instruction is enough. `checkPseudoBody`: no defined data in the body, no
+    /// reference (`dests`) into the middle of an instruction of the body, and without
+    /// `existing` no reference to the body but to its entry. Without `must_terminate` this is
+    /// PseudoDisassembler.isValidCode, which Create Address Tables asks.
+    #[allow(clippy::too_many_arguments)]
     fn valid_subroutine(
         &self,
         img: &Image,
         sl: &Sleigh,
         p: &mut crate::sleigh::Parse,
         owner: &[u8],
+        dests: &BTreeSet<u32>,
         entry: u32,
         existing: bool,
+        must_terminate: bool,
     ) -> bool {
         if img.read_u32(entry) == Some(0) && img.read_u32(entry + 4) == Some(0) {
             return false;
@@ -727,7 +837,7 @@ impl Analysis {
                 }
                 let Some(i) = self.decode(img, sl, p, a, &mut fold) else { return false };
                 let o = (a - self.code_lo) as usize;
-                let taken = |b: u8| b == 3 || b != 0 && !existing; // 3: defined data (a switch table)
+                let taken = |b: u8| b >= 3 || b != 0 && !existing; // 3, 4: defined data (a switch table, a pointer)
                 if owner.get(o..o + i.len as usize).is_none_or(|b| b.iter().any(|&b| taken(b))) {
                     return false;
                 }
@@ -759,7 +869,120 @@ impl Analysis {
         if targets.iter().any(|&t| matches!(start_of(t), Some((s, true)) if s != t)) {
             return false; // a jump into the middle of an instruction of the body
         }
-        (terminated || called) && (called || existing || body.len() > 1)
+        if must_terminate && !(terminated || called) {
+            return false;
+        }
+        // checkPseudoBody
+        if body.iter().any(|(&s, &l)| dests.range(s + 1..s + l as u32).next().is_some()) {
+            return false; // an offcut reference
+        }
+        existing
+            || (called || body.len() > 1)
+                && !body.iter().any(|(&s, &l)| dests.range(s..s + l as u32).any(|&t| t != entry))
+    }
+
+    /// OperandReferenceAnalyzer.isUsedForCalculation: the instruction at `a` computes with the
+    /// constant `t` (any operation but COPY, LOAD and STORE on it or on a copy of it), or
+    /// loads or stores through a copy of it.
+    fn used_for_calculation(&self, img: &Image, sl: &Sleigh, p: &mut crate::sleigh::Parse, a: u32, t: u32) -> bool {
+        let Some(sec) = img.block_of(a) else { return false };
+        if sl.decode(p, a as u64, &sec.data[(a - sec.addr) as usize..]).is_err() {
+            return false;
+        }
+        let Ok(ops) = sl.pcode(p) else { return false };
+        let mut target: Option<crate::sleigh::Varnode> = None;
+        for op in &ops {
+            let through = matches!(op.opc, 2 | 3);
+            if through && target.is_some() && op.ins.get(1) == target.as_ref() {
+                return true;
+            }
+            for v in &op.ins {
+                if target.as_ref() == Some(v) || v.space == 0 && v.offset == t as u64 {
+                    if through {
+                        continue;
+                    }
+                    if op.opc != 1 {
+                        return true;
+                    }
+                    if let Some(o) = &op.out {
+                        target = Some(*o);
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// AddressTable.getThresholdRunOfValidPointers(BILLION_CASES): the run of pointers that
+    /// happens by chance once in a billion, at least 2.
+    fn min_table(img: &Image) -> usize {
+        let bytes: f64 = img.sections.iter().map(|s| s.data.len() as f64).sum();
+        ((1e-9f64).ln() / (bytes / 2f64.powi(32)).ln()).ceil().max(2.0) as usize
+    }
+
+    /// Bytes at `a` that hold no instruction and no data but pointers (which a table may take
+    /// over, as AddressTable.getEntry and makeTable allow).
+    fn undefined(&self, img: &Image, owner: &[u8], a: u32) -> bool {
+        !self.is_code(img, a) || matches!(owner[(a - self.code_lo) as usize], 0 | 4)
+    }
+
+    /// AddressTable.getEntry(top, checkExisting, `min`, alignment 1, MINIMUM_SAFE_ADDRESS): the
+    /// run of words from `top` that are addresses of the image (not below 1024), cut by a
+    /// reference to a word after the second, by a word that points into the middle of an
+    /// instruction or to one something falls into (checkForCollisionAtTarget), by the next
+    /// reference destination and by the next instruction or data that is no pointer.
+    fn table_entry(&self, img: &Image, owner: &[u8], dests: &BTreeSet<u32>, top: u32, min: usize) -> Option<Vec<u32>> {
+        let s = img.block_of(top)?;
+        let end = s.addr + s.data.len() as u32;
+        if !self.undefined(img, owner, top) {
+            return None;
+        }
+        let collides = |t: u32| {
+            self.is_code(img, t)
+                && match owner[(t - self.code_lo) as usize] {
+                    2 => true, // into the middle of an instruction
+                    1 => self.insns.range(..t).next_back().is_some_and(|(&a, i)| {
+                        a + i.len as u32 == t
+                            && i.falls_through()
+                            && !(i.flow == Flow::Call && i.target.is_some_and(|t| self.noreturn.contains(&t)))
+                    }),
+                    _ => false,
+                }
+        };
+        let mut elems: Vec<u32> = Vec::new();
+        let mut cur = top;
+        while cur + 4 <= end {
+            let v = u32::from_le_bytes(s.data[(cur - s.addr) as usize..][..4].try_into().unwrap());
+            if v < 1024 || img.block_of(v).is_none() || (elems.len() > 1 && dests.contains(&cur)) || collides(v) {
+                break;
+            }
+            elems.push(v);
+            cur += 4;
+        }
+        let mut count = elems.len();
+        if count >= min {
+            let stop = dests.range(top + 1..top + 4 * count as u32).next().copied();
+            let stop = stop.into_iter().chain((top..top + 4 * count as u32).find(|&a| !self.undefined(img, owner, a)));
+            if let Some(at) = stop.min() {
+                count = count.min(((at - top) / 4) as usize);
+            }
+        }
+        elems.truncate(count);
+        (count >= min).then_some(elems)
+    }
+
+    /// AddressTable.makeTable: the words from `top` become pointers, each a reference to its
+    /// value.
+    fn make_table(&mut self, img: &Image, owner: &mut [u8], refs: &mut Refs, top: u32, elems: &[u32]) {
+        for (i, &v) in elems.iter().enumerate() {
+            let slot = top + 4 * i as u32;
+            self.table_slots.insert(slot, v);
+            refs.dests.insert(v);
+            if self.is_code(img, slot) {
+                let o = (slot - self.code_lo) as usize;
+                owner[o..].iter_mut().take(4).filter(|b| **b == 0).for_each(|b| *b = 4);
+            }
+        }
     }
 
     /// OperandReferenceAnalyzer (`added`, `checkForPointer`): a data word an instruction
@@ -776,26 +999,22 @@ impl Analysis {
         sl: &Sleigh,
         p: &mut crate::sleigh::Parse,
         owner: &[u8],
+        refs: &Refs,
         asked: &mut HashSet<u32>,
     ) -> Vec<u32> {
-        let dests: BTreeSet<u32> = self
-            .insns
-            .values()
-            .flat_map(|i| i.refs.iter().chain(&i.code_imms).chain(&i.target))
-            .chain(self.tables.values().flatten())
-            .chain(self.table_slots.values())
-            .copied()
-            .collect();
+        let dests = &refs.dests;
         // checkForPointer: a value of 4096 up, and no reference into the rest of the slot
         let pointers = dests.iter().filter(|&&t| !self.is_code(img, t)).filter_map(|&t| {
             img.read_u32(t).filter(|&v| v >= 4096 && dests.range(t + 1..t.saturating_add(4)).next().is_none())
         });
         let mut out = Vec::new();
         for v in pointers.chain(self.table_slots.values().copied()) {
+            // hasDataAccessReferences: not where something reads or writes the target
             if self.is_code(img, v)
                 && owner[(v - self.code_lo) as usize] == 0
                 && asked.insert(v)
-                && self.valid_subroutine(img, sl, p, owner, v, true)
+                && !refs.reads.contains(&v)
+                && self.valid_subroutine(img, sl, p, owner, &refs.dests, v, true, true)
             {
                 out.push(v);
             }
@@ -806,71 +1025,34 @@ impl Analysis {
     /// Ghidra's Create Address Tables analyzer (AddressTableAnalyzer, AddressTable.getEntry and
     /// checkTable) over the bytes no instruction covers, in every section: runs of at least
     /// `getThresholdRunOfValidPointers` (one in a billion by chance) 4-aligned words that are
-    /// addresses (not 0, not below 1024), cut by a reference into the run (after its second
-    /// word, or before its end), the next instruction, a pointer into the middle of an
-    /// instruction or to an instruction something falls into, a UTF-16 string, or a jump of
-    /// more than 0xffffff between neighbours (which drops that entry). Adds the slots to
-    /// `table_slots` and returns the entries of tables whose entries are all code.
-    /// Not modelled: Ghidra's defined data (strings, structures) and its order of analysis.
-    pub fn address_tables(&mut self, img: &Image, owner: &[u8]) -> Vec<u32> {
-        let undefined = |a: u32| !self.is_code(img, a) || owner[(a - self.code_lo) as usize] == 0;
-        let bytes: f64 = img.sections.iter().map(|s| s.data.len() as f64).sum();
-        let min = ((1e-9f64).ln() / (bytes / 2f64.powi(32)).ln()).ceil().max(2.0) as usize;
-        // Reference destinations in undefined bytes (anything else is past the next instruction).
-        let mut refs: BTreeSet<u32> = BTreeSet::new();
-        for i in self.insns.values() {
-            refs.extend(i.refs.iter().chain(&i.code_imms).chain(&i.target).copied().filter(|&t| undefined(t)));
-        }
-        for c in self.tables.values() {
-            refs.extend(c.iter().copied().filter(|&t| undefined(t)));
-        }
-        let collides = |t: u32| {
-            self.is_code(img, t)
-                && match owner[(t - self.code_lo) as usize] {
-                    2 => true, // into the middle of an instruction
-                    1 => self.insns.range(..t).next_back().is_some_and(|(&a, i)| {
-                        a + i.len as u32 == t
-                            && i.falls_through()
-                            && !(i.flow == Flow::Call && i.target.is_some_and(|t| self.noreturn.contains(&t)))
-                    }),
-                    _ => false,
-                }
-        };
-        let (mut code, mut slots) = (Vec::new(), Vec::new());
+    /// addresses (`table_entry`), cut by a pointer into the middle of an instruction, a UTF-16
+    /// string, or a jump of more than 0xffffff between neighbours (which drops that entry).
+    /// Adds the slots to `table_slots` and returns the entries to disassemble
+    /// (`getFunctionEntries`): those of a table whose every entry lies in an executable block
+    /// and is the start of an instruction or, where nothing is defined, valid code
+    /// (PseudoDisassembler.isValidCode). An entry at defined data (a pointer of this or another
+    /// table) is not, so a table of pointers to pointers stays data.
+    /// Not modelled: Ghidra's other defined data (strings, structures); the analyzer's
+    /// disassembly between one table and the next (here after the whole pass).
+    fn address_tables(
+        &mut self,
+        img: &Image,
+        sl: &Sleigh,
+        p: &mut crate::sleigh::Parse,
+        owner: &mut [u8],
+        refs: &mut Refs,
+    ) -> Vec<u32> {
+        let min = Self::min_table(img);
+        let mut code = Vec::new();
         for s in &img.sections {
             let end = s.addr + s.data.len() as u32;
-            let word = |a: u32| u32::from_le_bytes(s.data[(a - s.addr) as usize..][..4].try_into().unwrap());
             let mut top = s.addr;
             while top + 4 <= end {
-                if !undefined(top) {
+                let Some(elems) = self.table_entry(img, owner, &refs.dests, top, min) else {
                     top += 4;
                     continue;
-                }
-                // getEntry
-                let mut elems: Vec<u32> = Vec::new();
-                let mut cur = top;
-                while cur + 4 <= end {
-                    let v = word(cur);
-                    if v < 1024 || img.block_of(v).is_none() || (elems.len() > 1 && refs.contains(&cur)) || collides(v)
-                    {
-                        break;
-                    }
-                    elems.push(v);
-                    cur += 4;
-                }
-                let mut count = elems.len();
-                if count >= min {
-                    let stop = refs.range(top + 1..top + 4 * count as u32).next().copied();
-                    let stop = stop.into_iter().chain((top..top + 4 * count as u32).find(|&a| !undefined(a)));
-                    if let Some(at) = stop.min() {
-                        count = count.min(((at - top) / 4) as usize);
-                    }
-                }
-                if count < min {
-                    top += 4;
-                    continue;
-                }
-                elems.truncate(count);
+                };
+                let count = elems.len();
                 // processAddressTable: checkTable, make the table, carry on one entry past it
                 let mut first = 0;
                 while first < count {
@@ -886,16 +1068,22 @@ impl Analysis {
                         len += 1;
                     }
                     if len >= min {
-                        let t = &elems[first..first + len];
-                        for (i, &v) in t.iter().enumerate() {
-                            slots.push((at(first + i), v));
-                            if undefined(v) {
-                                refs.insert(v);
-                            }
-                        }
-                        // ponytail: "valid code" is "in an executable section"; Ghidra pseudo-disassembles
-                        if t.iter().all(|&v| self.is_code(img, v)) {
-                            code.extend(t);
+                        self.make_table(img, owner, refs, at(first), &elems[first..first + len]);
+                        // getFunctionEntries, over the whole table that is left
+                        let rest = &elems[first..];
+                        let valid: Vec<u32> = rest
+                            .iter()
+                            .copied()
+                            .filter(|&v| {
+                                self.is_code(img, v)
+                                    && match owner[(v - self.code_lo) as usize] {
+                                        0 => self.valid_subroutine(img, sl, p, owner, &refs.dests, v, true, false),
+                                        b => b == 1,
+                                    }
+                            })
+                            .collect();
+                        if valid.len() >= rest.len() {
+                            code.extend(valid);
                         }
                     }
                     first += len + 1;
@@ -903,7 +1091,6 @@ impl Analysis {
                 top += 4 * count as u32;
             }
         }
-        self.table_slots.extend(slots);
         code
     }
 
@@ -1053,42 +1240,61 @@ impl Analysis {
         }
     }
 
-    fn compute_bodies(&mut self) {
-        let mut bodies = BTreeMap::new();
-        for &f in &self.funcs {
-            let mut seen = BTreeSet::new();
-            let mut work = vec![f];
-            while let Some(a) = work.pop() {
-                if (a != f && self.funcs.contains(&a)) || !seen.insert(a) {
-                    continue;
-                }
-                let Some(i) = self.insns.get(&a) else {
-                    seen.remove(&a);
-                    continue;
-                };
-                let noret = match i.flow {
-                    Flow::Call => i.target.is_some_and(|t| self.noreturn.contains(&t)),
-                    Flow::CallInd => i.slot.is_some_and(|s| self.noreturn.contains(&s)),
-                    _ => false,
-                };
-                if i.falls_through() && !noret {
-                    work.push(a + i.len as u32);
-                }
-                if matches!(i.flow, Flow::Jump | Flow::CondJump) {
-                    work.extend(i.target);
-                }
-                if let Some(cases) = self.tables.get(&a) {
-                    work.extend(cases);
-                }
-            }
-            bodies.insert(f, seen.into_iter().collect());
+    /// Ghidra's CALL_RETURN flow override at an instruction, which ghidra-rs derives: a call of
+    /// a non-returning function (the no-return analyzer) and a jump to a function (Shared
+    /// Return Calls). An override of the project store wins.
+    pub fn call_return(&self, a: u32, i: &Ins) -> bool {
+        if let Some(&o) = self.overrides.get(&a) {
+            return o;
         }
-        self.bodies = bodies;
+        match i.flow {
+            Flow::Call => i.target.is_some_and(|t| self.noreturn.contains(&t)),
+            Flow::CallInd => i.slot.is_some_and(|s| self.noreturn.contains(&s)),
+            Flow::Jump => i.target.is_some_and(|t| self.funcs.contains(&t)),
+            _ => false,
+        }
+    }
+
+    /// The body of function `f`: the instructions of the ranges the store set for it, else the
+    /// flow from its entry up to other function entries.
+    pub fn body_of(&self, f: u32) -> Vec<u32> {
+        if let Some(ranges) = self.fixed_bodies.get(&f) {
+            return ranges.iter().flat_map(|&(lo, hi)| self.insns.range(lo..=hi).map(|(&a, _)| a)).collect();
+        }
+        let mut seen = BTreeSet::new();
+        let mut work = vec![f];
+        while let Some(a) = work.pop() {
+            if (a != f && self.funcs.contains(&a)) || !seen.insert(a) {
+                continue;
+            }
+            let Some(i) = self.insns.get(&a) else {
+                seen.remove(&a);
+                continue;
+            };
+            let calls = matches!(i.flow, Flow::Call | Flow::CallInd);
+            // the override of a jump matters only where the store set one: a derived one
+            // targets a function entry, where the walk stops anyway
+            let tail = self.overrides.get(&a) == Some(&true);
+            if i.falls_through() && !(calls && self.call_return(a, i)) {
+                work.push(a + i.len as u32);
+            }
+            if matches!(i.flow, Flow::Jump | Flow::CondJump) && !tail {
+                work.extend(i.target);
+            }
+            if let Some(cases) = self.tables.get(&a) {
+                work.extend(cases);
+            }
+        }
+        seen.into_iter().collect()
+    }
+
+    pub fn compute_bodies(&mut self) {
+        self.bodies = self.funcs.iter().map(|&f| (f, self.body_of(f))).collect();
     }
 
     /// Each function's stack purge, as Ghidra sets it from the function's returns: the `n` of
     /// `RET n` (0 for `RET`), where every return of the body agrees.
-    fn stack_purges(&mut self, img: &Image) {
+    pub fn stack_purges(&mut self, img: &Image) {
         self.purge.clear();
         for (&f, body) in &self.bodies {
             let mut pops = body.iter().filter(|a| self.insns[a].flow == Flow::Return).map(|&a| {
@@ -1175,11 +1381,25 @@ impl Analysis {
     /// One function's walk for `propagate`: every decode of an instruction of the body, with
     /// the state the walk brought there.
     fn flow_constants(&self, img: &Image, sl: &Sleigh, p: &mut crate::sleigh::Parse, f: u32) -> Vec<(u32, Ins)> {
+        self.flow_walk(img, sl, p, f, false, &mut |_, _| {})
+    }
+
+    /// The walk of `flow_constants`; `visit` sees each instruction's address and the state
+    /// after it. With `stack_and`, `AND ESP,mask` keeps ESP a stack address.
+    pub fn flow_walk(
+        &self,
+        img: &Image,
+        sl: &Sleigh,
+        p: &mut crate::sleigh::Parse,
+        f: u32,
+        stack_and: bool,
+        visit: &mut dyn FnMut(u32, &Fold),
+    ) -> Vec<(u32, Ins)> {
         const MAX_EXTRA_INSTRUCTION_FLOW: u32 = 16;
         let body = &self.bodies[&f];
         let (mut out, mut visited, mut edges) = (Vec::new(), HashSet::new(), HashSet::new());
         // (destination, source, state, instructions run since hitting visited code)
-        let mut stack = vec![(f, f, Fold { whole: true, ..Fold::default() }, None::<u32>)];
+        let mut stack = vec![(f, f, Fold { whole: true, stack_and, ..Fold::default() }, None::<u32>)];
         while let Some((mut a, src, mut fold, mut extra)) = stack.pop() {
             if !edges.insert((a, src)) {
                 continue; // already flowed here from there
@@ -1194,6 +1414,7 @@ impl Analysis {
                     extra = None;
                 }
                 let Some(d) = self.decode(img, sl, p, a, &mut fold) else { break };
+                visit(a, &fold);
                 let computed = d.computed;
                 out.push((a, d));
                 let call = matches!(ins.flow, Flow::Call | Flow::CallInd);
@@ -1242,6 +1463,45 @@ impl Analysis {
             (Flow::CallInd, Some(s)) => img.read_u32(s).filter(|t| self.funcs.contains(t)),
             _ => None,
         }
+    }
+
+    /// The bytes the RETs of `f` pop (`RET n`), where they agree.
+    /// Replace the purges a call's stack effect goes by (function entry or import slot ->
+    /// bytes popped besides the return address); returns the ones replaced.
+    pub fn swap_call_purges(&mut self, purges: HashMap<u32, u32>) -> HashMap<u32, u32> {
+        std::mem::replace(&mut self.purge, purges)
+    }
+
+    pub fn purge(&self, f: u32) -> Option<u32> {
+        self.purge.get(&f).copied()
+    }
+
+    /// Ghidra's `FunctionPurgeAnalysisCmd`: the bytes the first RET of the body (by address,
+    /// among its first 2048 instructions) pops; without a RET, the purge of the function the
+    /// last jump out of the body calls (a jump with a `CALL_RETURN` override).
+    // ponytail: Ghidra takes the callee's purge as it is when this function is analysed (in
+    // address order); here the callee is always worked out first, 8 jumps deep at most
+    pub fn ret_purge(&self, img: &Image, f: u32, depth: u32) -> Option<u32> {
+        let mut backup = None;
+        for &a in self.bodies.get(&f)?.iter().take(2048) {
+            let i = &self.insns[&a];
+            match i.flow {
+                Flow::Return => {
+                    let sec = img.block_of(a)?;
+                    let b = &sec.data[(a - sec.addr) as usize..];
+                    let b = &b[b.iter().take_while(|&&x| matches!(x, 0xf2 | 0xf3 | 0x66)).count()..];
+                    return match b {
+                        [0xc2 | 0xca, lo, hi, ..] => Some(u16::from_le_bytes([*lo, *hi]) as u32),
+                        [0xc3 | 0xcb, ..] => Some(0),
+                        _ => None, // IRET
+                    };
+                }
+                Flow::Jump => backup = i.target.filter(|t| *t != f && self.funcs.contains(t)).or(backup),
+                _ => {}
+            }
+        }
+        let t = backup.filter(|t| depth < 8 && !self.noreturn.contains(t))?;
+        self.ret_purge(img, t, depth + 1)
     }
 
     pub fn body_size(&self, f: u32) -> u64 {

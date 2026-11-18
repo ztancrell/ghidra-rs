@@ -2,13 +2,17 @@
 //! offsets the local scope owns (`ScopeLocal` and its range tree), `ScopeLocal::markNotMapped`,
 //! and `ActionRestrictLocal`.
 //!
-//! Local symbols (database.cc) are not ported: the scope holds only the locked parameters of the
-//! function's own prototype. `ScopeLocal::restructureVarnode` (MapState, RangeHint, the alias
-//! checker) builds symbols, so `ActionRestructureVarnode` stays unported.
+//! The symbols `ScopeLocal::restructureVarnode` builds (MapState, RangeHint, the alias checker:
+//! `mapstate.rs`) are the entries [`LocalSym`] here, range and flags, each with its symbol of
+//! the local scope (`Funcdata::symtab`) for the data-type and the name. The locked parameters
+//! of the function's own prototype are not symbols of the scope: they are read from the
+//! prototype. (Superseded: "Local symbols (database.cc) are not ported", "stays unported in
+//! the `decompile` root", "bare entries".)
 
 use super::fspec::{EffectKind, Storage};
 use super::funcdata::Funcdata;
 use super::opcode::Opcode;
+use super::scope::SymbolId;
 use super::varnode::{Space, VarnodeId, VnFlags};
 use super::{Arch, Result};
 use std::collections::HashSet;
@@ -25,6 +29,30 @@ pub(crate) struct LocalMap {
     /// the last offset of the model's parameter range (`paramrange.getLastRange()->getLast()`,
     /// the default range `[0, highest >> 2]` when the input list has no stack entry)
     param_last: u64,
+    /// the model's parameter ranges (`FuncProto::getParamRange`), as given to [`LocalMap::new`]
+    params: Vec<(u64, u64)>,
+    /// the symbols `ScopeLocal::restructureVarnode` made ([`super::mapstate`]); a removed one
+    /// keeps its index
+    syms: Vec<LocalSym>,
+    /// `openParamRefs`: the last `restructureVarnode` saw an open reference into the parameters
+    pub(crate) open_param_refs: bool,
+    /// their entries (`maptable` of the stack space), keyed by the index in `syms`
+    entries: super::rangemap::RangeMap<usize>,
+}
+
+/// A symbol of the local scope made by `ScopeLocal::restructureVarnode`: an unnamed, unlocked
+/// stack variable with one entry, `[off, last]`. Its flags are `mapped` and `addrtied`, and
+/// `nolocalalias` once `markUnaliased` sets it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LocalSym {
+    pub(crate) off: u64,
+    pub(crate) last: u64,
+    pub(crate) noalias: bool,
+    /// its symbol of the local scope (`Funcdata::symtab`): the data-type and the name
+    pub(crate) id: SymbolId,
+    /// category `fake_input` (`fakeInputSymbols`)
+    pub(crate) fake_input: bool,
+    live: bool,
 }
 
 impl LocalMap {
@@ -41,13 +69,24 @@ impl LocalMap {
             m.insert(a, b);
         }
         // the last of the merged parameter ranges ends at the largest end
+        m.params = params.to_vec();
         m.param_last = params.iter().map(|&(_, b)| b).max().unwrap_or((highest >> 2).min(0x7fff_ffff));
         m
     }
 
     /// A scope owning nothing, before `Funcdata::start_processing` knows the architecture.
     pub(crate) fn empty() -> LocalMap {
-        LocalMap { ranges: Vec::new(), highest: u64::MAX, min_param: u64::MAX, max_param: 0, param_last: 0 }
+        LocalMap {
+            ranges: Vec::new(),
+            highest: u64::MAX,
+            min_param: u64::MAX,
+            max_param: 0,
+            param_last: 0,
+            params: Vec::new(),
+            syms: Vec::new(),
+            open_param_refs: false,
+            entries: Default::default(),
+        }
     }
 
     /// Port of `RangeList::insertRange`: overlapping ranges merge (touching ones do not).
@@ -64,6 +103,112 @@ impl LocalMap {
         out.push((first, last));
         out.sort_unstable();
         self.ranges = out;
+    }
+
+    /// The model's parameter ranges.
+    pub(crate) fn params(&self) -> &[(u64, u64)] {
+        &self.params
+    }
+
+    /// The entry of the unnamed stack variable `id` over `[off, off + size)`
+    /// (`Funcdata::add_local_sym` makes the two).
+    pub(crate) fn add_sym(&mut self, off: u64, size: u64, fake_input: bool, id: SymbolId) {
+        let last = off.saturating_add(size.max(1) - 1);
+        self.syms.push(LocalSym { off, last, noalias: false, id, fake_input, live: true });
+        self.entries.insert(self.syms.len() - 1, off, last, super::rangemap::SUB_FIRST);
+    }
+
+    /// `clearUnlockedCategory(-1)` (`fake_input` false) or `clearCategory(Symbol::fake_input)`:
+    /// the symbols removed, for `Funcdata::clear_local_syms`.
+    // ponytail: removed symbols stay in `syms` (one set per pass of the action); compact the
+    // list if a partial function with very many passes gets slow
+    pub(crate) fn clear_syms(&mut self, fake_input: bool) -> Vec<SymbolId> {
+        let mut gone = Vec::new();
+        for i in 0..self.syms.len() {
+            let s = self.syms[i];
+            if s.live && s.fake_input == fake_input {
+                self.entries.erase(i, s.off, s.last);
+                self.syms[i].live = false;
+                gone.push(s.id);
+            }
+        }
+        gone
+    }
+
+    /// The symbols in the order of the entry list (`rangemap->begin_list()`), by index.
+    pub(crate) fn sym_list(&self) -> &[usize] {
+        self.entries.records()
+    }
+
+    pub(crate) fn sym(&self, i: usize) -> &LocalSym {
+        &self.syms[i]
+    }
+
+    /// `Scope::setAttribute(symbol, Varnode::nolocalalias)`.
+    pub(crate) fn set_noalias(&mut self, i: usize) {
+        self.syms[i].noalias = true;
+    }
+
+    /// Port of `ScopeInternal::findOverlap`: a symbol with an entry overlapping
+    /// `[off, off + size)`.
+    pub(crate) fn find_overlap(&self, off: u64, size: u64) -> Option<&LocalSym> {
+        self.entries.find_overlap(off, off.saturating_add(size.max(1) - 1)).map(|i| &self.syms[i])
+    }
+
+    /// The symbol loop of `ScopeLocal::markNotMapped` over `[off, last]`: each symbol under the
+    /// range is removed (`removeSymbol`; none is typelocked), until a `fake_input` one stops it.
+    /// True when one did: the range then stays mapped. The symbols removed go to `gone`.
+    fn unmap_syms(&mut self, off: u64, last: u64, gone: &mut Vec<SymbolId>) -> bool {
+        while let Some(i) = self.entries.find_overlap(off, last) {
+            let s = self.syms[i];
+            if s.fake_input {
+                return true;
+            }
+            self.entries.erase(i, s.off, s.last);
+            self.syms[i].live = false;
+            gone.push(s.id);
+        }
+        false
+    }
+
+    /// Port of `ScopeInternal::findContainer`: the smallest symbol holding all of
+    /// `[off, off + size)` (the symbols are address-tied, so in use everywhere).
+    pub(crate) fn find_container(&self, off: u64, size: u32) -> Option<&LocalSym> {
+        let last = off.saturating_add(u64::from(size.max(1)) - 1);
+        self.syms.iter().filter(|s| s.live && s.off <= off && last <= s.last).min_by_key(|s| s.last - s.off)
+    }
+
+    /// Whether a symbol holds all of `[off, off + size)`.
+    pub(crate) fn has_container(&self, off: u64, size: u32) -> bool {
+        self.find_container(off, size).is_some()
+    }
+
+    /// Port of `RangeList::longestFit` on the scope's ranges: the bytes from `off` on that
+    /// chained ranges hold, counted until `maxsize` is reached.
+    pub(crate) fn longest_fit(&self, off: u64, maxsize: u64) -> u64 {
+        let at = self.ranges.partition_point(|&(first, _)| first <= off);
+        let Some(mut i) = at.checked_sub(1) else { return 0 };
+        let (mut offset, mut res) = (off, 0u64);
+        if self.ranges[i].1 < offset {
+            return 0;
+        }
+        while let Some(&(first, last)) = self.ranges.get(i) {
+            if first > offset {
+                break;
+            }
+            res += last + 1 - offset;
+            offset = last + 1;
+            if res >= maxsize {
+                break;
+            }
+            i += 1;
+        }
+        res
+    }
+
+    /// Port of `ScopeLocal::isUnmappedUnaliased` for a stack offset.
+    pub(crate) fn is_unmapped_unaliased(&self, off: u64) -> bool {
+        self.max_param < self.min_param || off < self.min_param || off > self.max_param
     }
 
     /// The ranges the scope owns, in order (`Scope::printBounds`).
@@ -172,9 +317,12 @@ fn locked_stack_params(fd: &Funcdata) -> Vec<(u64, u32, String)> {
 
 /// Port of `ScopeLocal::markNotMapped`: the stack range is no longer mapped by the local
 /// scope. A parameter range widens the parameter extent first; a typelocked symbol under it (a
-/// locked parameter) keeps the range, with a warning unless both are parameters. Any other
-/// local symbol under it (removed, or a `fake_input` that keeps the range, in the C++) fails
-/// loudly: ghidra-rs's local scope holds none while this runs.
+/// locked parameter) keeps the range, with a warning unless both are parameters. A symbol of
+/// `restructureVarnode` under it is removed, and a `fake_input` one keeps the range
+/// (`LocalMap::unmap_syms`). Any other local symbol under it fails loudly. So does a locked
+/// parameter under it while such symbols exist (the order `findOverlap` gives the two in is not
+/// ported; `restructureVarnode` makes no symbol under a locked prototype), and a range that
+/// wraps the space while they do.
 pub(crate) fn mark_not_mapped(fd: &mut Funcdata, space: Space, first: u64, sz: u32, parameter: bool) -> Result<()> {
     if space != Space::Stack {
         return Ok(());
@@ -186,7 +334,9 @@ pub(crate) fn mark_not_mapped(fd: &mut Funcdata, space: Space, first: u64, sz: u
     let locked = locked_stack_params(fd);
     let other = fd.symtab.overlapping(super::scope::LOCAL, Space::Stack, first, sz).into_iter().any(|s| {
         let sym = fd.symtab.symbol(s);
+        // (the symbols of `restructureVarnode` are handled below)
         !(sym.flags.type_locked && sym.entries.iter().any(|e| locked.iter().any(|l| l.0 == e.offset)))
+            && !fd.localmap.syms.iter().any(|l| l.live && l.id == s)
     });
     if other {
         return super::err(
@@ -196,12 +346,27 @@ pub(crate) fn mark_not_mapped(fd: &mut Funcdata, space: Space, first: u64, sz: u
     let hit = locked
         .into_iter()
         .find(|&(off, size, _)| u128::from(off) < end && u128::from(first) < u128::from(off) + u128::from(size));
+    // findOverlap(addr, sz) takes the range as given, not clipped
+    let sym_last = first.checked_add(u64::from(sz.max(1)) - 1);
+    if !fd.localmap.entries.records().is_empty() && (sym_last.is_none() || hit.is_some()) {
+        return super::err(
+            "markNotMapped with symbols of restructureVarnode over a locked parameter or a range wrapping the stack space: not implemented in ghidra-rs yet",
+        );
+    }
     if let Some((_, _, name)) = hit {
         // every symbol here is a typelocked function parameter
         if !parameter {
             fd.warning_header(format!("Variable defined which should be unmapped: {name}"));
         }
         return Ok(());
+    }
+    let mut gone = Vec::new();
+    let kept = sym_last.is_some_and(|l| fd.localmap.unmap_syms(first, l, &mut gone));
+    for id in gone {
+        fd.symtab.remove_symbol(id);
+    }
+    if kept {
+        return Ok(()); // inputs in the stack space are not unmapped
     }
     fd.localmap.remove_range(first, sz);
     Ok(())
@@ -293,7 +458,7 @@ fn alias_boundary(fd: &Funcdata, arch: &Arch) -> u64 {
 /// reference parameters) start the aliased region.
 fn boundary_from(fd: &Funcdata, base: VarnodeId, local_boundary: u64) -> u64 {
     let mut boundary = u64::MAX;
-    for b in gather_additive_base(fd, base) {
+    for (b, _) in gather_additive_base(fd, base) {
         // addressToByte with a word size of 1
         let offset = gather_offset(fd, b);
         if offset >= local_boundary && offset < boundary {
@@ -304,14 +469,16 @@ fn boundary_from(fd: &Funcdata, base: VarnodeId, local_boundary: u64) -> u64 {
 }
 
 /// Port of `AliasChecker::gatherAdditiveBase`: the varnodes of the sums `start` is in that are
-/// used other than in a further sum (the index terms are not needed here).
-fn gather_additive_base(fd: &Funcdata, start: VarnodeId) -> Vec<VarnodeId> {
-    let mut queue = vec![start];
+/// used other than in a further sum (`AddBase::base`), each with whether a non-constant term
+/// was added on the way (`AddBase::index`). As in the C++, the index found at one reader stays
+/// set for the readers after it.
+pub(crate) fn gather_additive_base(fd: &Funcdata, start: VarnodeId) -> Vec<(VarnodeId, bool)> {
+    let mut queue = vec![(start, false)];
     let mut marked: HashSet<VarnodeId> = HashSet::from([start]);
     let mut out = Vec::new();
     let mut i = 0;
     while i < queue.len() {
-        let vn = queue[i];
+        let (vn, mut index) = queue[i];
         i += 1;
         let mut nonadduse = false;
         for &op in fd.vn(vn).descend.iter() {
@@ -325,7 +492,13 @@ fn gather_additive_base(fd: &Funcdata, start: VarnodeId) -> Vec<VarnodeId> {
                     nonadduse = true;
                     false
                 }
-                Opcode::IntSub | Opcode::IntAdd | Opcode::Ptradd | Opcode::Ptrsub | Opcode::Segmentop => true,
+                Opcode::IntSub | Opcode::IntAdd | Opcode::Ptradd => {
+                    // the other term (for INT_SUB the pointer is input 0)
+                    let other = if o.ins[1] == vn { o.ins[0] } else { o.ins[1] };
+                    index |= !fd.vn(other).is_constant();
+                    true
+                }
+                Opcode::Ptrsub | Opcode::Segmentop => true,
                 _ => {
                     nonadduse = true;
                     false
@@ -333,12 +506,12 @@ fn gather_additive_base(fd: &Funcdata, start: VarnodeId) -> Vec<VarnodeId> {
             };
             if let Some(sub) = o.out.filter(|_| follow) {
                 if marked.insert(sub) {
-                    queue.push(sub);
+                    queue.push((sub, index));
                 }
             }
         }
         if nonadduse {
-            out.push(vn);
+            out.push((vn, index));
         }
     }
     out
@@ -346,7 +519,7 @@ fn gather_additive_base(fd: &Funcdata, start: VarnodeId) -> Vec<VarnodeId> {
 
 /// Port of `AliasChecker::gatherOffset`: the constant part of the sum `vn` is the result of
 /// (64-bit wrapping arithmetic, as the C++ `uintb`).
-fn gather_offset(fd: &Funcdata, vn: VarnodeId) -> u64 {
+pub(crate) fn gather_offset(fd: &Funcdata, vn: VarnodeId) -> u64 {
     let v = fd.vn(vn);
     if v.is_constant() {
         return v.offset;
@@ -447,5 +620,21 @@ mod tests {
         // a range covering a whole piece removes it
         m.remove(0, 8, false);
         assert_eq!(m.ranges[0], (12, 511));
+    }
+
+    /// `markNotMapped` removes the symbols under a range until it meets a fake input.
+    #[test]
+    fn unmapping_removes_symbols_up_to_a_fake_input() {
+        use super::super::scope::SymbolId;
+        let mut m = LocalMap::empty();
+        m.add_sym(0x10, 4, false, SymbolId(7));
+        m.add_sym(0x20, 4, true, SymbolId(8));
+        assert!(m.find_container(0x12, 2).is_some() && m.find_container(0x12, 4).is_none());
+        let mut gone = Vec::new();
+        assert!(!m.unmap_syms(0x8, 0x13, &mut gone));
+        assert!(!m.has_container(0x10, 4));
+        assert!(m.unmap_syms(0x1c, 0x23, &mut gone));
+        assert!(m.has_container(0x20, 4));
+        assert_eq!(gone, [SymbolId(7)]);
     }
 }

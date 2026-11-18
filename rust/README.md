@@ -16,6 +16,12 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   descent, function discovery, switch tables, function bodies, flows and data references.
 - `ghidra-rs/src/scripts.rs`: writers for the ExportFunctions and ExportGaps CSV files, plus
   RTTI vftables and a small MSVC name demangler.
+- `ghidra-rs/src/store.rs`: the project store: a text file of edits (functions, bodies, no-return
+  flags, flow overrides, thunk marks) laid over the analysis, and the script primitives that
+  edit both (see "Project store and the editing scripts").
+- `ghidra-rs/src/edits.rs`: mercs2's five project-editing scripts (AddRelocatedEntries,
+  DefineTableFunctions, RecoverFunctions, ClearFalseNoReturn, FoldSlotFragments) on the store.
+- `ghidra-rs/tests/store.rs`: edits on a fixed 32-bit blob, the store's text and its errors.
 - `ghidra-rs/src/main.rs`: the `ghidra-rs` CLI (binary loading via the `object` crate).
 - `ghidra-rs/tests/decode.rs`: decodes a fixed byte sequence and checks text and p-code.
 - `ghidra-rs/src/abi.rs`: port of CheckAbiCallers.java: per-byte register liveness walks
@@ -26,6 +32,10 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   an object's vtable, resolved through a value stored via a symbolic register; whole-function
   propagation, where a vtable stored to the stack survives a call to a `RET 4` function and a
   join; ExportFunctions counting a computed call in `callees` and `callers`.
+- `ghidra-rs/src/factsout.rs`: `analyze --facts`: the facts of ghidra-rs's own analysis in the
+  format of `tools/ghidra/ExportFacts.java` (stage S10, slices 2 and 3), for `load facts`.
+- `ghidra-rs/src/strings.rs`: Ghidra's ASCII Strings analyzer (the string search and the
+  trigram model's score), for `analyze --facts` (stage S10, slice 3).
 - `ghidra-rs/src/fid.rs`: Function ID: the FID hasher, a reader for Ghidra's `.fidbf`
   databases, and FID's matching and naming.
 - `ghidra-rs/tests/fid.rs`: the FID hash of a known CRT function, and its record in Ghidra's
@@ -44,7 +54,8 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   `mod.rs` (`Arch`: image, SLEIGH engine, compiler spec, mapped functions and external
   references, read-only ranges, register names; `LowlevelError`), `cspec.rs` (reading
   `x86win.cspec`), `fspec.rs` (prototype models, `FuncProto`, `CallSpec`), `inject.rs` (call
-  fixups: the p-code snippet parser),
+  fixups and executable scripts: the p-code snippet parser), `userop.rs` (the `<segmentop>` and
+  `<jumpassist>` user ops),
   `funcdata.rs` (`Funcdata`: op/varnode arenas, readers and the location-sorted varnode set,
   op insertion and input/output edits, stack loads), `op.rs`,
   `varnode.rs`, `readers.rs` (a varnode's reader list, up to 4 inline), `opcode.rs` (opcodes and their `print raw` names), `flow.rs` (`FlowInfo`,
@@ -72,6 +83,10 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
 - `tools/decomp-diff.sh`: runs a corpus on both decompilers and compares; `tools/decomp-show.sh`,
   `tools/decomp-rank.sh`, `tools/decomp-bisect.sh`: the S2 debugging tools (verbose diff,
   easy-first order, first differing step; see "Debugging tools").
+- `tools/ghidra-diff.sh`, `tools/ghidra/DecompileRef.java`: the stage S10 check, `print C` against
+  the C of Java Ghidra (see "Stage S10").
+- `tools/ghidra-facts.sh`, `tools/ghidra/ExportFacts.java`: the facts of the Java project for
+  `load facts` (see "Stage S10, slice 1").
 - `tools/decomp-corpus.sh`, `tools/corpus/m8.txt`, `tools/corpus/m500.txt`: the mercs2 corpora.
 
 ## Build
@@ -104,7 +119,9 @@ Ghidra's "packed" element/attribute encoding (`slaformat.cc`, `PackedDecode` in
 `ghidra-rs` finds the `.sla` at that path by default (`x86.sla` for 32-bit binaries,
 `x86-64.sla` otherwise). Override it with `--sla <file>` or the `GHIDRA_RS_SLA` environment
 variable. The context defaults (`addrsize`, `opsize`, ...) come from the `<context_set>` of the
-`.pspec` with the same name next to the `.sla`.
+`.pspec` with the same name next to the `.sla`. A language whose `.pspec` has another name (the
+16-bit x86 languages on `x86.sla`) is loaded with `Sleigh::load_with_pspec`; no command line
+option selects one yet.
 
 ## Usage
 
@@ -138,8 +155,12 @@ Varnodes print as a register name when one matches exactly, `0x5:4` for constant
 
 ```sh
 ghidra-rs analyze <pe32> [--functions <csv>] [--gaps <csv>] [--abi-callers <register_abi.csv> <out.csv> [--data-pointers]]
-                         [--decomp-prelude <out>] [--seeds <csv> | --functions-from <csv>]... [--sla <file>]
+                         [--decomp-prelude <out>] [--facts <out> [--protos <file>]] [--seeds <csv> | --functions-from <csv>]... [--store <file>] [--sla <file>]
 ```
+
+`--facts` is stage S10, slices 2 and 3 (below): the facts `load facts` reads, from this
+analysis. It reads the strings model `Features/Base/data/stringngrams/StringModel.sng` of the
+Ghidra tree the `.sla` file is in, and fails without it.
 
 Analyzes a 32-bit x86 PE and writes the files of three headless Ghidra scripts of the mercs2
 decomp project (`mercs2-decomp/tools/ghidra`), in the same format:
@@ -368,6 +389,16 @@ ghidra-rs instead of a Ghidra project:
   is how Ghidra reaches code only a vtable names, e.g. the deleting destructor 0x752040. Not
   modelled there: the string check at the word and pointer chains. This code belongs to no
   function and does not change `--functions` or `--gaps`.
+  Superseded in part (2026-11-17, "Stage S10, slice 3"): an address table an instruction
+  refers to becomes pointers and is not disassembled (`createFlowTable`); a code constant is
+  followed only where nothing reads or writes it, the instruction is no jump or call and
+  does not compute with it; `isValidSubroutine` also has `checkPseudoBody` (no defined data in
+  the flow, no reference into the middle of an instruction, and for a code constant no
+  reference to the flow but to its entry); the entries of an address table are disassembled
+  where each is an instruction start or `isValidCode`, not wherever all lie in an executable
+  section. So "Not modelled: Ghidra's defined data" above now leaves out pointers. The shadow
+  check after it: same 56,003, differ 60, Java only 152, ghidra-rs only 819 (before: 55,996,
+  61, 158, 873).
 - Code constants also come from a local constant fold (a stand-in for Ghidra's constant
   propagation, `SymbolicPropogator`): 4-byte register values from immediates, initialised
   memory and ADD/SUB/XOR/AND/OR, along a straight line of instructions and on into the
@@ -545,6 +576,150 @@ thread: each walk step copied and hashed the whole live set (a set of `String`s)
 revisits; live keys are now inline (`Key`) and a walk numbers each distinct live set once. The
 script's own run time in Ghidra was not measured here.
 
+## Project store and the editing scripts
+
+```sh
+ghidra-rs edit <pe32> --store <file> [--seeds <csv> | --functions-from <csv>]... [--sla <file>] <command>
+ghidra-rs analyze <pe32> ... --store <file>
+```
+
+The project store keeps a project's edits on top of ghidra-rs's own analysis, so mercs2's five
+project-editing Ghidra scripts run without a Java Ghidra project. It follows DESIGN.md's
+decision of 2026-11-15: plain text in the project's repo, and every run starts from scratch
+(load, analyse) and then applies the file. Nothing is reloaded while running. Code:
+`ghidra-rs/src/store.rs` (the format, `Store::apply`, and `Project`, the script primitives),
+`ghidra-rs/src/edits.rs` (the five scripts), `ghidra-rs/tests/store.rs`.
+
+### The file
+
+One file, one record per line, fields separated by one space, addresses as `0x%08x`. Records
+are written in the order they are applied and sorted by address within a kind, so a change
+is a small diff:
+
+```text
+ghidra-rs-store 1
+clear <first>-<last>               instructions overlapping the range are removed
+noreturn <addr> on|off             the no-return flag of a function (or import slot)
+switch <jump> <target>...          the targets of a computed jump
+code <addr>                        disassemble from here (flow is followed)
+function <entry> create|remove     a function analysis lacks, or one it has
+body <entry> <first>-<last>...     a fixed body in place of the flow from the entry
+override <addr> call_return|none   the flow override of an instruction
+thunk <entry> off|<target>         the function is (not) a thunk
+```
+
+`analyze --store` applies it right after discovery, before anything reads the analysis, so
+`--functions`, `--gaps`, `--abi-callers` and `--decomp-prelude` (the decompiler's function
+list) all see the edited program. Bodies are computed again from the flow at the end, so a
+function re-flows whenever a neighbour is created or removed or a flag changes; only a `body`
+record pins one, and `edit reflow <addr>` drops that record.
+
+What fails instead of being skipped: a first line other than `ghidra-rs-store 1`, an unknown
+record, a malformed address or range, two records of one kind for one address, a `code`,
+`function`, `switch` or `override` address where no instruction decodes, a `body` or `thunk`
+of an address that is no function. There are no comment lines: a command rewrites the whole
+file and would drop them.
+
+### What ghidra-rs derives, and what the store overrides
+
+This analysis keeps less state than a Ghidra project, so three things the scripts read are
+derived, and the store holds only the exceptions:
+
+- Flow overrides (`Analysis::call_return`): a call of a no-return function and an
+  unconditional jump to a function entry count as CALL_RETURN (Ghidra's no-return and
+  shared-return analyzers set those). `override ... none` cancels one, `call_return` adds one.
+  `--abi-callers` reads the same answer.
+- Thunks (`Project::thunked`): a body of one jump to a function, or through an import slot.
+  `thunk ... off` cancels that. Only the editing commands read thunk marks.
+- Bodies: the flow from the entry up to other function entries. Two functions can share
+  instructions (Ghidra's bodies never overlap); "the function containing an address" is the
+  function starting there, else the lowest entry.
+
+Not kept at all: defined data (only the slots of address tables count as data), fall-through
+overrides, references made by hand.
+
+### Commands
+
+| Command | Script | What it does |
+|---|---|---|
+| `add-relocated-entries <securom_functions.csv>` | AddRelocatedEntries.java | a function at each entry (first column) that lies in none |
+| `define-table-functions <start> <end>...` | DefineTableFunctions.java | a function at every `.text` pointer of the data ranges that lies in none |
+| `recover-functions <audit.csv>` | RecoverFunctions.java | functions from pointer runs in `.rdata`/`.data` and direct calls; same audit CSV |
+| `clear-false-noreturn <report.csv>` | ClearFalseNoReturn.java | clears no-return where a RET is reached without a call, decodes behind the calls, to a fixpoint |
+| `fold-slot-fragments <functions-original.csv> <slot-rewrites.csv> <report.csv>` | FoldSlotFragments.java | folds wrapper-exit fragments into their owners |
+| `create-function <addr>`, `remove-function <addr>`, `reflow <addr>` | | single edits |
+
+A store file that is not there yet starts empty. Each command analyses, applies the store,
+runs, and then proves the result: `Project::finish` applies the new store to the untouched
+analysis and compares instructions, functions, no-return flags, switch targets and bodies
+with what the command left. Any difference is an error and nothing is written.
+
+Not ported, failing by name before anything is loaded: `export-bindings` (ExportBindings.java
+`--recover`) and `audit-recovered-functions` (AuditRecoveredFunctions.java `--remove-empty`).
+Inside the ports, loud rather than guessed: a `fold-slot-fragments` switch whose operand has a
+base register or a prefix (`not ported: ...`), and a pointer or table word outside the image
+(Java throws there too).
+
+Where a port cannot do what Java does:
+
+- Java makes a function of one undefined byte where nothing decodes. Here `create_function`
+  refuses; `add-relocated-entries` and `define-table-functions` print the address on stderr
+  and go on, `recover-functions` reports `no_entry_instruction` (it also stands for Java's
+  `disassembly_failed`, which Java tells apart by a return value that is true either way).
+- `recover-functions` reports `defined_data` only for address-table slots.
+- `clear-false-noreturn` has no defined data to clear and no fall-through overrides; the
+  cleared item's text is ghidra-rs's disassembly; names are export names or `FUN_<addr>`.
+- `fold-slot-fragments`: `setBody` cannot fail on an overlap. Bodies here re-flow as soon as a
+  fragment goes, so "refit before->after" compares with the body at the start of the round
+  (Java's body until `setBody`). An owner that is itself folded by its own walk is skipped
+  (Java goes on with the deleted function).
+
+### Against Java (Mercenaries2.analysis.exe, 2026-11-17)
+
+Run in the order of mercs2's `analysis_pipeline.sh` on a fresh store, from plain discovery
+(no `--functions-from`); Java's outputs are `mercs2-decomp/build/*.csv` (2026-10-14) and the
+project's facts export (`rust/target/ghidra-ref/mercs2.facts`, 2026-11-17). Java ran
+ExportBindings `--recover` and AuditRecoveredFunctions `--remove-empty` in between; here they
+are not ported.
+
+| Command | Java | ghidra-rs |
+|---|---|---|
+| `recover-functions` | 15938 created, 36302 examined | 16150 created, 36909 examined; 15823 created by both, 115 by Java only, 327 here only |
+| `fold-slot-fragments` | 2204 removed, 1438 refit, 2 rounds | 2172 removed, 1423 refit, 2 rounds; removed by both 2140 (64 Java only, 32 here only); refit by both 1411, 1237 with the same sizes |
+| `add-relocated-entries` | not in mercs2's logs | 43 added |
+| `clear-false-noreturn` | not in mercs2's logs (its last report: 25 kept) | 3 cleared, 2 call sites, 608 kept |
+| `define-table-functions 0xd16bf0 0xd16d20 0xd17000 0xd1b000` | not saved (a read-only pre-script) | 66 defined |
+
+Java's three `switch` rows of the fold report have no counterpart: ghidra-rs's own switch
+recovery already has those jumps' targets. ghidra-rs flags far more functions no-return than
+Ghidra (every body without a return); 0x00401740, the one the Java script was written for, is
+not flagged here.
+
+The function set in `.text` against the Java project's facts (37635 functions):
+
+| | in both | same body size | Java only | ghidra-rs only |
+|---|---|---|---|---|
+| plain `analyze` | 20422 | 18663 | 17213 | 2331 |
+| with the store, after the four pipeline commands | 36602 | 36178 | 1033 | 180 |
+
+The store after those four commands: 23128 records (18365 `function`, 2471 `override`,
+1434 `body`, 812 `thunk`, 43 `code`, 3 `noreturn`; 696 KB). An `edit` run takes 20 to 30 s of CPU on the
+shared desktop (the analysis, the command, the store applied twice; about 1.8 GB at the peak);
+`clear-false-noreturn` took 115 s of CPU.
+
+Not compared: flow overrides against the 3365 of the facts export (ghidra-rs derives them and
+has no export of them), functions outside `.text`, body ranges beyond their size. The shadow
+check (`mercs2-decomp/tools/ghidra-rs-shadow.sh`: `analyze --functions-from ... --abi-callers`
+without a store) writes the same 56966 lines as before this change.
+
+### With the facts of a project
+
+The store is not the facts format (`load facts`, another branch): facts are the answers a
+program gives the decompiler, the store is only what a person or a script changed. They
+combine in one direction: a facts producer in `analysis` reads the `Analysis` after
+`Store::apply`, so its function, body and override records come out with the edits in them.
+The store never holds facts records.
+
 ## Decompiler harness (Milestone 3, stage S0)
 
 The decompiler is checked stage by stage against Ghidra's C++ console decompiler `decomp_dbg`
@@ -580,7 +755,8 @@ rust/tools/decomp-diff.sh --script <file>      # one script on both engines, ful
   runs up to the `break start` action (stage S4: at most `assignhigh`, see "Stage S4") and
   `continue` resumes it; a function mapped `nocode` prints `No code for <name>` instead. `print
   C|tree block` fail with "not implemented in ghidra-rs yet (milestone 3, later stages)";
-  `parse line` defines types and locks `extern` prototypes (stage S6); any other command fails with "not implemented in ghidra-rs".
+  `parse line` defines types and locks `extern` prototypes (stage S6); `load facts <file>` (stage S10, not a
+  command of `decomp_dbg`) reads the facts of a Ghidra project in place of the prelude; any other command fails with "not implemented in ghidra-rs".
   Superseded: until S6, `parse line` failed like `print C`.
   Superseded: until S2, `decompile` stopped at most at `heritage` and `continue` failed. Of the options
   `option readonly on|off` and `option currentaction decompile <group> on|off` have an
@@ -695,6 +871,13 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
   with it on), `swfs-r swfs-t swsn-r swsn-t swfsc-r swfsc-t` (`finalstructure` with case
   labels, `switchnorm`, and `finalstructure` with case labels and `setcasts` on) and
   `pc-r pc-t pcc-r pcc-t` (`print C`, S9 slices 1, 2, 3A, 3B, 4 and 5, `pcc` with `setcasts` on; see "C printing").
+  `pcd` is `print C` with the DEFAULT options (no group or rule off, no break), the action leaves
+  not ported yet skipped on both engines (the list `D` at the top of `bars.sh`; it shrinks as
+  they are ported). It runs on M8, M500 and `simple`: M8 and M500 run 56 checks, `simple` five
+  (superseded: "all 55 checks" and "the four `print C` checks" above).
+  `pmd` is `print map` and `print raw` with the same options at `break start startcleanup` (the
+  local symbols and the typed ops after `mapped_local_sync`); `D` is empty now. M8 and M500 run
+  57 checks, `simple` six (superseded: "56 checks" and "five").
 - `JOBS` (default `nproc`), `TIMEOUT` (seconds per function and engine, default 120 as for every bar here; 0x4c48d0 of M500 takes
   the reference about 485 s and ghidra-rs about 600 s alone, so at 120 s it counts as a function
   the reference does not finish), `OUT`
@@ -706,7 +889,12 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
   lines, a reference killed at `TIMEOUT` among them with the reason `decomp-diff.sh: timed out
   after N s`). `decomp-diff.sh` checks `timeout`'s exit status (124 or 137) and replaces a
   killed engine's cut-off output with that one line, so a run cut off mid-print never counts as
-  finished or as a `silent` difference.
+  finished or as a `silent` difference. A panic or stack overflow of ghidra-rs is `loud`: its
+  message (`panicked at`, `has overflowed its stack`) prints before the buffered console
+  output, and `decomp-diff.sh` keeps those lines from before the load line (everything else
+  there is the shared prelude). Checked with a stand-in engine that prints a panic message and
+  cuts its output: `loud`, where it was `silent` before. None occurs in the corpora: the
+  `m3-int5` full pass has 6 silent misses, all a type difference and none a panic, and no `timeout`.
 - The summary line is `<check>-<corpus>: reference finished F / N, identical I / F (loud L,
   silent S, timeout T), all outputs identical A / N`. `I / F` counts only the functions the
   reference finishes, which is how the README's bars are given. `A / N` is `decomp-diff.sh`'s
@@ -882,7 +1070,9 @@ Stage S1b (branch `m3-s1b`) runs the universal action up to `heritage`: after `f
   on the first pass; an unreachable block is an error until block removal is ported in S4),
   `varnodeprops` (with `option readonly on`, a free read of read-only memory becomes the
   constant the image holds there, read as `loadFill` reads: on into later sections, zero where
-  none is; the reads are taken in the varnodes' location order, as `beginLoc` walks them). `normalizesetup` and `funclinkoutonly`
+  none is; the reads are taken in the varnodes' location order, as `beginLoc` walks them; an op
+  writing read-only memory warns "Read-only address (ram,0x...) is written", see the end of
+  "C printing, slice 5"). `normalizesetup` and `funclinkoutonly`
   are not in the `decompile` root's groups and are left out.
 - Read-only memory is the loader's read-only sections (bfd's `SEC_READONLY`: PE sections
   without `IMAGE_SCN_MEM_WRITE`, `Section::readonly`) plus `readonly` commands; a varnode is
@@ -1036,7 +1226,8 @@ becomes a call and a halt, as before. Modules:
   the guards and strides read.
 - `rangeutil.rs` (from rangeutil.cc, 2,605 lines): `CircleRange` (ranges, intersection, union,
   non-zero masks, `pullBack` through unary and binary ops). The value-set solver is not used by
-  jump tables and not ported.
+  jump tables and not ported. (Superseded: ported for the stack guards, `valueset.rs`, see
+  "Value-set analysis and the stack guards".)
 - `emulate.rs` (from emulateutil.cc 397, emulate.cc 462, opbehavior.cc): `EmulateFunction` over
   the data flow (`EmulatePcodeOp`, `Emulate::executeCurrentOp`) and the integer and boolean op
   behaviors. memstate.cc (738 lines) is not needed: `EmulateFunction` keeps a value per
@@ -1093,7 +1284,8 @@ an error: 2 functions in obfuscated code, 0x1c3c0d9 and 0x1c3c0fa), `fail_return
 (`testForReturnAddress`; superseded: "not heritaged yet": since slice 3B a target traced to
 the input at stack offset 0 fails loudly in flow.rs; superseded again: ported on `m3-swsilent`, see "Switch corpus silent misses"), the retry of
 a table whose switch looks unreachable (it needs a guard folded to a constant; it is taken as
-complete), `checkUnrolledGuard`, multistage tables, overrides, `JumpAssisted`.
+complete), `checkUnrolledGuard`, multistage tables, overrides, `JumpAssisted` (superseded:
+ported, see "Segment and jump-assist user ops").
 
 Table targets against `ghidra-rs analyze` (its own MSVC switch pattern, milestone 2): of the
 619 jumps both find a table for, 610 have the same set of targets. The other 9 are 3 in
@@ -1455,7 +1647,10 @@ those groups are not ported and are left out of the partial's tree while they ar
 `shadowvar`, `condconst`, `mapped_local_sync`, `normalizebranches`); an entry is skipped only as
 long as its leaf is `not_ported`, so a later port runs in the partial too. Three of them can
 change which tables are recovered: `restructure_varnode` (in the partial it also runs
-`protectSwitchPaths`), `condconst` and `normalizebranches`. The partial carries
+`protectSwitchPaths`), `condconst` and `normalizebranches`. (Superseded, branch
+`m3-aliasupdate`: `restructure_varnode` runs in the partial function, see "Alias analysis of the
+jump-table partial function"; `action::PARTIAL_SKIP` holds seven actions now, `outputprototype`
+among them, and two of the seven can change the tables.) The partial carries
 `Funcdata::jumptablerecovery_on` (`isJumptableRecoveryOn`): heritage does not bump the
 dead-code delay in it, dead code skips `lastChanceLoad`, and `donothing` removes an empty block
 whatever was copied into it. An error of the partial's action fails the table, as in the C++;
@@ -1915,6 +2110,12 @@ R5 slices 4 and 5 (branch `m3-r5b`, 2026-11-13). Superseded: "constseq.cc, bitfi
   `StringManager::isString`, S9: three M500 functions reach it, 0x4bff10, 0x74d520, 0x766350),
   so the check still switches it off. `threewaycomp`, `conditionalmove`, `orpredicate` (oppool1)
   are not in the plan's R5 row and stay off.
+  Superseded: "Not ported: `ptrsubcharconstant`". Stage S10, slice 1 ports it
+  (`rules/typecleanup.rs`, `printc::is_string`) for the strings of the facts; the option files
+  of the checks still switch it off (`kept_off` in `tools/r1-options.sh`, which would drop the
+  line otherwise), and no check against `decomp_dbg` runs it. (Superseded on `m3-int6`: the
+  `kept_off` list is gone, the rule is an `r(...)` entry of `rules/mod.rs` and runs in every
+  check whose group `cleanup` is on; see "Integration `m3-int6`".)
 - Slice 5, `rules/constseq.rs`, `rules/bitfield.rs`: the groups `constsequence` and `bitfields`
   as far as they run without scopes and bit-field types. `stringcopy` never matches (no local
   symbols), `stringstore` fails at `HeapSequence` (not ported); no type has bit-fields, so the four
@@ -2121,7 +2322,11 @@ Bars held: S4 and the four S6 checks 498 / 500, paramdouble 500 / 500, switch co
 1,947 / 2,050, r1 / subvar / r4 498 / 499. LOADs and STOREs through the stack pointer stay unconverted until R5's
 `RuleLoadVarnode`/`RuleStoreVarnode`. Not ported, fails loudly: the load-guard value-set
 analysis, revisited markers, the dead-code restart, `ActionRestructureVarnode`. Details and
-the M500 numbers in `docs/plans/m3-decompiler.md`, "Stack heritage".
+the M500 numbers in `docs/plans/m3-decompiler.md`, "Stack heritage". (Superseded:
+`ActionRestructureVarnode` is ported, for the partial function of jump-table recovery on
+branch `m3-aliasupdate` and for the `decompile` root in "Local symbols". Superseded: "the
+load-guard value-set analysis" in that list, and the "load-guard error" of 0x40ad80 above; see
+"Value-set analysis and the stack guards".)
 
 
 Review fixes and merges (2026-11-14). 0x4098c0 is fixed: the heritage location map rebuilt a
@@ -2174,8 +2379,8 @@ bar fell; the table is in `docs/plans/m3-decompiler.md`, "Stack heritage".
 - Tools: `decomp-diff.sh` takes `DECOMP` and `GHIDRA_RS` from the environment, `decomp-ref.sh`
   takes `DECOMP_BUILD` and `JOBS`; `r1-options.sh` also writes `s8-t-options.txt`,
   `tail-r-options.txt` and `tail-t-options.txt`.
-- The unported leaves `restructure_varnode` and `mapped_local_sync` carry their C++ names
-  (superseded: `restructurevarnode`, `mappedlocalsync`).
+- The leaves `restructure_varnode` and `mapped_local_sync` carry their C++ names
+  (superseded: `restructurevarnode`, `mappedlocalsync`; and "unported": see "Local symbols").
 
 Checks and commands: docs/plans/m3-decompiler.md, "Tail". Results (M8; M500 of the functions the
 reference finishes): prototypes and globals 8 / 8, 498 / 499 (99.8 %) (rules on) and 8 / 8, 493 / 499 (98.8 %) (types
@@ -2309,6 +2514,8 @@ Misses explained, none new from the merge (each is in a branch's own miss list):
   inference pass and before merging), and this check is the only one that prints types, with
   `typerecovery` off, at a break (`returnsplit`) before both. At `inputprototype` the three M500
   functions are identical. Open: set the symbol properties when a varnode is made.
+  (Superseded: `print raw` applies the symbol types first and the six are identical; see the
+  end of "C printing, slice 5".)
 - switch `finalstructure` types on: 0x4f3366 keeps a call's join output (`j{EDX,EAX}`) the
   reference does not have; in `m3-tail`'s list, not traced. Open.
 - The 57 switch-corpus functions that differ at flow time (S3), `VariablePiece` (7 rules on, 15
@@ -2860,6 +3067,9 @@ cause:
 | the same, and the jump reads a stack varnode through the INDIRECT of a STORE that `RuleAliasUpdate` collapses in the C++ (`ActionRestructureVarnode`, not ported) | 1 (0x1c69c5a) | loud |
 | `ActionConditionalExe` (not ported) removes a block re-testing an equal condition held in another varnode | 1 (0x5a3c30) | loud |
 
+(Superseded, branch `m3-aliasupdate`: `RuleAliasUpdate` and the action run in the partial
+function; 0x1c69c5a stays loud, on the value-set range of the store guard its STORE has.)
+
 What changed:
 
 - The partial function of jump-table recovery runs with `RuleLoadVarnode` and `RuleStoreVarnode`,
@@ -2899,7 +3109,9 @@ ghidra-rs) are not in the 60 and were not traced; the count says they were silen
 of the 60 + 3). M8: all 55 checks identical. Not run on the final build: `swfsc-r`, `swfs-t`, `swsn-t`, `pcc-*` on
 the switch corpus, and M500 (0x4f3366 alone is identical in `swfs-t`). No unit test was added: the
 functions above are the check. A panic of ghidra-rs prints before the buffered console output,
-so `decomp-diff.sh` cuts its message and `bars.sh` counts it as silent, not loud.
+so `decomp-diff.sh` cuts its message and `bars.sh` counts it as silent, not loud. (Superseded:
+`decomp-diff.sh` keeps a panic or stack overflow message and `bars.sh` counts it as `loud`; see
+the output notes of "Every check at once: `tools/bars.sh`".)
 
 Review fixes (second commit on `m3-swsilent`). A review of the first commit found paths that could
 still differ silently; each now fails loudly. Superseded by this paragraph: "the stack offset 0"
@@ -2916,6 +3128,9 @@ above.
   retry on the partial function without the stack rules any more. Not proven: that removing only
   some of them (what the C++ alias analysis may do) gives the same table when removing all or none
   does.
+  Superseded (branch `m3-aliasupdate`): both run in the partial function; this test is left for
+  the partial function made without them, see "Alias analysis of the jump-table partial
+  function".
 - The partial function without the stack rules (the fallback when the stack heritage is not
   ported): a table from it also fails loudly when a guard (`analyzeGuards`,
   `jumptable::guard_conditions`) reads the stack through a LOAD the jump does not read.
@@ -3011,7 +3226,10 @@ M500 `pcc-r` and `pc-r` 494 / 495 (silent 1: 0x47a6b0), `pcc-t` and `pc-t` 495 /
 miss; M8 print checks 7 / 7. Every switch silent is now silent in an older switch check.
 (Superseded: "silent 62" of `pcc-t` in the table, "one is new" and "It is open" above.) Not
 rerun after the follow-up: the 51 other checks on M8, which the change cannot reach (only
-`print C` reads the flag).
+`print C` reads the flag). (Superseded: the warning is ported and the loud failure, the flag
+`Funcdata::readonly_write` and the whole-function test are gone; see "After `m3-int5`" at the
+end of this section. `action.rs`, `readonly_written`, is now the written branch of
+`fillinReadOnly`.)
 
 Review fixes on the same branch:
 
@@ -3052,6 +3270,1340 @@ M500 (4 in the baseline); 0x47a6b0 is loud in every check. (Superseded: the swit
 slice 5 above, which were derived or from single checks.) Varies with load: the "all outputs
 identical" count of `s6void-m500` is 499 / 500 here and 500 / 500 in the baseline (a reference
 timeout; identical 499 / 499 in both).
+
+After `m3-int5` (2026-11-17): the read-only write warning. `varnodeprops` has the written branch
+of `Funcdata::fillinReadOnly` (`action.rs`, `readonly_written`). With `option readonly on`, an
+op that writes read-only memory warns `Read-only address (ram,0x...) is written` at its
+address, once (`OpFlags::WARNING`, the C++ `PcodeOp::warning`), unless the varnode is
+address-forced and nothing reads it (`!isAddrForce() || !hasNoDescend()`). A marker (INDIRECT,
+MULTIEQUAL) is only flagged. The warning goes through `Funcdata::warning`, so a jump-table
+partial function adds its own `WARNING (jumptable):` line. A written read-only varnode also
+skips the zero replacement of the same action, as in the C++, where the read-only branch comes
+first. `print C` no longer fails on the case. 0x23caea8 is identical in switch `pcc-t` and
+`pcc-r` (6 warning lines at 3 addresses). Switch `pcc-t` 1987 / 2005 (loud 18, silent 0; `m3-int5`
+1986, loud 19). M500 `pcc-r` and `pc-r` 494 / 495 (loud 1),
+`pcc-t` and `pc-t` 495 / 495; M8 all 55 checks as the baseline. Not run: `pcc-r` on the whole
+switch corpus, `simple`, the full pass. Not seen: a marker writing read-only memory, an
+address-forced write of it that nothing reads, a second visit of a warned op (0x23caea8 is the
+only function of the corpora known to write read-only memory). Still wider than the C++: the
+zero replacement runs for a read-only varnode that is only read, or with `option readonly off`.
+
+After `m3-int5` (2026-11-17): the silent misses of `swsn-r`. All six (switch 0x8d8f40,
+0x8eabe0, 0x8ead90; M500 0x48a430, 0x5c5940, 0x6b3730) have one cause, the one named in the
+`m3-int` section: a ram varnode at an import slot (0x00b0511c, 0x00b05128, 0x00b05370,
+0x00b052ec) that outlives the call through it, here the INDIRECTs and MULTIEQUALs on the slot,
+prints `<code() *>` on the reference and `<xunknown4>` in ghidra-rs, and nothing else differs
+(435 lines in 0x8eabe0, 9 or 10 in the M500 three). The C++ types the varnode from its
+external-reference symbol when it is made; ghidra-rs applies the symbol types
+(`infertypes::symbol_types`) before each inference pass and before merging, and with
+`typerecovery` off neither has run at `break start returnsplit`. Fix: the console's `print raw`
+applies them first (`console.rs`), as merging does. `swsn-r`: switch 1987 / 2004 (loud 17,
+silent 0; before 1984, silent 3), M500 498 / 499 (loud 1: 0x47a6b0; before 495, silent 3). No
+silent miss is left in the checks run: M8 all 55 as the baseline; M500 `swsn-r`, the four
+print checks, `s6` 499 / 499 and `r5typed` 497 / 498 (loud 1); switch `swsn-r` and `pcc-t`.
+Not run: the other M500 and switch checks, `simple`, `r5d-adc`, the full pass. Still open: the
+type is not set when the varnode is made, so an action that reads a symbol's type or type lock
+with `typerecovery` off before merging would not see it (none is known to; no check shows one).
+(Superseded: "Open: set the symbol properties when a varnode is made" as the cause of a miss,
+and "the only silent misses left in the pass are in `swsn-r`" above.)
+
+### Segment and jump-assist user ops (branch `worktree-agent-a852cab363d8d01f3`, 2026-11-17)
+
+The spec tags `<segmentop>` (`.pspec` and `.cspec`) and `<jumpassist>` (`.pspec`) are read
+and their user ops ported. Before, a `.pspec` with either tag loaded with the tag ignored: the
+user op stayed a plain CALLOTHER, silently. No command could reach such a spec (the console
+loads `x86.pspec` and `x86win.cspec` only), so no output changed for 32-bit x86.
+
+Ported:
+
+- `Sleigh::load_with_pspec` loads a `.sla` with a `.pspec` of another name (16-bit x86 is
+  `x86.sla` with `x86-16-real.pspec` or `x86-16.pspec`) and keeps the two kinds of elements.
+- `decomp/userop.rs`: `SegmentOp`, `JumpAssistOp` and the part of `UserOpManage` that registers
+  them (one segment op per space, one meaning per user op), with the C++ decode errors.
+- `decomp/inject.rs`: `ExecutablePcode`, a snippet with `<input>` and `<output>` parameters run
+  on values (`EmulateSnippet`); a LOAD reads the image. The snippet parser gained `zext(e)` and
+  `sext(e)`. A script outside the parser's subset (a branch, a label) is an error when the spec
+  is read.
+- `ActionSegmentize` (`coreaction::segmentize`, once per function), `RuleSegment`
+  (`rules/segment.rs`, group `segment`), `SEGMENTOP` in `print raw`, in the jump-table emulator
+  (`executeSegmentOp`) and around a stack address made by `createStackRef` (`op_stack_load`).
+- `JumpAssisted` in `jumptable.rs`: tried first when a CALLOTHER makes the switch address, on
+  the partial function (addresses) and on the function (labels, `foldInNormalization`,
+  `foldInGuards`). `earlyJumpTableFail` stops at a `jumpassist` or segment user op.
+
+Fails loudly, on a spec with a segment op:
+
+- Type recovery and constant pointers (`ActionInferTypes`, `ActionConstantPtr`): near and far
+  pointers are not ported (`SegmentedResolver`, `markNearPointers`, `sizeOfPointer` /
+  `sizeOfAltPointer`, the far-pointer rules of PIECE and SUBPIECE).
+- The stack rules (`RuleLoadVarnode`, `RuleStoreVarnode`) when the stack space is narrower than
+  the space it lives in (16-bit x86: a 2-byte `SP` in the 4-byte `ram`): stack offsets wrap and
+  print at the container's size here. Found with the reference's `s0x0002:2(i)` against
+  ghidra-rs's `s0x00000002:2(i)`.
+- `setcasts` and `print C` on a `SEGMENTOP` (as before).
+- A `jumpassist` table whose op no longer matches on the function (the C++ goes on to
+  `JumpBasic` with the saved model); `funcptr_align` is taken as 0.
+
+So a 16-bit x86 function decompiles up to the first of these (with the default groups: type
+recovery), and no further. No console command selects a 16-bit language or loads a raw image;
+the checks below are unit tests.
+
+Checked against `decomp_dbg` (`load test file` on the same bytes, language
+`x86:LE:16:Real Mode:default`), byte-identical `print raw`:
+
+- `action::tests::segmentize_x86_16_real_mode`: a 7-instruction function at
+  `break start segmentize` and at the next `break start internalstorage`.
+- `action::tests::rule_segment_folds_constants_x86_16`: `segment(0x40, 0x6c)` becomes
+  `#0x46c` (`RuleSegment` and the script), at `break start deindirect`.
+
+Not checked against `decomp_dbg`: `JumpAssisted` and the `<jumpassist>` scripts (only JVM and
+Dalvik declare one; neither can be loaded here). `jumptable::tests::jump_assisted_model_runs_the_scripts`
+runs a hand-made `<jumpassist>` on x86's `segment` user op: size, targets, labels, by hand.
+`userop::tests::x86_16_segment_ops` checks the real and protected mode scripts' arithmetic by
+hand. Also not run: `RuleSegment`'s far-pointer branch, `createStackRef`'s SEGMENTOP,
+`executeSegmentOp`, a `<segmentop>` in a `.cspec`, and the Z80 and HCS12 specs.
+
+Gate (2026-11-17, against the baseline `m3-int5-116d9d34da`): the 55 M8 checks give the same
+summary lines as the baseline (every function the reference finishes is identical). M500
+`pcc-r` 494 / 495 (loud 1), `pcc-t` 495 / 495, `swfs-r` 498 / 499 (loud 1): the baseline's
+lines. `cargo test`: 138 passed. Not run: the other M500 checks, the switch and simple corpora,
+the full pass.
+
+### Default options: the check `pcd`, five action leaves, six rules (branch `m3-default`, 2026-11-17)
+
+The check `pcd` runs `print C` with the default options: no group off and no break. Two lists
+say what is still left out, on both engines:
+
+- `D` at the top of `bars.sh`: the action leaves not ported. Now empty. (Superseded: "Now
+  `restructure_varnode` and `mapped_local_sync`"; both are ported, see "Local symbols" below.)
+- `tools/corpus/default-options.txt` (written by `r1-options.sh` from the rule tables): the
+  rules of the three pools not ported. Now none: the file is empty since `m3-int6`.
+  (Superseded: "Now eight: `aliasupdate`, `switchsingle`, `ptrflow`, `segment`,
+  `ptrsubcharconstant`, `splitcopy`, `splitload`, `splitstore`", then two, `segment` and
+  `ptrsubcharconstant`; see "Pool rules" and "Integration `m3-int6`" below.)
+
+(Superseded: the next paragraph. A `decompile` run now fails while an unported rule is on; see
+"Pool rules: every rule listed, a missing one fails" below.)
+
+Not loud yet: without those `togglerule ... off` lines ghidra-rs runs the default options
+*without* the eight rules and says nothing (a rule missing from the tables is simply not in the
+pool). The seven silent misses of the first `pcd` run on M500 were all this (`conditionalmove`
+and others missing). Every older rule check switches the missing rules off through its options
+file, so only a run with the plain defaults is affected. Open decision: fail every
+default-options decompile while a rule is missing, or keep it as it is.
+
+Ported on the branch:
+
+- `ActionMultiCse`, `ActionShadowVar` (`coreaction.rs`), `ActionConditionalConst`
+  (`condconst.rs`). They run in the jump-table partial function too, as in the C++; the
+  partial honours `DECOMP_SKIP_ACTIONS`, because the reference patch skips an action by name in
+  every tree. The older checks keep `multicse,shadowvar,condconst` in their skip list (`S3` in
+  `bars.sh`), so they stay comparable with their baselines.
+- `ActionDynamicSymbols` and `ActionPrototypeWarnings` have nothing to do here (`action.rs`
+  says why: no console command makes a dynamic symbol; every source of a prototype warning
+  fails loudly earlier).
+- Rules: `pullsub_indirect`, `conditionalmove`, `orpredicate`, `threewaycomp`; `transformcpool`
+  fails on a CPOOLREF (the constant pool is not ported); `funcptrencoding` has nothing to do
+  while no spec declares `<funcptr>` (cspec.rs refuses it). `CloneBlockOps::cloneExpression`
+  (`returnsplit.rs`) for `conditionalmove`.
+- `ActionParamDouble`: a stack trial that is a PIECE is split in two (`checkInputSplit`,
+  `ParamActive::splitTrial`).
+- `ActionConditionalExe` (`condexe.rs`, all of `ConditionalExecution`): a block testing a
+  condition again is removed and its values flow to the matching side
+  (`BlockGraph::removeFromFlowSplit` in `block.rs`). Before, finding such a block failed
+  loudly. Still loud: a read of a removed op from inside the removed block (`opUnsetInput`).
+- `TypeSpacebase::getSubType` reads the local scope's symbols (`infertypes::sub_type`), so
+  `setcasts` casts the address of a named stack variable as the C++ does.
+
+Counts: see the plan, "Default options". Superseded by this section: "not ported yet,
+`multicse`, `shadowvar` and `condconst`" (stage R1), "Not ported from the table row:
+`threewaycomp` ... `conditionalmove` and `orpredicate`" (stages R2 and R5), the
+`PARTIAL_SKIP` list with `multicse`, `shadowvar`, `condconst` (stage S3), "`prototypewarnings`,
+which is `not_ported`" (C printing), "splitting a stack trial that is a PIECE" as a loud
+miss (stage R5 slice 3), and "0x47a6b0 is loud in every check" (the `ActionConditionalExe`
+removal, integration `m3-int5`).
+
+### Alias analysis of the jump-table partial function (branch `m3-aliasupdate`, 2026-11-17)
+
+`RuleAliasUpdate` itself is three lines: it runs `Funcdata::opCollapseIndirectsForAlias` on a
+STORE or call marked `store_aliasupdate`. What it collapses is decided elsewhere, by
+`ActionRestructureVarnode` (the `nolocalalias` flag of a stack varnode) and by the value-set
+range of a store guard. In the partial function the C++ runs all of it (`aliasyes` from the
+second pass on), and after it `protectSwitchPaths` keeps one INDIRECT on a path from a constant
+to the switch. Ported, for the partial function only:
+
+- `rules/copy.rs`, `rules/mod.rs`: `RuleAliasUpdate` (`aliasupdate`, group `analysis`, after
+  `multicollapse` in `oppool1`).
+- `mapstate.rs` (new): `opCollapseIndirectsForAlias`, `syncVarnodesWithSymbols` with
+  `markIndirectAliasUpdate`, `ScopeLocal::restructureVarnode` (`MapState::gatherVarnodes`,
+  `gatherOpen`, `initialize` with `reconcileDatatypes`, `RangeHint::merge`, `absorb`,
+  `attemptJoin`, `adjustFit`, `createEntry`, `fakeInputSymbols`, `markUnaliased`) and
+  `protectSwitchPaths`. The partial function has no data-types, so a hint's type is the unknown
+  type of its size, and a symbol is a bare entry (`varmap::LocalSym`: offset, size,
+  `nolocalalias`, the `fake_input` category) in a `RangeMap` (`rangemap.rs` gains
+  `find_overlap`).
+- `varnode.rs`, `op.rs`: the varnode flags `mapped` and `nolocalalias` (`VnFlags` is 64 bits
+  wide now), the op flags `store_aliasupdate` and `no_indirect_collapse`.
+  `heritage_guard.rs` marks a STORE that gets a store guard (`analyzeNewLoadGuards`).
+- `funcdata.rs`, `heritage.rs`: a new stack varnode inside one of these symbols takes the
+  symbol's flags (`setSymbolProperties`: `SymbolEntry::getAllFlags`, so `mapped`, `addrtied`,
+  and `nolocalalias` once `markUnaliased` set it), and the heritage guard reads `addrtied` from
+  the symbol. (Superseded: "takes no property from the scope"; see "Review fixes" below.)
+- `varmap.rs`: `markNotMapped` removes the symbols under its range, and a `fake_input` one
+  keeps the range mapped.
+- `varmap.rs`: `AliasChecker::gatherAdditiveBase` keeps the index term (`AddBase::index`).
+
+Not ported, each failing with an error that names it: a valid load or store guard
+(`MapState::addGuard` and `LoadGuard::isGuarded` read the value-set ranges; `ValueSetSolver`
+is not ported), an open hint outside the local ranges and the parameter range
+(`adjustOutOfRange` with `getNearestRange`), a locked prototype, a typed stack varnode or one
+above `max_basetype_size`, a RETURN of a stack varnode (`checkUnaliasedReturn`),
+`annotateRawStackPtr` once type recovery has started. (Superseded, see "Local symbols" below:
+of these only a locked prototype with parameters is left, and the action runs
+in the `decompile` root.) The action of the `decompile` root
+stays unported (`restructure_varnode` fails there as before), and `r1-options.sh` keeps
+`aliasupdate` off in the function itself: there the rule fails on the INDIRECTs of an indexed
+stack STORE. Without an options file the rule is on in the `decompile` root too:
+`heritage_guard.rs` marks a STORE that gets a store guard in every root, so there the rule
+fails loudly on a guarded STORE with INDIRECTs and otherwise collapses nothing (no varnode of
+the function itself is `nolocalalias`). (Superseded: "a valid load or store guard" in the list
+above, the mark set when the guard is made, and the rule failing on a guarded STORE; the guard
+ranges are analysed and read now, see "Value-set analysis and the stack guards" below.)
+
+`flow.rs` makes the partial function three ways (`Mode`): as the C++ does (`Exact`); without the
+action and the rule when they reach one of the paths above (`NoAlias`), where the test of
+`m3-swsilent` on the INDIRECTs of stack varnodes still decides, its error now naming the path
+that was not ported; and without the `stackvars` rules as before (`NoStack`). In `Exact` no test
+is made: the table is the one the partial function gives. The reference patch skips an action by
+name in every root, so with `DECOMP_SKIP_ACTIONS=restructure_varnode` (the print checks) its
+partial function runs without the action; ghidra-rs then leaves it out too
+(`action::jumptable_partial`), and only the rule runs.
+
+The 17 functions of the switch corpus that were loud on master (`paramdouble`, `swsn-r`,
+`swfs-r`), before and after:
+
+| functions | cause | now |
+|---|---|---|
+| 0x1cdbf0e, 0x7913d0, 0x7bb710, 0x7bf170, 0x831db0, 0x898690, 0x898850 | the test on the INDIRECTs of stack varnodes: the C++ collapses them all but the one `protectSwitchPaths` keeps, and the table fails on that one | identical |
+| 0x1c69c5a | an indexed stack STORE in the partial function: its INDIRECTs go by the value-set range of the store guard | loud |
+| 0x546d40, 0x5629d0, 0x78e7d0, 0x1b0c190, 0x502b80, 0x5c37f0 | an indexed stack LOAD on an address-tied range in the partial function (`guardLoads` needs the value-set range) | loud |
+| 0x5a3c30, 0x807a80 | `ActionConditionalExe` is not ported | loud |
+| 0x23f4238 | a multistage table (`switchnorm`); identical in `paramdouble`, loud from `swsn-r` on | loud |
+
+What is left needs three ports: `ValueSetSolver` with the guard ranges (rangeutil.cc, about
+1,500 lines; 7 functions), `ActionConditionalExe` (condexe.cc; 2) and the multistage recovery
+(1). (Superseded: the first of the three is done and its 7 functions are identical, see
+"Value-set analysis and the stack guards" below; `ActionConditionalExe` was ported on
+`m3-default`.)
+
+Checks. The master build stands in the reference's place (`decomp-diff.sh` with `DECOMP` set
+to a wrapper of it), so a run lists the functions whose output the branch changes; the checks
+against the reference then run on those. Nothing outside the partial function changes in the
+function itself (the symbols exist only there, and in the `decompile` root of every check the
+rule or its group is off, or the check stops before the stack is heritaged), so a function with
+the same output at `paramdouble` has the same tables.
+
+- Switch corpus, 2,050 functions at `paramdouble`, once with the action on and once with
+  `DECOMP_SKIP_ACTIONS=restructure_varnode,mapped_local_sync` (what `pcc-r` and `pcc-t` set): 10
+  outputs change in each run, the same 10. They are the seven of the first row above,
+  0x2285c9b and 0x7c1f30, which the reference does not finish with the action on, and
+  0x1c69c5a, still loud, with the new wording of its error.
+- The first 9 against the reference: `paramdouble`, `swfs-r`, `swfs-t`, `swsn-r`, `swsn-t`,
+  `swfsc-r`, `swfsc-t` 7 / 7 identical; `pcc-r` and `pcc-t` 8 / 8 (the reference finishes
+  0x7c1f30 there). The 17 of the table in `paramdouble`, `swfs-r`, `swsn-r`, `pcc-r`, `pcc-t`:
+  8, 7, 7, 7, 7 identical, the rest loud as the table says.
+- Counts from that and the `m3-int5` pass, not from a run of the whole corpus against the
+  reference: `paramdouble` 1988 -> 1995 / 2004 (loud 9), `swfs-r`, `swfs-t`, `swfsc-r`,
+  `swfsc-t` and `swsn-t` 1987 -> 1994 (loud 10), `swsn-r` 1984 -> 1991 (loud 10, silent 3 as
+  before), `pcc-r` 1987 -> 1995 / 2005 (loud 10), `pcc-t` 1986 -> 1994 / 2005 (loud 11). No
+  function identical on master changes, none becomes silent.
+- The two the reference does not finish. 0x7c1f30 now ends in the reference's error ("Unable to
+  load 512 bytes at r0x5310ec83"; the reference meets it at `load function`, ghidra-rs at
+  `decompile`). 0x2285c9b was loud and now prints a function, while the reference fails with
+  "Unable to load 512 bytes at r0xc6bb1000": both engines fail the first table the same way,
+  then the reference recovers the table at 0x2286023 and follows it out of the image, and
+  ghidra-rs fails that table ("Could not emulate address calculation"). The loud test hid this
+  difference; it is open and not traced.
+- M8: all 55 checks against the reference, every summary line equal to the `m3-int5`
+  baseline's (identical in each; in `fs-*`, `fsc-*`, `pc-*` and `pcc-*` the reference finishes 7
+  of the 8, as before), and old against new 8 / 8 outputs equal in all 55. M500, old against new, `s8r`,
+  `swfs-r`, `swfs-t`, `fs-t`, `paramdouble`, `pcc-r`, `pcc-t`, `r5s`, `r5slock`: 500 / 500
+  outputs equal in each, so their counts are those of the `m3-int5` pass.
+- The partial function against the reference's (`DECOMP_JT_RAW`, the INDIRECT ops of both), a
+  sample of 140 switch functions: 125 equal; 8 made without the action (an indexed stack LOAD
+  or a guard); 7 differ as
+  they did on master, by fewer lines (the reference has `AL` for `EAX`, one byte of a stack
+  slot; not traced, the partial function still runs without `multicse`, `shadowvar`,
+  `condconst` and `normalizebranches`). Of 700 functions of the corpus, 672 are made
+  the C++ way and 28 fall back (25 on an indexed stack LOAD in the stack heritage, 3 on a
+  guard in the action).
+- Not run: the full pass, the switch checks on the whole corpus and M500 against the
+  reference, the Mac. One unit test (`mapstate.rs`): overlapping hints merge into an open
+  range, and an alias offset reaches the symbols at and above it.
+
+Review fixes (branch `m3-default`, 2026-11-17), from an independent review of the port:
+
+- A new stack varnode inside a symbol of `restructureVarnode` got no flag; in the C++ it takes
+  the symbol's (`Varnode::setSymbolProperties` sets `getAllFlags` whatever `updateType`
+  returns): `mapped`, `addrtied`, and `nolocalalias` after `markUnaliased`. With the flags
+  missing, the next `syncVarnodesWithSymbols` saw a change and marked the varnode's INDIRECT
+  for `RuleAliasUpdate`, which the C++ does not.
+- `markNotMapped` ignored the symbols of `restructureVarnode`: it now removes those under the
+  range and keeps the range for a `fake_input` one, as the C++; a locked parameter under the
+  range while such symbols exist, or a range wrapping the space, fails loudly.
+- A partial function that fails with a normal error after it was made without the action and
+  the rule (`NoAlias`) no longer gives a failed table ("Treating indirect jump as call"): the
+  decompile ends with an error naming the path not ported. The same case for the partial
+  function without the `stackvars` rules (`NoStack`) is as before and not reviewed.
+- Checks, the build before the fixes against the one after: `paramdouble`, `swfs-r`, `swsn-r`,
+  `pcc-r`, `pcc-t` on the switch corpus (2,050 / 2,050 outputs equal in each), all 56 checks on
+  M8 (8 / 8 in each), `pcd`, `paramdouble`, `swfs-r`, `pcc-r`, `pcc-t`, `r5s` on M500
+  (500 / 500 in each). No function changes state; none of the three paths changes an output of
+  these corpora, so the fixes are tested only by one unit test (`varmap.rs`: the symbols under
+  a range and the fake input).
+- The same checks against the reference, the whole corpus (Superseded: the derived switch
+  counts above): `paramdouble` 1995 / 2004 (loud 9), `swfs-r` 1996 / 2004 (loud 8), `swsn-r`
+  1993 / 2004 (loud 8, silent 3 as before), `pcc-r` 1997 / 2005 (loud 8), `pcc-t` 1996 / 2005
+  (loud 9). M8: 56 checks, the 55 summary lines of the `m3-int5` baseline unchanged, `pcd`
+  8 / 8. M500: `pcd` 422 / 497 (loud 75), `paramdouble` 500 / 500, `swfs-r` 499 / 499, `pcc-r`
+  and `pcc-t` 495 / 495, `r5s` 483 / 499 (loud 16). Loud on the switch corpus: the six indexed
+  stack LOADs and 0x1c69c5a in all five, 0x23f4238 from `swfs-r` on, 0x23caea8 in `pcc-t`
+  (`fillinReadOnly`), and in `paramdouble` only 0x5861aa and 0x7c74c0 ("a second table after
+  the partial function's action failed is not ported"). Those two were identical in the
+  `m3-int5` pass and are loud in the build before these fixes too: not traced. (Superseded:
+  traced, see the next section.)
+
+### Value-set analysis and the stack guards (branch `worktree-agent-af2329329d4027b82`, 2026-11-17)
+
+An indexed LOAD or STORE through the stack pointer gets a guard record at the stack's first
+heritage pass. The C++ then finds the stack range each one can reach with the value-set
+analysis, and four places read that range. All of it is ported:
+
+- `valueset.rs` (new, from rangeutil.cc): `ValueSet`, `ValueSetRead`, `WidenerFull`,
+  `WidenerNone`, `ValueSetSolver` (`establishValueSets`, the constraints of the conditional
+  branches with `applyConstraints`, `generateRelativeConstraint` and the landmarks,
+  Bourdoncle's iteration order, `solve`). A varnode's set is found through a map in the
+  solver; a varnode with a set is the C++ marked varnode.
+- `rangeutil.rs`: the rest of `CircleRange` the solver needs (`pushForwardUnary`, `Binary`,
+  `Trinary`, `minimalContainer`, `contains` of a range, `widen`, `invert`, `getMaxInfo`,
+  `normalize`). Not ported: `setStride` (nothing calls it).
+- `heritage_guard.rs`: `analyzeNewLoadGuards` with `LoadGuard::establishRange` and
+  `finalizeRange`, `guardLoads` (a COPY of an address-tied range before each LOAD that may read
+  it), `handleNewLoadCopies` with `findAddressForces` and `propagateCopyAway`. The
+  `store_aliasupdate` mark of a guarded STORE is set by the analysis, as in the C++.
+- The readers: `LoadGuard::isGuarded` in `opCollapseIndirectsForAlias` and `MapState::addGuard`
+  in `gatherOpen` (`mapstate.rs`), `StackAffectingOps::populate` and `affectsTest` in the merge
+  test (`variable.rs`, `cover.rs`).
+
+Fails loudly: new guards after analysed ones (the C++ loop reads a missing value set there), a
+value set read for a varnode that has none, a constant with more than one reader as a root.
+`GHIDRA_RS_GUARD_DEBUG=<file>` appends one line per analysed guard (function, op, range, step,
+state) to the file.
+
+The two functions of `paramdouble` named above, 0x5861aa and 0x7c74c0, are not a guard case.
+The reference's partial function fails in its action too ("Overlapping input varnodes", the
+warning of the first table in `print C`), and the C++ then recovers the two later tables from
+the half-simplified clone ("Too many branches" for both). ghidra-rs matches the first failure
+and stops at the second table, which is the path not ported. They counted as identical in the
+`m3-int5` pass only because `print raw` shows no warning and every table failed either way;
+in `pcc-r`, `pcc-t` (`restructure_varnode` skipped) and the three `-r` switch checks they are
+identical (why the action does not fail under the `-r` options was not traced). Left loud: taking a table from a clone whose action stopped
+half way needs that state to be equal op for op, which no check shows.
+
+Checks (reference `decomp_dbg`, same options as the bars):
+
+- The 22 functions of M500 that were loud in `pcd` on a guard (16 "indexed stack LOAD", 6
+  "STORE guard" in the merge), all 56 checks: 52 checks 22 / 22 identical; `pcd` 18 / 22 (loud:
+  3 `getExactPiece`, 1 `HeapSequence`), `r5c` 21 / 22 (`HeapSequence`), `r5slock` and
+  `r5dtlocksv` 19 / 22 (a piece of a locked stack parameter). Silent 0. (That run used a build
+  that differs from the commit by comments, a dead field, two clippy rewrites and the debug
+  line.)
+- The 7 switch functions blocked on guard ranges (0x1c69c5a, 0x546d40, 0x5629d0, 0x78e7d0,
+  0x1b0c190, 0x502b80, 0x5c37f0) with 0x5861aa and 0x7c74c0, in `paramdouble`, `pcc-r`,
+  `pcc-t`, `swfs-r`, `swfs-t`, `swsn-r`, `swsn-t`, `swfsc-r`, `swfsc-t`: the 7 identical in all
+  nine; the other two identical in `pcc-r`, `pcc-t`, `swfs-r`, `swsn-r`, `swfsc-r`, loud in
+  `paramdouble`, `swfs-t`, `swsn-t`, `swfsc-t`.
+- The whole corpora, in two steps (the committed build). A function with no load or store
+  guard takes no new code path, so its result is that of the `m3-default` pass. Step one runs
+  the check with ghidra-rs alone and `GHIDRA_RS_GUARD_DEBUG` and lists the functions with a
+  guard, in the function or its partial function; step two runs those against the reference.
+  Switch corpus (2,050): `paramdouble` 68 with a guard, 66 / 66 identical (the reference does
+  not finish 2); `pcc-r` 98, 96 / 96; `pcc-t` 68, 66 / 66; `swsn-t` 68, 66 / 66. M500 `pcd`: 26
+  with a guard, 18 / 25 identical, 7 loud (6 `getExactPiece`, 1 `HeapSequence`, all loud before;
+  the reference times out on 0x6b21e0). Silent 0 in all five, no function identical before is
+  anything else now.
+- Counts derived from that and the `m3-default` pass, not from a run of every function against
+  the reference: switch `paramdouble` 1995 -> 2002 / 2004 (loud 2: 0x5861aa, 0x7c74c0), `pcc-r`
+  1997 -> 2004 / 2005 (loud 1), `pcc-t` 1996 -> 2003 / 2005 (loud 2); M500 `pcd` 422 -> 440 / 497
+  (loud 75 -> 57: 18 of the 22 guard functions are identical, 4 are loud on another port).
+- M8, 11 checks (`heritage`, `paramdouble`, `s4`, `r5`, `s7t`, `s8r`, `r5s`, `fs-t`, `pcc-r`,
+  `pcc-t`, `pcd`): identical in each. Not run: the other 45 checks on M8, the other switch
+  checks on the whole corpus, M500 beyond `pcd`.
+- One unit test (`rangeutil.rs`, `value_set_ranges`): push-forward, container and widening on
+  hand-computed ranges. The solver has no unit test; it is checked only through the functions
+  above.
+
+### Default options: pieces of symbols at naming and printing, `HeapSequence` validity (2026-11-17)
+
+The 51 `pcd` M500 functions loud in `namevars` and the two loud in `RuleStringStore`:
+
+- `namevars.rs`: `HighVariable::finalizeDatatype` asks `TypeFactory::getExactPiece`
+  (`infertypes::exact_piece`) for the piece of the symbol's data-type the variable covers. No
+  piece (a part of a scalar), or an unknown one, leaves the variable's type alone, as the C++.
+  Still loud: a piece whose type differs from the variable's (nothing ported reads
+  `type_finalized`), and a partial struct, array, union or enum. Superseded: "`finalizeDatatype`
+  of a piece of a symbol (`getExactPiece`) fails loudly". (Superseded by "Local symbols" below,
+  joined on `m3-int6`: the piece's type is kept, `type_finalized` is read by
+  `variable::h_type`; only the partial types stay loud.)
+- `printc.rs`: `PrintC::pushMismatchSymbol` for a variable running past the end of its local or
+  data symbol: `_name` at the symbol's start, else the unnamed location (`stack0x...`).
+  Superseded: "a variable past the end of its symbol (`pushMismatchSymbol`)" in the loud list of
+  slice 3A. The case of a function or external reference symbol stays loud.
+- `rules/constseq.rs`: the `HeapSequence` constructor (`findBasePointer`,
+  `findDuplicateBases`, `findInitialStores`, `collectStoreOps`, `checkInterference`,
+  `formByteArray`). A STORE of a character constant that roots no sequence of four characters
+  is left alone; a valid sequence fails loudly (`HeapSequence::transform`: the built-in string
+  copy user-op, its internal string and their printing are not ported). Superseded:
+  "`stringstore` fails at `HeapSequence` (not ported)" (stage R5 slice 5) and the three
+  HeapSequence misses of `r5c` (0x41f7f0, 0x4c1230, 0x766350: none is a valid sequence).
+- `merge.rs`, `snipOutputInterference`: the C++ sorts the reads by `HighVariable` address
+  (`PcodeOpNode::compareByHigh`). With reads of several variables of one group the order is
+  the allocator's (a new `HighVariable` reuses freed memory) and it numbers the copies made.
+  ghidra-rs sorted by creation order, which gave 0x4130d0 two copies swapped once naming let
+  it through; such a snip now fails loudly. Reads of a single variable are unchanged.
+
+Counts, M500: `pcd` 474 / 497 (loud 23, silent 0; before 422, loud 75). 50 of the 51 and both
+`RuleStringStore` functions are identical; 0x4130d0 is loud in `snipOutputInterference`. Left:
+16 indexed stack LOADs, 6 STORE guards, that one. `nm-r`, `nm-t`, `s7r` 499 / 499, `pcc-r`,
+`pcc-t` 495 / 495, `r5c` 498 / 498 (494 in the `m3-int5` pass: the three HeapSequence
+functions here; the fourth, 0x47a6b0, is identical too, and `r5c` was not run on `m3-default`,
+so where it changed is not measured). M8: the 56 summary lines unchanged.
+Not run: the switch and `simple` corpora, and the other M500 checks.
+
+### Local symbols: `restructure_varnode` and `mapped_local_sync` in the `decompile` root (2026-11-17)
+
+The last two action leaves of the default pipeline run in the `decompile` root. `D` in
+`bars.sh` is empty: `pcd` skips no action. (Superseded: "Now `restructure_varnode` and
+`mapped_local_sync`" in "Default options: the check `pcd`" above, and "The action of the
+`decompile` root stays unported" in the alias analysis section above.)
+
+One port serves the root and the jump-table partial function (`mapstate.rs`; the partial
+function's hints simply have unknown types):
+
+- Range hints carry data-types: `RangeHint::reconcile`, `isConstAbsorbable`, `preferred` with
+  `typeOrder`, `attemptJoin` through pointers, `reconcileDatatypes`; `createEntry` makes an
+  array when more than one element fits. `MapState::adjustOutOfRange` with
+  `RangeList::getNearestRange` and the backfill hints (`attemptBackfill`, `backfillOpen`)
+  replace the loud "open range hint outside the local ranges".
+- A symbol is an entry of `LocalMap` (range, `nolocalalias`, the `fake_input` category) with a
+  typed, unnamed symbol of the local scope behind it (`Funcdata::add_local_sym`), so the
+  `$$undef` names count up as in the C++. `markNotMapped`, `clearUnlockedCategory(-1)` and
+  `clearCategory(fake_input)` remove both.
+- `checkUnaliasedReturn` (through `markNotMapped`) and `annotateRawStackPtr` (a `PTRSUB(sp, #0)`
+  and a symbol at stack offset 0) are ported. (Superseded: the two loud paths of the same
+  names.)
+- `syncVarnodesWithSymbols` with `updateDatatypes`: `ActionMappedLocalSync` gives a stack
+  varnode the data-type of its place in its symbol (`TypeFactory::getExactPiece`). The action
+  runs in the partial function too (it left `action::PARTIAL_SKIP`).
+- `ActionInputPrototype` clears the fake inputs first; a reference into the stack parameters
+  that no input covers is a trial (`gatherParamSpacebaseRefs`, `markActiveInputRefs`) or gets a
+  symbol (`addRefOnlySymbols`).
+
+Readers of the symbols that changed with them:
+
+- `RulePtrArith` asks `TypeSpacebase::nearestArrayedComponentForward` and `Backward` for an
+  array symbol near a stack offset (`infertypes::nearest_arrayed_component`, with
+  `ScopeInternal::findSymbolAfter` and `findSymbolBefore`; `rangemap.rs` gains `after` and
+  `before`). It assumed no array symbol exists, which was a silent difference (0x4042e0:
+  `axStack_4a + -6`).
+- `HighIntersectTest::testUntiedCallIntersection` reads `hasNoLocalAlias`; `baseExplicit` reads
+  `isMapped` for a varnode that is not address-tied.
+- `finalizeDatatype` takes the type of the variable's place in its symbol and keeps it
+  (`type_finalized`, read by `variable::h_type`). (Superseded: "`finalizeDatatype` of a piece
+  of a symbol (`getExactPiece`) fails loudly" and "changing the data-type of a variable is not
+  ported".)
+- `PrintC::pushMismatchSymbol` for a variable larger than the symbol at its address
+  (`_xStack00000000`).
+- `linkSymbol` fails loudly where `handleSymbolConflict` would make a dynamic symbol.
+- `RuleStringCopy` fails loudly on a character copied into a symbol of `restructure_varnode`
+  (`StringSequence` is not ported).
+- Fixed on the way: `subflow.rs` and `subfloat.rs` read the size of a locked varnode's type
+  from the architecture's type factory instead of the function's (a panic once the stack
+  pointer's space-base type was reached; `bars.sh` counted it as silent).
+
+Not ported, each failing with an error that names it: a structure or union among the hints, a
+locked prototype with parameters, a piece of an array symbol as a data-type
+(`getTypePartialStruct`), a reference into the stack parameters of a locked prototype, a load or
+store guard whose pointer points to a union. (Superseded: "a valid load or store guard
+(`MapState::addGuard`, the value-set ranges)" in this list: the integration `m3-int6` joined
+this port with `MapState::addGuard` of "Value-set analysis and the stack guards"; in the
+`decompile` root the guard's hint takes the data-type its pointer points to, see "Integration
+`m3-int6`" below.)
+
+The check `pmd` (new in `bars.sh`): `print map` and `print raw` at `break start startcleanup`
+with the default options, so the symbols (their `$$undef` names, ranges, types, attributes) and
+the typed ops are compared right after `mapped_local_sync`, before naming and printing. It
+found a silent difference `pcd` hid behind a later error (0x581bf6 of `simple`):
+`ActionUnjustifiedParams` looked at register inputs only and passed over a stack input in the
+middle of a parameter slot, which the C++ widens (`adjustInputVarnodes`, not ported). A stack
+input fails loudly there now.
+
+Counts: see the plan, "Local symbols".
+
+### Pool rules: every rule listed, a missing one fails (branch `worktree-agent-ab53ef4e46d4bec80`, 2026-11-17)
+
+Behaviour change: a `decompile` run fails while a pool rule that is not ported is on. Before, a
+rule missing from the rule tables was simply not in the pool, and a run with the default
+options gave a result without it and said nothing (superseded: "Not loud yet" and the open
+decision in "Default options" above).
+
+- The tables `OPPOOL1`, `OPPOOL2` and `CLEANUP` (`rules/mod.rs`) now list every rule of the C++
+  pools, in the C++ order: a ported rule as `r(...)`, one that is not as `u(...)` (name, group,
+  op list). A unit test reads `coreaction.cc` and the rule constructors in the `.hh` files and
+  compares names, groups and order, so a rule the C++ gains or one dropped here fails
+  `cargo test`.
+- The `decompile` root (`pool::select` with `strict`): a pool holding a `u` rule whose group is
+  on and that `option togglerule <rule> off` did not switch off fails when it is first applied:
+  "pool rules not ported to ghidra-rs yet are on: ...". Switching the rule off on both engines
+  is the only way to run, and `tools/corpus/default-options.txt` (the `pcd` skip list) is where
+  the checks do it. A run that stops at a break before the pool is not affected.
+- The `jumptable` root, which no option reaches: the `u` rule is in the pool and fails on the
+  first op of its op list (for `segment`: a SEGMENTOP in the partial function).
+- `r1-options.sh` reads the `r(` entries as the ported rules.
+
+Two rules are `u` entries, both ported on other branches and left for integration (replace the
+`u` line by the `r` line there): `segment` (branch `worktree-agent-a852cab363d8d01f3`) and
+`ptrsubcharconstant` (branch `worktree-agent-af954dab401167074`). `default-options.txt` holds
+these two (superseded: eight). (Superseded on `m3-int6`: both are `r(...)` entries now, no
+table holds a `u` rule, `default-options.txt` is empty; `u` stays for the unit test and for a
+rule the C++ pools gain.)
+
+Ported here:
+
+- `switchsingle` (`RuleSwitchSingle`, `rules/mod.rs`): a BRANCHIND whose block has one out edge
+  and whose table has its labels becomes a BRANCH to the one destination, the table is removed
+  and the structure cleared; the header warning "Switch with 1 destination removed at ..." as
+  in the C++.
+- `ptrflow` (`RulePtrFlow`): its op list is empty unless the default data space is truncated
+  (`<truncate_space>` in the `.ldefs`, which ghidra-rs does not read). The console now refuses
+  a `.sla` that a language with a `<truncate_space>` uses in an `.ldefs` next to it
+  (`Sleigh::refuse_truncated`; no x86 language has one), so the rule has nothing to do. The
+  truncation itself (`SleighArchitecture::modifySpaces`, `truncatePointer`) is not ported.
+- `splitcopy`, `splitload`, `splitstore` (`SplitDatatype`, `rules/split.rs`): a COPY, LOAD or
+  STORE of a structure or array becomes one op per component (`getValueDatatype`,
+  `categorizeDatatype`, `getComponent` with holes, `testDatatypeCompatibility`,
+  `RootPointer::find` and `backUpPointer`, `buildPointers`, `buildInConstants`,
+  `buildInSubpieces` with `generateConstants`, `buildOutVarnodes`). Each of these fails with
+  an error naming it: a data-type that needs resolution (unionresolve.cc is not ported, so the
+  `ResolveCache` is left out), a piece of a structure or array (`TypePartialStruct` from
+  `getExactPiece`), the CONCAT of split outputs (`buildOutConcats`: proto-partial pieces need
+  `VariablePiece`), so a COPY or LOAD is split only when nothing reads its output, a value in
+  the join space. A STORE through an address-tied root pointer copies it to a temporary first
+  (`Funcdata::buildCopyTemp`).
+  `TypePointerRel` is not a ghidra-rs type.
+- `aliasupdate` in the `decompile` root: the rule was already in the root's pool (branch
+  `m3-aliasupdate`); `default-options.txt` no longer switches it off, so `pcd` runs it on both
+  engines. What the root still lacks is not in the rule: the value-set range of a store guard
+  (a guarded STORE with INDIRECTs fails loudly) and `restructure_varnode` (`nolocalalias`).
+  The older rule checks keep it off (`r1-options.sh`), as before. (Superseded on `m3-int6`:
+  the root has both, "Value-set analysis and the stack guards" and "Local symbols"; the older
+  rule checks still keep the rule off, as their baselines were made.)
+
+The options files of the rule checks lose `togglerule switchsingle off` (and
+`subvar-options.txt` `ptrflow off`), so those checks run `switchsingle` on both engines now.
+
+Counts: see the plan, "Pool rules".
+
+### Stage S10 (reference and inventory only; blocked), branch `worktree-agent-a6369f440dde42a16` (2026-11-17)
+
+Nothing of the decompiler changed in this slice. It adds the S10 check and records why the S10
+gate (M8 identical to Java Ghidra) cannot be reached yet.
+
+The check, `tools/ghidra-diff.sh <corpus>`: `tools/ghidra/DecompileRef.java` (the
+`DecompInterface` call of mercs2's `Decompile.java`, one output file per address) runs in
+headless Ghidra on a copy of the mercs2 Ghidra project, opened `-readOnly`; the console side is
+`print C` with default options, from ghidra-rs or, with `ENGINE=ref`, from `decomp_dbg`. The
+Java output is kept under `rust/target/ghidra-ref/java/<corpus>/` (the installed Ghidra is 12.2,
+the sources of this repository 12.3). Summary line: `java finished F / N, identical I / F (loud
+L, silent S)`.
+
+Results:
+
+| run | result |
+|---|---|
+| `ghidra-diff.sh m8` (ghidra-rs) | java finished 7 / 8 (no function at 0x54c990 in the Java project), identical 0 / 7, loud 7: "action restructure_varnode is not implemented" |
+| `ENGINE=ref ghidra-diff.sh m8` | identical 0 / 7 (the inventory below) |
+| `ENGINE=ref ghidra-diff.sh m500` | java finished 499 / 500 (0x4c48d0: 60 s timeout), identical 0 / 499 |
+| `decomp-diff.sh m8`, `print C`, default options | ghidra-rs loud 8 / 8 |
+| the same with the eight unported actions skipped on both engines | M8 identical 8 / 8; M500 reference ran 498 / 500, identical 410 / 500, loud 78, silent 11, and 0x4c48d0 (reference timeout) |
+
+Why it is blocked: Java Ghidra runs the default `decompile` action, every group on. ghidra-rs
+does not finish it for any function. The print checks of S9 (`pc-*`, `pcc-*`) run with the
+`tail-t` options (14 groups and 5 rules off) and with `restructure_varnode` and
+`mapped_local_sync` skipped. With default options eight leaves of `action.rs` are `not_ported`
+and fail loudly: `restructure_varnode` and `mapped_local_sync` (group `localrecovery`:
+`ScopeLocal::restructureVarnode`, `MapState`, `RangeHint`, `markUnaliased`, `fakeInputSymbols`,
+`remapSymbol`, the name recommendations of `varmap.cc`, about 1,100 lines of C++ not in
+`varmap.rs`), `multicse`, `shadowvar`, `condconst` (group `analysis`), `directwrite`
+(`protorecovery_b`), `dynamicsymbols` (`dynamic`) and `prototypewarnings` (`protorecovery`).
+
+With those eight skipped on both engines (`DECOMP_SKIP_ACTIONS`), default options otherwise:
+of the 78 loud M500 functions 36 fail at "ActionParamDouble: splitting a stack trial that is a
+PIECE", 17 at "heritage: an indexed stack LOAD ..." (one of them 0x6b21e0, where
+the reference timed out), 14 at "namevars: finalizeDatatype of a
+piece of a symbol (getExactPiece)", 5 at "merge: a STORE guard of the stack heritage pass", 3 at
+"subflow: a logical value in a join varnode", 2 at `RuleStringStore` (`HeapSequence`), 1 at
+`ActionConditionalExe`. 11 are silent, which no check of
+`bars.sh` runs: 0x40dc10 (`extraout_EDX` against `pfVar2`), 0x434f70, 0x494400 and 0x5b8ca0 (a
+missing `(xunknown1 *)` cast of a stack address), 0x45ec20, 0x571cc0, 0x5d3c90, 0x5d4050 and
+0x74c9b0 (other local declarations), 0x5c5ba0 (`in_XMM0_Da` against `in_XMM0_Qa`), 0x6fa6e0
+(`param_1[9]` against `param_1[8]`). Not looked into.
+
+What Java Ghidra prints that `decomp_dbg` does not (M8 and M500, `ENGINE=ref`), the S10 work
+proper, none of it ported:
+
+- Core type names: `undefined4`, `undefined1`, `int`, `uint`, `byte`, `float` for `xunknown4`,
+  `xunknown1`, `int4`, `uint4`, `uint1`, `float4`; with them the variable prefixes (`uVar1`,
+  `auStack_c0`, `puVar1` for `xVar1`, `axStack_c0`, `pxVar1`).
+- Function names: `FUN_00401000` for `func_0x00401000`; a thunk to an import by the import's
+  name (`D3DXVec3TransformNormal` for `func_0x0096bd76`); FID names without decoration
+  (`__security_check_cookie` for `@__security_check_cookie@4`).
+- Global names from the listing: `DAT_00cde2b0`, `_DAT_0256f88a`, `PTR_FUN_00bd2f98` for
+  `iRam00cde2b0`.
+- Read-only data: Java prints `DAT_00b9b664` and `DAT_00b97eec` where `decomp_dbg`, with the
+  prelude's `readonly` range, prints the constants `1.0` and `0.01`.
+- Stack locals: `local_bc` where `decomp_dbg` prints `iStack_bc` (the local range of the
+  prototype; 117 of the 499 M500 functions have a `local_`), and other pieces
+  (`auStack_4a [6]`, `uStack_44` for `axStack_4a [2]`, `xStack_48`).
+- Prototypes of the project: import parameter types (`LeaveCriticalSection((LPCRITICAL_SECTION)
+  ...)`), stored calling conventions and parameters of callees (`FUN_...(in_EAX)`, 152 of the
+  499 print a convention), no-return callees ("WARNING: Subroutine does not return").
+- Function set: 0x54c990 is no function in the Java project; in 0x9eec5e Java prints the jump
+  to `___report_gsfailure` as a call that does not return, where `decomp_dbg` follows the jump
+  and prints that function's body.
+- Comments: the FID plate comment ("Library Function - Single Match"), "WARNING: Globals
+  starting with '_' overlap smaller symbols at the same address" (80 of the 499).
+- Frame: Java's text ends with a blank line; `ghidra-diff.sh` drops blank lines before and
+  after the function on both sides.
+
+Not run: the checks of `bars.sh` (no Rust source changed), `ghidra-diff.sh` on the other
+corpora. Not decided: how ghidra-rs gets the Java project's facts (names, prototypes, data
+types, listing data), and the name of the output mode.
+
+Superseded: "none of it ported" and "Not decided" above. The next slice ports the list (see
+"Stage S10, slice 1"); the facts come from an export of the Ghidra project and the mode is the
+console command `load facts`. The eight actions are still not ported, so the gate is still out
+of reach.
+
+### Stage S10, slice 1: the facts of a Ghidra project and `load facts`, branch `worktree-agent-af954dab401167074` (2026-11-17)
+
+Java Ghidra's decompiler is the same C++ as `decomp_dbg`; what differs is what Java feeds it.
+This slice records those answers once and lets ghidra-rs read them, so the list of the slice
+above comes out of the ported C++ paths rather than out of new printing code.
+
+**The facts** (where they come from is not the user's decision yet; this is the choice made
+here). `tools/ghidra/ExportFacts.java`, run headless by `tools/ghidra-facts.sh` on the copy of
+the Java project (`-readOnly`), calls `DecompileCallback` and `PcodeDataTypeManager` as
+`DecompInterface` does and writes each answer as the XML Java would send, one record per line,
+fields separated by tabs, to `$GHIDRA_REF/mercs2.facts` (127 MB for mercs2, about two minutes;
+the file is version 2, see "Review fixes" below):
+
+| record | what | mercs2 |
+|---|---|---|
+| `coretypes <xml>` | `encodeCoreTypes` | 1 |
+| `block <first> <last> <r\|w>[v]` | a memory block: writable or not, volatile | 14 |
+| `wref <addr>` | an address of a non-writable block with a write reference | 265 |
+| `func <entry> <xml>` | `getMappedSymbols(entry)` while that function is decompiled | 44,990 |
+| `body <entry> <first>-<last> ...` | the ranges of the function's body | 44,990 |
+| `tracked <entry> <xml>` | `getTrackedRegisters(entry)`, written when it differs from the function before | 37 |
+| `comments <entry> <xml>` | `getComments(entry)`, when there is one | 1,613 |
+| `data <first> <length> <xml>` | `getMappedSymbols` of defined or labelled data | 271,502 |
+| `extref <addr> <xml>` | `getExternalRef` of a pointer to an external location | 1,022 |
+| `label <addr> <name> [<entry>]` | `getCodeLabel` of a primary symbol at an instruction; with `<entry>`, the name only that function's decompile gets | 218,095 (0 with an entry) |
+| `depth <entry> <to> <change>` | a stack-depth-change override at a call site of the function | 0 |
+| `string <first> <length> <n\|->` | defined string data; `n` characters when a raw read gives what `getStringData` gives | 26,420 (213 `-`) |
+| `undef <first> <last> <prefix>` | undefined bytes of a block that is not writable | 58,069 (`UNK_`) |
+| `override <addr> <kind>` | an instruction with a flow, fall-through or length override | 3,365 |
+| `type <id> <xml>` | `getDataType` of each `<typeref>` in the records | 376 |
+| `ns <id> <xml>` | `getNamespacePath` of each namespace id in the records | 798 |
+
+`load facts <file>` (`decomp/facts.rs`) indexes the file by address (about 0.5 s) and reads
+the core types and the `type` records; every other record's XML is parsed when a decompile asks
+for it. The loader is one module behind `Arch::load_facts`, `Arch::callee_proto`,
+`Arch::start_function`, `Arch::is_readonly`, `Arch::data_holds` and `facts::query_symbol`, so
+another source of facts can replace it.
+
+**What `load facts` changes** (nothing changes without it; the checks against `decomp_dbg` use
+the prelude as before):
+
+- Core types: Ghidra's (`TypeFactory::set_core`, the cache rule of `cacheCoreTypes` with
+  Ghidra's ids), so `undefined4`, `int`, `uint`, `byte`, `float`, and with them `uVar1`,
+  `puVar1`, `auStack_c0`.
+- Functions: the listing's, with their names (`FUN_00401000`, a thunk by its import's name,
+  FID names); `load addr` takes the listing's name. An external reference is the pointer's
+  record with the function Java hangs on it (the import's locked prototype).
+- Prototypes (`Facts::function`, `FuncProto::decode`): the model (`unknown` is a copy of the
+  default model, `createUnknownModel`), the model lock, the extrapop Ghidra computed, call
+  fixups, locked parameters and return value with the storage Java gives, and no-return: a
+  call to such a function is followed by an artificial halt (`checkForFlowModification`,
+  `Halt::NoReturn`, never printed) and "WARNING: Subroutine does not return".
+- Flow overrides: `CALL_RETURN` on a jump (`PcodeEmit.dumpCallOverride`): the jump is a call,
+  followed by `RETURN #0`.
+- The function's own record: its prototype, the tracked registers at its entry in place of the
+  processor spec's (`FS_OFFSET` and `DF` for mercs2), the listing's comments (the plate comment
+  at the entry is a header comment after the warnings, a pre comment is printed at its
+  address; `CommentDatabaseGhidra::fillCache`), and its stack variables as name
+  recommendations (`ScopeLocal::collectNameRecs`, `recoverNameRecommendationsForSymbols`:
+  `local_bc`).
+- Data symbols (`ScopeGhidra::removeQuery`): the symbol holding an address joins the function's
+  global scope when `mapGlobals`, `linkSymbol` or `linkSymbolReference` ask (`DAT_00cde2b0`);
+  a variable larger than the symbol at its address prints `_DAT_0256f88a` with the header
+  warning (`pushMismatchSymbol`); a locked data-type types the varnodes the symbol holds; the varnodes
+  a data symbol or a label holds are isolated from speculative merging (Java sends `typelock`
+  and `merge="false"` with every `HighCodeSymbol` and `HighLabelSymbol`).
+  Superseded: "every data symbol is isolated" (it did not name the labels, which Java isolates
+  too: 17,878 `<labelsym>` records of mercs2, each with `merge="false"`).
+- Pointers to data symbols (`ActionConstantPtr`): `&PTR_FUN_00bd2f98`, an array by its name
+  (`hkpEntityListener::vftable`), a string through `RulePtrsubCharConstant` (ported here:
+  `"AimMovementNodes"`).
+- Read-only memory is the listing's (`Facts::readonly`: a symbol's flag; a block that is not
+  writable unless the address has a write reference; in a function's body past the first 8
+  bytes). Java Ghidra sends no options from `DecompileRef.java`, so read-only memory does not
+  fold to constants (`DAT_00b9b664` stays).
+- Names of symbols in namespaces: the namespace path before the name (`pushSymbolScope` from a
+  function of the global namespace).
+- Labels: the listing's label at a block (`queryCodeLabel`, `LAB_00401178`).
+
+**Fails loudly with facts** (each an error when a decompile reaches it): a data symbol of
+struct or union type, or an array read as a variable, or a pointer into one (not its start;
+strings excepted); struct, union or array symbols near an address `RulePtrArith` looks at
+(`TypeSpacebase::nearestArrayedComponent`); a string that is not plain ASCII, or of wide
+characters (Java reads strings with the listing's character sets, `getStringData`); a function
+data-type with a prototype used for an indirect call (`forceSet`); the decompile of a function
+in a namespace; a prototype with only its inputs or only its output locked, an unlocked
+varargs prototype, custom storage, hidden return parameters, `inline`, prototype and
+jump-table overrides; names recommended for register variables; locked local variables;
+every flow override but `CALL_RETURN` on a jump or a call; volatile memory; signed
+enumerations, pointer-relative data-types, bit fields, display formats. The declaration of a
+function with a locked prototype was not ported before and is not now.
+
+**The check.** `tools/ghidra-diff.sh` now gives ghidra-rs the facts (`FACTS=0`: the prelude,
+as before) and, with `CLASSIFY=<actions>`, marks each miss `skip` or `own`: `decomp_dbg` runs
+with the prelude twice, with and without those actions, and a function whose two outputs
+differ needs the actions (`skip`). It is a guide: `decomp_dbg` has no data symbols, so an
+action can matter with the facts and not without them (0x73a340: `multicse` on a read-only
+global that the prelude folded).
+
+Results (`GHIDRA_REF` holding the Java C of the slice above; "the eight skipped" is
+`SKIP=restructure_varnode,mapped_local_sync,multicse,shadowvar,condconst,directwrite,dynamicsymbols,prototypewarnings`,
+which only ghidra-rs skips here: Java runs them):
+
+| run | result |
+|---|---|
+| `ghidra-diff.sh m8` | java finished 7 / 8, identical 0 / 7, loud 7 ("action restructure_varnode is not implemented") |
+| `ghidra-diff.sh m8`, the eight skipped, `CLASSIFY` | identical 3 / 7 (0x40a110, 0x58d030, 0x9eec5e), silent 4, all four marked `skip` |
+| `ghidra-diff.sh m500` | java finished 499 / 500, identical 0 / 499, loud 499 (498 the same action; 0x403060 a function in a namespace) |
+| `ghidra-diff.sh m500`, the eight skipped | identical 192 / 499 (loud 72, silent 235) |
+| `bars.sh`, `CORPORA=m8`, every check | 55 lines, each equal to the baseline's (`m3-int5-116d9d34da.summary`) |
+| `bars.sh`, M500 `pcc-r`, `pcc-t`, `pc-r`, `pc-t`, `nm-r`, `nm-t` | `pcc-r` 494 / 495 (loud 1), `pcc-t` 495 / 495, `pc-r` 494 / 495 (loud 1), `pc-t` 495 / 495, `nm-r` 498 / 499 (loud 1), `nm-t` 499 / 499: the six lines equal the baseline |
+
+What is left of the four M8 misses is what the eight actions do in Java and not here: the
+store to `_DAT_0256f88a` in 0x401000 (`directwrite`), the stack variables of 0x401080 and
+0x4042e0 (`restructure_varnode`: `auStack_c0 [4]`, `local_90 [40]`; the names the facts
+recommend are there, `local_bc`), and `uVar1 = DAT_00b9b664` in 0x73a340 (`multicse`). Their
+other lines are Java's.
+
+The M500 misses with the eight skipped. Loud 72: 54 are the misses default options reach
+without facts (`ActionParamDouble` on a PIECE 26, an indexed stack LOAD 13, `getExactPiece`
+in `namevars` 8, a STORE guard in `merge` 4, `subflow` 1, `HeapSequence` 1,
+`ActionConditionalExe` 1), and 18 come with the facts: "restarting for a locked prototype the
+call cannot take" in `deindirect` 9 (imports now have locked prototypes), the decompile of a
+function in a namespace 3, type propagation into a struct or array 2, a join storage 1, and
+three fixed after this run (2 panics where a callee's data-type was read from the
+architecture's types, now 1 "locked varargs prototype" and 1 silent; 1 function counted loud
+because its C holds the word ERROR in a string, the script now looks for the engines' error
+lines). Silent 235: not classified with the final build. An earlier run of this slice
+(before namespaces, arrays and strings; `CLASSIFY` with the prelude's read-only folding)
+classified 331 of the 500: of its 196 silent misses 191 were `skip` and 5 `own`, and of
+those five 0x425020 and 0x493730 are `multicse` on a read-only global and 0x45ec20 is a
+silent default-options miss of the slice above. Seen in the silent misses, all of them the
+eight's: stores to globals removed (`directwrite`), stack variables (`restructure_varnode`,
+`mapped_local_sync`), repeated reads of a global not shared (`multicse`), parameters and
+return values of the function itself (0x402820: `void` for `undefined4 *`).
+
+Decisions made here, for the user to confirm ("Claude's call"): the facts are an export of the
+Ghidra project, as recorded answers of `DecompileCallback` (XML, one record per line), indexed
+by address and parsed on demand; the mode is the console command `load facts <file>`, no
+option; `ghidra-diff.sh` uses the facts unless `FACTS=0`; read-only memory does not fold with
+facts, because `DecompileRef.java` sends no options; only plain ASCII strings are taken as
+the same in Java; `pushMismatchSymbol` and the string rule's string test follow Java only with
+facts (without facts the old error stays, no check against `decomp_dbg` reaches it;
+superseded on `m3-int6` for `pushMismatchSymbol`, which runs without facts too, checked by `pcd`); a
+function symbol covers its entry byte (Java's covers up to 8 bytes of a small function).
+
+Not run: `bars.sh` beyond the checks named above (no full pass), the Mac, `ghidra-diff.sh` on
+the other corpora. Not done: the eight actions, the struct and union paths, and the items
+under "Fails loudly with facts".
+
+### Stage S10, slice 1: review fixes, branch `worktree-agent-af954dab401167074` (2026-11-17)
+
+An independent review of the slice above; each finding was checked against the Java and C++
+sources before a change. The facts file is now version 2 (`ghidra-rs-facts 2`): a file of
+version 1 fails at `load facts` and `tools/ghidra-facts.sh` writes it again.
+
+Fixed:
+
+- Panics with facts: `SubfloatFlow::set_replacement`, `SubvariableFlow::set_replacement` and
+  `LaneDivide` read the size or metatype of a locked varnode's data-type from the
+  architecture's types; the id is one of the function's (`fd.types`). No M8 or M500 function
+  reached them.
+- `ghidra-diff.sh`: `FACTS=0` was cleared before it was tested, so the facts were always
+  loaded. Superseded: "`FACTS=0`: the prelude, as before" was not true until this fix.
+- Strings (`printc::java_reads_the_same`): `DecompileCallback.getStringData` reads the
+  listing's defined string data holding the address (its length, an offset into it, its
+  character set, a translation), and the raw bytes only where there is none. The `string`
+  records name the defined strings and, for each the export found plain (one-byte ASCII, the
+  data's own first bytes, zeros after them, no translation shown), its number of characters.
+  A string is printed when it is plain ASCII and either lies outside defined string data or
+  ends where a plain defined string ends; a raw read that finds no string inside defined string
+  data, a defined string of another form (213 of the 26,420 of mercs2) and a raw read of
+  another length fail. Superseded: "only plain ASCII strings are taken as the same in Java".
+- Labels: `getCodeLabel` answers for any address, so the `label` records are now the primary
+  symbols at every instruction (in a body, at an entry, outside every function), not only
+  those inside a body, where `print C` printed `code_r0x...` for Java's `LAB_...`. A label of
+  a function's namespace has a prefixed name outside that function's decompile
+  (`getNamespacePrefix`); the record then carries the function's entry and another function
+  reaching it fails (none in mercs2).
+- Undefined bytes of a block that is not writable (`encodeData`): Java sends a read-only
+  1-byte symbol of type `undefined` for each one without a primary symbol, named by
+  `SymbolUtilities.getDynamicName` (`UNK_00400128` in mercs2, not `DAT_`). The `undef` records
+  give the ranges and the prefix; `Facts::data_symbol` writes the symbol's XML, and the export
+  compares that text with Java's for the first such byte of every range (it stops on a
+  difference).
+- `RulePtrsubCharConstant::pushConstFurther`: the sum is not masked to the constant's size,
+  as in the C++.
+- `r1-options.sh`: `ptrsubcharconstant` is in `rules/mod.rs` now, so a rerun dropped its
+  `togglerule ... off` from the option files. The script keeps a list of rules that are ported
+  and stay off (`kept_off`): no check against `decomp_dbg` has run with the rule on. A rerun
+  leaves the fifteen option files unchanged. (Superseded on `m3-int6`: `kept_off` is removed and
+  the rerun dropped the line from the option files, sixteen with `default-options.txt`; the
+  checks against `decomp_dbg` with the rule on are in "Integration `m3-int6`".)
+
+Fails loudly now (was silent):
+
+- A stack-depth-change override at a call site (`getExtraPopOverride`,
+  `CallDepthChangeInfo`): the `depth` records name the functions that have one, and their
+  decompile fails. mercs2 has none.
+- A core character data-type that is no `int` (Java's `uchar` is a `uint` with
+  `char="true"`): fails at `load facts`. The core types of mercs2 have none; outside the core
+  types it failed before.
+- A variable larger than its symbol when the symbol is in a namespace: the C++ prints `_` and
+  the name without its namespaces; the port keeps both as one string.
+- A calling convention name the compiler spec does not have, other than `unknown`: the C++
+  keeps the name (`createUnknownModel`) and prints it in the declaration. mercs2 has
+  `__cdecl`, `__fastcall`, `__stdcall`, `__thiscall` and `unknown` only.
+
+Not changed: the review took `HighLabelSymbol` as not type-locked. It is
+(`super(0, nm, DataType.DEFAULT, true, true, dtmanage)`, and `isIsolated` is the type lock), all
+17,878 `<labelsym>` records of mercs2 carry `typelock="true"` and `merge="false"`, and
+`LabSymbol::decode` reads them with `decodeHeader`: labels stay isolated, as Java's are.
+
+Results (the Java C and `SKIP` as above; "before" is the slice's build with the facts of
+version 1):
+
+| run | before | after |
+|---|---|---|
+| `ghidra-diff.sh m8`, the eight skipped | identical 3 / 7 (loud 0, silent 4) | the same |
+| `ghidra-diff.sh m500`, the eight skipped | identical 192 / 499 (loud 70, silent 237) | the same; no function changed state |
+| `bars.sh`, `CORPORA=m8`, every check | 55 lines equal to the baseline (`m3-int5-116d9d34da.summary`) | the same 55 lines |
+| `bars.sh`, M500 `pcc-r`, `pcc-t`, `pc-r`, `pc-t`, `nm-r`, `nm-t` | the six lines equal the baseline | the same: `pcc-r` 494 / 495 (loud 1), `pcc-t` 495 / 495, `pc-r` 494 / 495 (loud 1), `pc-t` 495 / 495, `nm-r` 498 / 499 (loud 1), `nm-t` 499 / 499 |
+
+The console output of all 500 M500 functions is byte for byte the slice's (0x4c48d0, which
+Java does not finish, timed out in the loaded run and gave the same text alone). So no M8 or
+M500 function reaches a fixed path: the Java C of the two corpora has no `UNK_` name and no
+label that was `code_r0x` here, and the loud cases are reached by none. What checks the
+`undef` symbols is the export's comparison with Java's XML; what checks the `string` records
+is the export's comparison of the string with the data's bytes. `FACTS=0 ghidra-diff.sh m8`
+now runs the prelude: identical 0 / 7 (silent 7).
+
+Superseded: "identical 192 / 499 (loud 72, silent 235)" in the slice above is the run before
+its last three fixes; its final build gives loud 70, silent 237.
+
+Not done: outside defined string data, bytes with no terminator within 2,048 are no string
+here and are taken as none in Java, whose limit may differ by one character; a label of
+another function's namespace and the four loud cases above are not ported; no unit test
+covers the new records (they need a loaded architecture). Not run: `ghidra-diff.sh` on the
+other corpora, a full pass, the Mac.
+
+### Stage S10, slice 2: the facts from ghidra-rs's own analysis (`analyze --facts`), branch `worktree-agent-ad70960380034c8df` (2026-11-17)
+
+The facts of slice 1 come from a Java Ghidra project. This slice writes the same file from
+ghidra-rs's own analysis of the binary, so `load facts` needs no project:
+
+```sh
+ghidra-rs analyze <pe32> --facts <out> [--protos <file>] [--seeds <csv> | --functions-from <csv>]
+tools/facts-own.sh            # mercs2: writes rust/target/facts/mercs2.facts and compares it
+tools/ghidra-protos.sh        # once per Ghidra version: $GHIDRA_REF/win32.protos
+```
+
+`ghidra-rs/src/factsout.rs` writes each record as Java's `DecompileCallback` would send it for
+a listing holding what the analysis found. With `--facts`, `analyze` runs discovery with
+Create Address Tables and constant propagation (`Analysis::disassemble` with constants) and
+Function ID; mercs2 takes about 55 s with plain discovery and 50 to 130 s with
+`--functions-from` (discovery runs twice, see below; the desktop was shared), the file is 86 to 89 MB.
+
+| record | where it comes from |
+|---|---|
+| `coretypes` | Ghidra's built-in data-types for x86:LE:32 Windows, a copy of one export (`src/facts_coretypes.xml`); they do not depend on the program |
+| `block` | the PE sections and headers, writable or not; the TEB block of Ghidra's "Windows x86 Thread Environment Block" analyzer (`0xffdff000`) |
+| `wref` | an address of a block that is not writable which an instruction writes |
+| `func`, `body` | the functions and their bodies as address ranges. Names: an export's, Function ID's (`@name@4` is `name` with `__fastcall` locked, `_name` is `name` with `__cdecl` locked, as the demangler leaves them), a thunk's (one `JMP` to a function, through an import slot, or through a pointer that holds a function's entry: `thunk_FUN_...`, or the name and prototype of the import), else `FUN_<address>`. `extrapop`: Ghidra's `FunctionPurgeAnalysisCmd` (`Analysis::ret_purge`: the first RET by address, else the function the last jump out calls). No-return: the analysis's set. Call fixups: the compiler spec's `<callfixup>` targets by name. Stack variables: Ghidra's stack analysis (`Exporter::locals`, below) |
+| `tracked` | the `.pspec`'s tracked registers (`DF = 0`) and `FS_OFFSET = 0xffdff000`, once: they hold for every function |
+| `extref`, `data` (`<externrefsymbol>`) | the import slots. The prototype is the archive's (`--protos`), with no-return added from the analysis's set |
+| `data` | at every reference target that is not code: a pointer (`PTR_<what it points to>_<address>`: the slots of Create Address Tables, and the Reference analyzer's `checkForPointer`, followed from pointer to pointer), a string (below), `DAT_<address>` typed `undefinedN` where a COPY from memory or a LOAD or STORE through a constant sizes it (constant propagation's `createData`; only a COPY's direct read counts, as in `SymbolicPropogator`), else `DAT_<address>` of one `undefined` byte. A label at code outside every function is a `<labelsym>` |
+| `string` | the Reference analyzer's strings (`OperandReferenceAnalyzer.checkForAscii`, `checkForUnicode`): 5 or more ASCII characters with a terminator, or more than 3 UTF-16 ones, at a reference target outside executable blocks, with no reference into them; named `s_<text>` and `u_<text>` (`makeStringLabel`) |
+| `undef` | the bytes of the blocks that are not writable which no instruction, typed data or import slot covers, as ranges |
+| `label` | a function's name at its entry, `LAB_<address>` at an instruction something refers to |
+| `override` | `CALL_RETURN` on a jump to another function (not a thunk's) and on a call of a function that does not return |
+| `type` | the data-types of the archive's prototypes that are used, and `undefined` |
+| `underived <address> <what>` | what this analysis does not derive (new with this slice, below) |
+
+**Absent loudly.** What ghidra-rs does not derive is named, and the loader (`Facts::derived`)
+fails when a decompile reads it:
+
+| `underived` | when | mercs2 (plain discovery) |
+|---|---|---|
+| `function` | a function with a C++ name (an export or a Function ID name the small demangler leaves: Java has its namespace and the prototype of its mangling); an import, or a thunk to one, whose name the archive does not have (Java gives 220 of the 1,022 imports no prototype either, but an `extrapop` it works out at the call sites) | 699 |
+| `comments` | a function Function ID names (Java's plate comment lists the libraries, which `fid.rs` does not load) or with a C++ name (the demangler's comment) | 1,638 |
+| `label` | a switch case (Java: `caseD_3` in a `switchD_...` namespace, from its decompiler switch analysis) | 7,969 |
+
+**Function prototypes of the imports.** Java takes them from its data-type archive
+(`Ghidra/Features/Base/data/typeinfo/win32/windows_vs12_32.gdt`, in this repo). The archive is
+a Ghidra database (a packed buffer file like the `.fidbf` files, with the tables of
+`DataTypeManagerDB`), and a prototype's facts need its data-types (17,957 are used by the prototypes) encoded as the decompiler's
+XML: reading it in Rust means porting the data-type tables and `PcodeDataTypeManager`'s
+encoder. Not done here. Instead `tools/ghidra/ExportArchiveProtos.java` (run once per Ghidra
+version by `tools/ghidra-protos.sh`, about a minute) applies every function definition of the
+archive to an external function of a scratch program as the "Apply Data Archives" analyzer
+does (`ApplyFunctionSignatureCmd`, source IMPORTED) and records what
+`DecompileCallback.getExternalRef` answers: `$GHIDRA_REF/win32.protos`, 22,825 prototypes and
+17,957 data-types, 41 MB, for every 32-bit Windows program. It reads no program and no project
+of the user's. Without `--protos` every import is `underived`.
+
+**Stack variables** (`Exporter::locals`, `Analysis::flow_walk`): a port of
+`NewFunctionStackAnalysisCmd` with its defaults (locals, no parameters) on the constant
+propagation walk, with ESP at the entry as the stack's origin. A read or write through a stack
+address that an operand names makes a variable of the bytes the instruction's last LOAD or
+STORE moves (`getRefSize`); an `LEA` of a stack address makes one without a data-type;
+a variable that meets others becomes one over them all (`accumulateVariable`, with its "same
+length" test); `AND ESP,mask` keeps the stack address. Approximations: "an operand names the
+address" is "not the slot a PUSH, POP or CALL uses itself"; a call whose callee's purge the
+analysis does not know ends the tracking of its path, where Ghidra goes by the purge the
+callee has when the caller is analysed (unknown for a function it makes later:
+`local_res0`).
+
+**Seeds.** The Java project of mercs2 is not plain auto-analysis: its pipeline makes 18,483
+functions afterwards (`RecoverFunctions` and others), and Ghidra's purge, stack and constant
+propagation analyzers did not run on most of them (16,632 of them have `extrapop="unknown"`
+and no stack variables in the Java facts). `--facts` with `--seeds` or `--functions-from`
+models that: discovery runs once without the seeds, and a function only the seeds bring gets
+no `extrapop`, no stack variables, and its instructions size no data.
+
+**The comparison** (`tools/facts-diff.sh <ours> <java>`): per record kind, `equal` (the same
+key and text), `different`, `missing` (only Java) and `extra` (only ours), with every such
+record in `rust/target/facts-diff/<kind>.<state>`. A record's key is its kind and address.
+Ghidra's database ids are left out, the symbols of a function are compared in one order, and
+`tracked` is spread over the functions. `tools/facts-func-why.sh` and
+`tools/facts-data-why.sh` count the differing `func`, `extref` and `data` records by what
+differs. mercs2 against `$GHIDRA_REF/mercs2.facts` (Java's 44,990 functions):
+
+| kind | Java | with Java's functions (`FUNCS=java`): equal / different / missing / extra | equal | plain discovery: equal / different / missing / extra | equal |
+|---|---|---|---|---|---|
+| `func` | 44,990 | 36,282 / 8,701 / 7 / 0 | 80.6% | 19,905 / 6,602 / 18,483 / 2,733 | 44.2% |
+| `body` | 44,990 | 44,123 / 860 / 7 / 0 | 98.1% | 24,380 / 2,127 / 18,483 / 2,733 | 54.2% |
+| `extref` | 1,022 | 920 / 102 / 0 / 0 | 90.0% | 920 / 102 / 0 / 0 | 90.0% |
+| `data` | 271,502 | 127,777 / 13,553 / 130,172 / 17,037 | 47.1% | 101,255 / 38,582 / 131,665 / 42,693 | 37.3% |
+| `label` | 218,095 | 206,920 / 1,149 / 10,026 / 13,405 | 94.9% | 182,798 / 22,207 / 13,090 / 13,179 | 83.8% |
+| `string` | 26,420 | 13,635 / 1,466 / 11,319 / 112 | 51.6% | 13,623 / 1,467 / 11,330 / 111 | 51.6% |
+| `undef` | 58,069 | 53,779 / 1,097 / 3,193 / 3,214 | 92.6% | 53,577 / 1,178 / 3,314 / 3,239 | 92.3% |
+| `block` | 14 | 14 / 0 / 0 / 0 | 100% | 14 / 0 / 0 / 0 | 100% |
+| `wref` | 265 | 166 / 0 / 99 / 0 | 62.6% | 183 / 0 / 82 / 5 | 69.1% |
+| `tracked` (per function) | 44,990 | 44,963 / 20 / 7 / 0 | 99.9% | 26,498 / 9 / 18,483 / 2,733 | 58.9% |
+| `override` | 3,365 | 2,510 / 0 / 855 / 1,059 | 74.6% | 2,260 / 0 / 1,105 / 2,486 | 67.2% |
+| `comments` | 1,613 | 0 / 0 / 1,613 / 0 | 0% | the same | 0% |
+| `coretypes` | 1 | 1 / 0 / 0 / 0 | 100% | the same | 100% |
+| `type` (by name) | 365 | 263 / 0 / 102 / 2 | 72.1% | the same | 72.1% |
+| `ns` | 797 | 0 / 0 / 797 / 0 | 0% | the same | 0% |
+| `underived` | 0 | 10,414 extra | | 10,306 extra | |
+
+Plain discovery finds 29,240 functions, 26,507 of Java's 44,990. The mercs2 pipeline makes
+functions after auto-analysis (see "Analysis" above), and `--functions-from` takes such a
+list: `FUNCS=java` gives it the entries of the Java facts, so that column measures everything
+but the function set. It is not a run without Java: the list comes from the Java project.
+
+What differs, with Java's functions (the counts of `facts-func-why.sh` and
+`facts-data-why.sh`):
+
+- `func` (8,701): stack variables that differ 1,754 + 143 + 110, only in Java 503 + 461,
+  only here 497 + 178 (not looked at one by one; two seen: the purge Ghidra had for a callee
+  when it analysed the caller, see above); `extrapop` known only in Java 1,843 + 461 and only
+  here 1,752 + 497 + 143 (not looked at; among the functions the seeds bring, Java has an
+  `extrapop` for 1,851 and none for 16,632); no-return only here 395; names, models and
+  return types of C++ functions 268 + 213 + 110 (`underived` here).
+- `data`: 90,750 pointers of SecuROM's `Sdata` and `Srdata` are missing: those sections
+  are flagged as code, `Analysis::address_tables` takes a pointer into an executable section
+  as code and disassembles there, so the tables that follow collide with it (Ghidra asks its
+  pseudo-disassembler). 7,412 + 2,656 labels and 5,212 pointers of ours are that code.
+  10,664 strings are missing: Ghidra's ASCII Strings analyzer finds them without a
+  reference, by its trigram model (`StringModel.sng`), not ported. 6,442 `BYTE_` and about
+  2,200 `WORD_`/`DWORD_` records are Java's typed switch and loader tables. 2,401 + 907 `DAT_`
+  symbols are sized in Java through a register-held address the walk here does not size; of
+  the symbols sized here 54 differ. The loader's structures (`IMAGE_DOS_HEADER`, resources)
+  and the RTTI structures (about 1,400) are not derived.
+- `extref`: 102 differ, most of them in the `extrapop` Java has for an import without an
+  archive prototype (`underived` here). An import keeps its name where the archive has it
+  (`_cexit`) and takes the demangler's otherwise (`_initterm` is `initterm`, `__cdecl`).
+- `label`: missing switch cases (`underived`) and labels in code Ghidra reaches and
+  ghidra-rs does not; extra labels in SecuROM's sections (above).
+- `comments`, `ns`: not derived (1,553 of the 1,613 comments are Function ID's).
+
+**The end effect** (`tools/ghidra-diff.sh` with `FACTS=<file>`, new: another facts file than
+the Java project's; the eight actions skipped as in slice 1):
+
+| facts | M8 | M500 |
+|---|---|---|
+| the Java project's (slice 1) | identical 3 / 7 (loud 0, silent 4) | identical 192 / 499 (loud 70, silent 237) |
+| ghidra-rs's own, with Java's functions | identical 2 / 7 (loud 2, silent 3) | identical 171 / 499 (loud 71, silent 257) |
+| ghidra-rs's own, plain discovery | identical 1 / 7 (loud 2, silent 4) | identical 90 / 499 (loud 156, silent 253) |
+
+With Java's functions the console output of ghidra-rs is byte for byte the output it gives
+with the Java facts on 377 of the 500 M500 functions, and on M8 on all five that print:
+0x40a110 and 0x58d030 are Java's C, and 0x401000, 0x73a340 and 0x4042e0 miss it in the same
+way with either facts (the eight actions). The two loud M8 functions are what is not derived:
+0x401080 calls `D3DXVec3TransformNormal` through a thunk (an import the archive does not
+have: `underived function`), and 0x9eec5e, `__security_check_cookie`, has Function ID's plate
+comment (`underived comments`); with the Java facts it is the third identical one. Of the 71
+loud M500 functions 12 read an `underived` function and the others are the misses the Java
+facts reach too. With plain discovery 98 of the 156 loud ones are "no function at": the M500
+function, or one it calls, is a function only the mercs2 pipeline makes; 0x40a110 is a
+thunk there (`thunk_FUN_004a8660`), since discovery makes the jump's target a function.
+
+The checks against `decomp_dbg` do not read the facts: `bars.sh` with `CORPORA=m8` gives 55
+lines, each equal to the baseline's (`m3-int5-116d9d34da.summary`). `cargo test`: 140 pass.
+
+Decisions made here, for the user to confirm ("Claude's call"): the command is the `analyze`
+option `--facts <out>` (as `--functions`, `--decomp-prelude`); the `underived` records and
+the loader failing on them; a seeded function stands for one a script made after
+auto-analysis; the archive's prototypes come from a one-time headless export, not from a
+`.gdt` reader in Rust; the core types are a copied file; a rule of Ghidra's analyzers that is
+ported with an approximation (the stack variables, the strings and pointers at references,
+the data sizes) is written without an `underived` mark and measured by `facts-diff.sh`
+instead: a mark on every such record would make every decompile fail.
+
+Not done: the ASCII Strings analyzer, Function ID's comments, the demangler's namespaces and
+prototypes, switch-case labels, the structures of the loader and of RTTI, a `.gdt` reader,
+the order of Ghidra's analysis. Not fixed: `address_tables` on sections flagged as code (it
+feeds `--abi-callers` and `--functions` too, so it needs their gates). Not run: a full
+`bars.sh` pass, `ghidra-diff.sh` on the corpora other than M8 and M500, the Mac.
+
+Superseded (2026-11-17, slice 3 below): the ASCII Strings analyzer and Function ID's comments (for
+names that are not mangled) are ported, and `address_tables` no longer disassembles data of
+sections flagged as code; the counts of this section are those of slice 2's build, the current
+ones are in slice 3. Also superseded there: "at a reference target outside executable blocks"
+(the `string` row), "a call whose callee's purge the analysis does not know" for imports and
+`__cdecl` functions (Stack variables), "only a COPY's direct read counts" for an address a
+register holds (the `data` row), and `underived comments` for a Function ID name that is not
+mangled.
+
+### Stage S10, slice 3: Ghidra's analyzers ported for `analyze --facts`, branch `worktree-agent-aa1e28b7594b072e7` (2026-11-17)
+
+The user's decision of 2026-11-17 (`../DESIGN.md`, Decided): the facts ghidra-rs derives come
+from ports of Ghidra's Java analyzers, not from approximations. This slice ports five pieces
+and measures each with `tools/facts-diff.sh` against the Java facts of mercs2 (Java's
+functions, `FUNCS=java`). What is still approximated is listed at the end and stays measured.
+
+**1. Address tables and code in SecuROM's sections** (`analysis.rs`: `Analysis::disassemble`,
+`table_entry`, `make_table`, `address_tables`, `valid_subroutine`, `used_for_calculation`).
+`Srdata` and `Sdata` are data with the execute flag, in Ghidra too (`PeLoader` takes
+`IMAGE_SCN_MEM_EXECUTE`). Ghidra keeps their pointers as data by rules that were missing here:
+
+- `OperandReferenceAnalyzer.getAddressTable` and `createFlowTable`: where an instruction
+  refers to the start of a run of addresses (`AddressTable.getEntry`, at least 3, and at least
+  the analyzer's minimum), the run becomes pointers and nothing is disassembled there. A jump
+  or call that refers to one makes no table ("Switch Table References" is off) and is not
+  looked at further.
+- The "Subroutine References" test before `isValidSubroutine`: not where a memory operand
+  reads or writes the target (`hasDataAccessReferences`), not from a jump or call, not a
+  value the instruction computes with (`isUsedForCalculation`, on the p-code).
+- `PseudoDisassembler.checkPseudoBody`: no defined data in the flow (a pointer is data now,
+  and stops a later disassembly), no reference into the middle of one of its instructions,
+  and without existing code no reference to the flow but to its entry.
+- `AddressTable.getFunctionEntries` with `PseudoDisassembler.isValidCode`: Create Address
+  Tables disassembles a table's entries only when every one of them lies in an executable
+  block and is the start of an instruction or, where nothing is defined, valid code. An entry
+  at defined data (a pointer of the same or another table) is not. Superseded: "valid code is
+  in an executable section" (`ponytail` note of `address_tables`) and "Not fixed:
+  `address_tables` on sections flagged as code" (slice 2).
+
+**2. Purges at call sites** (`factsout::call_purges`, `Analysis::swap_call_purges`, the fold
+of `Analysis::decode`). The stack analysis (`NewFunctionStackAnalysisCmd` on
+`SymbolicPropogator`) moves ESP after a call by `SymbolicPropogator.getFunctionPurge`: 0 for a
+convention with a known extrapop (`__cdecl`), whatever the function's purge is; the
+prototype's for an import of the archive, also through `CALL [slot]` and through a thunk; else
+the purge `FunctionPurgeAnalysisCmd` stored (the first RET by address, `Analysis::ret_purge`),
+which only a function of auto-analysis has. Superseded: "a call whose callee's purge the
+analysis does not know ends the tracking" as far as imports and `__cdecl` functions go
+(slice 2 used the purge of functions whose RETs all agree, for every function with a body).
+
+**3. ASCII Strings analyzer** (`strings.rs`, `Exporter::ascii_strings`). A port of
+`StringsAnalyzer` with its defaults: the search of `StringSearcher`
+(`MinLengthCharSequenceMatcher`, `MultiByteCharMatcher`: ASCII and UTF-16 at both byte
+offsets, 5 characters, a terminator), `StringAndScores` (lower case, trimmed, runs of spaces
+and of tabs as one), `NGramUtils` (the trigram model
+`Ghidra/Features/Base/data/stringngrams/StringModel.sng`, read from the Ghidra tree the
+`.sla` file is in; `--facts` fails without it; the score leaves out the first trigram, as
+Java's does), `createStringIfValid` (undefined bytes, or a string of the same kind at its end
+that it takes over; the zero bytes up to the next multiple of 4 belong to it). It runs after
+the reference analysis, over each run of sections that follow one another. With it, a string
+at a reference in an executable block is made as `checkForAscii` makes it (Java's
+`isValidInstruction` is always false). Superseded: "`string` ... at a reference target
+outside executable blocks" and "Not done: the ASCII Strings analyzer" (slice 2).
+
+**4. Data through an address a register holds** (`Fold::data`, the walk in
+`factsout::export`). `SymbolicPropogator` makes a reference, and constant propagation data of
+the bytes moved, at a LOAD or STORE through a constant a register holds. `Analysis::decode`
+records these of each instruction, and the facts walk every function of auto-analysis for
+them. Before, only an instruction's own constant sized data. A write through a register into
+a block that is not writable is a `wref` now.
+
+**5. Function ID's plate comments** (`fid.rs`: `plate_comment`, the Libraries table).
+`ApplyFidEntriesCommand.generateComment` with `MatchNameAnalysis.analyzeLibraries`: the kind
+of match, up to four names, the libraries (family, version, variant; shortened from 5
+libraries on). Only where no matched name is mangled: Java shows the demangler's full form of
+a mangled name, which is not ported, and such a function keeps its `underived comments`
+record.
+
+**Against Java** (mercs2, `FUNCS=java`; equal records and their share of Java's; each row adds
+its piece to the rows above it):
+
+| | `func` | `data` | `label` | `string` | `undef` | `wref` | `comments` |
+|---|---|---|---|---|---|---|---|
+| Java has | 44,990 | 271,502 | 218,095 | 26,420 | 58,069 | 265 | 1,613 |
+| before (slice 2) | 36,282 (80.6%) | 127,777 (47.1%) | 206,920 (94.9%) | 13,635 (51.6%) | 53,779 (92.6%) | 166 (62.6%) | 0 |
+| 1. tables | 36,282 | 217,776 (80.2%) | 206,468 (94.7%) | 13,636 | 53,841 (92.7%) | 166 | 0 |
+| 2. call purges | 36,553 (81.2%) | 217,776 | 206,468 | 13,636 | 53,841 | 166 | 0 |
+| 3. strings | 36,553 | 227,804 (83.9%) | 206,468 | 23,203 (87.8%) | 54,711 (94.2%) | 166 | 0 |
+| 4. register data | 36,553 | 229,590 (84.6%) | 206,472 | 23,242 (88.0%) | 54,839 (94.4%) | 225 (84.9%) | 0 |
+| 5. FID comments | 36,553 | 229,590 | 206,472 | 23,242 | 54,839 | 225 | 1,145 (71.0%) |
+| strings at references in executable blocks | 36,553 | 230,456 (84.9%) | 206,472 | 23,918 (90.5%) | 55,514 (95.6%) | 225 | 1,145 |
+
+The whole table of the final build:
+
+| kind | Java | with Java's functions (`FUNCS=java`): equal / different / missing / extra | equal | slice 2 | plain discovery: equal / different / missing / extra | equal | slice 2 |
+|---|---|---|---|---|---|---|---|
+| `func` | 44,990 | 36,553 / 8,430 / 7 / 0 | 81.2% | 80.6% | 19,838 / 6,669 / 18,483 / 2,733 | 44.1% | 44.2% |
+| `body` | 44,990 | 44,123 / 860 / 7 / 0 | 98.1% | 98.1% | 24,380 / 2,127 / 18,483 / 2,733 | 54.2% | 54.2% |
+| `extref` | 1,022 | 920 / 102 / 0 / 0 | 90.0% | 90.0% | 920 / 102 / 0 / 0 | 90.0% | 90.0% |
+| `data` | 271,502 | 230,456 / 11,796 / 29,250 / 12,963 | 84.9% | 47.1% | 204,465 / 36,563 / 30,474 / 38,581 | 75.3% | 37.3% |
+| `label` | 218,095 | 206,472 / 1,140 / 10,483 / 7,455 | 94.7% | 94.9% | 182,399 / 22,194 / 13,502 / 7,110 | 83.6% | 83.8% |
+| `string` | 26,420 | 23,918 / 1,984 / 518 / 31 | 90.5% | 51.6% | 23,903 / 1,999 / 518 / 33 | 90.5% | 51.6% |
+| `undef` | 58,069 | 55,514 / 708 / 1,847 / 3,036 | 95.6% | 92.6% | 55,288 / 799 / 1,982 / 3,076 | 95.2% | 92.3% |
+| `block` | 14 | 14 / 0 / 0 / 0 | 100% | 100% | 14 / 0 / 0 / 0 | 100% | 100% |
+| `wref` | 265 | 225 / 0 / 40 / 3 | 84.9% | 62.6% | 242 / 0 / 23 / 10 | 91.3% | 69.1% |
+| `tracked` (per function) | 44,990 | 44,963 / 20 / 7 / 0 | 99.9% | 99.9% | 26,498 / 9 / 18,483 / 2,733 | 58.9% | 58.9% |
+| `override` | 3,365 | 2,478 / 0 / 887 / 1,008 | 73.6% | 74.6% | 2,239 / 0 / 1,126 / 2,448 | 66.5% | 67.2% |
+| `comments` | 1,613 | 1,145 / 8 / 460 / 43 | 71.0% | 0% | 1,138 / 7 / 468 / 30 | 70.6% | 0% |
+| `coretypes` | 1 | 1 / 0 / 0 / 0 | 100% | 100% | the same | 100% | 100% |
+| `type` (by name) | 365 | 263 / 0 / 102 / 2 | 72.1% | 72.1% | the same | 72.1% | 72.1% |
+| `ns` | 797 | 0 / 0 / 797 / 0 | 0% | 0% | the same | 0% | 0% |
+| `underived` | 0 | 9,209 extra | | 10,414 | 9,122 extra | | 10,306 |
+
+Three kinds lose a little: `label` (the 452 below), `override` (32 `CALL_RETURN` records, which
+piece 1 changes; not looked at one by one) and, with plain discovery only, `func` (67
+functions, not traced; there every function is one "of auto-analysis", so every callee has
+its purge at a call, see `func` below). The analysis takes about 115 to 130 s on the shared
+desktop (slice 2: 50 to 130 s) and the facts 40 to 50 s (17 s): the Strings search and the
+second walk of every function.
+
+What still differs, by cause:
+
+- **The code ghidra-rs has and Java does not, and the other way.** 7,455 labels are extra
+  and 10,483 missing (before: 13,405 and 10,026). The tables took 5,952 extra labels away
+  (code that was data of SecuROM) and 452 equal ones: 610 labels that Java has are no longer
+  reached (581 of them in SecuROM's `Stext`) and 149 others are, because `checkPseudoBody`
+  meets a reference into the flow (seen: 0x1b10da0, where an immediate of other code is an
+  address inside it). Java's reference came after its disassembly there: its analysis asks in
+  small steps from the entry points, ghidra-rs asks with the references of all the code
+  discovery found. Extra code also makes strings at its references that Java's Strings
+  analyzer makes instead (longer by the zero bytes: 0x88f47c `PUSH 0xb12ce4` lies in bytes
+  Java leaves undefined), and the other way round: 1,984 strings differ in length and nothing
+  else.
+- **`func`**: unchanged but for the stack variables. `facts-func-why.sh`: stack variables
+  differ in 1,610 functions that differ in nothing else (before 1,754): Java has variables
+  ghidra-rs lacks in 191 (before 567), ghidra-rs has variables Java lacks in 668 (before 470),
+  both in 748 (variables on one side only: Java 274 functions, before 503; ghidra-rs 280,
+  before 178). Seen in 0x49ab40: Java tracks ESP up to `CALL 0x401740` and not after it,
+  though that function has a purge in the Java facts (`RET`, extrapop 4): when Java analysed
+  the caller it did not have it. Which functions Ghidra had made when its stack analyzer ran
+  on a caller is not derived (the functions "of auto-analysis" here are those plain discovery
+  finds). `extrapop` known only in Java (1,843 + 461) or only here (1,736 + 510) is the same
+  question: which functions auto-analysis made and which the mercs2 pipeline made later.
+- **`data`**: 29,250 missing, 12,963 extra, 11,796 different. Not looked at one by one after
+  the ports; the kinds slice 2 lists remain (typed switch and loader tables, the loader's and
+  RTTI structures, pointers and labels at code only one side has).
+- **`comments`**: Java has 1,553 of Function ID (1,188 with names that are not mangled) and
+  60 of the demangler. 460 are missing: the 365 with a mangled name, the 60, and 35 with
+  plain names at functions Function ID does not mark here. 43 are extra (functions it marks
+  only here) and 8 name other libraries (seen: 0x1cdc1f5, Visual Studio 2003 here, 2017 and
+  2019 in Java; not traced: the installed Ghidra is 12.2, the repo's databases are 12.3's).
+- `ns`, `type`, `extref`, `override`, `tracked`, `body`: as slice 2.
+
+**Still approximated** (written without a mark, measured by `facts-diff.sh`):
+
+- the order of Ghidra's analysis: which references and which functions exist when an analyzer
+  asks (the code constants, `checkPseudoBody`, the purge of a callee in the stack analysis,
+  the purge of a function whose last jump goes to another function);
+- the stack analysis's "an operand names the address" (`getStackOpIndex`);
+- Create Address Tables' disassembly between one table and the next (here after a whole pass),
+  and Ghidra's defined data other than pointers, strings and switch tables;
+- the pointers at references (`checkForPointer`: the string check at the word is in the
+  facts, not in `Analysis::pointer_targets`);
+- the Strings analyzer's listing (the loader's and RTTI structures are not derived, so a
+  string inside one is made here), and `log10` of Rust's `f64` against Java's at a score that
+  equals its threshold to the last bit;
+- data sizes where two accesses disagree (the last one in the order of the functions wins).
+
+Not ported: the demangler (names, namespaces, prototypes and comments of C++ functions: `ns`
+0 of 797, `underived function` and `comments`), switch-case labels, the loader's and RTTI
+structures, a `.gdt` reader, Ghidra's task queue (the order above).
+
+**The end effect** (`tools/ghidra-diff.sh` with `FACTS=<file>`, the eight actions skipped as
+in slice 1; both rows run with this build):
+
+| own facts, Java's functions | M8 | M500 |
+|---|---|---|
+| before (the facts of slice 2) | identical 2 / 7 (loud 2, silent 3) | identical 171 / 499 (loud 71, silent 257) |
+| after | identical 2 / 7 (loud 2, silent 3) | identical 173 / 499 (loud 71, silent 255) |
+
+M500: 0x4e9230 and 0x6ee4c0 were silent and are identical; no other function changes its
+state. M8: the same seven states. 0x401080 still reads an `underived` function (an import the
+archive does not have). 0x9eec5e still reads `underived comments`: its Function ID name is
+`@__security_check_cookie@4`, and Java's comment ends with the demangler's line `__fastcall
+__security_check_cookie,4`. A name with `@` counts as mangled here; of the 23 such names in
+Java's comments 22 are `_name@N`, which Java shows as they are (so those 22 comments could be
+written; not done).
+
+**The shadow check** (mercs2's `tools/ghidra-rs-shadow.sh` logic: `analyze --functions-from
+build/functions.csv --abi-callers` against `config/abi_callers.csv`, mercs2 only read): same
+56,003, differ 60, Java only 152, ghidra-rs only 819. Before: same 55,996, differ 61, Java
+only 158, ghidra-rs only 873. Only piece 1 reaches it. Every changed row: 54 rows Java does
+not have are gone (29 `trivial`, 14 `unconcluded`, 7 `violation`, 4 `unknown`: call sites in
+bytes that are data now); 7 rows Java has are new with Java's status (4 `trivial`, 2
+`unknown`, 1 `unconcluded`); 1 row went from `ok` to Java's `unknown`; 1 row Java has is gone
+(0x56d910 called at 0x550c94, `ok` on both sides before: that code is no longer reached).
+`--functions` and `--gaps` give the same files, byte for byte.
+
+The checks against `decomp_dbg` do not read the facts: `bars.sh` with `CORPORA=m8` gives 55
+lines, each equal to the baseline's (`m3-int5-116d9d34da.summary`). `cargo fmt` and `clippy -D
+warnings` are clean. `cargo test`: 145 pass (3 new: the string search, the trigram score, an
+address table in executable data).
+
+Decisions made here, for the user to confirm ("Claude's call"): Java's `checkPseudoBody` is
+ported whole, though with the references of all discovered code it loses 452 equal labels of
+SecuROM's code while it wins the tables (the alternative, a check against flow and memory
+references only, was measured: it kept the labels and lost 86,619 equal `data` records);
+`--facts` fails when the strings
+model file is not in the Ghidra tree of the `.sla` file; a Function ID comment is written
+only where no name is mangled, any other stays `underived`; the purges of imports come from
+the archive export (`--protos`), so without it a call of an import ends the stack tracking
+as before.
+
+Not run: a full `bars.sh` pass (M8 only), `ghidra-diff.sh` on corpora other than M8 and
+M500, plain discovery under `ghidra-diff.sh`, the Mac. Not measured apart: each piece's share
+of the `ghidra-diff.sh` change.
+
+### Integration `m3-int6` (2026-11-17)
+
+Eight branches merged on `m3-int6`, in this order: the small items after `m3-int5`
+(59a40e44b5: panics counted loud, the `fillinReadOnly` warning, the `swsn-r` silents), "Segment
+and jump-assist user ops" (ef3d3c7f7e), `m3-default` (eecc410c3b), "Value-set analysis and the
+stack guards" (a8fae53df4), "pieces of symbols" (b42e25269c), "Local symbols" (24dd65cc1d),
+"Pool rules" (e9ab60a763) and the analyzers branch (e384aa0276: stage S10 with its three
+slices, and the project store). The sections above describe each branch as it was on its own;
+their counts are each branch's, on its own base. Where two branches met, the code is now:
+
+- `mapstate.rs`: the typed range hints of "Local symbols" with `MapState::addGuard` of
+  "Value-set analysis and the stack guards", instead of the loud "a load or store guard". In
+  the `decompile` root the guard's hint takes the data-type its pointer points to (down to the
+  element of an array) when that has the step's size, else unknown bytes of the step's size, as
+  the C++; in the partial function it is always the unknown type. New here, on neither branch:
+  the typed case, and a loud error for a pointer to a union (`getTypeReadFacing` needs the
+  union's resolution).
+- `namevars.rs`, `finalizeDatatype`: `getExactPiece` of "pieces of symbols"
+  (`infertypes::exact_piece`), and the piece's type is kept as in "Local symbols"
+  (`type_finalized`). The loud "changing the data-type of a variable" is gone.
+- `printc.rs`, `pushMismatchSymbol`: the unnamed location of "pieces of symbols" for a variable
+  past the end of its symbol; it runs without facts too (stage S10 had kept it behind
+  `load facts`), and S10's loud case of a symbol name in a namespace stays.
+- `variable.rs`, `testUntiedCallIntersection`: the `hasNoLocalAlias` test of "Local symbols"
+  and the store-guard test of the value-set branch.
+- `rules/ptrarith.rs`: S10's loud test of a composite data symbol near the address, then
+  `nearestArrayedComponent` over the local symbols.
+- `rules/mod.rs`: `segment` and `ptrsubcharconstant` are `r(...)` entries. No table holds a
+  `u(...)` rule now, so no default run can fail on an unported pool rule; `u` stays for its
+  unit test and for a rule the C++ pools gain.
+- `r1-options.sh`: S10's `kept_off` list is removed. Rerun, the script leaves
+  `default-options.txt` empty (`pcd` and `pmd` run the plain default options, nothing switched
+  off) and drops `togglerule ptrsubcharconstant off` from the eleven rule option files that had
+  it, so those checks run the rule on both engines.
+
+Counts on the tip of the branch, one machine (the desktop), `TIMEOUT` 120:
+
+- `cargo test`: 157 passed. `tables_list_every_rule_of_the_cpp_pools` passes. `cargo fmt
+  --check` and `cargo clippy -D warnings` are clean.
+- M8, all 57 checks: the 55 lines of the `m3-int5` baseline unchanged (every function the
+  reference finishes identical), `pcd` 8 / 8, `pmd` 8 / 8, silent 0.
+- M500, seven checks (the `m3-int5` baseline in brackets; `pcd` and `pmd` have none):
+
+  | check | identical / reference finished | loud | silent |
+  |---|---|---|---|
+  | `pcd` | 493 / 499 | 6 | 0 |
+  | `pmd` | 497 / 500 | 3 | 0 |
+  | `pcc-r` | 495 / 495 (494 / 495, loud 1) | 0 | 0 |
+  | `pcc-t` | 495 / 495 (495 / 495) | 0 | 0 |
+  | `r5s` | 498 / 498 (446 / 499, loud 53) | 0 | 0 |
+  | `paramdouble` | 500 / 500 (500 / 500) | 0 | 0 |
+  | `swsn-r` | 499 / 499 (495 / 499, loud 1, silent 3) | 0 | 0 |
+
+  The six loud of `pcd`: 0x53a040, 0x5a9b80, 0x766350 (`RuleStringCopy`: `StringSequence` is
+  not ported) and 0x5cee30, 0x5d8680, 0x5d87c0 (`subflow`: a logical value in a join varnode);
+  the three of `pmd` are the `subflow` three. 0x4c48d0 is the function the reference does not
+  finish in 120 s. In `r5s` the reference also does not finish 0x6b21e0, in 120 s or, run
+  alone, in 600 s; the `m3-int5` baseline finished it (identical there), so it is not compared
+  now. The same timeout is in the `r5s` miss lists of `m3-default`, "Pool rules" and "Local
+  symbols", so it is older than this integration; which change of the `r5s` run makes the
+  reference slow there is not traced.
+- No function identical in the baseline is loud or silent in these five baseline checks
+  (0x6b21e0 of `r5s` aside: not compared), and no silent miss is left in the checks run. Against the branches' own miss lists: all six `pcd` misses
+  were loud on "Local symbols" already, five with the same error and 0x766350 earlier, at an
+  indexed stack LOAD (it now gets as far as `StringSequence`); the other five were identical on
+  "pieces of symbols", which did not have the local symbols.
+
+Superseded by this section: `pcd` M500 415, 422, 440 and 474 / 497 and 463 / 499, `pmd` M500
+470 / 499 (the branch sections above and the plan); "`default-options.txt` holds two rules";
+"Open: `ValueSetSolver` (26 of the 36 loud)" of "Local symbols"; "Left: 16 indexed stack
+LOADs, 6 STORE guards" of "pieces of symbols"; the blocked "eight actions of the default
+`decompile` are not ported" of stage S10 (all are ported or have nothing to do; the S10 checks
+against Java Ghidra were not rerun with them on).
+
+Not run on `m3-int6`: the other 50 checks on M500, the switch, `simple` and `r5d-adc` corpora
+(the full pass), the Mac, `ghidra-diff.sh` and `facts-diff.sh` (stage S10: they need the Java
+Ghidra project). Not seen in a check: whether any function of M8 or M500 reaches the typed
+guard hint with a pointer whose target has the step's size (the code new in this merge), and
+`ptrsubcharconstant` changing an output without facts (the checks with it on give the counts
+above, and no line of the M8 baseline moved).
+
+Full pass (2026-11-18, `bars-queue.sh` on `ff58230822`, desktop and Mac): 132 of 133 pairs, the Mac dropped off the network and lost `swsn-t-switch`, rerun on the desktop: 2001 / 2004 (loud 3, silent 0). Silent 0 in every pair. No pair has fewer identical functions or more silent misses than the `m3-int5` baseline; `r5s`, `r5slock` and `r5dtlocksv` M500 have reference finished 498 instead of 499 (0x6b21e0, the reference no longer finishes it), while their identical counts rose (`r5s` 446 -> 498, `r5slock` and `r5dtlocksv` 451 -> 467). Switch: `paramdouble` 2002 / 2004, `swfs-r` 2003, `swsn-r` 2003, `swfs-t` and `swsn-t` 2001. Superseded: "Not run: the full pass" above.
 
 ## Speed
 

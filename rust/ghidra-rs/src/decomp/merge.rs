@@ -139,7 +139,7 @@ fn def_order(fd: &Funcdata) -> Vec<VarnodeId> {
 }
 
 /// `FlowBlock::dominates`
-fn dominates(fd: &Funcdata, dom: BlockId, mut sub: Option<BlockId>) -> bool {
+pub(crate) fn dominates(fd: &Funcdata, dom: BlockId, mut sub: Option<BlockId>) -> bool {
     let index = fd.blocks.block(dom).index;
     while let Some(s) = sub {
         if index > fd.blocks.block(s).index {
@@ -220,8 +220,7 @@ fn test_adjacent(fd: &mut Funcdata, hout: HighId, hin: HighId) -> Result<bool> {
     if !test_required(fd, hout, hin)? {
         return Ok(false);
     }
-    // `isNameLock` on both: the name lock comes from the symbols (nothing sets
-    // `Symbol::isIsolated`, tested below in the C++)
+    // `isNameLock` on both: the name lock comes from the symbols
     if matches!((high_symbol(fd, hin), high_symbol(fd, hout)), (Some((_, true)), Some((_, true)))) {
         return Ok(false);
     }
@@ -230,6 +229,14 @@ fn test_adjacent(fd: &mut Funcdata, hout: HighId, hin: HighId) -> Result<bool> {
     }
     if illegal_input(fd, hout)? || illegal_input(fd, hin)? {
         return Ok(false);
+    }
+    // `Symbol::isIsolated` of either symbol: only the data symbols of the facts (stage S10)
+    if !fd.isolated.is_empty() {
+        for h in [hin, hout] {
+            if fd.highs.get(h).inst.iter().any(|vn| fd.isolated.contains(vn)) {
+                return Ok(false);
+            }
+        }
     }
     // no speculative merging of variables in separate overlapping collections
     Ok(piece_of(fd, hout).is_none() || piece_of(fd, hin).is_none())
@@ -713,11 +720,17 @@ fn snip_output_interference(fd: &mut Funcdata, indop: OpId) -> Result<bool> {
     if correctable.is_empty() {
         return Ok(false);
     }
-    // ponytail: PcodeOpNode::compareByHigh orders by HighVariable pointer; HighIds count
-    // creation, which is allocation order
+    // PcodeOpNode::compareByHigh orders by HighVariable pointer. Reads of one high keep the
+    // order of `std::sort`; several highs (the pieces of a group) come in the order of their
+    // heap addresses, which the allocator decides (a new high reuses freed memory), and the
+    // order numbers the copies. Superseded: "HighIds count creation, which is allocation
+    // order" (0x4130d0 printed two copies swapped).
     let mut keyed = Vec::with_capacity(correctable.len());
     for &(o, s) in &correctable {
         keyed.push((in_high(fd, o, s)?, o, s));
+    }
+    if keyed.iter().any(|k| k.0 != keyed[0].0) {
+        return err("merge: snipOutputInterference of several variables of a group orders its copies by HighVariable address (compareByHigh), which ghidra-rs cannot reproduce");
     }
     super::stdsort::sort(&mut keyed, |a, b| a.0 < b.0);
     correctable = keyed.iter().map(|&(_, o, s)| (o, s)).collect();
@@ -1418,7 +1431,7 @@ fn piece_root(fd: &Funcdata, mut vn: VarnodeId) -> Result<VarnodeId> {
 }
 
 /// `PcodeOp::compareOrder` (the caller tests it as a boolean, as the C++ does).
-fn compare_order(fd: &Funcdata, a: OpId, b: OpId) -> i32 {
+pub(crate) fn compare_order(fd: &Funcdata, a: OpId, b: OpId) -> i32 {
     let (pa, pb) = (fd.op(a).parent, fd.op(b).parent);
     if pa == pb {
         return if fd.op(a).order < fd.op(b).order { -1 } else { 1 };
@@ -1481,6 +1494,10 @@ fn base_explicit(fd: &Funcdata, vn: VarnodeId, mut maxref: usize) -> Result<i32>
             Opcode::Piece => {}
             _ => return Ok(-1),
         }
+    } else if v.has(VnFlags::MAPPED) {
+        // mapped without being address-tied (`syncVarnodesWithSymbols` sets the one, never the
+        // other): explicit
+        return Ok(-1);
     }
     if v.descend.is_empty() {
         return Ok(-1);
@@ -1684,6 +1701,7 @@ pub(crate) fn assign_high_action(fd: &mut Funcdata, arch: &Arch) -> Result<i32> 
     // (`setSymbolProperties`); ghidra-rs applies it before each inference pass, which do not run
     // with `typerecovery` off, so once more here, before anything merging reads types
     super::infertypes::symbol_types(fd, arch);
+    super::facts::symbol_types(fd, arch)?;
     set_high_level(fd);
     Ok(0)
 }
@@ -1712,9 +1730,9 @@ fn group_partials(fd: &Funcdata) -> Result<()> {
 }
 
 /// `ActionMergeMultiEntry`: only a symbol with several whole entries has work; the local scope
-/// holds none here (`localrecovery`, which would make them, is not ported), so one fails
-/// loudly. Superseded: "the local scope holds no symbols" (it holds the parameters, one entry
-/// each).
+/// holds none here (the symbols of `restructure_varnode` and the parameters have one entry
+/// each; no dynamic symbol exists), so one fails loudly. Superseded: "the local scope holds no
+/// symbols", "`localrecovery`, which would make them, is not ported".
 pub(crate) fn merge_multi_entry(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
     let multi = fd
         .symtab

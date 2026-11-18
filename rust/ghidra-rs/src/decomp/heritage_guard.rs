@@ -1,29 +1,113 @@
 //! Stack-pointer tracing for the stack heritage pass (heritage.cc): the LOADs and STOREs that may
 //! reach the stack through the stack pointer. Ports `Heritage::discoverIndexedStackPointers`,
-//! `protectFreeStores`, `reprocessFreeStores`, `generateLoadGuard`/`generateStoreGuard` and
-//! `guardLoads`.
+//! `protectFreeStores`, `reprocessFreeStores`, `generateLoadGuard`/`generateStoreGuard`,
+//! `guardLoads`, `analyzeNewLoadGuards` with `LoadGuard::establishRange`/`finalizeRange` (the
+//! value-set analysis of `valueset.rs`), and `handleNewLoadCopies` with `findAddressForces` and
+//! `propagateCopyAway`.
 //!
-//! Not ported: the value-set analysis of the guards (`analyzeNewLoadGuards`, `LoadGuard::
-//! establishRange`/`finalizeRange`, rangeutil.cc's `ValueSetSolver`). A guard keeps only the
-//! offset its pointer was traced from; `guardLoads`, the one reader of the analysed range during
-//! heritage, fails when it would need it. With no load-guard COPYs, `handleNewLoadCopies` has
-//! nothing to do. The other readers of the analysed ranges, none ported yet, must fail while
-//! [`has_valid_guards`] is true: `StackAffectingOps::populate`/`affectsTest` (merge.cc, stage
-//! S7), `Funcdata::opCollapseIndirectsForAlias` (funcdata_op.cc, through `RuleAliasUpdate`)
-//! and `MapState::gatherOpen` / the alias checker (varmap.cc, `ActionRestructureVarnode`).
+//! The readers of the analysed ranges outside heritage: `StackAffectingOps` (merge.cc, in
+//! `variable.rs`), `Funcdata::opCollapseIndirectsForAlias` and `MapState::addGuard` (both in
+//! `mapstate.rs`).
+//! (Superseded: "Not ported: the value-set analysis of the guards"; a guard kept only its
+//! pointer offset, and each reader failed while a valid guard existed.)
 
 use super::op::{OpFlags, OpId};
 use super::opcode::Opcode;
-use super::varnode::{Space, VarnodeId};
+use super::valueset::{ValueSetRead, ValueSetSolver, Widener};
+use super::varnode::{Space, VarnodeId, VnFlags};
 use super::{err, Arch, Funcdata, Result};
 use std::collections::HashSet;
 
-/// Port of `LoadGuard` before analysis: an indexed LOAD or STORE through the stack pointer.
+/// Port of `LoadGuard`: an indexed LOAD or STORE through the stack pointer and the stack range
+/// it may reach.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LoadGuard {
     pub(crate) op: OpId,
     /// the stack offset the pointer was traced from (`pointerBase`)
-    pub(crate) pointer_base: u64,
+    pointer_base: u64,
+    pub(crate) minimum: u64,
+    pub(crate) maximum: u64,
+    /// the step of the accesses, 0 if unknown
+    pub(crate) step: u32,
+    /// 0 = unanalysed, 1 = analysed (partial result), 2 = analysed (full result)
+    analysis_state: u8,
+}
+
+impl LoadGuard {
+    /// `isGuarded`: the guard covers the address
+    pub(crate) fn is_guarded(&self, space: Space, off: u64) -> bool {
+        space == Space::Stack && off >= self.minimum && off <= self.maximum
+    }
+    /// `isRangeLocked`
+    pub(crate) fn is_range_locked(&self) -> bool {
+        self.analysis_state == 2
+    }
+    /// `isValid`: the op is alive and still the LOAD or STORE
+    pub(crate) fn is_valid(&self, fd: &Funcdata, opc: Opcode) -> bool {
+        !fd.op(self.op).is_dead() && fd.op(self.op).opc == opc
+    }
+
+    /// Port of `LoadGuard::establishRange`: what the partial analysis (no widening) gives.
+    /// `highest` is the stack space's highest offset.
+    fn establish_range(&mut self, read: &ValueSetRead, highest: u64) {
+        let range = &read.range;
+        let range_size = range.get_size();
+        let mut size = 0x1000;
+        if range.is_empty() {
+            self.minimum = self.pointer_base;
+        } else if range.is_full() || range_size > 0xff_ffff {
+            self.minimum = self.pointer_base;
+            self.analysis_state = 1; // no more analysis
+        } else {
+            self.step = if range_size == 3 { range.step } else { 0 };
+            if read.left_is_stable {
+                self.minimum = range.left;
+            } else if read.right_is_stable {
+                if self.pointer_base < range.right {
+                    self.minimum = self.pointer_base;
+                    size = range.right - self.pointer_base;
+                } else {
+                    self.minimum = range.left;
+                    size = range_size.wrapping_mul(u64::from(range.step));
+                }
+            } else {
+                self.minimum = self.pointer_base;
+            }
+        }
+        if self.minimum > highest {
+            self.minimum = highest;
+            self.maximum = highest;
+        } else {
+            size = size.min((highest - self.minimum).wrapping_add(1));
+            self.maximum = self.minimum.wrapping_add(size).wrapping_sub(1);
+        }
+    }
+
+    /// Port of `LoadGuard::finalizeRange`: what the full analysis gives.
+    fn finalize_range(&mut self, read: &ValueSetRead, highest: u64) {
+        self.analysis_state = 1;
+        let range = &read.range;
+        let mut range_size = range.get_size();
+        // these sizes are likely the storage size of the index: only with signs of iteration
+        if (range_size == 0x100 || range_size == 0x10000) && self.step == 0 {
+            range_size = 0;
+        }
+        if range_size > 1 && range_size < 0xff_ffff {
+            self.analysis_state = 2;
+            if range_size > 2 {
+                self.step = range.step;
+            }
+            self.minimum = range.left;
+            self.maximum = range.right.wrapping_sub(1) & range.mask;
+            if self.maximum < self.minimum {
+                // the values reach what is usually the stack parameters
+                self.maximum = highest;
+                self.analysis_state = 1;
+            }
+        }
+        self.minimum = self.minimum.min(highest);
+        self.maximum = self.maximum.min(highest);
+    }
 }
 
 /// `StackNode::traversals` bits: the path went through a non-constant ADD or a MULTIEQUAL.
@@ -40,7 +124,7 @@ struct StackNode {
 }
 
 /// The input stack-pointer varnode (`Funcdata::findVarnodeInput` of the space's spacebase).
-fn stack_pointer_input(fd: &Funcdata, arch: &Arch) -> Option<VarnodeId> {
+pub(crate) fn stack_pointer_input(fd: &Funcdata, arch: &Arch) -> Option<VarnodeId> {
     let (sp, off, size) = arch.spec.stack_pointer;
     fd.loc_at(Space::Sleigh(sp), off, size).into_iter().find(|&v| fd.vn(v).is_input())
 }
@@ -95,14 +179,14 @@ pub(crate) fn discover_indexed_stack_pointers(
             Opcode::Multiequal => Some((coff, ctrav | MULTIEQUAL)),
             Opcode::Load => {
                 if ctrav != 0 {
-                    generate_guard(fd, op, coff, false);
+                    generate_guard(fd, op, coff, mask, false);
                 }
                 None
             }
             Opcode::Store => {
                 if o.ins.get(1) == Some(&cvn) {
                     if ctrav != 0 {
-                        generate_guard(fd, op, coff, true);
+                        generate_guard(fd, op, coff, mask, true);
                     } else {
                         fd.op_mut(op).flags.set(OpFlags::SPACEBASE_PTR);
                     }
@@ -126,11 +210,12 @@ pub(crate) fn discover_indexed_stack_pointers(
 }
 
 /// Port of `Heritage::generateLoadGuard` / `generateStoreGuard`.
-fn generate_guard(fd: &mut Funcdata, op: OpId, pointer_base: u64, store: bool) {
+fn generate_guard(fd: &mut Funcdata, op: OpId, pointer_base: u64, highest: u64, store: bool) {
     if fd.op(op).flags.has(OpFlags::SPACEBASE_PTR) {
         return;
     }
-    let g = LoadGuard { op, pointer_base };
+    // `LoadGuard::set`: unanalysed, it guards everything
+    let g = LoadGuard { op, pointer_base, minimum: 0, maximum: highest, step: 0, analysis_state: 0 };
     if store {
         fd.heritage.store_guards.push(g);
     } else {
@@ -196,29 +281,154 @@ pub(crate) fn reprocess_free_stores(fd: &mut Funcdata, arch: &Arch, free: &[OpId
     Ok(())
 }
 
-/// Whether a store guard (`store`) or a load guard is still valid (`LoadGuard::isValid`: its op
-/// is alive and still a STORE or LOAD): a reader of the unanalysed guard ranges must then fail.
-pub(crate) fn has_valid_guards(fd: &Funcdata, store: bool) -> bool {
-    let (list, opc) =
-        if store { (&fd.heritage.store_guards, Opcode::Store) } else { (&fd.heritage.load_guards, Opcode::Load) };
-    list.iter().any(|g| !fd.op(g.op).is_dead() && fd.op(g.op).opc == opc)
-}
-
-/// Port of `Heritage::guardLoads`: an address-tied stack range would get a COPY guard at each
-/// indexed LOAD whose analysed range holds it. Guards whose LOAD is gone are dropped.
-pub(crate) fn guard_loads(fd: &mut Funcdata, space: Space, addrtied: bool) -> Result<()> {
+/// Port of `Heritage::guardLoads`: an address-tied range gets a COPY to itself (`addrforce`)
+/// before each indexed LOAD whose range holds its first byte, so the value is kept in place
+/// there. Guards whose LOAD is gone are dropped.
+pub(crate) fn guard_loads(fd: &mut Funcdata, space: Space, off: u64, size: u32, addrtied: bool) -> Result<()> {
     if !addrtied {
         return Ok(());
     }
-    let guards = std::mem::take(&mut fd.heritage.load_guards);
-    let live: Vec<LoadGuard> =
-        guards.into_iter().filter(|g| !fd.op(g.op).is_dead() && fd.op(g.op).opc == Opcode::Load).collect();
-    let first = live.first().map(|g| g.pointer_base);
-    fd.heritage.load_guards = live;
-    match first {
-        Some(base) if space == Space::Stack => err(format!(
-            "heritage: an indexed stack LOAD (from stack offset {base:#x}) may read an address-tied stack range; its range needs the value-set analysis of LoadGuard (ValueSetSolver): not implemented in ghidra-rs yet"
-        )),
-        _ => Ok(()),
+    let mut guards = std::mem::take(&mut fd.heritage.load_guards);
+    guards.retain(|g| g.is_valid(fd, Opcode::Load));
+    for g in guards.iter().filter(|g| g.is_guarded(space, off)) {
+        let copy = fd.new_op(Opcode::Copy, fd.op(g.op).seq.addr);
+        let out = fd.new_varnode_out(size, space, off, copy);
+        fd.vn_set(out, VnFlags::ACTIVE_HERITAGE.with(VnFlags::ADDRFORCE));
+        let inp = fd.new_varnode(size, space, off);
+        fd.vn_set(inp, VnFlags::ACTIVE_HERITAGE);
+        fd.op_set_input(copy, inp, 0)?;
+        fd.op_insert_before(copy, g.op)?;
+        fd.heritage.load_copy_ops.push(copy);
     }
+    fd.heritage.load_guards = guards;
+    Ok(())
+}
+
+/// Port of `Heritage::analyzeNewLoadGuards`: the value-set analysis of the pointers of the new
+/// guards gives each its range, first without widening, then (when one is still open) with it.
+pub(crate) fn analyze_new_load_guards(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
+    let new_from = |list: &[LoadGuard]| list.iter().rposition(|g| g.analysis_state != 0).map_or(0, |i| i + 1);
+    let (load_from, store_from) = (new_from(&fd.heritage.load_guards), new_from(&fd.heritage.store_guards));
+    // only the last guard of each list is looked at
+    let unanalysed = |list: &[LoadGuard]| list.last().is_some_and(|g| g.analysis_state == 0);
+    if !unanalysed(&fd.heritage.load_guards) && !unanalysed(&fd.heritage.store_guards) {
+        return Ok(());
+    }
+    if load_from != 0 || store_from != 0 {
+        // the C++ loops would start at the last analysed guard, which has no value set
+        return err("heritage: new load or store guards after analysed ones (analyzeNewLoadGuards) is not ported");
+    }
+    let mut loads = std::mem::take(&mut fd.heritage.load_guards);
+    let mut stores = std::mem::take(&mut fd.heritage.store_guards);
+    let mut reads = Vec::new();
+    let mut sinks = Vec::new();
+    for g in loads.iter().rev().chain(stores.iter().rev()) {
+        reads.push(g.op);
+        sinks.push(fd.input(g.op, 1)?); // the pointer
+    }
+    let highest = stack_mask(arch);
+    let mut solver = ValueSetSolver::default();
+    solver.establish_value_sets(fd, &sinks, &reads, stack_pointer_input(fd, arch), false)?;
+    solver.solve(fd, 10000, Widener::None)?;
+    let read = |solver: &ValueSetSolver, g: &LoadGuard| match solver.value_set_read(g.op) {
+        Some(r) => Ok(r.clone()),
+        None => err("heritage: a load or store guard without a value set"),
+    };
+    let mut run_full = false;
+    for g in loads.iter_mut().chain(stores.iter_mut()) {
+        g.establish_range(&read(&solver, g)?, highest);
+        run_full |= g.analysis_state == 0;
+    }
+    for g in &stores {
+        // the alias information of the STORE has changed
+        fd.op_mut(g.op).flags.set(OpFlags::ALIAS_UPDATE);
+    }
+    if run_full {
+        solver.solve(fd, 10000, Widener::Full)?;
+        for g in loads.iter_mut().chain(stores.iter_mut()) {
+            g.finalize_range(&read(&solver, g)?, highest);
+        }
+    }
+    // GHIDRA_RS_GUARD_DEBUG=<file>: append one line per analysed guard (the console output before
+    // `load function` is cut by decomp-diff.sh, and a partial function is made there)
+    if let Some(path) = std::env::var_os("GHIDRA_RS_GUARD_DEBUG") {
+        use std::io::Write;
+        let mut lines = String::new();
+        for (name, g) in loads.iter().map(|g| ("load", g)).chain(stores.iter().map(|g| ("store", g))) {
+            let seq = fd.op(g.op).seq;
+            lines += &format!(
+                "{:#x} {name} guard at {:#x}:{:x}: [{:#x}, {:#x}] step {} state {}\n",
+                fd.entry, seq.addr, seq.time, g.minimum, g.maximum, g.step, g.analysis_state
+            );
+        }
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(path);
+        if file.and_then(|mut f| f.write_all(lines.as_bytes())).is_err() {
+            return err("GHIDRA_RS_GUARD_DEBUG: cannot write the guard file");
+        }
+    }
+    fd.heritage.load_guards = loads;
+    fd.heritage.store_guards = stores;
+    Ok(())
+}
+
+/// Port of `Heritage::findAddressForces`: from the COPY sinks back through artificial ops (a
+/// COPY or MULTIEQUAL within one address, an INDIRECT of a STORE), which join `sinks`, to the
+/// last real writes of the address, which are returned.
+fn find_address_forces(fd: &Funcdata, sinks: &mut Vec<OpId>) -> Vec<OpId> {
+    let mut forces = Vec::new();
+    let mut marked: HashSet<OpId> = sinks.iter().copied().collect();
+    let addr = |vn: VarnodeId| (fd.vn(vn).space, fd.vn(vn).offset);
+    let mut pos = 0;
+    while let Some(&op) = sinks.get(pos) {
+        pos += 1;
+        let Some(to) = fd.op(op).out.map(addr) else { continue };
+        for &vn in &fd.op(op).ins {
+            let Some(def) = fd.vn(vn).def else { continue };
+            if fd.vn(vn).has(VnFlags::ADDRFORCE) || !marked.insert(def) {
+                continue;
+            }
+            let d = fd.op(def);
+            let artificial = match d.opc {
+                Opcode::Copy | Opcode::Multiequal => d.ins.iter().all(|&i| addr(i) == to),
+                Opcode::Indirect if d.flags.has(OpFlags::INDIRECT_STORE) => addr(d.ins[0]) == to,
+                _ => false,
+            };
+            if artificial {
+                sinks.push(def);
+            } else {
+                forces.push(def);
+            }
+        }
+    }
+    forces
+}
+
+/// Port of `Heritage::handleNewLoadCopies`: after renaming, the last real writes flowing to a
+/// load-guard COPY are marked `addrforce` when a guard's range holds them, and the COPYs go
+/// (`propagateCopyAway`).
+pub(crate) fn handle_new_load_copies(fd: &mut Funcdata) -> Result<()> {
+    let copies = std::mem::take(&mut fd.heritage.load_copy_ops);
+    let mut sinks = copies.clone();
+    for op in find_address_forces(fd, &mut sinks) {
+        let Some(out) = fd.op(op).out else { continue };
+        let (space, off) = (fd.vn(out).space, fd.vn(out).offset);
+        if fd.heritage.load_guards.iter().any(|g| g.is_guarded(space, off)) {
+            fd.vn_set(out, VnFlags::ADDRFORCE);
+        }
+    }
+    for op in copies {
+        // follow the COPY chain within the address to its earliest input
+        let Some(out) = fd.op(op).out else { continue };
+        let mut inp = fd.input(op, 0)?;
+        while let Some(d) = fd.vn(inp).def.map(|d| fd.op(d)).filter(|d| d.opc == Opcode::Copy) {
+            let next = d.ins[0];
+            if (fd.vn(next).space, fd.vn(next).offset) != (fd.vn(inp).space, fd.vn(inp).offset) {
+                break;
+            }
+            inp = next;
+        }
+        fd.total_replace(out, inp)?;
+        fd.op_destroy(op);
+    }
+    Ok(())
 }

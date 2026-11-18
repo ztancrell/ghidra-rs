@@ -5,7 +5,14 @@ use std::path::PathBuf;
 
 const USAGE: &str = "usage: ghidra-rs disasm <binary> [--func <symbol>|--addr <hex>] [--count N] [--pcode] [--sla <file>]
        ghidra-rs analyze <pe32> [--functions <csv>] [--gaps <csv>] [--abi-callers <register_abi.csv> <out.csv> [--data-pointers]]
-                         [--decomp-prelude <out>] [--seeds <csv> | --functions-from <csv>]... [--sla <file>]
+                         [--decomp-prelude <out>] [--facts <out> [--protos <file>]] [--seeds <csv> | --functions-from <csv>]... [--store <file>] [--sla <file>]
+       ghidra-rs edit <pe32> --store <file> [--seeds <csv> | --functions-from <csv>]... [--sla <file>] <command>
+           commands: add-relocated-entries <securom_functions.csv>
+                     define-table-functions <start> <end> [<start> <end>]...
+                     recover-functions <audit.csv>
+                     clear-false-noreturn <report.csv>
+                     fold-slot-fragments <functions-original.csv> <slot-rewrites.csv> <report.csv>
+                     create-function <addr> | remove-function <addr> | reflow <addr>
        ghidra-rs decompile -i <script>
        ghidra-rs datatest [--ref <decomp_dbg>] <test.xml|dir>...";
 
@@ -20,6 +27,9 @@ fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() >= 2 && args[0] == "analyze" {
         return analyze(&args[1], &args[2..]);
+    }
+    if args.len() >= 2 && args[0] == "edit" {
+        return edit(&args[1], &args[2..]);
     }
     if args.len() == 3 && args[0] == "decompile" && args[1] == "-i" {
         let stdout = std::io::stdout();
@@ -206,13 +216,112 @@ fn datatest(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Function entries of a CSV: the first column of each 0x-prefixed line.
+fn read_seeds(path: &str) -> Result<Vec<u32>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    let lines = text.lines().filter(|l| l.starts_with("0x"));
+    let entry = |l: &str| {
+        let a = l.split(',').next().unwrap_or("");
+        u32::from_str_radix(&a[2..], 16).map_err(|e| format!("{path}: {a}: {e}"))
+    };
+    lines.map(entry).collect()
+}
+
+/// `edit`: runs one editing command on the analysis of a 32-bit PE with the project store laid
+/// over it, and writes the store back. The five mercs2 editing scripts are `edits.rs`; the
+/// script options that are not ported fail by name.
+fn edit(path: &str, args: &[String]) -> Result<(), String> {
+    use ghidra_rs::{analysis, edits, store};
+    let (mut file, mut seeds, mut exact) = (None, Vec::new(), false);
+    let mut sla = std::env::var_os("GHIDRA_RS_SLA").map(PathBuf::from).unwrap_or_else(|| Sleigh::sla_path("x86"));
+    let mut it = args.iter();
+    let mut command = None;
+    while let Some(flag) = it.next() {
+        if !flag.starts_with("--") {
+            command = Some(flag.as_str());
+            break;
+        }
+        let val = it.next().cloned().ok_or(format!("{flag} needs a value"))?;
+        match flag.as_str() {
+            "--store" => file = Some(val),
+            "--sla" => sla = PathBuf::from(val),
+            "--seeds" | "--functions-from" => {
+                exact |= flag == "--functions-from";
+                seeds.extend(read_seeds(&val)?);
+            }
+            _ => return Err(USAGE.into()),
+        }
+    }
+    let rest: Vec<&str> = it.map(String::as_str).collect();
+    let (Some(file), Some(command)) = (file, command) else { return Err(USAGE.into()) };
+    // the editing options of mercs2's other scripts
+    if matches!(command, "export-bindings" | "audit-recovered-functions") {
+        return Err(format!(
+            "not ported: {command} (ExportBindings.java --recover, AuditRecoveredFunctions.java --remove-empty)"
+        ));
+    }
+    let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    let img = analysis::Image::from_pe(&data).map_err(|e| format!("{path}: {e}"))?;
+    let sl = Sleigh::load(&sla)?;
+    let base = analysis::Analysis::run(&img, &sl, &seeds, exact)?;
+    // a store that is not there yet starts empty
+    let before =
+        if std::path::Path::new(&file).exists() { store::Store::load(&file)? } else { store::Store::default() };
+    let mut an = base.clone();
+    before.apply(&mut an, &img, &sl)?;
+    let mut p = store::Project::new(&img, &sl, an, before);
+    let read = |f: &str| std::fs::read_to_string(f).map_err(|e| format!("{f}: {e}"));
+    let report = |f: &str| std::fs::File::create(f).map(std::io::BufWriter::new).map_err(|e| format!("{f}: {e}"));
+    let addr = |p: &store::Project, a: &str| {
+        u32::from_str_radix(a.trim_start_matches("0x"), 16).map_err(|e| format!("{a}: {e}")).and_then(|a| {
+            match p.an.funcs.contains(&a) || command == "create-function" {
+                true => Ok(a),
+                false => Err(format!("no function at 0x{a:08x}")),
+            }
+        })
+    };
+    match (command, rest.as_slice()) {
+        ("add-relocated-entries", [csv]) => edits::add_relocated_entries(&mut p, &read(csv)?)?,
+        ("define-table-functions", ranges) if !ranges.is_empty() && ranges.len() % 2 == 0 => {
+            let ranges: Vec<String> = ranges.iter().map(|r| r.to_string()).collect();
+            edits::define_table_functions(&mut p, &ranges)?
+        }
+        ("recover-functions", [audit]) => edits::recover_functions(&mut p, &mut report(audit)?)?,
+        ("clear-false-noreturn", [out]) => edits::clear_false_noreturn(&mut p, &mut report(out)?)?,
+        ("fold-slot-fragments", [original, rewrites, out]) => {
+            edits::fold_slot_fragments(&mut p, &read(original)?, &read(rewrites)?, &mut report(out)?)?
+        }
+        ("create-function", [a]) => {
+            let a = addr(&p, a)?;
+            if !(p.disassemble(a) && p.create_function(a)) {
+                return Err(format!("no instruction decodes at 0x{a:08x}"));
+            }
+        }
+        ("remove-function", [a]) => {
+            let a = addr(&p, a)?;
+            p.remove_function(a)
+        }
+        ("reflow", [a]) => {
+            let a = addr(&p, a)?;
+            p.reflow(a)
+        }
+        _ => return Err(format!("unknown edit command or wrong arguments: {command}\n{USAGE}")),
+    }
+    let (funcs, text) = (p.an.funcs.len(), p.finish(base)?.to_string());
+    std::fs::write(&file, &text).map_err(|e| format!("{file}: {e}"))?;
+    println!("{file}: {} records, {funcs} functions", text.lines().count() - 1);
+    Ok(())
+}
+
 /// `analyze`: Ghidra-style function discovery on a 32-bit PE, writing the files of the mercs2
 /// scripts ExportFunctions.java (`--functions`) and ExportGaps.java (`--gaps`).
 fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     use ghidra_rs::{analysis, scripts};
     let (mut functions, mut gaps, mut seeds, mut exact, mut data_pointers) = (None, None, Vec::new(), false, false);
+    let mut store = None;
     let mut abi: Option<(String, String)> = None;
     let mut prelude = None;
+    let (mut facts, mut protos) = (None, None);
     let mut sla = std::env::var_os("GHIDRA_RS_SLA").map(PathBuf::from).unwrap_or_else(|| Sleigh::sla_path("x86"));
     let mut it = args.iter();
     while let Some(flag) = it.next() {
@@ -225,6 +334,9 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
             "--functions" => functions = Some(val),
             "--gaps" => gaps = Some(val),
             "--decomp-prelude" => prelude = Some(val),
+            "--facts" => facts = Some(val),
+            "--protos" => protos = Some(val),
+            "--store" => store = Some(val),
             "--sla" => sla = PathBuf::from(val),
             "--abi-callers" => {
                 let out = it.next().cloned().ok_or("--abi-callers needs <register_abi.csv> <out.csv>")?;
@@ -234,11 +346,7 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
             // to what discovery finds; --functions-from makes them the whole function set.
             "--seeds" | "--functions-from" => {
                 exact |= flag == "--functions-from";
-                let text = std::fs::read_to_string(&val).map_err(|e| format!("{val}: {e}"))?;
-                for line in text.lines().filter(|l| l.starts_with("0x")) {
-                    let a = line.split(',').next().unwrap_or("");
-                    seeds.push(u32::from_str_radix(&a[2..], 16).map_err(|e| format!("{val}: {a}: {e}"))?);
-                }
+                seeds.extend(read_seeds(&val)?);
             }
             _ => return Err(USAGE.into()),
         }
@@ -261,7 +369,17 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     let img = analysis::Image::from_pe(&data).map_err(|e| format!("{path}: {e}"))?;
     let sl = Sleigh::load(&sla)?;
     let t = std::time::Instant::now();
+    // --facts: the functions discovery finds without the seeds are the ones Ghidra's
+    // auto-analysis worked on; a seeded one stands for a function a script made afterwards
+    let plain = match &facts {
+        Some(_) if !seeds.is_empty() => Some(analysis::Analysis::run(&img, &sl, &[], false)?.funcs),
+        _ => None,
+    };
     let mut an = analysis::Analysis::run(&img, &sl, &seeds, exact)?;
+    // the project's edits, over the fresh analysis and before anything reads it
+    if let Some(p) = &store {
+        ghidra_rs::store::Store::load(p)?.apply(&mut an, &img, &sl)?;
+    }
     if let Some((csv, _)) = &abi {
         // The script disassembles a contract entry analysis never reached (a vtable-only function).
         // Its references also come from code Ghidra decoded outside the function bodies: code
@@ -274,6 +392,9 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
             .filter(|a| !an.insns.contains_key(a))
             .collect();
         an.disassemble(&img, &sl, &entries, true);
+    } else if facts.is_some() {
+        // as above, with Create Address Tables: the pointers in data are facts too
+        an.disassemble(&img, &sl, &[], true);
     } else if functions.is_some() {
         // Ghidra's ConstantPropagationAnalyzer, which `disassemble` above runs too: its
         // references and computed calls count in `callees`, `callers` and `data_refs`. It
@@ -288,7 +409,7 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
         t.elapsed().as_secs_f64()
     );
     let create = |p: &str| std::fs::File::create(p).map(std::io::BufWriter::new).map_err(|e| format!("{p}: {e}"));
-    if functions.is_some() || prelude.is_some() {
+    if functions.is_some() || prelude.is_some() || facts.is_some() {
         let t = std::time::Instant::now();
         let files = ghidra_rs::fid::default_files();
         let dbs = files.iter().map(|f| ghidra_rs::fid::FidDb::open(f)).collect::<Result<Vec<_>, _>>()?;
@@ -306,6 +427,42 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
         if let Some(p) = prelude {
             std::fs::write(&p, ghidra_rs::console::prelude(&img, &an, &fid)).map_err(|e| format!("{p}: {e}"))?;
             println!("wrote decompiler prelude {p}");
+        }
+        if let Some(p) = facts {
+            let t = std::time::Instant::now();
+            let protos = match &protos {
+                Some(f) => {
+                    let text = std::fs::read_to_string(f).map_err(|e| format!("{f}: {e}"))?;
+                    Some(ghidra_rs::factsout::Protos::parse(&text).map_err(|e| format!("{f}: {e}"))?)
+                }
+                None => None,
+            };
+            let cspec_path = sla.with_file_name("x86win.cspec");
+            let cspec = std::fs::read_to_string(&cspec_path).map_err(|e| format!("{}: {e}", cspec_path.display()))?;
+            // the model of the ASCII Strings analyzer, in the Ghidra tree the .sla file is in
+            let model_path =
+                sla.ancestors().nth(5).map(|g| g.join("Features/Base/data/stringngrams/StringModel.sng")).ok_or_else(
+                    || format!("{}: not in a Ghidra tree (the strings model is found from it)", sla.display()),
+                )?;
+            let model = std::fs::read_to_string(&model_path).map_err(|e| format!("{}: {e}", model_path.display()))?;
+            let strings =
+                ghidra_rs::strings::Model::parse(&model).map_err(|e| format!("{}: {e}", model_path.display()))?;
+            let mut w = create(&p)?;
+            let inputs = ghidra_rs::factsout::Inputs {
+                fid: &fid,
+                protos: protos.as_ref(),
+                analyzed: plain.as_ref(),
+                cspec: &cspec,
+                strings: Some(&strings),
+            };
+            // the stack analysis goes by the purges Ghidra has at a call site
+            let purges = ghidra_rs::factsout::call_purges(&img, &an, &inputs);
+            let own = an.swap_call_purges(purges);
+            let done = ghidra_rs::factsout::export(&img, &an, &sl, &inputs, &mut w).and_then(|()| w.flush());
+            an.swap_call_purges(own);
+            done.map_err(|e| format!("{p}: {e}"))?;
+            println!("wrote facts {p}");
+            eprintln!("facts in {:.1}s", t.elapsed().as_secs_f64());
         }
     }
     if let Some(p) = gaps {

@@ -10,13 +10,14 @@
 #   CORPORA  m8, m500, r5d-adc, switch, simple (files of tools/corpus/) or a file of addresses.
 #            Default: all five. Without CHECKS, r5d-adc runs only the double-rule checks,
 #            switch only the S3 bar (paramdouble), the six switch checks and pcc-r, pcc-t (with
-#            `switchnorm` on: the sw options), and simple only the four print C checks.
+#            `switchnorm` on: the sw options), and simple only the print C checks.
 #   CHECKS   names from the `case` below. Default: every check that applies to the corpus.
 #   JOBS     parallel functions per check (default: nproc); TIMEOUT seconds per function and
-#            engine (default 600)
+#            engine (default 120)
 #   OUT      output directory (default rust/target/bars): summary.out (the lines printed, appended),
 #            <check>-<corpus>.log (decomp-diff.sh's output) and .miss (one line per function that
-#            differs: `loud` when ghidra-rs printed an error, `silent` otherwise, `timeout` when
+#            differs: `loud` when ghidra-rs printed an error, panicked or overflowed its stack
+#            (decomp-diff.sh keeps that message), `silent` otherwise, `timeout` when
 #            it printed nothing or was killed at TIMEOUT; `reference failed` lines for those the
 #            reference does not finish, a reference killed at TIMEOUT among them)
 #   KEEP=1   keep the per-function outputs (OUT/<check>-<corpus>/), deleted otherwise
@@ -32,10 +33,15 @@ cd "$(dirname "$0")/.." || exit 1
 t=$PWD/tools; c=$t/corpus; o=${OUT:-$PWD/target/bars}; l=$PWD/target/locks
 export JOBS=${JOBS:-$(nproc)} TIMEOUT=${TIMEOUT:-120}
 mkdir -p "$o"
-S3=multicse,shadowvar,condconst                   # rule-stage actions not ported, skipped on both engines
-L=restructure_varnode,mapped_local_sync           # the same for `localrecovery`
+# Rule-stage actions the older checks skip on both engines, as they did before the actions were
+# ported (branch `m3-default`); `pcd` and `pmd` run them. (Superseded: "not ported".)
+S3=multicse,shadowvar,condconst
+L=restructure_varnode,mapped_local_sync           # the same for `localrecovery` (ported: "Local symbols")
 S=inputprototype,mapglobals,namevars,setcasts     # the leaves before finalstructure
 SC=inputprototype,mapglobals,namevars          # the same with `setcasts` on (stage S9)
+# default options (`pcd`): every action leaf not ported yet, skipped on both engines. Shrinks as
+# each is ported; empty when the default pipeline is whole.
+D=
 TP=$'print tree block\nprint raw'; MP=$'print map\nprint raw'
 
 # run <check> <corpus> <env assignments...>
@@ -51,8 +57,8 @@ run() {
         if cmp -s "$f" "$o/$name/rust/$a"; then same=$((same + 1)); continue; fi
         if [ ! -s "$o/$name/rust/$a" ] || grep -q '^decomp-diff.sh: timed out' "$o/$name/rust/$a"; then
             tmo=$((tmo + 1)); echo "timeout $a"
-        elif grep -q 'ERROR\|error:\|panicked' "$o/$name/rust/$a"; then
-            loud=$((loud + 1)); echo "loud $a: $(grep -m1 'ERROR\|error:\|panicked' "$o/$name/rust/$a" | cut -c1-160)"
+        elif grep -q 'ERROR\|error:\|panicked\|has overflowed its stack' "$o/$name/rust/$a"; then
+            loud=$((loud + 1)); echo "loud $a: $(grep -m1 'ERROR\|error:\|panicked\|has overflowed its stack' "$o/$name/rust/$a" | cut -c1-160)"
         else silent=$((silent + 1)); echo "silent $a: $(grep -m1 "^different $a," "$o/$name.log" | cut -c1-200)"
         fi
     done >> "$o/$name.miss"
@@ -66,7 +72,7 @@ run() {
 std="stack stackhigh funclink heritage paramdouble s4 s6 s6void s6int4 s6callee r1 subvar r4 r5 r5typed s7r s7r2 s7sub s7r4 s7r5 s7t s7t2 s8 s8r"
 dbl="r5d r5dt r5dtlock r5dtlocksv"
 sw="swfs-r swfs-t swsn-r swsn-t swfsc-r swfsc-t"
-pc="pc-r pc-t pcc-r pcc-t"
+pc="pc-r pc-t pcc-r pcc-t pcd pmd"
 all="$std r5c $dbl svlock svs6 r5slock r5s pg-r pg-t nm-r nm-t ldn-r ldn-t fs-r fs-t cs-r cs-t fsc-r fsc-t $sw $pc"
 [ -n "$LIST" ] || "$t/lock-options.sh" "$l" || exit 1
 for C in ${CORPORA:-m8 m500 r5d-adc switch simple}; do
@@ -148,6 +154,14 @@ for C in ${CORPORA:-m8 m500 r5d-adc switch simple}; do
         # sw options (`switchnorm` on, `localrecovery` off)
         pcc-r) run $k "$C" "PRINT=print C" DECOMP_SKIP_ACTIONS=$S3,$L BREAK=prototypewarnings OPTIONS=$c/$po-r-options.txt ;;
         pcc-t) run $k "$C" "PRINT=print C" DECOMP_SKIP_ACTIONS=$L BREAK=prototypewarnings OPTIONS=$c/$po-t-options.txt ;;
+        # pcd: `print C` with the DEFAULT options (no group off, no break), less the rules not
+        # ported (default-options.txt, written by r1-options.sh from the rule tables) and the
+        # actions of $D
+        pcd) run $k "$C" "PRINT=print C" DECOMP_SKIP_ACTIONS=$D BREAK= OPTIONS=$c/default-options.txt ;;
+        # pmd: the same options at `break start startcleanup`, right after `mapped_local_sync`:
+        # the local symbols (names, ranges, types, attributes) and the typed ops, before
+        # naming and printing
+        pmd) run $k "$C" DECOMP_RAW_EXTRA=1 DECOMP_MAP_EXTRA=1 "PRINT=$MP" DECOMP_SKIP_ACTIONS=$D BREAK=startcleanup OPTIONS=$c/default-options.txt ;;
         *) echo "unknown check $k" >&2; exit 1 ;;
         esac
     done

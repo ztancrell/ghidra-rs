@@ -11,12 +11,4 @@ option currentaction decompile returnsplit off
 option currentaction decompile splitcopy off
 option currentaction decompile splitpointer off
 option currentaction decompile dynamic off
-option togglerule pullsub_indirect off
 option togglerule aliasupdate off
-option togglerule threewaycomp off
-option togglerule transformcpool off
-option togglerule switchsingle off
-option togglerule conditionalmove off
-option togglerule orpredicate off
-option togglerule funcptrencoding off
-option togglerule ptrsubcharconstant off

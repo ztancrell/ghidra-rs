@@ -185,7 +185,7 @@ ported, then estimated Rust lines.
 | S7 | Merge, high variables | `merge`, `variable`, merge actions, `dynamic` (hashes, needed for saved locals) | 5k → 2.5k | `print raw` with high-variable ids after `copymarker` | M500 ≥ 95% | S6 |
 | S8 | Structuring | rest of `block`, `blockaction`, CFG edits of `funcdata_block` | 5k → 3k | `print tree block` at the end, rules off and then on | M500 ≥ 98% | S4 |
 | S9 | C printing | `printc`, `printlanguage`, `prettyprint`, `comment`, `stringmanage`, naming and cast actions | 7k → 4k | `print C` | all of D passes in our runner; M500 ≥ 95% identical to `decomp_dbg` | S7, S8, R5 |
-| S10 | Ghidra-facing output | Ghidra names (`FUN_`, `DAT_`, `undefined4`), import prototypes, read-only blocks | → 1.5k | our C against `Decompile.java` | M8 identical; M500 ≥ 90% with differences listed | S9 |
+| S10 | Ghidra-facing output | Ghidra names (`FUN_`, `DAT_`, `undefined4`), import prototypes, read-only blocks | → 1.5k | our C against `Decompile.java` | M8 identical; M500 ≥ 90% with differences listed | S9, and the default `decompile` action (see "S10: reference and inventory only, blocked") |
 
 "Print raw with types" and "with high-variable ids" need a small patch to the reference copy
 (`Varnode::printRaw` in `varnode.cc`, about 20 lines), kept under `rust/tools/` and applied by the
@@ -339,7 +339,9 @@ past 0x1000000 and 0x7c1f30, where the reference reads a garbage target. Details
   varnode); the value-set solver of rangeutil.cc is not used by jump tables. Not ported:
   `fail_callother` (stops with an error; 2 functions in obfuscated code), `fail_return`,
   retrying an unreachable-looking table, unrolled guards, multistage tables, overrides,
-  `JumpAssisted`, label recovery and guard folding (`recoverLabels`, after `paramdouble`).
+  `JumpAssisted` (superseded: ported on `worktree-agent-a852cab363d8d01f3`, see "Segment and
+  jump-assist user ops" below), label recovery and guard folding (`recoverLabels`, after
+  `paramdouble`).
 - Debugging: `GHIDRA_RS_JT_DEBUG=1|2` on ghidra-rs, and the reference patch's `DECOMP_JT_RAW`
   prints the C++ partial function.
 - Speed: Mall to `heritage` 9.4 s → 69.7 s; 49 s of it is one function (0xa4e8c2, a partial
@@ -528,6 +530,9 @@ table row:
   and `donothing`; `analyzeGuards` is the C++ loop. Left: the fold through read-only loads
   (`RuleLoadVarnode`, R5). S3 recheck at `paramdouble`: M8 8 / 8, M500 500 / 500, switch
   corpus 1,947 / 2,050 (1,934 before).
+  Superseded (branch `m3-aliasupdate`): `restructure_varnode` runs in the partial function
+  (`mapstate.rs`); seven actions are left out, of which `condconst` and `normalizebranches` can
+  change table recovery.
 - With R3 part two and R4 merged: the R1/R2/R3 check, the subvar check and the R4 check (all
   with group `cleanup` on) are each M8 8 / 8, M500 498 / 499 (497 / 499 before the merge).
 - `ActionNonzeroMask` on the function itself no longer reads folded constants (an R1
@@ -884,6 +889,10 @@ R5 slices 4 and 5 (branch `m3-r5b`, 2026-11-13). Superseded: "constseq.cc, bitfi
   `StringManager::isString`, S9: three M500 functions reach it, 0x4bff10, 0x74d520, 0x766350),
   so the check still switches it off. `threewaycomp`, `conditionalmove`, `orpredicate` (oppool1)
   are not in the plan's R5 row and stay off.
+  Superseded: "Not ported: `ptrsubcharconstant`". S10 slice 1 ports it for the strings of the
+  facts; the checks' option files still switch it off (`kept_off` in `r1-options.sh`), and no
+  check against `decomp_dbg` runs it. (Superseded on `m3-int6`: `kept_off` is gone and the rule
+  runs wherever group `cleanup` is on; see "Integration `m3-int6`" below.)
 - Slice 5, `rules/constseq.rs`, `rules/bitfield.rs`: the groups `constsequence` and `bitfields`
   as far as they run without scopes and bit-field types. `stringcopy` never matches (no local
   symbols), `stringstore` fails at `HeapSequence` (not ported); no type has bit-fields, so the four
@@ -957,6 +966,8 @@ Open, failing loudly:
   of `opCollapseIndirectsForCopy`); partial structs, arrays and unions in `getExactPiece`.
 - Not modelled: `PcodeOp::isStoreUnmapped` (set only by `ActionRestructureVarnode`, not
   ported), word sizes other than 1.
+  Superseded: `ActionInternalStorage` sets that mark, and no x86 model declares internal
+  storage; `ActionRestructureVarnode` never did.
 - The jump-table partial function still runs without the two rules and with
   `jumptable::fold_constants` (the C++ has `stackvars` on there and `fillinReadOnly`); the tree
   builder leaves them out of the `jumptable` root (`action.rs`).
@@ -1171,6 +1182,10 @@ answers a locked stack parameter's type (10 functions typed `ESP + 4` as `int4 *
   (`removeRevisitedMarkers`), the restart after heritage following dead-code removal
   (`bumpDeadcodeDelay`), pieces of a locked stack parameter, `ActionRestructureVarnode`
   (MapState, RangeHint, AliasChecker, symbols), `ActionMappedLocalSync`.
+  Superseded (branch `m3-aliasupdate`): `ActionRestructureVarnode` is ported for the partial
+  function of jump-table recovery (`mapstate.rs`), not for the function itself.
+  Superseded again ("Local symbols", 2026-11-17): both actions are ported for the function
+  itself too.
 
 Review fixes and merges (2026-11-14). Fixed after an independent review:
 
@@ -1648,7 +1663,8 @@ and the explained misses: rust/README.md, "Integration of `m3-tail` and `m3-r5b`
   count is now of the functions the reference finishes).
 - Open: the type a global symbol gives a new varnode is set lazily (`infertypes::symbol_types`),
   so `switchnorm` rules on differs in 0x48a430, 0x5c5940, 0x6b3730 (M500) and 0x8d8f40,
-  0x8eabe0, 0x8ead90 (switch corpus) at `returnsplit`; 0x4f3366 (switch `finalstructure` types
+  0x8eabe0, 0x8ead90 (switch corpus) at `returnsplit` (superseded: `print raw` applies the
+  types first, the six are identical; see "After `m3-int5`" below); 0x4f3366 (switch `finalstructure` types
   on) keeps a call's join output; ghidra-rs is about 1.25 times slower than the reference on
   0x4c48d0.
 
@@ -1815,6 +1831,332 @@ slice 5 above, which were derived or from single checks.) Varies with load: the 
 identical" count of `s6void-m500` is 499 / 500 here and 500 / 500 in the baseline (a reference
 timeout; identical 499 / 499 in both).
 
+After `m3-int5` (2026-11-17): the "Read-only address is written" warning of `fillinReadOnly` is
+ported (`action.rs`, `readonly_written`: once per op, not for a marker, not for an
+address-forced varnode nothing reads) and `print C` no longer fails on the case. 0x23caea8 is
+identical; switch `pcc-t` 1987 / 2005 (loud 18, silent 0), M500 print checks at their counts, M8
+all 55 checks as the baseline. Details: rust/README.md, the end of "C printing, slice 5".
+(Superseded: "0x23caea8 is loud" and "Next: port the `fillinReadOnly` warning" above.)
+The six silent misses of `swsn-r` (0x8d8f40, 0x8eabe0, 0x8ead90 on switch; 0x48a430, 0x5c5940,
+0x6b3730 on M500) were the lazily set symbol type of an import slot, printed at
+`break start returnsplit` with `typerecovery` off; `print raw` now applies the symbol types
+first. `swsn-r`: switch 1987 / 2004 (loud 17, silent 0), M500 498 / 499 (loud 1, silent 0). No
+silent miss is left in the checks run. (Superseded: the "Open" bullet on `symbol_types` under
+the `m3-int` integration, for these six; "the only silent misses left" above.)
+
+### Segment and jump-assist user ops, branch `worktree-agent-a852cab363d8d01f3` (2026-11-17)
+
+`<segmentop>` and `<jumpassist>` are read (they were ignored silently in a `.pspec`), with
+`SegmentOp`, `JumpAssistOp`, `ExecutablePcode`, `ActionSegmentize`, `RuleSegment` and the
+`JumpAssisted` jump-table model. Two unit tests match `decomp_dbg` on 16-bit real mode x86
+(`segmentize`, and `RuleSegment` on constants); `JumpAssisted` has a hand-made test only.
+Details, the loud limits and the counts: `rust/README.md`, "Segment and jump-assist user ops".
+
+Next for 16-bit x86, in the order a decompile meets them: a stack space of the stack pointer's
+size (now loud in the stack rules), near and far pointers (`SegmentedResolver`,
+`sizeOfAltPointer`; now loud in type recovery), the SEGMENTOP cast rules and `opSegmentOp` in
+the printer, and a way to select the language and load a raw image from the console. This is
+processor breadth, which DESIGN.md (2026-11-14) puts after the mercs2 scripts and the project
+store.
+
+### Default options: the check `pcd`, branch `m3-default` (2026-11-17)
+
+`pcd` in `bars.sh` runs `print C` with no group or rule switched off and no break, with the
+action leaves not ported yet skipped on both engines (the list `D` in `bars.sh`). Baseline with
+seven leaves skipped (`restructure_varnode`, `mapped_local_sync`, `multicse`, `shadowvar`,
+`condconst`, `dynamicsymbols`, `prototypewarnings`): M8 6 / 8 (silent 2), M500 339 / 497 (loud
+83, silent 75; 66 of the silent are one missing cast of a stack address, `(xunknown1 *)&stack...`).
+Next: port the seven leaves in the C++ order and shrink `D`. (Superseded: five are done, below.)
+
+Progress on the branch (details: rust/README.md, "Default options"):
+
+1. `multicse`, `shadowvar` ported, and `TypeSpacebase::getSubType` reads the local symbols (the
+   missing stack-address cast): M8 8 / 8, M500 407 / 497 (loud 83, silent 7).
+2. `condconst` ported; `dynamicsymbols` and `prototypewarnings` have nothing to do in the
+   console. `D` is `restructure_varnode,mapped_local_sync`. M500 407 / 497 (loud 83, silent 7).
+3. The 7 silent misses had one cause: rules of the default pools that are not ported are
+   missing from the pool without a word (`conditionalmove` in 0x608500; the other six not traced
+   to a rule each). `pcd` now switches the unported rules off on both engines
+   (`tools/corpus/default-options.txt`, written by `r1-options.sh`); the 7 are identical with
+   that. The first two counts above were measured without it. M500 415 / 497 (loud 82, silent 0)
+   with 11 rules off.
+4. Rules ported: `pullsub_indirect`, `conditionalmove`, `orpredicate`, `threewaycomp`, plus
+   `transformcpool` (fails on a CPOOLREF) and `funcptrencoding` (nothing to do on these specs).
+   Eight rules stay off: `aliasupdate`, `switchsingle`, `ptrflow`, `segment`,
+   `ptrsubcharconstant`, `splitcopy`, `splitload`, `splitstore`. (Superseded: two stay off,
+   `segment` and `ptrsubcharconstant`; see "Pool rules" below. Superseded on `m3-int6`: none
+   stays off, see "Integration `m3-int6`".)
+5. `ActionParamDouble` splits a stack trial that is a PIECE (35 loud functions of M500: 6
+   identical in `pcd`, 29 loud later in `namevars`; all 35 identical in `print raw` at
+   `break start namevars`).
+
+Not done: `restructure_varnode` and `mapped_local_sync`. They need the local symbols of
+varmap.cc (`MapState`, `RangeHint`, the full `AliasChecker`, `createEntry`,
+`fakeInputSymbols`, `markUnaliased`, `annotateRawStackPtr`) and then
+`Funcdata::syncVarnodesWithSymbols` with the varnode flags ghidra-rs does not model yet
+(`mapped`, `nolocalalias`, type locks from symbols), which heritage guards, type propagation,
+`namevars` (symbols that exist before it) and the printer read. Also open: the loud misses
+`pcd` reaches (`namevars` `getExactPiece`, indexed stack LOADs in heritage, STORE guards in
+merge, `HeapSequence`, `ActionConditionalExe`), and whether a default-options run should fail
+while a pool rule is missing. (Superseded: `ActionConditionalExe` is ported, `condexe.rs`;
+`restructure_varnode` and `mapped_local_sync` are ported, see "Local symbols" below.)
+while a pool rule is missing. (Superseded: `ActionConditionalExe` is ported, `condexe.rs`; a
+run now fails while a pool rule is missing, see "Pool rules" below.)
+
+End sweep of the branch before the merge of `m3-aliasupdate` (final build): all 56 checks on
+M8 identical. M500: `pcd` 422 / 497 (loud 75, silent 0: 51 `namevars` `getExactPiece`, 16
+indexed stack LOAD, 6 STORE guard in merge, 2 `HeapSequence`), `paramdouble` 500 / 500, `r1`
+499 / 499 (baseline 498), `r5s` 483 / 499 (baseline 446), `s7r` 499 / 499 (498), `pcc-r`
+495 / 495 (494), `pcc-t` 495 / 495. `simple`: `pcd` 184 / 200 (loud 16), `pcc-r` and `pcc-t`
+194 / 194. Switch `pcc-t` 1988 / 2005 (baseline 1986, silent 0). Not run: the other M500 and
+switch checks (the full pass). `m3-aliasupdate` is merged into the branch after that sweep
+(its `mapstate.rs` runs in the jump-table partial only; the decompile-root leaf is still
+`not_ported`, so `D` is unchanged); what was rerun on the merge is in the merge commit.
+
+Alias analysis of the jump-table partial function (branch `m3-aliasupdate`, 2026-11-17).
+`RuleAliasUpdate` only runs `opCollapseIndirectsForAlias`; what that collapses comes from
+`ActionRestructureVarnode` (`nolocalalias`) and from the value-set range of a store guard. Ported
+for the partial function (`mapstate.rs`): the rule, `opCollapseIndirectsForAlias`,
+`syncVarnodesWithSymbols`, `ScopeLocal::restructureVarnode` without data-types (MapState,
+RangeHint, `fakeInputSymbols`, `markUnaliased`) and `protectSwitchPaths`. `flow.rs` makes the
+partial function as the C++ does and takes its table as it is; where the action or the rule
+reaches a path not ported (a load or store guard, `adjustOutOfRange`, a locked prototype, a typed
+or large stack varnode, `checkUnaliasedReturn`) it falls back to the partial function without
+them and the test of `m3-swsilent`. The action of the `decompile` root stays unported.
+Switch corpus: 0x1cdbf0e, 0x7913d0, 0x7bb710, 0x7bf170, 0x831db0, 0x898690 and 0x898850 loud ->
+identical in `paramdouble`, the six switch checks, `pcc-r` and `pcc-t` (each checked against the
+reference); 0x7c1f30 loud -> identical in `pcc-r` and `pcc-t`. Derived counts: `paramdouble`
+1995 / 2004 (loud 9), `swfs-r`, `swfs-t`, `swfsc-r`, `swfsc-t`, `swsn-t` 1994 (loud 10), `swsn-r`
+1991 (loud 10, silent 3), `pcc-r` 1995 / 2005 (loud 10), `pcc-t` 1994 / 2005 (loud 11). Every
+other switch output at `paramdouble`, all 55 checks on M8 and nine checks on M500 are byte-equal
+to master's. Still loud, by missing port: `ValueSetSolver` and the guard ranges (0x1c69c5a,
+0x546d40, 0x5629d0, 0x78e7d0, 0x1b0c190, 0x502b80, 0x5c37f0), `ActionConditionalExe` (0x5a3c30,
+0x807a80), multistage tables (0x23f4238). Open: 0x2285c9b, which the reference does not finish,
+prints a function now. Details in `rust/README.md`, "Alias analysis of the jump-table partial
+function". (Superseded: the switch counts of the `m3-int5` paragraph above. Superseded
+2026-11-17: `ValueSetSolver` and the guard ranges are ported and those 7 functions are identical;
+derived counts switch `paramdouble` 2002 / 2004, `pcc-r` 2004 / 2005, `pcc-t` 2003 / 2005, M500
+`pcd` 440 / 497 (loud 57). Details in `rust/README.md`, "Value-set analysis and the stack
+guards".)
+
+Review fixes of that port (branch `m3-default`, 2026-11-17): a new stack varnode inside a symbol
+of `restructureVarnode` takes the symbol's flags (`mapped`, `addrtied`, `nolocalalias`);
+`markNotMapped` removes the symbols under its range and stops at a `fake_input` one; a partial
+function made without the action and the rule that fails with a normal error ends the decompile
+loudly. No output changes: the build before against the one after is equal on the switch corpus
+(`paramdouble`, `swfs-r`, `swsn-r`, `pcc-r`, `pcc-t`), M8 (56 checks) and M500 (`pcd`,
+`paramdouble`, `swfs-r`, `pcc-r`, `pcc-t`, `r5s`). Measured against the reference on the whole
+switch corpus (Superseded: the derived counts above): `paramdouble` 1995 / 2004 (loud 9),
+`swfs-r` 1996 (loud 8), `swsn-r` 1993 (loud 8, silent 3), `pcc-r` 1997 / 2005 (loud 8), `pcc-t`
+1996 / 2005 (loud 9). Open: 0x5861aa and 0x7c74c0, identical at `paramdouble` in the `m3-int5`
+pass, are loud there before and after these fixes ("a second table after the partial function's
+action failed"). Details in `rust/README.md`, "Review fixes" of the alias analysis section.
+
+### Local symbols: `restructure_varnode` and `mapped_local_sync` (2026-11-17)
+
+The two leaves left in `D` are ported for the `decompile` root, so `D` is empty and `pcd` runs
+the whole default action tree (the eight pool rules of `default-options.txt` are still off).
+What was ported and which readers of the symbols changed: `rust/README.md`, "Local symbols".
+
+New check `pmd`: `print map` and `print raw` (with `DECOMP_MAP_EXTRA` and `DECOMP_RAW_EXTRA`) at
+`break start startcleanup`, default options: the symbols and the typed ops right after
+`mapped_local_sync`.
+
+Counts. The reference now runs both actions, so its output differs from the baseline's in
+most functions with stack variables. "Before" is `m3-default` for `pcd` and the `m3-int5` pass
+for the rest.
+
+| check | before | now |
+|---|---|---|
+| `pcd` M8 | 8 / 8 | 8 / 8 |
+| `pcd` M500 | 422 / 497 (loud 75, silent 0) | 463 / 499 (loud 36, silent 0) |
+| `pcd` simple | 184 / 200 (loud 16) | 188 / 200 (loud 12, silent 0) |
+| `pmd` M8, M500, simple | new | 8 / 8, 470 / 499 (loud 29, silent 0), 190 / 200 (loud 10, silent 0) |
+| `pcc-r`, `pc-r` M500 | 494 / 495 (loud 1) | 495 / 495 |
+| `pcc-t`, `pc-t` M500 | 495 / 495 | 495 / 495 |
+| `nm-r` M500 | 498 / 499 (loud 1) | 499 / 499 |
+| `nm-t` M500 | 499 / 499 | 499 / 499 |
+| `paramdouble`, `s7t` M500 | 500 / 500, 499 / 499 | 500 / 500, 499 / 499 |
+| `r5s` M500 | 446 / 499 (loud 53) | 483 / 499 (loud 16, silent 0) |
+| the six print and naming checks, simple | 194 / 194 (`nm-*` not in the pass) | 194 / 194; `nm-r`, `nm-t` 200 / 200 |
+| `r5s` simple | not in the pass | 192 / 200 (loud 8, silent 0) |
+| switch: `paramdouble`, `swfs-r`, `swsn-r`, `pcc-t` | 1995 / 2004, 1996, 1993 (silent 3), 1996 / 2005 (`m3-default` review fixes) | the same counts, the same functions in the same states |
+
+Where they ran: `pcd` and `pmd` (M8, simple, M500), `r5s` (simple, M500), `pcc-t` (simple,
+M500) and `nm-t` (simple) on the desktop with the final code. The other lines, and the switch
+corpus, on the two-machine queue at commit 083ac6a7b5 of the task branch (not kept: squashed),
+which lacks only the loud stack input of `ActionUnjustifiedParams` below and a unit test; at
+that commit `pmd` and `r5s` on simple had 0x581bf6 silent. (`r5s` M500 with the final code on
+the loaded desktop: 482 / 498, loud 16, one more reference timeout.) Not run: the other checks of the
+full pass (the ones with `localrecovery` off or the two actions skipped do not reach the
+port in the function itself; all of them reach it in the jump-table partial function).
+
+`pcd` M500 by function: 47 loud before are identical now (the `namevars` pieces of a symbol,
+STORE guards in merge), 6 identical before are loud now, none is silent:
+
+| functions | cause | needs |
+|---|---|---|
+| 0x5cee30, 0x5d8680, 0x5d87c0 | `subflow`: a logical value in a join varnode (0x5cee30: symbols and ops equal to the reference at the five hits of `break start restructure_varnode` before it) | join addresses in `subflow` |
+| 0x4b8e50, 0x74c9b0 | `RuleStringCopy` finds the symbol of `restructure_varnode` | `StringSequence` (constseq.cc) |
+| 0x6b21e0 | heritage: an indexed stack LOAD | `ValueSetSolver` |
+
+The 36 loud of `pcd` M500: 17 indexed stack LOAD in heritage and 9 load or store guard in
+`restructure_varnode` (both need `ValueSetSolver`), 5 `StringSequence`, 3 join `subflow`, 2
+`HeapSequence`. `pcd` simple: 1 identical before is loud now (0x4ea611, a guard in
+`restructure_varnode`), 5 loud before are identical.
+
+Found by `pmd` and `r5s` on simple: 0x581bf6 was silent. `ActionUnjustifiedParams` passed over
+a stack input in the middle of a parameter slot (it looked at register inputs only); the C++
+widens it (`adjustInputVarnodes`, not ported). It fails loudly now. In `pcd` the function was
+loud later anyway (`StringSequence`), which hid it.
+Pool rules (branch `worktree-agent-ab53ef4e46d4bec80`, 2026-11-17). Behaviour change: the
+`decompile` root fails while a pool rule that is not ported is on (the rule tables list every
+C++ rule, `r` ported or `u` not; a unit test compares them with coreaction.cc), so
+`default-options.txt` is the only way to run without one. Ported: `switchsingle`, `ptrflow`
+(nothing to do without a `<truncate_space>`, which the console refuses), `splitcopy`,
+`splitload`, `splitstore` (`SplitDatatype`, `rules/split.rs`; loud on a type needing
+resolution, a partial structure, the CONCAT of split outputs).
+`aliasupdate` is no longer switched off in `pcd`. `default-options.txt` holds two rules:
+`segment` and `ptrsubcharconstant`, ported on other branches and `u` entries here until those
+merge. Checks:
+- `pcd` M500 422 / 497 (loud 75, silent 0), the same 75 functions as before; the six with a
+  STORE guard now fail in `RuleAliasUpdate` instead of in merge.
+- The reference alone on M500 with the six rules on against the eight off: three outputs
+  change (0x4130d0, 0x494200, 0x5bed50), all by `aliasupdate`, all loud in ghidra-rs. So
+  `switchsingle` and the split rules change nothing on M500.
+- Switch corpus, `pcd` (its first run there; not a `bars.sh` default): 1788 / 1994 identical
+  (loud 199, silent 7; counted before `buildCopyTemp` was added, which changes 4 loud
+  functions, see below). The reference alone with `switchsingle` and the split rules on
+  against off: 81 outputs change; ghidra-rs prints 55 of them identically, 25 are loud
+  (indexed stack LOAD, `getExactPiece`, `HeapSequence`, one jump table), 1 is silent
+  (0x2396e7d). The 7 silent misses are the same with the old eight rules off, so they are older
+  than this branch: 0x2396e7d (an extra "Recovered jumptable eliminated as dead code"),
+  0x1c1df81, 0x761980, 0x780890 (a cast on a RETURN value missing), 0x521087, 0x636a4c,
+  0x9944d6 (names and types of stack inputs). Not traced.
+- The four functions that stopped at `duplicateToTemp` (0x54054b, 0x77f310, 0x7f89b0,
+  0x7f8fe5) after `buildCopyTemp` was ported: all four loud in `namevars` (`getExactPiece`) in
+  `pcd`; `print raw` at `break start namevars`: 0x77f310 and 0x7f89b0 identical (the split
+  STOREs through the temporary), 0x54054b and 0x7f8fe5 differ, and differ the same way with
+  the eight rules off (SUBPIECEs of stack inputs the reference has): older, not traced.
+- `simple`: `pcd` 184 / 200 (loud 16, silent 0), as before; the six rules change three
+  reference outputs there, all loud in ghidra-rs (indexed stack LOAD).
+- M8: 56 checks, the 55 lines of the `m3-int5` baseline unchanged, `pcd` 8 / 8.
+- M500 rule checks (the options files without `togglerule switchsingle off`), identical /
+  reference finished, baseline `m3-int5` in brackets: `r1`, `subvar`, `r4`, `r5d`, `s7r`,
+  `s7r2`, `s7sub`, `s7r4`, `s7t`, `s7t2` 499 / 499 (498 or 499); `r5`, `r5typed`, `r5dt`,
+  `s7r5` 498 / 498 (497); `r5c` 495 / 498 (494); `r5dtlock` 482 / 498 (481); `r5dtlocksv` and
+  `r5slock` 453 / 498 (451 / 499); `r5s` 482 / 498 (446 / 499; `m3-default` 483 / 499). Silent
+  0 in each. In `r5dtlocksv`, `r5slock` and `r5s` the reference finished 498, not 499 (a
+  timeout on the loaded machine), so one function is not compared there.
+- Switch corpus: `pcc-r` 1997 / 2005 (loud 8, silent 0) and `swsn-r` 1993 / 2004 (loud 8,
+  silent 3: 0x8d8f40, 0x8eabe0, 0x8ead90), both as in the `m3-default` review-fix pass, now with
+  `switchsingle` on.
+- Not run: the other M500 checks, the other switch checks, `pcd` on the switch corpus again
+  with the final build (only the four functions above), `r5d-adc`.
+
+### S10: reference and inventory only, blocked (2026-11-17)
+
+No decompiler code. `rust/tools/ghidra-diff.sh` and `rust/tools/ghidra/DecompileRef.java` capture
+Java Ghidra's C (the call of mercs2's `Decompile.java`) and compare it with `print C` under
+default options. M8: Java finishes 7 / 8 (no function at 0x54c990 in the Java project),
+ghidra-rs identical 0 / 7, loud 7. M500: Java finishes 499 / 500; `decomp_dbg` identical
+0 / 499.
+
+The gate needs the default `decompile` action, which ghidra-rs finishes for no function: eight
+leaves are not ported (`restructure_varnode`, `mapped_local_sync`, `multicse`, `shadowvar`,
+`condconst`, `directwrite`, `dynamicsymbols`, `prototypewarnings`). The S9 print checks ran with
+the `tail` options and the two `localrecovery` leaves skipped. With the eight skipped on both
+engines and default options: M8 8 / 8 against `decomp_dbg`; M500 410 / 500 (reference ran 498;
+loud 78, silent 11, one reference timeout). So before S10 proper:
+
+1. the eight actions, checked against `decomp_dbg` with default options;
+2. the loud and silent misses that default options reach (list in `rust/README.md`, "Stage S10");
+3. then the Ghidra-facing parts: type and symbol names, the project's prototypes and function
+   set, read-only data, Java's comments (the inventory in `rust/README.md`).
+
+Open, for the user: where ghidra-rs takes the Java project's facts from (an export of the
+Ghidra project, or its own analysis), and the name of the output mode.
+
+### S10 slice 1: the facts of the Ghidra project and `load facts` (2026-11-17)
+
+Item 3 above, done ahead of items 1 and 2 (other branches). Superseded: "Open, for the user"
+above, as far as a first choice goes: the facts are an export of the Ghidra project and the
+mode is the console command `load facts <file>`; both are choices of this slice for the user
+to confirm, and the loader is one module (`decomp/facts.rs`) that another source can replace.
+
+- `rust/tools/ghidra/ExportFacts.java` (run by `rust/tools/ghidra-facts.sh`) records what
+  Java's `DecompileCallback` answers its decompiler, as the XML it sends: functions with
+  prototypes and local symbols, data symbols, external references, data-types, namespaces,
+  comments, labels, tracked registers, flow overrides, memory blocks.
+- `load facts` makes ghidra-rs read them where the C++ asks Java: Ghidra's core types,
+  function and data names, prototypes (model, extrapop, locked parameters, no-return, call
+  fixups), `CALL_RETURN` overrides, data symbols with their data-types and the `_` prefix of
+  `pushMismatchSymbol`, pointers to data symbols and strings (`RulePtrsubCharConstant`), the
+  listing's read-only memory, plate and pre comments, labels, names recommended for stack
+  variables (`local_bc`). What the rest of the port cannot honour fails loudly when a
+  decompile reads it (list in `rust/README.md`, "Stage S10, slice 1").
+- `ghidra-diff.sh` gives ghidra-rs the facts. M8: Java finishes 7 / 8; with default options
+  identical 0 / 7, loud 7 (the eight actions); with the eight skipped identical 3 / 7
+  (0x40a110, 0x58d030, 0x9eec5e), and the other four differ where `decomp_dbg` itself
+  changes when the eight are skipped. M500 with the eight skipped: identical 192 / 499 (loud 72, silent 235).
+- The checks against `decomp_dbg` are unchanged: `pcc-r` 494 / 495 (loud 1), `pcc-t` 495 / 495, `pc-r` 494 / 495 (loud 1), `pc-t` 495 / 495, `nm-r` 498 / 499 (loud 1), `nm-t` 499 / 499: the six lines equal the baseline.
+- Review fixes (2026-11-17, `rust/README.md`, "Stage S10, slice 1: review fixes"): panics with
+  facts, strings as `getStringData` reads them, labels at every instruction, undefined bytes of
+  read-only blocks, `FACTS=0` in `ghidra-diff.sh`, `kept_off` in `r1-options.sh`; call-site
+  extrapop overrides, `uchar` core types, unknown model names and `_ns::name` fail loudly. The
+  facts file is version 2. Superseded: "loud 72, silent 235": the slice's final build gives
+  M500 identical 192 / 499 (loud 70, silent 237), and the fixes change no function's state.
+  The checks against `decomp_dbg` (M8 all 55 lines, the six M500 lines) equal the baseline.
+- Slice 2 (2026-11-17, `rust/README.md`, "Stage S10, slice 2"): `ghidra-rs analyze --facts`
+  writes the facts from ghidra-rs's own analysis (`factsout.rs`), in the same format, so the
+  Java project is not needed to make them; the import prototypes come from a one-time export
+  of Ghidra's Windows archive (`tools/ghidra-protos.sh`). What is not derived is an
+  `underived` record and fails the decompile that reads it. `tools/facts-diff.sh` compares the
+  two facts files per record kind; `ghidra-diff.sh` takes `FACTS=<file>`.
+  mercs2 with Java's function set: `func` 80.6%, `body` 98.1%, `extref` 90.0%, `data` 47.1% equal;
+  `ghidra-diff.sh` with the eight skipped: M8 identical 2 / 7 (3 / 7 with the Java facts), M500
+  171 / 499 (192 / 499). The checks against `decomp_dbg` (M8, 55 lines) equal the baseline.
+- Slice 3 (2026-11-17, `rust/README.md`, "Stage S10, slice 3"), after the user's decision to port
+  Ghidra's analyzers instead of approximating them: address tables at instruction references
+  and `checkPseudoBody` (`OperandReferenceAnalyzer`, `AddressTable`, `PseudoDisassembler`),
+  call-site purges for the stack analysis (`SymbolicPropogator.getFunctionPurge`), the ASCII
+  Strings analyzer (`strings.rs`, Ghidra's trigram model file), data through an address a
+  register holds, Function ID's plate comments. mercs2 with Java's function set: `func` 81.2%,
+  `data` 84.9%, `string` 90.5%, `comments` 71.0% equal (superseded: "`func` 80.6% ... `data`
+  47.1%" above); `ghidra-diff.sh` M8 identical 2 / 7, M500 173 / 499. Not ported: the
+  demangler, Ghidra's order of analysis (its task queue), switch-case labels, the loader's and
+  RTTI structures.
+
+Still before the gate: the eight actions (item 1), the misses default options reach (item 2),
+and from this slice the struct and union symbols and the other loud items. (Superseded on
+`m3-int6` for item 1: the eight actions are ported or have nothing to do, see below.)
+
+### Integration `m3-int6` (2026-11-17)
+
+The eight branches above (the small items after `m3-int5`, the segment user ops, `m3-default`,
+the value sets and stack guards, the pieces of symbols, the local symbols, the pool rules, and
+the analyzers branch with S10 and the project store) are merged on `m3-int6`. What the joins
+changed in the code, and what is superseded: `rust/README.md`, "Integration `m3-int6`". In
+short: `MapState::addGuard` runs with the typed hints of the `decompile` root; no pool rule is
+unported (`segment` and `ptrsubcharconstant` are `r(...)` entries, `default-options.txt` is
+empty, `kept_off` is gone from `r1-options.sh`); `pcd` and `pmd` run the plain default options
+with no action skipped.
+
+Measured on the tip (one machine, `TIMEOUT` 120): `cargo test` 157 passed; M8 all 57 checks,
+the 55 baseline lines unchanged, `pcd` and `pmd` 8 / 8; M500 `pcd` 493 / 499 (loud 6, silent
+0), `pmd` 497 / 500 (loud 3), `pcc-r` and `pcc-t` 495 / 495, `r5s` 498 / 498, `paramdouble`
+500 / 500, `swsn-r` 499 / 499; silent 0 in each, and no function identical in the `m3-int5`
+baseline is loud or silent (0x6b21e0 of `r5s` aside: the reference no longer finishes it, as on
+the branches; not compared). (Superseded: the `pcd` and `pmd` M500 counts of the sections
+above, 415 to 474 / 497, 463 / 499 and 470 / 499.)
+
+Left loud on M500 with default options: `StringSequence` (0x53a040, 0x5a9b80, 0x766350) and a
+logical value in a join varnode in `subflow` (0x5cee30, 0x5d8680, 0x5d87c0). Not run: the
+other M500 checks, the switch, `simple` and `r5d-adc` corpora (the full pass comes next), and
+the S10 checks against Java Ghidra.
+
+Full pass (2026-11-18, `bars-queue.sh` on `ff58230822`, desktop and Mac): 132 of 133 pairs, the Mac dropped off the network and lost `swsn-t-switch`, rerun on the desktop: 2001 / 2004 (loud 3, silent 0). Silent 0 in every pair. No pair has fewer identical functions or more silent misses than the `m3-int5` baseline; `r5s`, `r5slock` and `r5dtlocksv` M500 have reference finished 498 instead of 499 (0x6b21e0, the reference no longer finishes it), while their identical counts rose (`r5s` 446 -> 498, `r5slock` and `r5dtlocksv` 451 -> 467). Switch: `paramdouble` 2002 / 2004, `swfs-r` 2003, `swsn-r` 2003, `swfs-t` and `swsn-t` 2001. Superseded: "Not run: the full pass" above.
+
 ## Running stages in parallel
 
 Strict chain first: S0 → S1a → S1b → S2. After S2 the work fans out. Under the cap of two
@@ -1870,6 +2212,12 @@ Everything a person changes while reversing, so a rerun keeps it:
 
 The decompiler only reads this through one query interface (like the C++ `Scope`/`Database`),
 so milestone 3 can keep it in memory and milestone 4 swaps in the store.
+
+A first part exists (2026-11-17, `rust/ghidra-rs/src/store.rs`): a plain text file with created and
+removed functions, fixed bodies, no-return flags, flow overrides, thunk marks and switch targets,
+applied over a fresh analysis (`analyze --store`). It holds none of the other items above, and it
+does not record who set a fact: everything in the file is an edit, everything else is analysis.
+See `rust/README.md`, "Project store and the editing scripts".
 
 ## Where to diverge from Ghidra, and where not
 

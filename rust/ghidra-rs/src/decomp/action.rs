@@ -8,7 +8,9 @@
 pub use super::actiontree::{ActionTree, Outcome};
 use super::fspec::{ExtraPop, ParamActive};
 use super::funcdata::CallId;
+use super::op::{OpFlags, OpId};
 use super::opcode::Opcode;
+use super::printc::raw_offset;
 use super::varnode::{Space, VarnodeId, VnFlags};
 use super::{err, heritage, Arch, Funcdata, Result};
 
@@ -16,10 +18,11 @@ use super::{err, heritage, Arch, Funcdata, Result};
 /// off (`option currentaction decompile <group> off`): the root `universal` (restart group,
 /// once per function), its first actions, the repeating groups `fullloop`, `mainloop` and
 /// `stackstall`, and the root's actions after `fullloop` to `stop` (ported through `mapglobals`, `namevars`, `setcasts` and
-/// `finalstructure`, the tail; `prototypewarnings` is not). `oppool1` holds the
+/// `finalstructure`, the tail; superseded: "`prototypewarnings` is not"). `oppool1` holds the
 /// ported rules (`rules::OPPOOL1`) less those `togglerule` switched off (`rule:<name>` in
 /// `disabled`); the actions named `action:<name>` there (`DECOMP_SKIP_ACTIONS`) are left out. An
-/// action that is not ported fails when it runs with its group on.
+/// action that is not ported fails when it runs with its group on, and so does a pool while a
+/// rule that is not ported is on (`rules::pool::select`).
 pub fn universal(disabled: &std::collections::HashSet<String>) -> ActionTree {
     tree(false, disabled)
 }
@@ -96,7 +99,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             .collect()
     };
     // the rules of the groups that are on, less those `togglerule` switched off ("rule:<name>")
-    let pool1 = super::rules::select(super::rules::OPPOOL1, rule_on);
+    let pool1 = super::rules::select(super::rules::OPPOOL1, rule_on, !jumptable);
     let pool1 = t.pool("oppool1", pool1);
     let mut root = leaves(
         &mut t,
@@ -117,8 +120,8 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             // ActionLaneDivide (R3, `lanedivide.rs`). Superseded: until R3 it was the one action
             // not ported that did nothing instead of failing (group `base` cannot be switched off)
             ("lanedivide", "base", super::lanedivide::lane_divide),
-            ("multicse", "analysis", not_ported),
-            ("shadowvar", "analysis", not_ported),
+            ("multicse", "analysis", c::multi_cse),
+            ("shadowvar", "analysis", c::shadow_var),
             ("deindirect", "deindirect", c::deindirect),
             ("stackptrflow", "stackptrflow", c::stack_ptr_flow),
         ],
@@ -132,7 +135,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("varnodeprops", "base", varnode_props),
             ("heritage", "base", heritage_pass),
             ("paramdouble", "protorecovery", super::rules::param_double),
-            ("segmentize", "base", c::nothing),
+            ("segmentize", "base", c::segmentize),
             ("internalstorage", "base", c::nothing),
             ("forcegoto", "blockrecovery", c::nothing),
             ("directwrite", "protorecovery_a", c::direct_write),
@@ -145,7 +148,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("spacebase", "base", c::spacebase),
             ("infertypes", "typerecovery", super::infertypes::infer_types),
             ("nonzeromask", "analysis", super::rules::nonzero_mask),
-            ("restructure_varnode", "localrecovery", not_ported),
+            ("restructure_varnode", "localrecovery", super::mapstate::restructure_varnode),
         ],
     );
     mainloop.push(stackstall);
@@ -160,7 +163,7 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
     // oppool2 (stage R5): the `typerecovery` pointer rules and the `stackvars` rules.
     // The `stackvars` rules are on in the jump-table partial function too, as in the C++
     // (superseded: "runs without the `stackvars` rules"; see [`jumptable_partial`]).
-    let pool2 = super::rules::select(super::rules::OPPOOL2, rule_on);
+    let pool2 = super::rules::select(super::rules::OPPOOL2, rule_on, !jumptable);
     mainloop.push(t.pool("oppool2", pool2));
     mainloop.extend(leaves(
         &mut t,
@@ -168,8 +171,8 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("determinedbranch", "unreachable", c::determined_branch),
             ("unreachable", "unreachable", c::unreachable),
             ("nodejoin", "nodejoin", c::node_join),
-            ("conditionalexe", "conditionalexe", c::conditional_exe),
-            ("condconst", "analysis", not_ported),
+            ("conditionalexe", "conditionalexe", super::condexe::conditional_exe),
+            ("condconst", "analysis", super::condconst::conditional_const),
         ],
     ));
     let mainloop = t.group("mainloop", mainloop, true);
@@ -196,13 +199,13 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
     root.extend(leaves(
         &mut t,
         &[
-            ("mapped_local_sync", "localrecovery", not_ported),
+            ("mapped_local_sync", "localrecovery", super::mapstate::mapped_local_sync),
             // ActionStartCleanUp only records the varnode create index (`clean_up_index`), which
             // nothing ported reads
             ("startcleanup", "cleanup", c::nothing),
         ],
     ));
-    let cleanup = super::rules::select(super::rules::CLEANUP, rule_on);
+    let cleanup = super::rules::select(super::rules::CLEANUP, rule_on, !jumptable);
     root.push(t.pool("cleanup", cleanup));
     root.extend(leaves(
         &mut t,
@@ -218,7 +221,9 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("mergemultientry", "merge", super::merge::merge_multi_entry),
             ("mergecopy", "merge", super::merge::merge_copy),
             ("dominantcopy", "merge", super::merge::dominant_copy),
-            ("dynamicsymbols", "dynamic", not_ported),
+            // ActionDynamicSymbols, as ActionDynamicMapping above: dynamic symbols come only from
+            // console commands ghidra-rs does not have (`map hash`, `map equate`, `map unionfacet`)
+            ("dynamicsymbols", "dynamic", c::nothing),
             ("markindirectonly", "merge", super::merge::mark_indirect_only),
             ("mergeadjacent", "merge", super::merge::merge_adjacent_action),
             ("mergetype", "merge", super::merge::merge_type),
@@ -233,11 +238,17 @@ fn tree(jumptable: bool, disabled: &std::collections::HashSet<String>) -> Action
             ("outputprototype", "localrecovery", c::output_prototype),
             ("inputprototype", "fixateproto", c::input_prototype),
             ("mapglobals", "fixateglobals", c::map_globals),
-            ("dynamicsymbols", "dynamic", not_ported),
+            // ActionDynamicSymbols, as ActionDynamicMapping above: dynamic symbols come only from
+            // console commands ghidra-rs does not have (`map hash`, `map equate`, `map unionfacet`)
+            ("dynamicsymbols", "dynamic", c::nothing),
             ("namevars", "merge", super::namevars::name_vars),
             ("setcasts", "casts", super::cast::set_casts),
             ("finalstructure", "blockrecovery", super::finalstructure::final_structure),
-            ("prototypewarnings", "protorecovery", not_ported),
+            // ActionPrototypeWarnings has nothing to warn of: a dead-code delay override is made
+            // only by the restart heritage.rs fails on, a parameter without storage fails in
+            // locked.rs (`hasInputErrors`), no return value is assigned an error, and no model
+            // is unknown (made only when a prototype is decoded from XML)
+            ("prototypewarnings", "protorecovery", c::nothing),
             ("stop", "base", c::nothing),
         ],
     ));
@@ -253,17 +264,13 @@ pub(crate) fn not_ported(_: &mut Funcdata, _: &Arch) -> Result<i32> {
 
 /// The actions of the `jumptable` root's groups the partial function is simplified without while
 /// they are not ported (an entry is skipped only as long as its leaf is `not_ported`; any other
-/// unported action reached in the partial fails the table and is reported, `flow.rs`). Three
-/// of them can change which tables are recovered: `restructure_varnode` (in the partial it also
-/// runs `protectSwitchPaths`, coreaction.cc), `condconst` (constants along a guarded path) and
-/// `normalizebranches` (flips the CBRANCHs the guards are read from).
+/// unported action reached in the partial fails the table and is reported, `flow.rs`). One
+/// of them can change which tables are recovered: `normalizebranches` (flips the CBRANCHs the
+/// guards are read from). Superseded: "Three of them"; `restructure_varnode` (the partial runs
+/// its port, `mapstate.rs`), `multicse`, `shadowvar`, `condconst` and `mapped_local_sync` were
+/// entries until they were ported, and run in the partial.
 const PARTIAL_SKIP: &[&str] = &[
     "funclinkoutonly",
-    "restructure_varnode",
-    "multicse",
-    "shadowvar",
-    "condconst",
-    "mapped_local_sync",
     "normalizebranches",
     // stage S7: the last `localrecovery` action, after merging (not in the `jumptable` groups);
     // it only sets the output prototype's types, which no recovered address reads
@@ -278,9 +285,22 @@ const PARTIAL_SKIP: &[&str] = &[
 /// the partial function flow.rs falls back to when the stack heritage reaches a path not
 /// ported; `jumptable::fold_constants` then folds the read-only loads. Superseded: "the rules
 /// of later stages (R3 to R5, with `RuleLoadVarnode`) are missing from it".
-pub(crate) fn jumptable_partial(fd: &mut Funcdata, arch: &Arch, stack: bool) -> Result<()> {
-    let off: &[&str] = if stack { &[] } else { &["rule:loadvarnode", "rule:storevarnode"] };
-    match tree(true, &off.iter().map(|s| s.to_string()).collect()).perform(fd, arch)? {
+/// `alias` false leaves out `ActionRestructureVarnode` and `RuleAliasUpdate`, for the partial
+/// function flow.rs falls back to when they reach a path not ported (`mapstate.rs`). Every
+/// action `DECOMP_SKIP_ACTIONS` names (console.rs) is left out too: the reference patch skips
+/// an action by name in every root, so its partial function runs without it.
+pub(crate) fn jumptable_partial(fd: &mut Funcdata, arch: &Arch, stack: bool, alias: bool) -> Result<()> {
+    let mut off: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if !stack {
+        off.extend(["rule:loadvarnode", "rule:storevarnode"].map(String::from));
+    }
+    if !alias {
+        off.extend(["action:restructure_varnode", "rule:aliasupdate"].map(String::from));
+    }
+    if let Ok(skip) = std::env::var("DECOMP_SKIP_ACTIONS") {
+        off.extend(skip.split(',').filter(|s| !s.is_empty()).map(|s| format!("action:{s}")));
+    }
+    match tree(true, &off).perform(fd, arch)? {
         super::actiontree::Outcome::Complete => Ok(()),
         super::actiontree::Outcome::Break(at) => err(format!("the jumptable action stopped at {at}")),
     }
@@ -322,14 +342,17 @@ fn default_params(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     let evalfp = models.eval_called.unwrap_or(models.default);
     for i in 0..fd.qlst.len() {
         let c = fd.qlst[i];
-        let callee = fd.call(c).callee().and_then(|e| arch.functions.get(&e));
-        let proto = &mut fd.call_mut(c).proto;
-        if proto.model.is_some() {
+        if fd.call(c).proto.model.is_some() {
             continue;
         }
+        let callee = match fd.call(c).callee() {
+            Some(e) => arch.callee_proto(&mut fd.types, e)?,
+            None => None,
+        };
+        let proto = &mut fd.call_mut(c).proto;
         match callee {
             Some(f) => {
-                proto.copy(&f.proto);
+                proto.copy(&f);
                 if !proto.model_locked && !proto.has_matching_model(evalfp) {
                     proto.set_model(models, evalfp);
                 }
@@ -438,7 +461,7 @@ pub(crate) fn create_placeholder(fd: &mut Funcdata, arch: &Arch, c: CallId) -> R
     let slot = fd.op(op).ins.len();
     let spec = &arch.spec;
     let uniq = arch.sleigh.uniq_space();
-    let loadval = fd.op_stack_load(spec.stack_pointer, spec.stack_container, uniq, 0, 1, op, None)?;
+    let loadval = fd.op_stack_load(spec.stack_pointer, arch.stack_segment(), uniq, 0, 1, op, None)?;
     fd.op_insert_input(op, loadval, slot)?;
     fd.call_mut(c).stack_placeholder_slot = Some(slot);
     fd.vn_set(loadval, VnFlags::SPACEBASE_PLACEHOLDER);
@@ -453,35 +476,37 @@ fn unreachable(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     super::coreaction::unreachable(fd, arch)
 }
 
-/// Whether an op that is not a marker writes read-only memory, where `Funcdata::fillinReadOnly`
-/// warns "Read-only address (...) is written" (with `option readonly on`). The warning is not
-/// ported, so `print C` fails for such a function. This is wider than the C++ test: it leaves
-/// out `!isAddrForce() || !hasNoDescend()` and the one warning per op.
-pub(crate) fn readonly_written(fd: &Funcdata, arch: &Arch) -> bool {
-    let ram = Space::Sleigh(arch.sleigh.code_space());
-    arch.readonly_propagate
-        && fd.loc_all().into_iter().any(|vn| {
-            let v = fd.vn(vn);
-            v.space == ram
-                && v.def.is_some_and(|d| !matches!(fd.op(d).opc, Opcode::Indirect | Opcode::Multiequal))
-                && arch.is_readonly(v.offset, v.size)
-        })
+/// The written branch of `Funcdata::fillinReadOnly`: the op `def` writes the read-only varnode
+/// `vn`. A marker is only flagged; another op warns "Read-only address (...) is written" at
+/// its address the first time it is seen, unless the varnode is address-forced and unread.
+fn readonly_written(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, def: OpId) {
+    let warned = fd.op(def).flags.has(OpFlags::WARNING);
+    fd.op_mut(def).flags.set(OpFlags::WARNING);
+    let (v, o) = (fd.vn(vn), fd.op(def));
+    if warned || matches!(o.opc, Opcode::Indirect | Opcode::Multiequal) {
+        return;
+    }
+    if !v.has(VnFlags::ADDRFORCE) || !v.descend.is_empty() {
+        let (Space::Sleigh(s), addr) = (v.space, o.seq.addr) else { return };
+        let sp = &arch.sleigh.spaces[s as usize];
+        let msg = format!("Read-only address ({},{}) is written", sp.name, raw_offset(sp.size, v.offset));
+        fd.warning(&msg, addr);
+    }
 }
 
-/// Port of `ActionVarnodeProps::apply` on the first pass (before heritage): with
-/// `option readonly on`, each free read of read-only memory becomes the constant the image
-/// holds there (`Funcdata::fillinReadOnly`). The rest of the action needs later passes
-/// (auto-live holds) or masks that are all ones before heritage; x86 declares no volatile memory.
+/// Port of `ActionVarnodeProps::apply`: with `option readonly on`, each free read of read-only
+/// memory becomes the constant the image holds there and each write of it warns
+/// (`Funcdata::fillinReadOnly`). The rest of the action needs later passes (auto-live holds) or
+/// masks that are all ones before heritage; x86 declares no volatile memory.
 ///
 /// The C++ walks the varnodes in location order (`beginLoc`: address, size, then creation for
 /// free ones) and makes one constant per read; before heritage each free varnode has one
 /// reader, so the reads are visited in that order and the constants made in it.
 fn varnode_props(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
-    let mut changes = varnode_props_late(fd)?;
+    let mut changes = varnode_props_late(fd, arch)?;
     if !arch.readonly_propagate {
         return Ok(changes);
     }
-    fd.readonly_write |= readonly_written(fd, arch);
     let ram = Space::Sleigh(arch.sleigh.code_space());
     let mut reads = Vec::new();
     for op in fd.blocks.ops() {
@@ -558,9 +583,10 @@ fn handle_extended_zero(fd: &mut Funcdata, vn: VarnodeId) -> i32 {
 /// varnode whose non-zero mask and consume mask share no bit is replaced by zero
 /// (`totalReplaceConstant`; before `nonzeromask` first runs every mask is all ones, so only an
 /// unconsumed varnode qualifies).
-fn varnode_props_late(fd: &mut Funcdata) -> Result<i32> {
+fn varnode_props_late(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     let mut changes = 0;
     let pass = fd.heritage.pass();
+    let ram = Space::Sleigh(arch.sleigh.code_space());
     for vn in fd.loc_all() {
         let v = fd.vn(vn);
         if v.is_annotation() || v.is_dead() {
@@ -584,6 +610,13 @@ fn varnode_props_late(fd: &mut Funcdata) -> Result<i32> {
                 changes += 1;
             }
             continue;
+        }
+        // a written read-only varnode only gets a warning
+        if let Some(d) = v.def.filter(|_| arch.readonly_propagate && v.space == ram) {
+            if arch.is_readonly(v.offset, v.size) {
+                readonly_written(fd, arch, vn, d);
+                continue;
+            }
         }
         // no bit that may be non-zero is consumed: every read becomes 0
         if fd.nzmask(vn) & v.consume == 0 && !v.is_constant() {
@@ -643,6 +676,64 @@ mod tests {
         let brk = t.perform(&mut fd, arch).unwrap();
         assert_eq!(brk, Outcome::Break("universal:fullloop:mainloop:heritage start".into()));
         crate::decomp::print_raw(&fd, arch).unwrap()
+    }
+
+    /// 16-bit real mode (`x86:LE:16:Real Mode:default`: `x86.sla` with `x86-16-real.pspec`, whose
+    /// `<segmentop>` gives the user op `segment` its meaning, and `x86-16.cspec`):
+    /// `PUSH BP; MOV BP,SP; MOV BX,[BP+4]; MOV AX,[BX]; ADD AX,[0x1234]; POP BP; RET` at
+    /// `break start segmentize` and at the next `break start internalstorage`, against decomp_dbg
+    /// on the same bytes as a `load test file`: `ActionSegmentize` turns each
+    /// `segment(base, inner)` CALLOTHER into `segmentop(ram, base, inner)`.
+    #[test]
+    fn segmentize_x86_16_real_mode() {
+        let text = vec![0x55, 0x8b, 0xec, 0x8b, 0x5e, 0x04, 0x8b, 0x07, 0x03, 0x06, 0x34, 0x12, 0x5d, 0xc3];
+        let arch = arch16(text);
+        let mut fd = Funcdata::new(0x1000);
+        let mut t = universal(&Default::default());
+        t.set_break_start("segmentize").unwrap();
+        let brk = t.perform(&mut fd, &arch).unwrap();
+        assert_eq!(brk, Outcome::Break("universal:fullloop:mainloop:segmentize start".into()));
+        let raw = crate::decomp::print_raw(&fd, &arch).unwrap();
+        assert_eq!(raw, include_str!("../../tests/data/raw-segmentize-x86-16-before.txt"));
+        t.set_break_start("internalstorage").unwrap();
+        let brk = t.perform(&mut fd, &arch).unwrap();
+        assert_eq!(brk, Outcome::Break("universal:fullloop:mainloop:internalstorage start".into()));
+        let raw = crate::decomp::print_raw(&fd, &arch).unwrap();
+        assert_eq!(raw, include_str!("../../tests/data/raw-segmentize-x86-16-after.txt"));
+        // further on (the actions the checks skip on both engines off) the decompile fails
+        // loudly: the stack rules need the 2-byte stack space
+        let skip = ["multicse", "shadowvar", "condconst", "restructure_varnode", "mapped_local_sync"];
+        let mut fd = Funcdata::new(0x1000);
+        let mut t = universal(&skip.iter().map(|s| format!("action:{s}")).collect());
+        let e = t.perform(&mut fd, &arch).unwrap_err();
+        assert!(e.0.contains("a stack space of 2 bytes inside the 4-byte space ram"), "{e}");
+    }
+
+    /// The 16-bit real mode architecture with `text` at 0x1000.
+    fn arch16(text: Vec<u8>) -> Arch {
+        let path = Sleigh::sla_path("x86");
+        assert!(path.exists(), "{} is missing: run rust/build-sla.sh first", path.display());
+        let cspec = std::fs::read_to_string(path.with_file_name("x86-16.cspec")).unwrap();
+        let sleigh = Sleigh::load_with_pspec(&path, Some(&path.with_file_name("x86-16-real.pspec"))).unwrap();
+        let img = Image { sections: vec![section(".text", true, 0x1000, text)], ..Image::default() };
+        Arch::new(sleigh, img, &cspec).unwrap()
+    }
+
+    /// `MOV AX,0x40; MOV ES,AX; MOV AX,ES:[0x6c]; RET` in 16-bit real mode at
+    /// `break start deindirect` (the five actions of `skip` off on both
+    /// engines), against decomp_dbg: `RuleSegment` runs the `<segmentop>` script on the constant
+    /// base and offset, and the LOAD reads `#0x46c`.
+    #[test]
+    fn rule_segment_folds_constants_x86_16() {
+        let arch = arch16(vec![0xb8, 0x40, 0x00, 0x8e, 0xc0, 0x26, 0xa1, 0x6c, 0x00, 0xc3]);
+        let mut fd = Funcdata::new(0x1000);
+        let skip = ["multicse", "shadowvar", "condconst", "restructure_varnode", "mapped_local_sync"];
+        let mut t = universal(&skip.iter().map(|s| format!("action:{s}")).collect());
+        t.set_break_start("deindirect").unwrap();
+        let brk = t.perform(&mut fd, &arch).unwrap();
+        assert_eq!(brk, Outcome::Break("universal:fullloop:mainloop:stackstall:deindirect start".into()));
+        let raw = crate::decomp::print_raw(&fd, &arch).unwrap();
+        assert_eq!(raw, include_str!("../../tests/data/raw-rulesegment-x86-16.txt"));
     }
 
     /// `MOVSD XMM0, qword ptr [0x4020fc]; MOVSS XMM1, dword ptr [0x4020fe]; RET` with read-only

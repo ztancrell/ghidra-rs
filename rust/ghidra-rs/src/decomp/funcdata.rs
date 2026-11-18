@@ -101,9 +101,15 @@ pub struct Funcdata {
     pub(crate) symref: BTreeMap<VarnodeId, super::namevars::SymRef>,
     /// warnings at an address (`Funcdata::warning`), for `print C`
     pub(crate) comments: Vec<(u64, String)>,
-    /// a read-only varnode was written before heritage: the C++ warns at such a write
-    /// (`Funcdata::fillinReadOnly`), a warning that is not ported, so `print C` fails
-    pub(crate) readonly_write: bool,
+    /// the listing's comments of the function (the facts of stage S10), until `print C` asks
+    /// for the comments ([`Funcdata::fill_comment_cache`])
+    pub(crate) listing_comments: Vec<super::facts::ListingComment>,
+    /// the ram varnodes a data symbol of the facts holds (`Varnode::mapentry` of a symbol with
+    /// `Symbol::isIsolated`): their highs take no part in speculative merging
+    pub(crate) isolated: std::collections::HashSet<VarnodeId>,
+    /// the names the facts recommend for the function's variables
+    /// (`ScopeLocal::nameRecommend`), applied by `ActionNameVars`
+    pub(crate) name_recs: Vec<super::facts::NameRec>,
     /// the space the global scope owns (ram): its varnodes are `persist` and `addrtied`
     /// (`setVarnodeProperties` through `Scope::queryProperties`)
     pub(crate) ram: Option<u32>,
@@ -137,6 +143,10 @@ pub struct Funcdata {
     pub(crate) infer_passes: u32,
     /// `ActionConstantPtr::localcount`
     pub(crate) constptr_passes: u32,
+    /// `ActionSegmentize::localcount`: the action ran
+    pub(crate) segmentize_done: bool,
+    /// `ActionRestructureVarnode::numpass`: its runs so far ([`super::mapstate`])
+    pub(crate) restructure_passes: u32,
     /// `typerecovery_exceeded`: inference gave up after 7 passes
     pub(crate) typerecovery_exceeded: bool,
     /// the high variables (stage S7, `variable.rs`)
@@ -181,10 +191,12 @@ impl Funcdata {
             localmap: super::varmap::LocalMap::empty(),
             next_unique: UNIQUE_ANALYSIS,
             warnings: Vec::new(),
+            listing_comments: Vec::new(),
+            isolated: std::collections::HashSet::new(),
+            name_recs: Vec::new(),
             mapentry: BTreeMap::new(),
             symref: BTreeMap::new(),
             comments: Vec::new(),
-            readonly_write: false,
             ram: None,
             global: Vec::new(),
             uniq: None,
@@ -199,6 +211,8 @@ impl Funcdata {
             typerecovery_start: false,
             infer_passes: 0,
             constptr_passes: 0,
+            segmentize_done: false,
+            restructure_passes: 0,
             typerecovery_exceeded: false,
             highs: super::variable::Highs::default(),
             next_alive: 0,
@@ -364,15 +378,26 @@ impl Funcdata {
     /// (`setSymbolProperties` with `SymbolEntry::updateType`; a piece of one fails in heritage,
     /// `check_locked_param_pieces`).
     fn scoped_stack(&self, v: &mut Varnode) {
-        if self.localmap.in_scope(v.offset, v.size) {
-            v.flags.set(VnFlags::ADDRTIED);
+        // A symbol of `restructureVarnode` holding the varnode gives its flags
+        // (`setSymbolProperties`: `SymbolEntry::getAllFlags`, whatever `updateType` returns):
+        // `mapped`, `addrtied`, and `nolocalalias` once `markUnaliased` set it. So the next
+        // `syncVarnodesWithSymbols` finds nothing to change on it, and marks no INDIRECT.
+        match self.localmap.find_container(v.offset, v.size) {
+            Some(s) => {
+                v.flags.set(VnFlags::ADDRTIED.with(VnFlags::MAPPED));
+                if s.noalias {
+                    v.flags.set(VnFlags::NOLOCALALIAS);
+                }
+            }
+            None if self.localmap.in_scope(v.offset, v.size) => v.flags.set(VnFlags::ADDRTIED.with(VnFlags::MAPPED)),
+            None => {}
         }
         let Some(l) = &self.proto.locked else { return };
         let hit = l.inputs.iter().find(|p| {
             matches!(p.storage, Some(super::fspec::Storage::Stack { offset, size }) if offset == v.offset && size == v.size)
         });
         if let Some(p) = hit {
-            v.flags.set(VnFlags::ADDRTIED);
+            v.flags.set(VnFlags::ADDRTIED.with(VnFlags::MAPPED));
             v.ty = Some(p.ty);
             if self.types.meta(p.ty) != super::types::Meta::Unknown {
                 v.flags.set(VnFlags::TYPELOCK);
@@ -725,20 +750,33 @@ impl Funcdata {
 
     /// Port of `Funcdata::opStackLoad`: a LOAD of `size` bytes at stack offset `off`, computed
     /// from the stack pointer `sp` (space, offset, size) just before `op`; `ram` is the space the
-    /// stack lives in; `stackref` is a stack pointer to reuse (`buildParam`), none to read the
-    /// register afresh. Returns the loaded value.
+    /// stack lives in and `seg` its segment op, if it has one (`Arch::stack_segment`); `stackref`
+    /// is a stack pointer to reuse (`buildParam`), none to read the register afresh. Returns the
+    /// loaded value.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn op_stack_load(
         &mut self,
         sp: (u32, u64, u32),
-        ram: u32,
+        (ram, seg): (u32, Option<(u32, u32)>),
         uniq: u32,
         off: u64,
         size: u32,
         op: OpId,
         stackref: Option<VarnodeId>,
     ) -> Result<VarnodeId> {
-        let addout = self.create_stack_ref(sp, uniq, off, op, stackref)?;
+        let mut addout = self.create_stack_ref(sp, uniq, off, op, stackref)?;
+        if let Some((base_size, addr_size)) = seg {
+            // createStackRef: the stack's space is segmented, so the full address is
+            // `SEGMENTOP(space, 0, SP + off)`, right after the ADD
+            let addop = self.vn(addout).def.ok_or_else(|| LowlevelError("stack reference without its op".into()))?;
+            let segop = self.new_op(Opcode::Segmentop, self.op(op).seq.addr);
+            let segout = self.new_unique_out(addr_size, uniq, segop);
+            let spc = self.new_varnode_space(ram);
+            let base = self.new_constant(base_size, 0);
+            self.op_set_all_input(segop, &[spc, base, addout])?;
+            self.op_insert_after(segop, addop)?;
+            addout = segout;
+        }
         let addop = self.vn(addout).def.ok_or_else(|| LowlevelError("stack reference without its op".into()))?;
         let addr = self.op(op).seq.addr;
         let loadop = self.new_op(Opcode::Load, addr);
@@ -751,7 +789,8 @@ impl Funcdata {
     }
 
     /// Port of `Funcdata::createStackRef` (inserted before `op`; `stackref` reuses a stack pointer):
-    /// `u = SP + off`. x86 declares no segment op, so there is no `SEGMENTOP` around it.
+    /// `u = SP + off`. The `SEGMENTOP` around it in a segmented space is made by the caller,
+    /// `op_stack_load`.
     fn create_stack_ref(
         &mut self,
         sp: (u32, u64, u32),
@@ -1202,6 +1241,20 @@ impl Funcdata {
     pub(crate) fn add_header(&mut self, msg: String) {
         if !self.warnings.contains(&msg) && !self.comments.iter().any(|(a, m)| *a == self.entry && *m == msg) {
             self.warnings.push(msg);
+        }
+    }
+
+    /// Port of `CommentDatabaseGhidra::fillCache`: the first time the comments are asked for
+    /// (by `print C`), the listing's join them, after the warnings made so far. Of the types
+    /// the printer shows by default, a `header` comment at the entry is a header comment and
+    /// a `user2` comment is one at its address; the other types are not printed.
+    pub(crate) fn fill_comment_cache(&mut self) {
+        for c in std::mem::take(&mut self.listing_comments) {
+            match c.kind.as_str() {
+                "header" if c.addr == self.entry => self.warnings.push(c.text),
+                "user2" => self.comments.push((c.addr, c.text)),
+                _ => {}
+            }
         }
     }
 }

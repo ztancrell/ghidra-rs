@@ -68,6 +68,8 @@ pub struct Console {
     actions: Option<ActionTree>,
     /// groups switched off with `option currentaction decompile <group> off`
     disabled: std::collections::HashSet<String>,
+    /// `load facts` was given
+    facts: bool,
 }
 
 /// The `.sla` for a 32-bit PE (`GHIDRA_RS_SLA`, else x86.sla built by `build-sla.sh`) and the
@@ -78,6 +80,7 @@ fn x86_windows() -> Result<(Sleigh, String), String> {
         std::env::var_os("GHIDRA_RS_SLA").map(std::path::PathBuf::from).unwrap_or_else(|| Sleigh::sla_path("x86"));
     let cspec_path = path.with_file_name("x86win.cspec");
     let cspec = std::fs::read_to_string(&cspec_path).map_err(|e| format!("{}: {e}", cspec_path.display()))?;
+    Sleigh::refuse_truncated(&path)?;
     Ok((Sleigh::load(&path)?, cspec))
 }
 
@@ -147,9 +150,26 @@ impl Console {
                 self.arch = Some(Arch::new(sleigh, image, &cspec).map_err(|e| e.to_string())?);
                 writeln!(out, "{path} successfully loaded: Intel/AMD 32-bit x86").map_err(io)?;
             }
+            // `load facts <file>` (stage S10, no console command of Ghidra's): the facts of a
+            // Ghidra program replace the prelude; from here on names, data-types, prototypes
+            // and memory properties are Java Ghidra's
+            ["load", "facts", path] => {
+                let arch = self.arch.as_mut().ok_or("load facts: no program loaded")?;
+                let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+                arch.load_facts(text).map_err(|e| e.to_string())?;
+                self.facts = true;
+                writeln!(out, "{path} successfully loaded: facts").map_err(io)?;
+            }
             ["load", "addr", rest @ ..] if self.arch.is_some() => {
                 let a = addr(rest.first())?;
-                let name = rest.get(1).map_or_else(|| format!("func_0x{a:08x}"), |n| n.to_string());
+                // with facts, the function has the name the listing gives it
+                let listed =
+                    self.arch.as_ref().filter(|_| self.facts).and_then(|arch| arch.function_name(u64::from(a)));
+                let name = rest
+                    .get(1)
+                    .map(|n| n.to_string())
+                    .or(listed.map(String::from))
+                    .unwrap_or_else(|| format!("func_0x{a:08x}"));
                 writeln!(out, "Function {name}: 0x{a:08x}").map_err(io)?;
                 // `IfcAddrrangeLoad`: the function joins the global scope (`addFunction`), where
                 // constants and variables at its address find it. One already mapped there stays
@@ -292,6 +312,11 @@ impl Console {
                         fd.proto = p;
                     }
                 }
+                // with facts, the function starts from its record
+                let set = match (&mut self.fd, &mut self.arch) {
+                    (Some(fd), Some(arch)) => set.and_then(|()| arch.start_function(fd)),
+                    _ => set,
+                };
                 self.actions = set.is_ok().then_some(actions);
                 self.run_actions(set, out)?;
             }
@@ -303,9 +328,12 @@ impl Console {
                 self.run_actions(Ok(()), out)?;
             }
             ["print", "raw"] => {
-                let (Some(arch), Some(fd)) = (&self.arch, &self.fd) else {
+                let (Some(arch), Some(fd)) = (&self.arch, &mut self.fd) else {
                     return Err("print raw: no function decompiled".into());
                 };
+                // the C++ types a ram varnode from its global symbol when it is made; ghidra-rs before
+                // a pass reads types, and none has run at a break with `typerecovery` off
+                crate::decomp::symbol_types(fd, arch);
                 write!(out, "{}", crate::decomp::print_raw(fd, arch).map_err(|e| e.to_string())?).map_err(io)?;
             }
             // `IfcParseLine`: a C declaration (types, or a locked function prototype)

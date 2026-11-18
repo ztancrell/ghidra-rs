@@ -15,11 +15,14 @@ mod blocktransform;
 mod cast;
 mod collapse;
 mod comment;
+mod condconst;
+mod condexe;
 mod coreaction;
 mod cover;
 mod cparse;
 mod cspec;
 mod emulate;
+mod facts;
 mod finalstructure;
 mod flow;
 mod fspec;
@@ -32,6 +35,7 @@ mod jumptable;
 mod lanedivide;
 mod lateres;
 mod locked;
+mod mapstate;
 mod merge;
 mod namevars;
 mod nodejoin;
@@ -54,6 +58,8 @@ mod subfloat;
 mod subflow;
 mod transform;
 mod types;
+mod userop;
+mod valueset;
 mod variable;
 mod varmap;
 mod varnode;
@@ -65,7 +71,9 @@ use fspec::FuncProto;
 use std::collections::{BTreeMap, HashMap};
 
 pub use funcdata::Funcdata;
+pub(crate) use infertypes::symbol_types;
 pub use print::print_raw;
+pub(crate) use printc::is_string;
 pub use printc::print_c;
 
 /// `print map` (`IfcPrintMap` without a name): the bounds and symbols of the local scope.
@@ -136,6 +144,8 @@ pub struct Arch {
     pub(crate) sleigh: Sleigh,
     pub(crate) image: Image,
     pub(crate) spec: CompilerSpec,
+    /// the segment and jump-assist user ops of the specs (`Architecture::userops`)
+    pub(crate) userops: userop::UserOps,
     /// `map function`: entry -> the function
     pub(crate) functions: HashMap<u64, Function>,
     /// the register names, for `Address::printRaw`
@@ -163,9 +173,55 @@ pub struct Arch {
     /// the program-wide data-types (`Architecture::types`): the core types and those `parse
     /// line` defines; each decompile starts from a copy
     pub(crate) types: types::TypeFactory,
+    /// `load facts` (stage S10): the facts of a Ghidra program, which stand in for the Java
+    /// side of Ghidra's decompiler (names, data symbols, prototypes, memory properties)
+    pub(crate) facts: Option<Box<facts::Facts>>,
 }
 
 impl Arch {
+    /// `load facts <file>`: from here on the program is what the facts say, as Java Ghidra
+    /// tells its decompiler: Ghidra's core types replace the console's, the functions and
+    /// external references are the listing's, and read-only memory is the listing's too.
+    pub fn load_facts(&mut self, text: String) -> Result<()> {
+        let f = facts::Facts::load(self, text)?;
+        self.facts = Some(Box::new(f));
+        Ok(())
+    }
+
+    /// What a decompile of `fd` starts from with facts (`Funcdata::decode` of the function's
+    /// record and the queries Java answers for it): its prototype, the names recommended for
+    /// its variables, the listing's comments, and the tracked registers at its entry
+    /// (`ContextGhidra::getTrackedSet`), which replace the processor spec's. Nothing without
+    /// facts.
+    pub fn start_function(&mut self, fd: &mut Funcdata) -> Result<()> {
+        let Some(facts) = &self.facts else { return Ok(()) };
+        let f = facts.function(self, &mut fd.types, fd.entry, true)?;
+        fd.proto = f.proto;
+        fd.name_recs = f.name_recs;
+        fd.listing_comments = facts.comments(fd.entry)?;
+        self.tracked = facts.tracked(self, fd.entry)?;
+        Ok(())
+    }
+
+    /// Whether a data symbol of the facts holds the whole of `size` bytes at `off`
+    /// (`Scope::queryContainer`): such a varnode is linked to the symbol when it is made, every
+    /// data symbol Java Ghidra sends being type-locked.
+    pub(crate) fn data_holds(&self, off: u64, size: u32) -> bool {
+        let range = self.facts.as_ref().and_then(|f| f.data_range(off));
+        range.is_some_and(|(first, len)| off + u64::from(size) <= first + len)
+    }
+
+    /// The prototype a call to the function at `entry` starts from (`Scope::queryFunction`
+    /// and its `FuncProto`), none without a function there. With facts it is decoded from the
+    /// function's record, its data-types into `types`.
+    pub(crate) fn callee_proto(&self, types: &mut types::TypeFactory, entry: u64) -> Result<Option<FuncProto>> {
+        let Some(f) = self.functions.get(&entry) else { return Ok(None) };
+        match &self.facts {
+            Some(facts) => Ok(Some(facts.function(self, types, entry, false)?.proto)),
+            None => Ok(Some(f.proto.clone())),
+        }
+    }
+
     /// An architecture for `image` decoded by `sleigh`, with the compiler spec `cspec` (the
     /// text of a `.cspec` file).
     pub fn new(sleigh: Sleigh, image: Image, cspec: &str) -> Result<Arch> {
@@ -182,7 +238,12 @@ impl Arch {
             .iter()
             .map(|(name, val)| names.register(name).map(|(s, o, z)| (s, o, z, u64::from(*val))))
             .collect::<Result<_>>()?;
-        let spec = CompilerSpec::parse(cspec, &sleigh, &names)?;
+        // `parseProcessorConfig` (the `.pspec` user ops), then `parseCompilerConfig`
+        let mut userops = userop::UserOps::default();
+        for el in &sleigh.userop_specs {
+            userops.decode(el, &sleigh, &names)?;
+        }
+        let spec = CompilerSpec::parse(cspec, &sleigh, &names, &mut userops)?;
         let mut type_factory = types::TypeFactory::new();
         if let Some(m) = &spec.align_map {
             type_factory.align_map = m.clone();
@@ -203,6 +264,7 @@ impl Arch {
             sleigh,
             image,
             spec,
+            userops,
             functions: HashMap::new(),
             registers,
             tracked,
@@ -214,6 +276,7 @@ impl Arch {
             readonly_propagate: false,
             nan_ignore_all: false,
             types: type_factory,
+            facts: None,
         })
     }
 
@@ -222,11 +285,53 @@ impl Arch {
         self.sleigh.spaces.get(self.sleigh.code_space() as usize).map_or(4, |s| s.size)
     }
 
+    /// The space the stack lives in and, when that space has a segment op, the op's base size
+    /// and the space's address size (`Funcdata::createStackRef` wraps a stack address in a
+    /// SEGMENTOP there).
+    pub(crate) fn stack_segment(&self) -> (u32, Option<(u32, u32)>) {
+        let ram = self.spec.stack_container;
+        let size = self.sleigh.spaces.get(ram as usize).map_or(0, |s| s.size);
+        (ram, self.userops.segment_op(ram).map(|s| (s.base_size, size)))
+    }
+
+    /// Fails loudly for `what` when a spec declares a segment op: near and far pointers are not
+    /// ported (`SegmentedResolver` behind `Architecture::resolveConstant`, `markNearPointers`,
+    /// and `TypeFactory`'s `sizeOfPointer` / `sizeOfAltPointer` with the far-pointer rules of
+    /// PIECE and SUBPIECE), so types and constant pointers would differ silently.
+    pub(crate) fn no_segment_resolver(&self, what: &str) -> Result<()> {
+        match self.userops.segment_ops().next() {
+            Some(s) => err(format!(
+                "{what} with the segment op {}: near and far pointers are not implemented in ghidra-rs yet",
+                s.name
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// Fails loudly when the stack space is narrower than the space it lives in (16-bit x86: a
+    /// 2-byte `SP` in the 4-byte `ram`): stack offsets wrap and print at the container's size
+    /// here, where the C++ `SpacebaseSpace` has the stack pointer's.
+    pub(crate) fn no_narrow_stack(&self) -> Result<()> {
+        let (sp, container) = (self.spec.stack_pointer.2, self.stack_segment().0);
+        match self.sleigh.spaces.get(container as usize) {
+            Some(s) if s.size != sp => err(format!(
+                "a stack space of {sp} bytes inside the {}-byte space {} is not implemented in ghidra-rs yet",
+                s.size, s.name
+            )),
+            _ => Ok(()),
+        }
+    }
+
     /// `map function`: a function at `entry` with the default (empty) prototype.
     /// The locked prototype of the function at `entry` (`parse line extern`), which a decompile
     /// starts from; an unlocked one starts fresh, as every corpus script decompiles once.
     pub(crate) fn function_proto(&self, entry: u64) -> Option<FuncProto> {
         self.functions.get(&entry).filter(|f| f.proto.locked.is_some()).map(|f| f.proto.clone())
+    }
+
+    /// The name of the function at `entry`, if one is mapped there.
+    pub fn function_name(&self, entry: u64) -> Option<&str> {
+        self.functions.get(&entry).map(|f| f.name.as_str())
     }
 
     pub(crate) fn add_function(&mut self, entry: u64, name: String) {
@@ -284,6 +389,9 @@ impl Arch {
         let ptr = u64::from(self.externref_size());
         let in_externref =
             (off.saturating_sub(ptr - 1)..=off).any(|slot| self.externrefs.contains_key(&slot) && end <= slot + ptr);
+        if let Some(facts) = &self.facts {
+            return !in_externref && facts.readonly(off);
+        }
         !in_externref && self.readonly.iter().any(|&(s, e)| s <= off && off < e)
     }
 

@@ -46,6 +46,8 @@ pub(crate) struct HighVariable {
     /// `intersectdirty` and `extendcoverdirty`
     intersect_dirty: bool,
     extend_dirty: bool,
+    /// `type_finalized`: the data-type `finalizeDatatype` took from the variable's symbol
+    pub(crate) type_finalized: Option<TypeId>,
 }
 
 /// Port of `VariablePiece`: a high as a piece of a `VariableGroup`.
@@ -278,10 +280,15 @@ fn type_representative(fd: &mut Funcdata, h: HighId) -> VarnodeId {
 }
 
 /// Port of `HighVariable::updateType` / `getType` and `isTypeLock`: the representative's type
-/// and lock. ponytail: `stripType` is left out, no ported type has a stripped form.
+/// and lock, or the finalized type. ponytail: `stripType` is left out, no ported type has a
+/// stripped form.
 pub(crate) fn h_type(fd: &mut Funcdata, h: HighId) -> (TypeId, bool) {
     let rep = type_representative(fd, h);
-    (super::infertypes::vn_type(fd, rep), fd.vn(rep).has(VnFlags::TYPELOCK))
+    let ty = match fd.highs.get(h).type_finalized {
+        Some(t) => t,
+        None => super::infertypes::vn_type(fd, rep),
+    };
+    (ty, fd.vn(rep).has(VnFlags::TYPELOCK))
 }
 
 /// `HighVariable::getTiedVarnode`
@@ -889,30 +896,36 @@ fn block_intersection(fd: &mut Funcdata, a: HighId, b: HighId, blk: i32) -> bool
 
 /// Port of `HighIntersectTest::testUntiedCallIntersection` with `Cover::intersect(PcodeOpSet)`:
 /// whether the untied high is live across a call (or guarded STORE) that may change the tied
-/// one. `hasNoLocalAlias` is never set (`localrecovery` is not ported).
+/// one. A local variable without aliases (`hasNoLocalAlias`, set by `restructure_varnode`) is
+/// in nobody's way. (Superseded: "`hasNoLocalAlias` is never set".)
 fn untied_call_intersection(fd: &mut Funcdata, tied: HighId, untied: HighId) -> Result<bool> {
     if h_is(fd, tied, VnFlags::PERSIST) {
         return Ok(false);
     }
-    tied_varnode(fd, tied)?;
+    let rep = tied_varnode(fd, tied)?;
+    if fd.vn(rep).has(VnFlags::NOLOCALALIAS) {
+        return Ok(false);
+    }
     if fd.highs.affecting.is_none() {
-        fd.highs.affecting = Some(stack_affecting_ops(fd)?);
+        fd.highs.affecting = Some(stack_affecting_ops(fd));
     }
     let ui = |o| op_uindex(fd, o);
-    let set = fd.highs.affecting.as_ref().map(|s| s.intersects(h_cover(fd, untied), &ui));
+    // StackAffectingOps::affectsTest: a STORE with a guard only changes what its range holds
+    let (space, off) = (fd.vn(rep).space, fd.vn(rep).offset);
+    let affects = |op: OpId| {
+        fd.op(op).opc != super::opcode::Opcode::Store
+            || fd.heritage.store_guards.iter().find(|g| g.op == op).is_none_or(|g| g.is_guarded(space, off))
+    };
+    let set = fd.highs.affecting.as_ref().map(|s| s.intersects(h_cover(fd, untied), &ui, &affects));
     Ok(set.unwrap_or(false))
 }
 
-/// Port of `StackAffectingOps::populate`: every call, sorted by block
-/// (`PcodeOpSet::finalize`). The STOREs of valid store guards would join, with `affectsTest`
-/// reading the guard's analysed range, which is not ported (`heritage_guard.rs`): fail while
-/// one exists. Without them `affectsTest` is always true.
-fn stack_affecting_ops(fd: &Funcdata) -> Result<OpSet> {
-    if super::heritage_guard::has_valid_guards(fd, true) {
-        return err("merge: a STORE guard of the stack heritage pass would affect a merge (StackAffectingOps), and its range needs the value-set analysis (ValueSetSolver): not implemented in ghidra-rs yet");
-    }
-    let ops = fd.qlst.iter().map(|&c| fd.call(c).op).map(|op| (op_block_index(fd, op), fd.op(op).order, op));
-    Ok(OpSet::finalize(ops.collect()))
+/// Port of `StackAffectingOps::populate`: every call and the STORE of every valid store guard,
+/// sorted by block (`PcodeOpSet::finalize`).
+fn stack_affecting_ops(fd: &Funcdata) -> OpSet {
+    let calls = fd.qlst.iter().map(|&c| fd.call(c).op);
+    let stores = fd.heritage.store_guards.iter().filter(|g| g.is_valid(fd, super::opcode::Opcode::Store)).map(|g| g.op);
+    OpSet::finalize(calls.chain(stores).map(|op| (op_block_index(fd, op), fd.op(op).order, op)).collect())
 }
 
 /// Port of `Varnode::copyShadow`: the two hold the same value through COPYs.

@@ -15,7 +15,9 @@
 //! Slice 5: the label of a spliced block (`BlockBasic::getEntryAddr` over the merged cover),
 //! a global variable that is a whole function or external reference symbol (its name), string
 //! constants (`pushPtrCharConstant`, the string read as `StringManagerUnicode` reads it) and
-//! function pointer constants (`pushPtrCodeConstant`, the function's name).
+//! function pointer constants (`pushPtrCodeConstant`, the function's name). A variable running
+//! past the end of its local or data symbol prints as `pushMismatchSymbol` does (`_name` at the
+//! symbol's start, else the unnamed location).
 //!
 //! Every construct the C++ would print that is not ported fails with an error naming it, so a
 //! function prints identically or not at all. Not ported yet: the long suffix of a constant, a
@@ -115,11 +117,9 @@ pub(crate) fn negate(tok: &'static OpToken) -> Option<&'static OpToken> {
 
 /// `print C` (`IfcPrintCStruct`, `PrintC::docFunction`): the function `name` as C.
 pub fn print_c(fd: &mut Funcdata, arch: &Arch, name: &str) -> Result<String> {
+    fd.fill_comment_cache();
     if fd.structure.is_empty() {
         return err("Function not fully decompiled. No structure present.");
-    }
-    if fd.readonly_write || super::action::readonly_written(fd, arch) {
-        return err("print C: the warning for a written read-only address (fillinReadOnly) is not ported");
     }
     let mut p = PrintC::new(fd, arch);
     p.doc_function(name)?;
@@ -127,7 +127,7 @@ pub fn print_c(fd: &mut Funcdata, arch: &Arch, name: &str) -> Result<String> {
 }
 
 /// `AddrSpace::printRaw` for an address size `size`, wordsize 1.
-fn raw_offset(size: u32, off: u64) -> String {
+pub(crate) fn raw_offset(size: u32, off: u64) -> String {
     let sz = match size {
         s if s > 4 && off >> 32 == 0 => 4,
         s if s > 4 && off >> 48 == 0 => 6,
@@ -883,6 +883,16 @@ impl PrintC<'_> {
             return err("print C: the front leaf of a label is not a block copy");
         };
         let block = self.fd.blocks.block(bb);
+        // `queryCodeLabel`: the listing's label at the block's entry (the facts of stage S10),
+        // unless the block has a special label (joined or duplicated)
+        if let (Some(facts), false) = (&self.arch.facts, block.joined || block.duplicated) {
+            let first_op = block.ops.first().map(|&op| self.fd.op(op).seq.addr);
+            let label = block.entry_addr(first_op).map(|a| facts.label(a, self.fd.entry)).transpose()?;
+            if let Some(label) = label.flatten() {
+                self.emit.print_str(label);
+                return Ok(());
+            }
+        }
         let prefix = if block.joined {
             "joined_"
         } else if block.duplicated {
@@ -987,7 +997,8 @@ impl PrintC<'_> {
         let mut separator = false;
         for op in ops {
             let o = self.fd.op(op);
-            if o.is_marker() || o.flags.has(OpFlags::NONPRINTING) {
+            // PcodeOp::notPrinted
+            if o.is_marker() || o.flags.has(OpFlags::NONPRINTING) || o.halt == Some(Halt::NoReturn) {
                 continue;
             }
             if o.is_branch() && (self.is_set(modifier::NO_BRANCH) || o.opc == Opcode::Branch) {
@@ -1238,6 +1249,7 @@ impl PrintC<'_> {
             }
             Some(Halt::BadInstruction) => "halt_baddata",
             Some(Halt::Unimplemented) => "halt_unimplemented",
+            Some(Halt::NoReturn) => "halt",
         };
         self.push_op(&FUNCTION_CALL)?;
         self.push_atom(Atom::Text(nm.into()))?;
@@ -1482,7 +1494,23 @@ impl PrintC<'_> {
             return err("print C: part of a symbol without a data-type is not ported");
         };
         if i64::from(off) + i64::from(size) > i64::from(self.fd.types.size(sty)) {
-            return err("print C: a variable past the end of its symbol (pushMismatchSymbol) is not ported");
+            // PrintC::pushMismatchSymbol: the symbol's address with a size too small prints
+            // its name after an underscore, any other offset the unnamed location. Checked
+            // against decomp_dbg (`pcd`) and, for the data symbols of the facts (stage S10),
+            // against Java Ghidra. (Superseded: "without facts it still fails".)
+            if off == 0 {
+                let name = &self.fd.symtab.symbol(sym).name;
+                // '_' + getDisplayName(): the name without its namespaces, which the port's
+                // symbol keeps as one string
+                if name.contains("::") {
+                    return err(
+                        "print C: a variable larger than its symbol in a namespace (pushMismatchSymbol) is not ported",
+                    );
+                }
+                let name = format!("_{name}");
+                return self.push_atom(Atom::Text(name));
+            }
+            return self.push_unnamed_location(vn, size);
         }
         self.push_partial_symbol(sym, i64::from(off), size, is_read.then_some(vn))
     }
@@ -1991,7 +2019,9 @@ impl PrintC<'_> {
         }
         let arch = self.arch;
         let data = self.strings.entry(val).or_insert_with(|| string_data(arch, val, charsize as usize));
-        let Some((chars, trunc)) = data.clone() else { return Ok(None) };
+        let data = data.clone();
+        java_reads_the_same(arch, val, charsize, data.as_ref())?;
+        let Some((chars, trunc)) = data else { return Ok(None) };
         let mut t = String::from(if charsize > 1 { "L\"" } else { "\"" });
         for cp in chars {
             print_unicode(&mut t, cp)?;
@@ -2062,6 +2092,40 @@ fn print_unicode(t: &mut String, cp: i32) -> Result<()> {
 
 /// `StringManagerUnicode::maximumChars` (sleigh_arch.cc: 2048).
 const MAXIMUM_CHARS: usize = 2048;
+
+/// With facts (stage S10) Java reads a string (`DecompileCallback.getStringData`): the listing's
+/// defined string data holding the address, with its length, character set and translation,
+/// else a terminated string of the bytes. [`string_data`] reads the bytes up to a terminator.
+/// The two are taken to agree on a whole string of plain one-byte ASCII that either lies
+/// outside defined string data, or in a string the export found plain and that ends where the
+/// raw read does (`Facts::string_at`); and on no string where the listing defines none. Any
+/// other case fails.
+// ponytail: outside defined string data, bytes without a terminator within `MAXIMUM_CHARS`
+// are no string here and are taken as none in Java (its limit may differ by one character)
+fn java_reads_the_same(arch: &Arch, addr: u64, charsize: u32, data: Option<&(Vec<i32>, bool)>) -> Result<()> {
+    let Some(facts) = &arch.facts else { return Ok(()) };
+    let defined = facts.string_at(addr);
+    let plain = |&c: &i32| matches!(c, 0x20..=0x7e | 9 | 10 | 13);
+    let same = match data {
+        None => defined.is_none(),
+        Some((chars, trunc)) => {
+            let whole = charsize == 1 && !trunc && chars.len() + 2 < MAXIMUM_CHARS && chars.iter().all(plain);
+            whole && defined.is_none_or(|(at, n)| n.is_some_and(|n| n.saturating_sub(at) == chars.len() as u64))
+        }
+    };
+    if !same {
+        return err("print C: a string Java Ghidra reads (getStringData) from defined string data of another length or form, or that is not plain ASCII, is not ported");
+    }
+    Ok(())
+}
+
+/// Port of `StringManager::isString`: whether a string of characters of `charsize` bytes
+/// (not an empty one) is at `addr`.
+pub(crate) fn is_string(arch: &Arch, addr: u64, charsize: u32) -> Result<bool> {
+    let data = string_data(arch, addr, charsize as usize);
+    java_reads_the_same(arch, addr, charsize, data.as_ref())?;
+    Ok(data.is_some_and(|(chars, _)| !chars.is_empty()))
+}
 
 /// Port of `StringManagerUnicode::getStringData` (with `checkCharacters` and
 /// `assignStringData`), read as `escapeCharacterData` reads the UTF-8 it stores: the code

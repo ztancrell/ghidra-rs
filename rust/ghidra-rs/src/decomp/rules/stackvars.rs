@@ -6,7 +6,8 @@
 //!
 //! Not ported, failing loudly: an INDIRECT of the old STORE that overlaps the new COPY's output
 //! only in part (the PIECE/SUBPIECE rebuild of `opCollapseIndirectsForCopy`). Not modelled:
-//! `PcodeOp::isStoreUnmapped` (only `ActionRestructureVarnode` sets it, not ported), word sizes
+//! `PcodeOp::isStoreUnmapped` (only `ActionInternalStorage` sets it, and no x86 model declares
+//! internal storage; superseded: "only `ActionRestructureVarnode` sets it"), word sizes
 //! other than 1 (`AddrSpace::addressToByte`).
 
 use super::*;
@@ -32,7 +33,11 @@ fn correct_spacebase(fd: &Funcdata, arch: &Arch, vn: VarnodeId, spc: u32) -> Res
     if (v.space, v.offset, v.size) != (Space::Sleigh(sp), off, size) {
         return err("Unable to find entry for spacebase register");
     }
-    Ok((arch.spec.stack_container == spc).then_some(Space::Stack))
+    if arch.spec.stack_container != spc {
+        return Ok(None);
+    }
+    arch.no_narrow_stack()?;
+    Ok(Some(Space::Stack))
 }
 
 /// Port of `RuleLoadVarnode::vnSpacebase`: `vn` as a space base plus a constant.
@@ -133,7 +138,7 @@ pub(super) fn store_varnode(fd: &mut Funcdata, op: OpId, arch: &Arch) -> Result<
     fd.op_remove_input(op, 1);
     fd.op_remove_input(op, 0);
     fd.op_set_opcode(op, Copy);
-    // isStoreUnmapped is never set (ActionRestructureVarnode is not ported)
+    // isStoreUnmapped is never set (ActionInternalStorage: no model declares internal storage)
     collapse_indirects_for_copy(fd, op)?;
     Ok(1)
 }

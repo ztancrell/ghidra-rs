@@ -18,7 +18,10 @@
 //!   from name-locked symbols when it is cleared, and it holds none.
 //! - CAST ops (`setcasts` runs after this action) and proto-partial varnodes do not exist.
 //! - `VariablePiece` groups (`isSameGroup`) are not ported; merging fails loudly on them.
-//! - `finalizeDatatype` of a piece of a symbol (`getExactPiece`) fails loudly.
+//! - `finalizeDatatype` of a piece of a symbol that is a partial type (a partial struct, array,
+//!   union or enum piece: `getTypePartialStruct`) fails loudly in `getExactPiece`
+//!   (`infertypes.rs`). (Superseded: "of a piece of a symbol (`getExactPiece`) fails loudly",
+//!   "giving a variable a data-type other than its own fails loudly".)
 
 use std::collections::BTreeMap;
 
@@ -47,6 +50,7 @@ pub(crate) fn name_vars(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     }
     let mut namerec = Vec::new();
     link_symbols(fd, arch, &mut namerec)?;
+    recover_name_recommendations(fd)?;
     look_for_bad_jump_tables(fd)?;
     look_for_func_param_names(fd, &namerec)?;
     let mut base = 1;
@@ -71,6 +75,38 @@ pub(crate) fn name_vars(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         fd.symtab.rename_symbol(sym, &name);
     }
     Ok(0)
+}
+
+/// Port of `ScopeLocal::recoverNameRecommendationsForSymbols` for the recommendations the facts
+/// of stage S10 make (`Funcdata::name_recs`: stack variables, without a use point): the
+/// address-tied symbol starting at the recommended storage, when its name is undefined, takes
+/// the name and is name-locked. (`remapVarnode` of the linked varnode changes nothing for a
+/// symbol mapped at that address without a use point.)
+fn recover_name_recommendations(fd: &mut Funcdata) -> Result<()> {
+    for rec in std::mem::take(&mut fd.name_recs) {
+        let super::fspec::Storage::Stack { offset, size } = rec.storage else {
+            return err("namevars: a name recommended for a variable outside the stack is not ported");
+        };
+        // findOverlap: the first entry overlapping the storage, whatever its use point
+        let overlap = fd.symtab.overlapping(LOCAL, Space::Stack, offset, size);
+        let first = overlap.iter().filter_map(|&sym| {
+            let s = fd.symtab.symbol(sym);
+            let end = u128::from(offset) + u128::from(size);
+            let hit = |e: &&SymbolEntry| {
+                e.space == Space::Stack && u128::from(e.offset) < end && offset < e.offset + u64::from(e.size)
+            };
+            s.entries.iter().filter(hit).map(|e| e.offset).min().map(|at| (at, sym))
+        });
+        let Some((at, sym)) = first.min() else { continue };
+        let s = fd.symtab.symbol(sym);
+        if at != offset || !s.flags.addr_tied || !s.is_name_undefined() {
+            continue;
+        }
+        let name = fd.symtab.make_name_unique(LOCAL, &rec.name)?;
+        fd.symtab.rename_symbol(sym, &name);
+        fd.symtab.lock_symbol(sym, false, true);
+    }
+    Ok(())
 }
 
 /// `HighVariable::getSymbol`: the symbol and entry of the first member linked to one, and that
@@ -223,6 +259,7 @@ fn link_symbol(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId) -> Result<Option<S
     if persist {
         // queryProperties: the global scope owns the storage; a variable a function or an external
         // reference holds stays unlinked here and the printer fails on it
+        super::facts::query_symbol(fd, arch, space, offset)?;
         if let Some(GlobalHit::Data(sym, e)) = global_container(fd, arch, space, offset, Some(usepoint))? {
             if !fd.symtab.symbol(sym).entries[e].conflict {
                 fd.mapentry.insert(vn, (sym, e));
@@ -234,6 +271,19 @@ fn link_symbol(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId) -> Result<Option<S
     // queryProperties(addr, 1, usepoint): the local scope, then (for storage it does not own)
     // the global one, which holds nothing outside its ranges
     if let Some((sym, e)) = fd.symtab.find_container(LOCAL, space, offset, 1, Some(usepoint))? {
+        // handleSymbolConflict: a varnode that is not address-tied, in a symbol valid everywhere
+        // (one of `restructure_varnode`) whose own storage holds another variable, gets a
+        // dynamic symbol instead
+        let entry = &fd.symtab.symbol(sym).entries[e];
+        let (everywhere, at) = (entry.uselimit.0.is_empty(), (entry.space, entry.offset, entry.size));
+        let v = fd.vn(vn);
+        if everywhere && !v.is_input() && !v.has(VnFlags::ADDRTIED) {
+            for other in fd.loc_at(at.0, at.1, at.2) {
+                if high(fd, other)? != h {
+                    return err("namevars: a variable in the storage of another one's symbol (buildDynamicSymbol) is not ported");
+                }
+            }
+        }
         if !fd.symtab.symbol(sym).entries[e].conflict {
             fd.mapentry.insert(vn, (sym, e));
             return Ok(Some(sym));
@@ -353,6 +403,7 @@ fn link_symbol_reference(fd: &mut Funcdata, arch: &Arch, in0: VarnodeId, off: Va
     let hit = if space == Space::Stack {
         fd.symtab.find_container(LOCAL, Space::Stack, addr, 1, None)?.map(|(s, e)| GlobalHit::Data(s, e))
     } else {
+        super::facts::query_symbol(fd, arch, space, addr)?;
         global_container(fd, arch, space, addr, None)?
     };
     let r = match hit {
@@ -393,17 +444,18 @@ fn link_spacebase_symbol(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, namerec:
     Ok(())
 }
 
-/// Port of `HighVariable::finalizeDatatype` for a high holding a whole symbol: the symbol's
-/// data-type becomes the variable's. Nothing ported reads `type_finalized`, so a type that
-/// would change, or a piece of the symbol, fails.
+/// Port of `HighVariable::finalizeDatatype`: the piece of the symbol's data-type the variable
+/// covers (`getExactPiece`, `infertypes.rs`; the whole type for a whole symbol) becomes the
+/// variable's, when there is one and it is not unknown. It stays (`type_finalized`, read by
+/// `variable::h_type`). A piece that is a partial type fails. (Superseded: "Nothing ported
+/// reads `type_finalized`, so a type that would change, or a piece of the symbol, fails".)
 fn finalize_datatype(fd: &mut Funcdata, arch: &Arch, h: HighId, sym: SymbolId) -> Result<()> {
     let Some(cur) = fd.symtab.symbol(sym).ty else { return Ok(()) };
     let sz = fd.vn(fd.highs.get(h).inst[0]).size;
-    if symbol_offset(fd, arch, h)? > 0 || fd.types.size(cur) != sz {
-        return err("namevars: finalizeDatatype of a piece of a symbol (getExactPiece) is not ported");
-    }
-    if fd.types.meta(cur) != Meta::Unknown && cur != h_type(fd, h).0 {
-        return err("namevars: finalizeDatatype changing the data-type of a variable is not ported");
+    let off = symbol_offset(fd, arch, h)?.max(0);
+    let Some(tp) = super::infertypes::exact_piece(fd, arch, cur, off as u64, sz)? else { return Ok(()) };
+    if fd.types.meta(tp) != Meta::Unknown {
+        fd.highs.get_mut(h).type_finalized = Some(tp);
     }
     Ok(())
 }
@@ -595,5 +647,45 @@ fn build_default_name(
     match index.as_mut() {
         Some(i) => fd.symtab.build_variable_name(LOCAL, &req, i),
         None => fd.symtab.build_variable_name(LOCAL, &req, base),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::decomp::facts::NameRec;
+    use crate::decomp::fspec::Storage;
+
+    #[test]
+    fn name_recommendations_for_stack_variables() {
+        let mut fd = Funcdata::new(0x1000);
+        let entry = |offset| SymbolEntry {
+            space: Space::Stack,
+            offset,
+            size: 4,
+            uselimit: UseLimit::default(),
+            conflict: false,
+            piece: None,
+        };
+        let a = fd.symtab.add_symbol(LOCAL, "", None, None, Some(entry(0xffffff44))).unwrap();
+        let b = fd.symtab.add_symbol(LOCAL, "", None, None, Some(entry(0xffffff48))).unwrap();
+        let c = fd.symtab.add_symbol(LOCAL, "named", None, None, Some(entry(0xffffff50))).unwrap();
+        let rec = |offset, size, name: &str| NameRec { storage: Storage::Stack { offset, size }, name: name.into() };
+        // at a symbol's start; inside one (not its address); at one that has a name; at none
+        fd.name_recs = vec![
+            rec(0xffffff44, 4, "local_bc"),
+            rec(0xffffff4a, 2, "local_b6"),
+            rec(0xffffff50, 4, "local_b0"),
+            rec(0xffffff60, 4, "local_a0"),
+        ];
+        recover_name_recommendations(&mut fd).unwrap();
+        let s = |id| fd.symtab.symbol(id);
+        assert_eq!((s(a).name.as_str(), s(a).flags.name_locked), ("local_bc", true));
+        assert!(s(b).is_name_undefined() && !s(b).flags.name_locked);
+        assert_eq!(s(c).name, "named");
+        assert!(fd.name_recs.is_empty());
+        // a recommendation outside the stack is not ported
+        fd.name_recs = vec![NameRec { storage: Storage::Space { space: 2, offset: 0, size: 4 }, name: "x".into() }];
+        assert!(recover_name_recommendations(&mut fd).is_err());
     }
 }

@@ -88,12 +88,24 @@ pub(crate) fn follow_flow(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
 type Staged = std::result::Result<(Vec<u64>, Option<jumptable::ValueRange>), Fail>;
 
 /// The partial function of jump-table recovery (`stageJumpTable`): not made yet, made and
-/// simplified (with the unported error of its stack rules when it was made without them), or
-/// made with a failed `jumptable` action.
+/// simplified (and how), or made with a failed `jumptable` action.
 enum Partial {
     None,
-    Ready(Box<Funcdata>, Option<LowlevelError>),
+    Ready(Box<Funcdata>, Mode),
     Failed,
+}
+
+/// How the partial function was simplified.
+enum Mode {
+    /// by the `jumptable` root action as the C++ runs it, `ActionRestructureVarnode` and
+    /// `RuleAliasUpdate` included (`mapstate.rs`)
+    Exact,
+    /// without those two, where they reach a path not ported (that error): the table stands
+    /// only when no INDIRECT of a stack varnode they might collapse changes it
+    NoAlias(LowlevelError),
+    /// also without the `stackvars` rules, where the stack heritage reaches a path not ported:
+    /// that error
+    NoStack(LowlevelError),
 }
 
 /// The varnodes of the data flow into `start` in the partial function `p` (every input of every
@@ -151,6 +163,41 @@ fn stack_loads(p: &Funcdata, flow: &HashSet<VarnodeId>, on_sp: impl Fn(&VarnodeI
 
 fn ram_addr(a: u64) -> String {
     format!("(ram,0x{a:08x})")
+}
+
+/// The flow override `kind` of an instruction of the facts (stage S10) on its p-code, as Java
+/// applies it before the decompiler sees the ops (`PcodeEmit.dumpCallOverride` with
+/// `dumpNullReturn`): `CALL_RETURN` makes the final branch a call and adds `RETURN #0`. The
+/// conditional form and the other overrides are not ported.
+fn call_return_override(
+    ops: &mut Vec<crate::sleigh::PcodeOp>,
+    kind: &str,
+    ptr_size: u32,
+) -> std::result::Result<(), String> {
+    let unported = || format!("facts: the flow override {kind} is not ported");
+    if kind != "CALL_RETURN" {
+        return Err(unported());
+    }
+    // every other op must leave the flow alone, and a relative branch is not overridden
+    let (last, before) = ops.split_last_mut().ok_or_else(unported)?;
+    let is = |op: &crate::sleigh::PcodeOp, opc: Opcode| op.opc == opc as u8;
+    let flow = [Opcode::Branch, Opcode::Cbranch, Opcode::Branchind, Opcode::Call, Opcode::Callind, Opcode::Return];
+    if before.iter().any(|op| flow.iter().any(|&f| is(op, f))) {
+        return Err(unported());
+    }
+    if is(last, Opcode::Branch) {
+        if last.ins.first().is_none_or(|v| v.space == 0) {
+            return Ok(());
+        }
+        last.opc = Opcode::Call as u8;
+    } else if is(last, Opcode::Branchind) || is(last, Opcode::Return) {
+        last.opc = Opcode::Callind as u8;
+    } else if !is(last, Opcode::Call) && !is(last, Opcode::Callind) {
+        return Err(unported());
+    }
+    let null = crate::sleigh::Varnode { space: 0, offset: 0, size: ptr_size };
+    ops.push(crate::sleigh::PcodeOp { opc: Opcode::Return as u8, out: None, ins: vec![null] });
+    Ok(())
 }
 
 impl Flow<'_> {
@@ -361,10 +408,16 @@ impl Flow<'_> {
             .bytes_at(addr)
             .ok_or_else(|| EmitError::Fatal(LowlevelError(format!("Unable to load 512 bytes at r0x{addr:08x}"))))?;
         let len = sl.decode(&mut self.parse, addr, bytes).map_err(EmitError::BadData)?;
-        let ops = sl.pcode(&self.parse).map_err(|e| match e {
+        let mut ops = sl.pcode(&self.parse).map_err(|e| match e {
             PcodeError::Unimplemented => EmitError::Unimplemented,
             PcodeError::Invalid(e) => EmitError::Fatal(LowlevelError(e)),
         })?;
+        if let Some(facts) = &self.arch.facts {
+            for kind in facts.overrides(addr) {
+                call_return_override(&mut ops, kind, sl.spaces.get(sl.code_space() as usize).map_or(4, |s| s.size))
+                    .map_err(|e| EmitError::Fatal(LowlevelError(format!("{e} at r0x{addr:08x}"))))?;
+            }
+        }
         self.fd.emit_pcode(addr, &ops).map_err(EmitError::Fatal)?;
         Ok(len as u64)
     }
@@ -412,7 +465,17 @@ impl Flow<'_> {
                     self.end_instruction_at(op, i, maxtime);
                     *startbasic = true;
                 }
-                Opcode::Call => self.setup_call_specs(op)?,
+                Opcode::Call => {
+                    // checkForFlowModification: a callee that does not return is followed by
+                    // an artificial halt, which the walk picks up next
+                    if self.setup_call_specs(op)? {
+                        let addr = self.fd.op(op).seq.addr;
+                        self.artificial_halt(addr, Some(Halt::NoReturn))?;
+                        if let Some(halt) = self.fd.dead.pop() {
+                            self.fd.dead.insert(i, halt);
+                        }
+                    }
+                }
                 Opcode::Callind => {
                     self.setup_callind_specs(op);
                 }
@@ -521,23 +584,26 @@ impl Flow<'_> {
 
     /// Port of `FlowInfo::setupCallSpecs` with `queryCall` and `checkForFlowModification`: name
     /// the callee, take its flow effects, replace the target with the call's annotation and
-    /// queue a call with a fixup for injection. (The console's prototypes never say a function
-    /// does not return, so a call never ends flow.)
-    fn setup_call_specs(&mut self, op: OpId) -> Result<()> {
+    /// queue a call with a fixup for injection. Returns whether the callee does not return
+    /// (only the facts of stage S10 say so; the console's prototypes never do), having put the
+    /// warning.
+    fn setup_call_specs(&mut self, op: OpId) -> Result<bool> {
         let entry = self.fd.vn(self.fd.input(op, 0)?).offset;
-        let callee = self.arch.functions.get(&entry);
+        let callee = self.arch.callee_proto(&mut self.fd.types, entry)?;
         let mut spec = CallSpec::new(op, Some(entry), callee.is_some());
-        if let Some(f) = callee {
-            spec.proto.copy_flow_effects(&f.proto);
+        if let Some(p) = &callee {
+            spec.proto.copy_flow_effects(p);
         }
-        let inline = spec.proto.inject.is_some();
+        let (inline, no_return) = (spec.proto.inject.is_some(), spec.proto.no_return);
         let call = self.new_call(spec);
         let vn = self.fd.new_varnode_callspecs(call);
         self.fd.op_set_input(op, vn, 0)?;
         if inline {
             self.injectlist.push(call);
+        } else if no_return {
+            self.fd.warning("Subroutine does not return", self.fd.op(op).seq.addr);
         }
-        Ok(())
+        Ok(no_return)
     }
 
     /// Port of `FlowInfo::setupCallindSpecs` (without overrides, an indirect call stays one).
@@ -562,7 +628,7 @@ impl Flow<'_> {
         let mut tables = Vec::new();
         let mut partial = Partial::None;
         for op in std::mem::take(&mut self.tablelist) {
-            let res = match jumptable::early_fail(self.fd, op) {
+            let res = match jumptable::early_fail(self.fd, self.arch, op) {
                 Some(f) => Err(f),
                 None => self.stage_jump_table(&mut partial, op)?,
             };
@@ -629,8 +695,9 @@ impl Flow<'_> {
     /// The partial function of `stageJumpTable`: a clone with the flow so far (`truncatedFlow`),
     /// simplified by the `jumptable` root action, and that action's result. `stack`: with the
     /// `stackvars` rules, as in the C++; without them the constant loads are folded by
-    /// `jumptable::fold_constants` instead.
-    fn build_partial(&mut self, stack: bool) -> Result<(Funcdata, Result<()>)> {
+    /// `jumptable::fold_constants` instead. `alias`: with `ActionRestructureVarnode` and
+    /// `RuleAliasUpdate`, as in the C++.
+    fn build_partial(&mut self, stack: bool, alias: bool) -> Result<(Funcdata, Result<()>)> {
         let mut p = self.fd.clone();
         p.jumptablerecovery_on = true;
         let mut pflow = Flow {
@@ -647,7 +714,7 @@ impl Flow<'_> {
             reinterpreted_present: self.reinterpreted_present,
         };
         pflow.generate_blocks()?;
-        let res = action::jumptable_partial(&mut p, self.arch, stack);
+        let res = action::jumptable_partial(&mut p, self.arch, stack, alias);
         if res.is_ok() {
             if !stack {
                 jumptable::fold_constants(&mut p, self.arch);
@@ -666,16 +733,24 @@ impl Flow<'_> {
             }
             Partial::None => {
                 let (nw, nc) = (self.fd.warnings.len(), self.fd.comments.len());
-                let (mut p, mut res) = self.build_partial(true)?;
-                // The stack heritage of the partial function reached a path ghidra-rs does not
-                // port (the value-set ranges of an indexed stack LOAD): the table is recovered
-                // from the partial function without the `stackvars` rules instead, and the
+                let (mut p, mut res) = self.build_partial(true, true)?;
+                let mut mode = Mode::Exact;
+                // `ActionRestructureVarnode` or `RuleAliasUpdate` reached a path ghidra-rs does
+                // not port (`mapstate.rs`): the partial function is made without them and its
+                // table tested below. When its stack heritage does too, the table is recovered
+                // from the partial function without the `stackvars` rules instead, and that
                 // error is kept for a table that one does not give (below).
-                let mut unported = None;
-                if let Err(e) = &res {
-                    if e.is_unported() {
-                        unported = Some(LowlevelError(e.0.clone()));
-                        (p, res) = self.build_partial(false)?;
+                if let (Err(e), true) = (&res, std::env::var_os("GHIDRA_RS_JT_DEBUG").is_some()) {
+                    eprintln!("jumptable partial in {:#x}: {e}", self.fd.entry);
+                }
+                if let Some(why) = res.as_ref().err().filter(|e| e.is_unported()).map(|e| LowlevelError(e.0.clone())) {
+                    (p, res) = self.build_partial(true, false)?;
+                    mode = Mode::NoAlias(why);
+                    if let Err(e) = &res {
+                        if e.is_unported() {
+                            mode = Mode::NoStack(LowlevelError(e.0.clone()));
+                            (p, res) = self.build_partial(false, false)?;
+                        }
                     }
                 }
                 self.carry_warnings(&p, nw, nc);
@@ -687,14 +762,22 @@ impl Flow<'_> {
                     if e.is_unported() {
                         return Err(e);
                     }
+                    // The action failing without `ActionRestructureVarnode` and
+                    // `RuleAliasUpdate` does not show that it fails with them: no failed table
+                    // is taken from that partial function.
+                    if let Mode::NoAlias(why) = &mode {
+                        return err(format!(
+                            "jump table: the partial function made without the alias analysis fails ({e}), which does not show that the C++ one does ({why})"
+                        ));
+                    }
                     *partial = Partial::Failed;
                     return Ok(Err(Fail::Normal(e.0)));
                 }
-                *partial = Partial::Ready(Box::new(p), unported);
+                *partial = Partial::Ready(Box::new(p), mode);
             }
             Partial::Ready(..) => {}
         }
-        let Partial::Ready(p, unported) = partial else { return err("jump table: no partial function") };
+        let Partial::Ready(p, mode) = partial else { return err("jump table: no partial function") };
         let p: &Funcdata = p;
         if std::env::var("GHIDRA_RS_JT_DEBUG").is_ok_and(|v| v == "2") {
             eprintln!("{}", super::print_raw(p, self.arch).unwrap_or_default());
@@ -733,7 +816,7 @@ impl Flow<'_> {
         }
         let res = jumptable::recover_addresses(p, self.arch, op);
         let jump = flow_into(p, p.op(op).ins[0]);
-        if let Some(e) = unported {
+        if let Mode::NoStack(e) = mode {
             // The partial function made without the stack rules. Its result stands only where
             // the stack rules could not change it; otherwise the error of the partial function
             // with them. No table: they could, when the jump depends on the stack pointer. A
@@ -754,11 +837,11 @@ impl Flow<'_> {
             if loud {
                 return Err(LowlevelError(e.0.clone()));
             }
-        } else {
+        } else if let Mode::NoAlias(why) = mode {
             // In the C++ partial function `ActionRestructureVarnode` and `RuleAliasUpdate`
             // (`opCollapseIndirectsForAlias`: the alias analysis, and the value-set ranges of
             // the STORE guards) remove the INDIRECTs of stack varnodes nothing can alias, at a
-            // STORE or a call; neither is ported. The result stands only when it is the same
+            // STORE or a call; this partial function was made without them. The result stands only when it is the same
             // with every such INDIRECT removed (then with any of them removed, taken as given),
             // and a table that fails while the jump reads one is never taken as failed: with
             // them removed the C++ rules may simplify further (`RuleMultiCollapse`).
@@ -775,9 +858,9 @@ impl Flow<'_> {
             let failed_on_one = matches!(res, Err(Fail::Normal(_)))
                 && jump.iter().any(|&v| p.vn(v).def.is_some_and(|d| is_stack_indirect(p, d)));
             if !same || failed_on_one {
-                return err(
-                    "jump table: the table depends on an INDIRECT of a stack varnode that RuleAliasUpdate may collapse (ActionRestructureVarnode in the partial function): not ported",
-                );
+                return err(format!(
+                    "jump table: the table depends on an INDIRECT of a stack varnode that RuleAliasUpdate may collapse, and the partial function was made without it ({why})"
+                ));
             }
         }
         if let Ok((.., true)) = res {
@@ -940,5 +1023,29 @@ impl Flow<'_> {
             self.fd.op_insert(op, bl, at);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sleigh::{PcodeOp, Varnode};
+
+    #[test]
+    fn call_return_override_of_a_jump() {
+        let ram = |offset| Varnode { space: 1, offset, size: 4 };
+        let op = |opc: Opcode, ins| PcodeOp { opc: opc as u8, out: None, ins };
+        let mut ops = vec![op(Opcode::Branch, vec![ram(0x401000)])];
+        call_return_override(&mut ops, "CALL_RETURN", 4).unwrap();
+        assert_eq!(ops.len(), 2);
+        assert_eq!((ops[0].opc, ops[0].ins[0].offset), (Opcode::Call as u8, 0x401000));
+        assert_eq!((ops[1].opc, ops[1].ins[0]), (Opcode::Return as u8, Varnode { space: 0, offset: 0, size: 4 }));
+        // a relative branch is left alone; a conditional one and the other overrides fail
+        let mut rel = vec![op(Opcode::Branch, vec![Varnode { space: 0, offset: 1, size: 4 }])];
+        call_return_override(&mut rel, "CALL_RETURN", 4).unwrap();
+        assert_eq!(rel.len(), 1);
+        let mut cbr = vec![op(Opcode::Cbranch, vec![ram(0x401000), Varnode { space: 2, offset: 0, size: 1 }])];
+        assert!(call_return_override(&mut cbr, "CALL_RETURN", 4).is_err());
+        assert!(call_return_override(&mut ops, "BRANCH", 4).is_err());
     }
 }
