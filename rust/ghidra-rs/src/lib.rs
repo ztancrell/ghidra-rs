@@ -4,6 +4,7 @@ pub mod analysis;
 pub mod console;
 pub mod decomp;
 pub mod edits;
+pub mod exports;
 pub mod factsout;
 pub mod fid;
 pub mod scripts;
