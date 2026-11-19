@@ -476,6 +476,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    28,751 / 1,897 / 316 (was 28,434 / 2,214 / 315), bodies differing 1,275 -> 824. Superseded:
    346 above. Left: Shared Return Calls and no-return per batch, the Stack analyzer per batch,
    getThunkedAddr's register tracking.
+   Shared Return Calls per batch at 398 (a FUNCTION_ANALYZER, its targets made by
+   CreateFunctionCmd): M500 381 (loud 30, silent 88), plain 208 (silent 163); plain purges
+   differing from Java 12.2 on auto-analysis functions 1,806 -> 761. Superseded: 347 and 189
+   above, and "Shared Return Calls ... per batch" in "Left".
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

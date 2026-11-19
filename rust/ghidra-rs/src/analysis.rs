@@ -1,4 +1,4 @@
-//! Function discovery, bodies and references for 32-bit x86 PE images, modelled on what
+//! Function discovery, bodies                 Task::SharedReturns => an.shared_returns(&set),nd references for 32-bit x86 PE images, modelled on what
 //! Ghidra's auto-analysis produces for the scripts in `main.rs` (ExportFunctions, ExportGaps).
 //! Every executable section is disassembled; results are reported for `.text`. See rust/README.md "Analysis" for what is and isn't covered.
 
@@ -434,9 +434,8 @@ impl Analysis {
                 priority::DATA_TYPE_PROPOGATION - 2,
                 Task::StartSearchAfterData,
             ),
-            // ponytail: Java runs Shared Return Calls at 398 on each batch of new functions; here
-            // once, after the other analyzers, on all of them (the walk's port takes one set)
-            analyzer("Shared Return Calls", Kind::Byte, priority::LOW_PRIORITY, Task::SharedReturns),
+            // CODE_ANALYSIS.before().before(): on each batch of functions added or with a changed body
+            analyzer("Shared Return Calls", Kind::Function, priority::CODE_ANALYSIS - 2, Task::SharedReturns),
             analyzer("X86 Function Callee Purge", Kind::Function, priority::FUNCTION_ANALYSIS, Task::Purge),
         ]);
         mgr.notify(Kind::Byte, &exec().map(|s| s.addr).collect());
@@ -472,10 +471,7 @@ impl Analysis {
                 Task::StartSearch | Task::StartSearchAfterData => {
                     an.start_search(img, sl, &mut p, &mut owner, &mut queue)
                 }
-                Task::SharedReturns => {
-                    an.funcs.retain(|a| an.insns.contains_key(a));
-                    an.shared_returns();
-                }
+                Task::SharedReturns => an.shared_returns(&set),
                 Task::Purge => an.callee_purge(img, &set, &body_noreturn),
             }
             mgr.notify(Kind::Data, &data);
@@ -1561,98 +1557,98 @@ impl Analysis {
     }
 
     /// SharedReturnAnalysisCmd with "assume contiguous functions" (x86's default) and without
-    /// conditional branches, run as the FUNCTION analyzer is: first on every function
-    /// discovery made, then on the functions each run created, until none is created. The jump
-    /// scan set is built per function of the run as `checkAboveFunction` /
+    /// conditional branches, on `set`: the entries of the functions added or with a body set
+    /// since its last turn (a FUNCTION_ANALYZER at 398). The jump
+    /// scan set is built per function of `set` as `checkAboveFunction` /
     /// `checkBelowFunction` build it (from the previous function's entry to the next one's,
     /// a single-range body taken out again), and the jump sources in it are walked in address
     /// order with Java's cached "function after / before the source", whose staleness decides
     /// some targets. A target becomes a function when an unconditional jump (a jump's first
     /// flow reference) passes the next function entry or goes before the previous one, no
     /// conditional flow reaches it, no instruction falls into it and it is not a lone return
-    /// (`checkIfCouldHaveFallThruTo`). The functions are created after the walk (Java queues
-    /// them with `AutoAnalysisManager.createFunction`).
-    fn shared_returns(&mut self) {
+    /// (`checkIfCouldHaveFallThruTo`). The functions are the ones with a body (the function
+    /// manager's); the targets go to `funcs` and are made by CreateFunctionCmd after the task
+    /// (Java queues them with `AutoAnalysisManager.createFunction` at 397, before the next
+    /// task). The jumps to a function in `set` are not given CALL_RETURN here
+    /// (`processFunctionJumpReferences`): ghidra-rs derives that override (`call_return`).
+    fn shared_returns(&mut self, set: &BTreeSet<u32>) {
         let mut cond = HashSet::new();
         for i in self.insns.values() {
             if i.flow == Flow::CondJump {
                 cond.extend(i.target);
             }
         }
-        let mut set: Vec<u32> = self.funcs.iter().copied().collect();
-        while !set.is_empty() {
-            let mut scan = RangeSet::default();
-            for &f in &set {
-                // checkAboveFunction
-                let prev = self.funcs.range(..f).next_back().copied().unwrap_or(0);
-                scan.add(prev, f);
-                // checkBelowFunction
-                let body = self.body_ranges(f);
-                if body.len() > 1 {
-                    body.iter().for_each(|&(lo, hi)| scan.add(lo, hi));
-                }
-                let next = self.funcs.range(f + 1..).next().map_or(u32::MAX, |&n| n - 1);
-                scan.add(f, next);
-                if body.len() <= 1 {
-                    body.iter().for_each(|&(lo, hi)| scan.remove(lo, hi));
-                }
+        let funcs = &self.bodies;
+        let mut scan = RangeSet::default();
+        for &f in set.iter().filter(|f| funcs.contains_key(f)) {
+            // checkAboveFunction
+            let prev = funcs.range(..f).next_back().map_or(0, |(&p, _)| p);
+            scan.add(prev, f);
+            // checkBelowFunction
+            let body = self.body_ranges(f);
+            if body.len() > 1 {
+                body.iter().for_each(|&(lo, hi)| scan.add(lo, hi));
             }
-            let mut created = BTreeSet::new();
-            // Java's cache: None is null, Some(None) is Address.NO_ADDRESS
-            let (mut after, mut before): (Option<Option<u32>>, Option<Option<u32>>) = (None, None);
-            let after_of = |a: u32| self.funcs.range(a + 1..).next().copied();
-            let before_of = |a: u32| self.funcs.range(..a).next_back().copied();
-            for (&src, i) in scan.ranges().flat_map(|(lo, hi)| self.insns.range(lo..=hi)) {
-                // the first flow reference: the jump's target, or a computed jump's lowest case
-                let dest = match i.flow {
-                    Flow::Jump => i.target,
-                    Flow::JumpInd => self.tables.get(&src).and_then(|c| c.iter().min().copied()),
-                    _ => None,
-                };
-                let Some(dest) = dest else { continue };
-                if cond.contains(&dest) {
+            let next = funcs.range(f + 1..).next().map_or(u32::MAX, |(&n, _)| n - 1);
+            scan.add(f, next);
+            if body.len() <= 1 {
+                body.iter().for_each(|&(lo, hi)| scan.remove(lo, hi));
+            }
+        }
+        let mut created = BTreeSet::new();
+        // Java's cache: None is null, Some(None) is Address.NO_ADDRESS
+        let (mut after, mut before): (Option<Option<u32>>, Option<Option<u32>>) = (None, None);
+        let after_of = |a: u32| funcs.range(a + 1..).next().map(|(&n, _)| n);
+        let before_of = |a: u32| funcs.range(..a).next_back().map(|(&p, _)| p);
+        for (&src, i) in scan.ranges().flat_map(|(lo, hi)| self.insns.range(lo..=hi)) {
+            // the first flow reference: the jump's target, or a computed jump's lowest case
+            let dest = match i.flow {
+                Flow::Jump => i.target,
+                Flow::JumpInd => self.tables.get(&src).and_then(|c| c.iter().min().copied()),
+                _ => None,
+            };
+            let Some(dest) = dest else { continue };
+            if cond.contains(&dest) {
+                continue;
+            }
+            if src < dest {
+                if after == Some(None) {
                     continue;
                 }
-                if src < dest {
+                if after.is_none_or(|a| a.is_some_and(|a| a <= src)) {
+                    after = Some(after_of(src));
                     if after == Some(None) {
                         continue;
                     }
-                    if after.is_none_or(|a| a.is_some_and(|a| a <= src)) {
-                        after = Some(after_of(src));
-                        if after == Some(None) {
-                            continue;
-                        }
+                }
+                if after.flatten().is_some_and(|a| dest >= a) {
+                    self.shared_target(dest, &mut created);
+                }
+            } else {
+                if after.is_none() {
+                    after = Some(after_of(src));
+                }
+                if before == Some(None) {
+                    let Some(a) = after.flatten() else { continue };
+                    if src < a {
+                        continue;
                     }
-                    if after.flatten().is_some_and(|a| dest >= a) {
-                        self.shared_target(dest, &mut created);
-                    }
-                } else {
-                    if after.is_none() {
-                        after = Some(after_of(src));
-                    }
+                    before = None;
+                    after = Some(after_of(src));
+                }
+                let keep = before.is_some() && after.is_some_and(|a| a.is_none_or(|a| src < a));
+                if !keep {
+                    before = Some(before_of(src));
                     if before == Some(None) {
-                        let Some(a) = after.flatten() else { continue };
-                        if src < a {
-                            continue;
-                        }
-                        before = None;
-                        after = Some(after_of(src));
-                    }
-                    let keep = before.is_some() && after.is_some_and(|a| a.is_none_or(|a| src < a));
-                    if !keep {
-                        before = Some(before_of(src));
-                        if before == Some(None) {
-                            continue;
-                        }
-                    }
-                    if before.flatten().is_some_and(|b| dest < b) {
-                        self.shared_target(dest, &mut created);
+                        continue;
                     }
                 }
+                if before.flatten().is_some_and(|b| dest < b) {
+                    self.shared_target(dest, &mut created);
+                }
             }
-            self.funcs.extend(&created);
-            set = created.into_iter().collect();
         }
+        self.funcs.extend(created);
     }
 
     /// SharedReturnAnalysisCmd.createFunction: nothing for an existing function (its jump
@@ -1660,7 +1656,7 @@ impl Analysis {
     /// into the target (`checkIfCouldHaveFallThruTo`): no instruction there, an instruction
     /// whose fallthrough is the target, or a lone terminator (a return).
     fn shared_target(&self, dest: u32, created: &mut BTreeSet<u32>) {
-        if self.funcs.contains(&dest) {
+        if self.bodies.contains_key(&dest) {
             return;
         }
         let Some(i) = self.insns.get(&dest) else { return };
@@ -1681,10 +1677,8 @@ impl Analysis {
     /// bytes, adjacent ones merged.
     fn body_ranges(&self, f: u32) -> Vec<(u32, u32)> {
         let mut out: Vec<(u32, u32)> = Vec::new();
-        // the body set (func.getBody); a function Shared Return Calls made on this turn has
-        // none yet
-        let body = self.bodies.get(&f).cloned().unwrap_or_else(|| self.body_of(f));
-        for a in body {
+        // the body set (func.getBody)
+        for &a in self.bodies.get(&f).into_iter().flatten() {
             let hi = a + self.insns[&a].len as u32 - 1;
             match out.last_mut() {
                 Some(last) if last.1.checked_add(1) == Some(a) => last.1 = hi,

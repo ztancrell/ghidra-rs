@@ -206,8 +206,8 @@ What discovery does, after Ghidra's analyzers:
   task at its priority, and the first task of the lowest priority runs next. Discovery's
   analyzers in it: Disassemble Entry Points (200, the seeds), Function Start Search (402),
   Function Start Search After Data (898, after the tables), Create Address Tables (899), X86
-  Function Callee Purge (500, on each batch of new functions) and Shared Return Calls (here a
-  last task at 10000 on all functions, as before; Java: 398 on each batch). The non-returning
+  Function Callee Purge (500, on each batch of new functions) and Shared Return Calls (398, on
+  each batch, as Java; superseded (2026-11-19): a last task at 10000 on all functions). The non-returning
   functions run after the queue (Java: 302). Without the purge analyzer the facts are byte for
   byte the ones of the loop it replaces (both function sets, 2026-11-18); with it see "Ghidra's
   task queue and the purge" below;
@@ -232,10 +232,12 @@ What discovery does, after Ghidra's analyzers:
   targets), and a target becomes a function when an unconditional jump passes the next
   function entry or goes before the previous one, no conditional flow reaches it, no
   instruction falls into it (a call counts, as `getFallFrom`) and it is not a lone return. The
-  functions are created after each walk, and the next walk runs on them alone. Not modelled:
-  Java runs the analyzer on each batch of functions its other analyzers add, and the batch
-  decides the scan set and the cache; here the first walk takes every function discovery made
-  at once. Superseded (2026-11-17): every unconditional jump past the next entry or before the
+  functions are made after the walk by CreateFunctionCmd (the body-from-creation path), and
+  the analyzer runs, as Java's FUNCTION_ANALYZER at 398, on each batch of functions added or
+  with a body set; the functions it walks over are the ones with a body. The CALL_RETURN
+  overrides it sets on jumps to a function (`processFunctionJumpReferences`) stay derived
+  (`call_return`, at any time, not from the moment the analyzer runs). Superseded (2026-11-19):
+  one walk over every function discovery made, after all other analyzers. Superseded (2026-11-17): every unconditional jump past the next entry or before the
   previous one made its target a function, a call did not count as falling into a target, and a
   lone return could become a function;
 - imports are read from the import directory through the loaded image (the mercs2 image keeps
@@ -5361,8 +5363,8 @@ Java's sites that set a body, and what is ported:
 
 Also not ported: getThunkedAddr's p-code register tracking (thunks of more than one
 instruction, e.g. adjustor stubs), CALL_TERMINATOR thunks, the one-byte placeholder body of a
-function made before its code, Shared Return Calls and the no-return analyzer per batch
-(here Shared Return Calls still runs once at 10000; it now reads the bodies set, func.getBody).
+function made before its code, the no-return analyzer per batch. Superseded (2026-11-19):
+Shared Return Calls now runs per batch at 398; see "Shared Return Calls per batch" below.
 
 **Thunks.** A function whose first instruction is a direct `JMP` is made a thunk of the target,
 the target made first where it is no function yet, unless the target lies in another body, has
@@ -5400,6 +5402,7 @@ The plain purge loss (about 100 functions Java leaves `unknown` that now get one
 0x40363f `JMP 0x416bb6`) comes from Shared Return Calls at 10000: 0x416bb6 is made a function
 by it after the first purge turn, so 0x40363f's first body runs on to 0x416bb6's RET; in Java
 Shared Return Calls runs at 398, before the purge. Porting it per batch is the next step.
+Superseded (2026-11-19): ported, see below.
 
 Own facts (`ghidra-diff.sh`): Java's function list M500 346 -> 347 / 499 (loud 31, silent
 122 -> 121; 0x5409f0 fixed, none newly missing), M8 4 / 7 (loud 2, silent 1) unchanged; plain
@@ -5407,6 +5410,30 @@ discovery M500 189 / 499 (loud 128, silent 182) and M8 2 / 7 (loud 2, silent 3) 
 `analyze --facts` 81 s with Java's list, 63 s plain, one run each. The facts of two runs are
 byte for byte the same. Not done: the Stack analyzer (903) on later batches. Not run: the full
 pass, the Mac, the shadow check, `--functions` / `--gaps` exports.
+
+#### Shared Return Calls per batch (2026-11-19)
+
+Shared Return Calls is a FUNCTION_ANALYZER at `CODE_ANALYSIS.before().before()` = 398
+(`SharedReturnAnalyzer`), so it runs on each batch of functions added or with a body set
+(AutoAnalysisManager's FUNCTION_ADDED / FUNCTION_BODY_CHANGED), before the purge (500). Its
+targets are made by CreateFunctionCmd after the task (Java schedules them at 397, before any
+other task), through `create_function`: a body that held the target is cut (a body change
+event, so the function goes to Shared Return Calls and the purge again). 0x40363f
+(`JMP 0x416bb6`): body 0x40363f-0x403653 and purge `unknown`, as Java 12.2 (was 4).
+
+| `j12body.sh` against Java 12.2 | before (f0f80bdab6) | after |
+|---|---|---|
+| plain: functions both / Java only / here only | 28,751 / 1,897 / 316 | 28,742 / 1,906 / 271 |
+| plain, purge differs (auto) | 1,891 (1,806) | 846 (761) |
+| plain, body differs (auto) | 824 (677) | 824 (677) |
+| plain, no-return differs (auto) | 125 (38) | 125 (38) |
+| Java's list, purge differs (auto) | 3,274 (2,526) | 2,316 (1,568) |
+| Java's list, body differs (auto) | 2,358 (2,002) | 2,358 (2,002) |
+| Java's list, no-return differs (auto) | 218 (34) | 218 (34) |
+
+Own facts (`ghidra-diff.sh`): Java's function list M500 347 -> 381 / 499 (loud 31 -> 30,
+silent 121 -> 88), M8 4 / 7 unchanged; plain discovery M500 189 -> 208 / 499 (loud 128,
+silent 182 -> 163), M8 2 / 7 unchanged. Not run: the full pass, the Mac, the shadow check.
 
 ## Speed
 
