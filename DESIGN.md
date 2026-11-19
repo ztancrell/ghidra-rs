@@ -480,6 +480,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    CreateFunctionCmd): M500 381 (loud 30, silent 88), plain 208 (silent 163); plain purges
    differing from Java 12.2 on auto-analysis functions 1,806 -> 761. Superseded: 347 and 189
    above, and "Shared Return Calls ... per batch" in "Left".
+   Full pass 2026-11-19 (83ee6a86e6, the tree of 82b968548a, desktop and Mac): 133 / 133 pairs, silent 0 in every pair, none
+   worse than `m3-int7` once 0x4c48d0 (a reference timeout at 120 s in `pmd`, `r5slock`,
+   `r5dtlocksv` M500) is run with `TIMEOUT` 400. Superseded: "Not run: the full pass, the Mac" for
+   this branch (`rust/README.md`).
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

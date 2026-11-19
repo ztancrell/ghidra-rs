@@ -5459,6 +5459,30 @@ and 218 (34) -> 54 (24); bodies differing 824 (677) -> 756 (674) and 2,358 (2,00
 (1,997); purges differing 846 (761) -> 824 (761) and 2,316 (1,568) -> 2,294 (1,568); M500 381
 and 208, M8 4 / 7 and 2 / 7 unchanged.
 
+#### Full pass of `analysis-queue` (2026-11-19)
+
+`bars-queue.sh` on 83ee6a86e6 (the tip then; the same tree is 82b968548a since a merge message got its trailers), desktop and Mac, `TIMEOUT` 120; summary (with the rerun)
+`rust/target/baselines/analysis-queue-83ee6a86e6.summary`, 133 lines, compared with
+`m3-int7-249c32cf94.summary`. The prelude changes with the analysis: `cksum` 3436140667, 835,201
+bytes, 30,084 `map function` lines (`m3-int7`: 285336359, 838,446, 30,208); the Mac's was
+regenerated and matched. 132 of 133 pairs in 3 h 54 min, 103 on the desktop (13,455 s busy) and
+29 on the Mac (12,738 s); the Mac dropped off the network during `pcc-t-switch` (`lost`,
+`INCOMPLETE`), rerun on the desktop: 2004 / 2005 (loud 1, silent 0), the baseline line. Silent 0
+in every pair. Lines that moved:
+
+- `pmd-m500` (Mac): reference finished 500 -> 499, identical 497 -> 496 (loud 3);
+  `r5slock-m500` (desktop) and `r5dtlocksv-m500` (Mac): reference finished 499 -> 498,
+  identical 469 -> 468 (loud 30). In all three the reference timed out at 120 s on 0x4c48d0
+  (the 120 s timeout edge noted under `REFCACHE`). Run alone with `TIMEOUT` 400, 0x4c48d0 is
+  identical in all three checks, so no function the port decompiles got worse.
+- "all outputs identical" one higher in 11 M500 lines: 498 -> 499 in `r5`, `r5c`, `r5dt` and
+  `r5typed`; 499 -> 500 in `r5d`, `s6`, `s6int4`, `s8r`, `subvar` and `svs6`; 490 -> 491 in
+  `svlock`. `stack-m500` outputs with stack SSA 318 -> 312. Not traced.
+
+Every other line equals the baseline. Superseded: "Not run: the full pass, the Mac" in the
+sections of this branch above (the shadow check and the `--functions` / `--gaps` exports are
+still not run).
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The

@@ -2200,6 +2200,14 @@ record kind at a time: `data` 43, `extrapop` 23, stack variables 17, the `func` 
 and INT_SEXT cases size data: 340 / 499, loud 31, silent 128 (was 328, 31, 140); M8 unchanged.
 Superseded: the 328 / 499 above for own facts with Java's function list.
 
+Full pass of branch `analysis-queue` (2026-11-19, `bars-queue.sh` on 83ee6a86e6, the tree of 82b968548a, desktop and
+Mac, compared with `m3-int7-249c32cf94.summary`): 133 / 133 pairs (the Mac lost `pcc-t-switch`,
+rerun on the desktop: the baseline line), silent 0 in every pair. `pmd`, `r5slock` and
+`r5dtlocksv` M500 are one identical lower because the reference timed out on 0x4c48d0 at 120 s;
+with `TIMEOUT` 400 it is identical in all three. "All outputs identical" one higher in 11 M500
+lines; `stack-m500` stack SSA 318 -> 312. New prelude `cksum` 3436140667 (30,084 functions).
+See `rust/README.md`, "Full pass of `analysis-queue`".
+
 ## Running stages in parallel
 
 Strict chain first: S0 → S1a → S1b → S2. After S2 the work fans out. Under the cap of two
