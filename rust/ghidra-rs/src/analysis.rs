@@ -524,6 +524,21 @@ impl Analysis {
                 "thunks disagree: {only_made} made by CreateFunctionCmd (thunk_of, the purges) are no one-jump body (the facts' names), {only_one_jump} one-jump bodies were not made thunks"
             ));
         }
+        // getThunkedAddr steps over an entry instruction without p-code (`NOP; JMP x` is a thunk
+        // of x); resolve_thunk does not. Counted for the one-byte NOP only
+        let nop_thunks = an
+            .bodies
+            .keys()
+            .filter(|&&f| {
+                img.block_of(f).is_some_and(|s| s.data.get((f - s.addr) as usize) == Some(&0x90))
+                    && an.insns.get(&(f + 1)).is_some_and(|i| i.flow == Flow::Jump)
+            })
+            .count();
+        if nop_thunks > 0 {
+            an.warnings.push(format!(
+                "not ported: getThunkedAddr past a no-p-code entry instruction: {nop_thunks} functions start `NOP; JMP` and are no thunks here"
+            ));
+        }
         an.stack_purges(img);
         Ok(an)
     }

@@ -5362,7 +5362,10 @@ Java's sites that set a body, and what is ported:
 | the edit scripts (`store.rs`) | `Store::apply` recomputes only the bodies its edits touch (functions made, removed, given a body or thunk mark; bodies holding a cleared, overridden, switch or new-entry address) from the flow (`body_of`, an approximation of Java re-running its commands); the rest keep their creation bodies. Superseded (2026-11-19): it recomputed every body (`compute_bodies`, removed) |
 
 Also not ported: getThunkedAddr's p-code register tracking (thunks of more than one
-instruction, e.g. adjustor stubs), CALL_TERMINATOR thunks, the one-byte placeholder body of a
+instruction, e.g. adjustor stubs), CALL_TERMINATOR thunks, getThunkedAddr stepping over an entry
+instruction without p-code (`NOP; JMP x` is a thunk of x in Java; `run` counts the functions
+that start with a one-byte `NOP` and a direct `JMP` and prints `warning: not ported:
+getThunkedAddr past a no-p-code entry instruction` when there are any; mercs2: none), the one-byte placeholder body of a
 function made before its code, the no-return analyzer per batch. Superseded (2026-11-19):
 Shared Return Calls now runs per batch at 398; see "Shared Return Calls per batch" below.
 
