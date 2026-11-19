@@ -134,6 +134,15 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   reruns; file dates are not enough. A timeout or any failed or incomplete reference run is
   never cached. ghidra-rs always reruns. `REFCACHE=0` turns it off (`decomp-diff.sh`,
   rust/README.md).
+- 2026-11-19: Bodies are kept from creation. Each function keeps the body CreateFunctionCmd
+  gave it, changed only where Java sets a body (fixupFunctionBody, the cut of an overlapping body
+  when a function is made, thunk creation, the no-return repairs); ghidra-rs no longer recomputes
+  bodies from the flow after each task. Then CreateFunctionCmd's thunks and the Stack analyzer on
+  later batches. Oracles split: analysis alone is checked against a plain Java 12.2
+  auto-analysis (`DumpPurges.java`); analysis with the ported mercs2 edit scripts against
+  `mercs2.facts`, which is mercs2's project after its own pipeline, not plain Java analysis
+  (0x4b6580: purge 0 in Java 12.2, `unknown` in the facts). See `rust/README.md`, "Bodies from
+  creation".
 
 ## Milestones
 
@@ -462,6 +471,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    The RTTI analyzer runs at 599, after the first purge turn: Java-known derived `unknown` 1,387 ->
    1,360, Java-unknown derived 1,769 -> 1,778 (9 adjustor stubs, a derived CALL_RETURN); M500 346.
    Superseded: "Left: ... the RTTI analyzer's priority" above.
+   Bodies kept from creation and set only at Java's sites, and CreateFunctionCmd's thunks (a
+   direct `JMP`): M500 347 (loud 31, silent 121), plain 189; plain discovery against Java 12.2
+   28,751 / 1,897 / 316 (was 28,434 / 2,214 / 315), bodies differing 1,275 -> 824. Superseded:
+   346 above. Left: Shared Return Calls and no-return per batch, the Stack analyzer per batch,
+   getThunkedAddr's register tracking.
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

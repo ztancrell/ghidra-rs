@@ -5243,7 +5243,8 @@ FUNCTION_ADDED and FUNCTION_BODY_CHANGED alike to `functionDefined`, so the purg
 gets a function again when its body changes, and `analyzeFunction` looks again where the purge
 is still unknown (or past 128). After each task the bodies are computed as a purge turn
 computes them (`Analysis::turn_bodies`), and a function whose body differs from the last
-notification is notified; the purge turn uses those bodies. Bodies and the non-returning
+notification is notified; the purge turn uses those bodies. Superseded (2026-11-19): bodies are kept from creation
+and set only where Java sets them; see "Bodies from creation" below. Bodies and the non-returning
 functions of a turn now take only functions with an instruction (CreateFunctionCmd makes none
 without one): 45 to 51 call targets that were never decoded counted as empty, non-returning
 functions before; alone, this changes no record. The fallback to a CALL_RETURN flow also takes
@@ -5296,6 +5297,8 @@ same for both rows (346 / 499 and 189 / 499), no function newly misses. `analyze
 
 Not modelled, ranked by what is left of the 1,743:
 
+Superseded (2026-11-19) for the first two items: see "Bodies from creation" below.
+
 - CreateFunctionCmd's thunks: a new function that is a `JMP` makes a function at its target
   first (`CreateThunkFunctionCmd.getReferencedFunction`), so the thunk's purge is the target's,
   unknown in the same batch. 702 of the 1,743 are 5-byte functions. 0x4b6580 (`JMP 0x57b780`, Java
@@ -5319,7 +5322,91 @@ Not modelled, ranked by what is left of the 1,743:
   so `getScalar(0).getSignedValue()` gives the positive value there.
 
 Not run: the full pass, the Mac, the shadow check (what `--abi` reads, the functions, bodies,
-non-returning functions and `Analysis::purge`, is unchanged).
+non-returning functions and `Analysis::purge`, is unchanged). Superseded (2026-11-19): with
+the bodies below, the functions, bodies and non-returning functions change; the shadow check
+was not run on them.
+
+#### Bodies from creation, and CreateFunctionCmd's thunks (2026-11-19)
+
+**Oracles** (the user's decision, DESIGN.md "Decided" 2026-11-19): analysis alone is checked
+against a plain Java 12.2 auto-analysis (`rust/target/aq-java/purges.txt` of the main checkout,
+dumped by `tools/ghidra/DumpPurges.java`: entry, purge, thunked function, body min / max /
+address count, no-return); analysis with the ported mercs2 edit scripts against `mercs2.facts`.
+
+**The body model** (`Analysis::create_function`). A function's body is set when the function is
+made and changed only where Java changes it; `Analysis::bodies` is no longer recomputed from the
+flow after each task. After each task (the purge excepted) the functions without a body are
+made in address order, as CreateFunctionCmd: the flow from the entry up to the entries of the
+functions made so far (`Analysis::walk`, getFunctionBody), less what other bodies hold;
+each function whose body overlaps loses the part from the new entry to the new body's end (it
+lies before) or up to its own entry (it lies after) (subtractBodyFromExisting). Bodies never
+overlap during the run (`body_owner`). The functions made and the bodies set are notified to the
+function analyzers (FUNCTION_ADDED, FUNCTION_BODY_CHANGED). With `--functions-from`, only the
+listed functions are made.
+
+Java's sites that set a body, and what is ported:
+
+| Java site | here |
+|---|---|
+| CreateFunctionCmd.createFunction, subtractBodyFromExisting | ported (`create_function`, `subtract_existing`) |
+| CreateFunctionCmd.resolveThunk, CreateThunkFunctionCmd.applyTo | ported for a direct `JMP` at the entry (getSimpleFlow), `resolve_thunk` |
+| CreateFunctionCmd.fixupFunctionBody | ported (`fixup_body`); its thunk case only for a target that is a function already |
+| FindNoReturnFunctionsAnalyzer.fixCallingFunctionBody | ported for this analysis's no-return rule (`find_noreturn`): callers of a new non-returning function are fixed up |
+| CreateFunctionCmd with findEntryPoint (setBody of a given body) | not ported: no ported analyzer makes functions that way |
+| CallFixupAnalyzer.fixCallingFunctionBody | not ported (no call-fixup analyzer here) |
+| EntryPointAnalyzer (recreate after the do-later set) | not ported (the do-later set is not modelled) |
+| AddressTable.fixupFunctionBody, DecompilerSwitchAnalyzer / DecompilerSwitchAnalysisCmd | not ported: switch cases are disassembled here before the function is made, so its first body holds them |
+| ClearFlowAndRepairCmd | not ported (no analyzer here clears flow) |
+| the edit scripts (`store.rs`) | as before: `Store::apply` recomputes the bodies from the flow (`compute_bodies`) |
+
+Also not ported: getThunkedAddr's p-code register tracking (thunks of more than one
+instruction, e.g. adjustor stubs), CALL_TERMINATOR thunks, the one-byte placeholder body of a
+function made before its code, Shared Return Calls and the no-return analyzer per batch
+(here Shared Return Calls still runs once at 10000; it now reads the bodies set, func.getBody).
+
+**Thunks.** A function whose first instruction is a direct `JMP` is made a thunk of the target,
+the target made first where it is no function yet, unless the target lies in another body, has
+no instruction or is a thunk on the way; the thunk's body is its body less the target's
+(0x4b6580: `JMP 0x57b780`, body 5 bytes, as Java 12.2). A thunk's purge is its thunked
+function's, read and set (`FunctionDB.getStackPurgeSize`); `callee_purges` gives each thunk its
+target's purge when `run` ends. The purge analyzer looks in the body, then in the flow from the
+entry (`locatePurgeInstruction`).
+
+**No-return rule on the bodies set.** A jump out of the body counts as returning unless its
+target is a non-returning function (a body no longer runs on into code another function holds).
+Non-returning functions are kept once found, as Java's flag.
+
+Against Java 12.2 (`j12body.sh`, `rust/target/aq/` of this worktree; functions in both lists;
+"auto" = `functions-analysis.csv`):
+
+| | before | after |
+|---|---|---|
+| plain discovery: functions both / Java only / here only | 28,434 / 2,214 / 315 | 28,751 / 1,897 / 316 |
+| plain, purge differs (auto) | 1,925 (1,763) | 1,891 (1,806) |
+| plain, body differs (auto) | 1,275 (919) | 824 (677) |
+| plain, no-return differs (auto) | 437 (28) | 125 (38) |
+| Java's list, purge differs (auto) | 3,714 (2,523) | 3,274 (2,526) |
+| Java's list, body differs (auto) | 2,604 (2,092) | 2,358 (2,002) |
+| Java's list, no-return differs (auto) | 557 (21) | 218 (34) |
+
+Against `mercs2.facts` (`purgecmp.sh`, auto-analysis functions, Java's list): Java `unknown`
+here known 1,778 -> 1,808, Java known here `unknown` 1,360 -> 1,354, equal 17,997 -> 17,973,
+stack variables equal 12,215 -> 12,238; plain discovery: 1,733 -> 1,808, 506 -> 506, equal
+17,983 -> 17,911. 5-byte functions whose purge differs from Java 12.2 (auto, Java's list):
+Java `unknown` here known 128 -> 117, Java known here `unknown` 41 -> 28; plain discovery
+88 -> 118 and 17 -> 3.
+
+The plain purge loss (about 100 functions Java leaves `unknown` that now get one, e.g.
+0x40363f `JMP 0x416bb6`) comes from Shared Return Calls at 10000: 0x416bb6 is made a function
+by it after the first purge turn, so 0x40363f's first body runs on to 0x416bb6's RET; in Java
+Shared Return Calls runs at 398, before the purge. Porting it per batch is the next step.
+
+Own facts (`ghidra-diff.sh`): Java's function list M500 346 -> 347 / 499 (loud 31, silent
+122 -> 121; 0x5409f0 fixed, none newly missing), M8 4 / 7 (loud 2, silent 1) unchanged; plain
+discovery M500 189 / 499 (loud 128, silent 182) and M8 2 / 7 (loud 2, silent 3) unchanged.
+`analyze --facts` 81 s with Java's list, 63 s plain, one run each. The facts of two runs are
+byte for byte the same. Not done: the Stack analyzer (903) on later batches. Not run: the full
+pass, the Mac, the shadow check, `--functions` / `--gaps` exports.
 
 ## Speed
 

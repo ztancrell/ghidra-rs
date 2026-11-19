@@ -232,6 +232,11 @@ pub struct Analysis {
     pub fixed_bodies: BTreeMap<u32, Vec<(u32, u32)>>,
     /// Thunk marks of the store: the thunked function, or `None` for "not a thunk".
     pub thunks: HashMap<u32, Option<u32>>,
+    /// The thunks CreateFunctionCmd made (`resolve_thunk`): thunk -> thunked function.
+    pub thunk_of: BTreeMap<u32, u32>,
+    /// During `run`: the function whose body holds each instruction (Ghidra's bodies do not
+    /// overlap); emptied when `run` ends.
+    body_owner: HashMap<u32, u32>,
 }
 
 const MAX_STACK: [usize; 2] = [16, 1024]; // local fold, whole-function walk
@@ -346,6 +351,8 @@ impl Analysis {
             overrides: HashMap::new(),
             fixed_bodies: BTreeMap::new(),
             thunks: HashMap::new(),
+            thunk_of: BTreeMap::new(),
+            body_owner: HashMap::new(),
         };
         let (rs, list) = sl.registers();
         an.fpu_ip = list.iter().find(|r| r.0 == "FPUInstructionPointer").map(|r| (rs, r.1));
@@ -433,10 +440,11 @@ impl Analysis {
             analyzer("X86 Function Callee Purge", Kind::Function, priority::FUNCTION_ANALYSIS, Task::Purge),
         ]);
         mgr.notify(Kind::Byte, &exec().map(|s| s.addr).collect());
-        // the bodies of the last notification, for FUNCTION_ADDED and FUNCTION_BODY_CHANGED, and
-        // the non-returning functions they were computed with
-        let mut notified: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
-        let mut turn_noreturn = HashSet::new();
+        // with `exact`, only the given functions are made (CreateFunctionCmd)
+        let allowed: Option<HashSet<u32>> = exact.then(|| extra.iter().copied().collect());
+        // the non-returning functions the bodies go by (FindNoReturnFunctionsAnalyzer's side);
+        // discovery's disassembly goes by `an.noreturn`, the imports'
+        let mut body_noreturn = an.noreturn.clone();
         while let Some((task, set)) = mgr.next_task() {
             let mut data = BTreeSet::new();
             match task {
@@ -468,116 +476,298 @@ impl Analysis {
                     an.funcs.retain(|a| an.insns.contains_key(a));
                     an.shared_returns();
                 }
-                Task::Purge => an.callee_purge(img, &set, &turn_noreturn),
+                Task::Purge => an.callee_purge(img, &set, &body_noreturn),
             }
             mgr.notify(Kind::Data, &data);
-            // AutoAnalysisManager sends both FUNCTION_ADDED and FUNCTION_BODY_CHANGED to
-            // functionDefined: a function is new to the function analyzers when it has a body it
-            // did not have at the last notification (bodies as a purge turn computes them; the
-            // purge changes none, and its turn uses the bodies computed here)
+            // CreateFunctionCmd on the functions the task found, in address order, then the
+            // no-return repairs. AutoAnalysisManager sends FUNCTION_ADDED and
+            // FUNCTION_BODY_CHANGED alike to functionDefined: the function analyzers get the
+            // functions made and the ones whose body was set (the purge sets none)
             if !matches!(task, Task::Purge) {
-                let known = an.turn_bodies();
-                turn_noreturn = std::mem::replace(&mut an.noreturn, known);
-                let defined = an.bodies.iter().filter(|(f, b)| notified.get(*f) != Some(*b)).map(|(&f, _)| f).collect();
+                let known = std::mem::replace(&mut an.noreturn, std::mem::take(&mut body_noreturn));
+                let mut defined = BTreeSet::new();
+                let new: Vec<u32> = an.funcs.iter().copied().filter(|f| !an.bodies.contains_key(f)).collect();
+                for f in new {
+                    an.create_function(f, allowed.as_ref(), &mut Vec::new(), &mut defined);
+                }
+                an.find_noreturn(&mut defined);
+                body_noreturn = std::mem::replace(&mut an.noreturn, known);
                 mgr.notify(Kind::Function, &defined);
-                notified = an.bodies.clone();
             }
         }
         if exact {
             an.funcs = extra.iter().copied().filter(|a| an.insns.contains_key(a)).collect();
+            an.bodies.retain(|f, _| an.funcs.contains(f));
         }
-        an.compute_bodies();
-        an.find_noreturn();
+        an.noreturn = body_noreturn;
+        an.body_owner = HashMap::new();
+        // a thunk's purge is its thunked function's (FunctionDB.getStackPurgeSize)
+        let thunked: Vec<(u32, u32)> = an.thunk_of.keys().map(|&f| (f, an.thunked_end(f))).collect();
+        for (f, t) in thunked {
+            if let Some(&n) = an.callee_purges.get(&t) {
+                an.callee_purges.insert(f, n);
+            }
+        }
         an.stack_purges(img);
         Ok(an)
     }
 
     /// X86 Function Callee Purge (`FunctionPurgeAnalysisCmd`) on the functions added or with a
-    /// changed body since its last turn, in address order: the operand of the body's first RET
-    /// or RETF (by address, among its first 2048 instructions; 0 without one); without a RET,
-    /// the purge the function a CALL_RETURN flow of the body (CALL_TERMINATOR or
-    /// COMPUTED_CALL_TERMINATOR, the last one) reaches has at this moment, unless that function
-    /// does not return. Only a function whose purge is unknown (or past 128) is looked at again
-    /// (`analyzeFunction`); a known one stays. `turn_noreturn`: the non-returning functions the
-    /// bodies were computed with (`turn_bodies`).
-    // ponytail: the body is the one of this turn, not of the moment the function was made, and
-    // the non-returning functions are this analysis's rule on this turn's bodies (Java's
-    // analyzer runs at 302 with its own rule); both kept for this turn only
-    fn callee_purge(&mut self, img: &Image, set: &BTreeSet<u32>, turn_noreturn: &HashSet<u32>) {
-        let known = std::mem::replace(&mut self.noreturn, turn_noreturn.clone());
+    /// changed body since its last turn, in address order (`analyzeFunction`). Only a purge
+    /// that is unknown (or past 128) is looked for; a thunk's purge is its thunked function's,
+    /// read and set (`FunctionDB.getStackPurgeSize`). The purge instruction is searched in the
+    /// body, else in the flow from the entry (`locatePurgeInstruction`); its value is the RET's
+    /// operand, or for a CALL_RETURN flow the purge the function it reaches has at this moment
+    /// (none for a non-returning one). `body_noreturn`: the non-returning functions the
+    /// bodies go by.
+    // ponytail: the non-returning functions are this analysis's rule on the bodies (Java's
+    // analyzer runs at 302 with its own rule)
+    fn callee_purge(&mut self, img: &Image, set: &BTreeSet<u32>, body_noreturn: &HashSet<u32>) {
+        let known = std::mem::replace(&mut self.noreturn, body_noreturn.clone());
         for &f in set.iter().filter(|f| self.bodies.contains_key(f)) {
-            // analyzeFunction: only a purge that is unknown (or past ±128) is looked for again
-            if self.callee_purges.get(&f).is_some_and(|&n| n <= 128) {
+            let at = self.thunked_end(f);
+            if self.callee_purges.get(&at).is_some_and(|&n| n <= 128) {
                 continue;
             }
-            let mut backup = None;
-            let mut purge = None;
-            for &a in self.bodies[&f].iter().take(2048) {
-                let i = &self.insns[&a];
-                if i.flow == Flow::Return {
-                    let sec = img.block_of(a).unwrap();
-                    let b = &sec.data[(a - sec.addr) as usize..];
-                    let b = &b[b.iter().take_while(|&&x| matches!(x, 0xf2 | 0xf3 | 0x66)).count()..];
-                    // an IRET is no "ret" or "retf": the search goes on
-                    purge = match b {
-                        [0xc2 | 0xca, lo, hi, ..] => Some(u16::from_le_bytes([*lo, *hi]) as u32),
-                        [0xc3 | 0xcb, ..] => Some(0),
-                        _ => continue,
-                    };
-                    break;
-                }
-                if matches!(i.flow, Flow::Jump | Flow::Call | Flow::CallInd | Flow::JumpInd) && self.call_return(a, i) {
-                    backup = Some(i);
-                }
-            }
-            let purge = purge.or_else(|| {
-                let t = backup?.target.filter(|t| self.bodies.contains_key(t) && !self.noreturn.contains(t))?;
-                self.callee_purges.get(&t).copied()
+            let found = self.purge_insn(img, &self.bodies[&f]).or_else(|| {
+                let flow = self.walk(f, |a| self.bodies.contains_key(&a));
+                self.purge_insn(img, &flow)
             });
-            if let Some(n) = purge {
-                self.callee_purges.insert(f, n);
+            if let Some(n) = found.and_then(|(a, n)| n.or_else(|| self.call_purge(a))) {
+                self.callee_purges.insert(at, n);
             }
         }
         self.noreturn = known;
     }
 
-    /// The bodies and non-returning functions of a purge turn: bodies of the functions that
-    /// have an instruction (CreateFunctionCmd makes none without one), the non-returning
-    /// functions of this analysis's rule on them. Returns the non-returning functions to
-    /// restore after the turn.
-    fn turn_bodies(&mut self) -> HashSet<u32> {
-        let known = self.noreturn.clone();
-        self.compute_bodies();
-        self.find_noreturn();
-        known
+    /// findPurgeInstruction: the first RET or RETF of `body` by address, among its first 2048
+    /// instructions, with its operand; else the last CALL_RETURN flow (CALL_TERMINATOR or
+    /// COMPUTED_CALL_TERMINATOR), without a value.
+    fn purge_insn(&self, img: &Image, body: &[u32]) -> Option<(u32, Option<u32>)> {
+        let mut backup = None;
+        for &a in body.iter().take(2048) {
+            let i = &self.insns[&a];
+            if i.flow == Flow::Return {
+                let sec = img.block_of(a)?;
+                let b = &sec.data[(a - sec.addr) as usize..];
+                let b = &b[b.iter().take_while(|&&x| matches!(x, 0xf2 | 0xf3 | 0x66)).count()..];
+                // an IRET is no "ret" or "retf": the search goes on
+                match b {
+                    [0xc2 | 0xca, lo, hi, ..] => return Some((a, Some(u16::from_le_bytes([*lo, *hi]) as u32))),
+                    [0xc3 | 0xcb, ..] => return Some((a, Some(0))),
+                    _ => continue,
+                }
+            }
+            if matches!(i.flow, Flow::Jump | Flow::Call | Flow::CallInd | Flow::JumpInd) && self.call_return(a, i) {
+                backup = Some((a, None));
+            }
+        }
+        backup
     }
 
-    /// Non-returning functions: no RETURN anywhere in the body; then redo the bodies.
-    fn find_noreturn(&mut self) {
+    /// getPurgeValue of a CALL_RETURN flow: the purge of the function at its target, unless
+    /// that function does not return.
+    fn call_purge(&self, a: u32) -> Option<u32> {
+        let t = self.insns[&a].target.filter(|t| self.bodies.contains_key(t) && !self.noreturn.contains(t))?;
+        self.callee_purges.get(&self.thunked_end(t)).copied()
+    }
+
+    /// The function a chain of thunks made by `resolve_thunk` ends at (`f` itself if none).
+    fn thunked_end(&self, mut f: u32) -> u32 {
+        for _ in 0..16 {
+            match self.thunk_of.get(&f) {
+                Some(&t) => f = t,
+                None => break,
+            }
+        }
+        f
+    }
+
+    /// CreateFunctionCmd at `f`, a function with an instruction and no body yet: the flow from
+    /// the entry up to the entries of the functions made so far (getFunctionBody), less what
+    /// other bodies hold (subtractBodyFromExisting, which also cuts those bodies), made a thunk
+    /// where the entry is a jump (resolveThunk); once more when the thunk's target, made
+    /// meanwhile, overlaps the body (OverlappingFunctionException). `referring`: the thunks
+    /// whose target this is (referringThunkAddresses); a body that holds one is no function.
+    /// Bodies made or cut go to `changed`. With `allowed`, only those functions are made.
+    fn create_function(
+        &mut self,
+        f: u32,
+        allowed: Option<&HashSet<u32>>,
+        referring: &mut Vec<u32>,
+        changed: &mut BTreeSet<u32>,
+    ) -> bool {
+        if self.bodies.contains_key(&f) || !self.insns.contains_key(&f) || allowed.is_some_and(|s| !s.contains(&f)) {
+            return false;
+        }
+        for _ in 0..2 {
+            let body = self.walk(f, |a| self.bodies.contains_key(&a));
+            let body = self.subtract_existing(f, body, changed);
+            if let Some(b) = self.resolve_thunk(f, &body, allowed, referring, changed) {
+                self.set_body(f, b, changed);
+                return true;
+            }
+            if referring.iter().any(|r| body.binary_search(r).is_ok()) {
+                return false;
+            }
+            if !body.iter().any(|a| self.body_owner.contains_key(a)) {
+                self.set_body(f, body, changed);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// subtractBodyFromExisting: each function whose body overlaps `body` loses the part from
+    /// `f` to the end of `body` (it lies before `f`) or up to its own entry (it lies after);
+    /// `body` loses what the function keeps.
+    fn subtract_existing(&mut self, f: u32, mut body: Vec<u32>, changed: &mut BTreeSet<u32>) -> Vec<u32> {
+        let over: BTreeSet<u32> =
+            body.iter().filter_map(|a| self.body_owner.get(a).copied()).filter(|&g| g != f).collect();
+        for g in over {
+            let Some(&max) = body.last() else { break };
+            let end = if g < f { max } else { g - 1 };
+            if let Some(gb) = self.bodies.get_mut(&g) {
+                let n = gb.len();
+                gb.retain(|&a| {
+                    let cut = (f..=end).contains(&a);
+                    if cut {
+                        self.body_owner.remove(&a);
+                    }
+                    !cut
+                });
+                if gb.len() != n {
+                    changed.insert(g);
+                }
+            }
+            body.retain(|a| self.body_owner.get(a) != Some(&g));
+        }
+        body
+    }
+
+    /// CreateFunctionCmd.resolveThunk with CreateThunkFunctionCmd: a function whose first
+    /// instruction is a direct JMP (getSimpleFlow) is a thunk of the function at the target,
+    /// made first where there is none (getReferencedFunction), but not where the target lies in
+    /// another function's body, has no instruction, or is a thunk on the way. The thunk's body
+    /// is `body` less the target's body; where `body` held the target, that must leave one
+    /// range from the entry, else it must not overlap the target. Returns the thunk's body.
+    fn resolve_thunk(
+        &mut self,
+        f: u32,
+        body: &[u32],
+        allowed: Option<&HashSet<u32>>,
+        referring: &mut Vec<u32>,
+        changed: &mut BTreeSet<u32>,
+    ) -> Option<Vec<u32>> {
+        let t = self.insns.get(&f).filter(|i| i.flow == Flow::Jump)?.target.filter(|&t| t != f)?;
+        if referring.contains(&f) {
+            return None;
+        }
+        if !self.bodies.contains_key(&t) {
+            if self.body_owner.contains_key(&t) || !self.insns.contains_key(&t) || referring.contains(&t) {
+                return None;
+            }
+            referring.push(f);
+            let made = self.create_function(t, allowed, referring, changed);
+            referring.pop();
+            // getFunctionContaining(entry): the target's body may hold the entry now
+            if !made || self.body_owner.contains_key(&f) {
+                return None;
+            }
+        }
+        let thunk: Vec<u32> = body.iter().copied().filter(|a| self.body_owner.get(a) != Some(&t)).collect();
+        let one_range =
+            thunk.first() == Some(&f) && thunk.windows(2).all(|w| w[0] + self.insns[&w[0]].len as u32 == w[1]);
+        let held = body.binary_search(&t).is_ok();
+        if held && !one_range || !held && thunk.len() != body.len() {
+            return None;
+        }
+        self.thunk_of.insert(f, t);
+        Some(thunk)
+    }
+
+    /// Function.setBody (FUNCTION_BODY_CHANGED; a new function's body with FUNCTION_ADDED).
+    fn set_body(&mut self, f: u32, body: Vec<u32>, changed: &mut BTreeSet<u32>) {
+        for a in self.bodies.get(&f).into_iter().flatten() {
+            if self.body_owner.get(a) == Some(&f) {
+                self.body_owner.remove(a);
+            }
+        }
+        for &a in &body {
+            self.body_owner.insert(a, f);
+        }
+        self.bodies.insert(f, body);
+        self.funcs.insert(f);
+        changed.insert(f);
+    }
+
+    /// CreateFunctionCmd.fixupFunctionBody: the flow from the entry, as at creation; a
+    /// function that is no thunk and whose entry jumps to a function becomes its thunk
+    /// (resolveThunk); a body that overlaps others cuts them as at creation.
+    // ponytail: the thunk case takes a target that is a function already and a body that
+    // overlaps none; Java's would make the target and set the thunk even where the body then
+    // fails (CreateThunkFunctionCmd.applyTo on an existing function)
+    fn fixup_body(&mut self, f: u32, changed: &mut BTreeSet<u32>) {
+        let new = self.walk(f, |a| self.bodies.contains_key(&a));
+        let overlaps = new.iter().any(|a| self.body_owner.get(a).is_some_and(|&g| g != f));
+        if !self.thunk_of.contains_key(&f) && !overlaps {
+            let i = &self.insns[&f];
+            if let Some(t) = i.target.filter(|t| i.flow == Flow::Jump && *t != f && self.bodies.contains_key(t)) {
+                self.thunk_of.insert(f, t);
+                if self.bodies.get(&f) != Some(&new) {
+                    self.set_body(f, new, changed);
+                }
+                return;
+            }
+        }
+        if new.is_empty() || self.bodies.get(&f) == Some(&new) {
+            return;
+        }
+        let new = if overlaps { self.subtract_existing(f, new, changed) } else { new };
+        self.set_body(f, new, changed);
+    }
+
+    /// Non-returning functions, this analysis's rule (FindNoReturnFunctionsAnalyzer's place):
+    /// no RETURN anywhere in the body. The functions that call a new one get their bodies
+    /// fixed up (`fixCallingFunctionBody`), and the rule runs again. Bodies set go to `changed`.
+    fn find_noreturn(&mut self, changed: &mut BTreeSet<u32>) {
         for _ in 0..4 {
-            let n = self.noreturn.len();
-            let found: Vec<u32> = self
+            let found: HashSet<u32> = self
                 .bodies
                 .iter()
-                .filter(|(_, b)| {
-                    !b.iter().any(|a| {
-                        let i = &self.insns[a];
-                        // a JMP [slot] thunk to a non-returning import does not return either
-                        i.flow == Flow::Return
-                            || i.flow == Flow::JumpInd
-                                && !self.tables.contains_key(a)
-                                && !i.slot.is_some_and(|s| self.noreturn.contains(&s))
-                            || i.flow == Flow::Jump
-                                && i.target.is_some_and(|t| self.bodies.contains_key(&t) && !self.noreturn.contains(&t))
-                    })
+                .filter(|(f, b)| {
+                    !self.noreturn.contains(f)
+                        && !b.iter().any(|a| {
+                            let i = &self.insns[a];
+                            // a JMP [slot] thunk to a non-returning import does not return either
+                            i.flow == Flow::Return
+                                || i.flow == Flow::JumpInd
+                                    && !self.tables.contains_key(a)
+                                    && !i.slot.is_some_and(|s| self.noreturn.contains(&s))
+                                // a jump out of the body (to a function, made or not, or
+                                // to code the body does not hold) unless to a non-returning one
+                                || i.flow == Flow::Jump
+                                    && i.target.is_some_and(|t| {
+                                        !self.noreturn.contains(&t)
+                                            && b.binary_search(&t).is_err()
+                                    })
+                        })
                 })
                 .map(|(&f, _)| f)
                 .collect();
-            self.noreturn.extend(found);
-            if self.noreturn.len() == n {
+            if found.is_empty() {
                 break;
             }
-            self.compute_bodies();
+            self.noreturn.extend(&found);
+            let callers: BTreeSet<u32> = self
+                .insns
+                .iter()
+                .filter(|(_, i)| i.flow == Flow::Call && i.target.is_some_and(|t| found.contains(&t)))
+                .filter_map(|(a, _)| self.body_owner.get(a).copied())
+                .collect();
+            for g in callers {
+                self.fixup_body(g, changed);
+            }
         }
     }
 
@@ -1491,7 +1681,10 @@ impl Analysis {
     /// bytes, adjacent ones merged.
     fn body_ranges(&self, f: u32) -> Vec<(u32, u32)> {
         let mut out: Vec<(u32, u32)> = Vec::new();
-        for a in self.body_of(f) {
+        // the body set (func.getBody); a function Shared Return Calls made on this turn has
+        // none yet
+        let body = self.bodies.get(&f).cloned().unwrap_or_else(|| self.body_of(f));
+        for a in body {
             let hi = a + self.insns[&a].len as u32 - 1;
             match out.last_mut() {
                 Some(last) if last.1.checked_add(1) == Some(a) => last.1 = hi,
@@ -1522,10 +1715,16 @@ impl Analysis {
         if let Some(ranges) = self.fixed_bodies.get(&f) {
             return ranges.iter().flat_map(|&(lo, hi)| self.insns.range(lo..=hi).map(|(&a, _)| a)).collect();
         }
+        self.walk(f, |a| self.funcs.contains(&a))
+    }
+
+    /// The flow from `f` (getFunctionBody without other functions): fallthroughs (not past a
+    /// CALL_RETURN call), jumps and switch cases, up to the entries `is_entry` names.
+    fn walk(&self, f: u32, is_entry: impl Fn(u32) -> bool) -> Vec<u32> {
         let mut seen = BTreeSet::new();
         let mut work = vec![f];
         while let Some(a) = work.pop() {
-            if (a != f && self.funcs.contains(&a)) || !seen.insert(a) {
+            if (a != f && is_entry(a)) || !seen.insert(a) {
                 continue;
             }
             let Some(i) = self.insns.get(&a) else {
