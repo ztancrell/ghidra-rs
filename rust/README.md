@@ -5376,7 +5376,13 @@ entry (`locatePurgeInstruction`).
 
 **No-return rule on the bodies set.** A jump out of the body counts as returning unless its
 target is a non-returning function (a body no longer runs on into code another function holds).
-Non-returning functions are kept once found, as Java's flag.
+Non-returning functions are kept once found, as Java's flag. Superseded (2026-11-19): "as
+Java's flag" was misleading. The rule is an approximation: Java's FindNoReturnFunctionsAnalyzer
+decides from call-site evidence against a threshold, never from a body without a RET, and a
+wrong mark here is never cleared. Since 2026-11-19 a conditional jump out of the body and a
+fallthrough out of it (into another function's body) count as returning too, so a function cut
+by one made inside it is not marked for falling into it; numbers in "Shared Return Calls per
+batch" below.
 
 Against Java 12.2 (`j12body.sh`, `rust/target/aq/` of this worktree; functions in both lists;
 "auto" = `functions-analysis.csv`):
@@ -5434,6 +5440,12 @@ event, so the function goes to Shared Return Calls and the purge again). 0x40363
 Own facts (`ghidra-diff.sh`): Java's function list M500 347 -> 381 / 499 (loud 31 -> 30,
 silent 121 -> 88), M8 4 / 7 unchanged; plain discovery M500 189 -> 208 / 499 (loud 128,
 silent 182 -> 163), M8 2 / 7 unchanged. Not run: the full pass, the Mac, the shadow check.
+
+The no-return rule with conditional jumps and fallthroughs out of the body counting as returning
+(fix, same day; plain, then Java's list, all (auto)): no-return differing 125 (38) -> 50 (22)
+and 218 (34) -> 54 (24); bodies differing 824 (677) -> 756 (674) and 2,358 (2,002) -> 2,288
+(1,997); purges differing 846 (761) -> 824 (761) and 2,316 (1,568) -> 2,294 (1,568); M500 381
+and 208, M8 4 / 7 and 2 / 7 unchanged.
 
 ## Speed
 

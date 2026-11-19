@@ -724,7 +724,10 @@ impl Analysis {
     }
 
     /// Non-returning functions, this analysis's rule (FindNoReturnFunctionsAnalyzer's place):
-    /// no RETURN anywhere in the body. The functions that call a new one get their bodies
+    /// no way out of the body: no RETURN, no jump (conditional or not) or fallthrough out of
+    /// it, unless to a non-returning function. An approximation: Java's analyzer decides from
+    /// the call sites (`FindNoReturnFunctionsAnalyzer`, its evidence threshold), never from a
+    /// body without a RET; a mark here is kept once made, so a wrong one stays. The functions that call a new one get their bodies
     /// fixed up (`fixCallingFunctionBody`), and the rule runs again. Bodies set go to `changed`.
     fn find_noreturn(&mut self, changed: &mut BTreeSet<u32>) {
         for _ in 0..4 {
@@ -742,11 +745,15 @@ impl Analysis {
                                     && !i.slot.is_some_and(|s| self.noreturn.contains(&s))
                                 // a jump out of the body (to a function, made or not, or
                                 // to code the body does not hold) unless to a non-returning one
-                                || i.flow == Flow::Jump
+                                || matches!(i.flow, Flow::Jump | Flow::CondJump)
                                     && i.target.is_some_and(|t| {
                                         !self.noreturn.contains(&t)
                                             && b.binary_search(&t).is_err()
                                     })
+                                // a fallthrough out of the body (into another function's)
+                                || i.falls_through()
+                                    && !(matches!(i.flow, Flow::Call | Flow::CallInd) && self.call_return(*a, i))
+                                    && b.binary_search(&(a + i.len as u32)).is_err()
                         })
                 })
                 .map(|(&f, _)| f)
@@ -2012,7 +2019,8 @@ impl RangeSet {
 
 #[cfg(test)]
 mod tests {
-    use super::{pair_hit, RangeSet, POST_FILL, PRE_FILL};
+    use super::{pair_hit, Analysis, Flow, Ins, RangeSet, POST_FILL, PRE_FILL};
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
     #[test]
     fn pattern_pairs_need_their_bits() {
@@ -2034,5 +2042,53 @@ mod tests {
         s.add(0, u32::MAX);
         s.remove(0, 5);
         assert_eq!(s.ranges().collect::<Vec<_>>(), [(6, u32::MAX)]);
+    }
+
+    /// An analysis of `insns` alone (no image), with a function at each of `funcs` made in
+    /// order as CreateFunctionCmd makes it.
+    fn bare(insns: &[(u32, Flow, Option<u32>)], funcs: &[u32]) -> (Analysis, BTreeSet<u32>) {
+        let ins = |&(a, flow, target): &(u32, Flow, Option<u32>)| {
+            let i = Ins { len: 1, flow, target, slot: None, computed: None, refs: vec![], code_imms: vec![] };
+            (a, i)
+        };
+        let mut an = Analysis {
+            text_start: 0,
+            text_end: 0,
+            code_lo: 0,
+            code_hi: 0,
+            insns: insns.iter().map(ins).collect(),
+            tables: HashMap::new(),
+            funcs: BTreeSet::new(),
+            noreturn: HashSet::new(),
+            bodies: BTreeMap::new(),
+            table_slots: BTreeMap::new(),
+            fpu_ip: None,
+            purge: HashMap::new(),
+            callee_purges: HashMap::new(),
+            reg_space: 0,
+            overrides: HashMap::new(),
+            fixed_bodies: BTreeMap::new(),
+            thunks: HashMap::new(),
+            thunk_of: BTreeMap::new(),
+            body_owner: HashMap::new(),
+        };
+        let mut changed = BTreeSet::new();
+        for &f in funcs {
+            an.create_function(f, None, &mut Vec::new(), &mut changed);
+        }
+        (an, changed)
+    }
+
+    #[test]
+    fn noreturn_counts_a_fallthrough_into_another_body_as_returning() {
+        // 0x10 falls into 0x11, made first; 0x20 only loops
+        let (mut an, mut changed) = bare(
+            &[(0x10, Flow::Fall, None), (0x11, Flow::Return, None), (0x20, Flow::Jump, Some(0x20))],
+            &[0x11, 0x10, 0x20],
+        );
+        assert_eq!(an.bodies[&0x10], [0x10]);
+        an.find_noreturn(&mut changed);
+        assert!(!an.noreturn.contains(&0x10));
+        assert!(an.noreturn.contains(&0x20));
     }
 }
