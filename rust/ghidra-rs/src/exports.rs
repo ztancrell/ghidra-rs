@@ -535,7 +535,8 @@ pub fn abi_candidates(
         let name = facts.names.get(&f).ok_or(format!("the facts have no function at 0x{f:08x}"))?;
         rows.push((f, size, refs, found.into_iter().collect::<Vec<_>>().join(";"), name));
         writeln!(txt, "=== {f:08x} {name}").map_err(io)?;
-        for &a in &p.an.bodies[&f] {
+        let body = p.an.bodies.get(&f).ok_or(format!("0x{f:08x}: a function without a body"))?;
+        for &a in body {
             writeln!(txt, "{a:08x}  {}", text(p, a)?).map_err(io)?;
         }
         // getC(): a blank line, the function, a blank line; then the script's own line end

@@ -5352,7 +5352,7 @@ Java's sites that set a body, and what is ported:
 |---|---|
 | CreateFunctionCmd.createFunction, subtractBodyFromExisting | ported (`create_function`, `subtract_existing`) |
 | CreateFunctionCmd.resolveThunk, CreateThunkFunctionCmd.applyTo | ported for a direct `JMP` at the entry (getSimpleFlow), `resolve_thunk` |
-| CreateFunctionCmd.fixupFunctionBody | ported (`fixup_body`); its thunk case only for a target that is a function already |
+| CreateFunctionCmd.fixupFunctionBody | ported (`fixup_body`); its thunk case only for a target that is a function already and a new body that overlaps no other, and not where the target's thunk chain leads back to the function (setThunkedFunction refuses a cycle). A thunk chain past 16 thunks and a no-return rule still finding functions after 4 rounds print a warning (`analyze`, `edit`); on mercs2 the 4-round warning shows with both function sets, the chain one does not |
 | FindNoReturnFunctionsAnalyzer.fixCallingFunctionBody | ported for this analysis's no-return rule (`find_noreturn`): callers of a new non-returning function are fixed up |
 | CreateFunctionCmd with findEntryPoint (setBody of a given body) | not ported: no ported analyzer makes functions that way |
 | CallFixupAnalyzer.fixCallingFunctionBody | not ported (no call-fixup analyzer here) |

@@ -502,6 +502,10 @@ impl Analysis {
         an.body_owner = HashMap::new();
         // a thunk's purge is its thunked function's (FunctionDB.getStackPurgeSize)
         let thunked: Vec<(u32, u32)> = an.thunk_of.keys().map(|&f| (f, an.thunked_end(f))).collect();
+        let long = thunked.iter().filter(|(_, t)| an.thunk_of.contains_key(t)).count();
+        if long > 0 {
+            an.warnings.push(format!("{long} thunk chains are longer than 16 thunks; their purge is cut short"));
+        }
         for (f, t) in thunked {
             if let Some(&n) = an.callee_purges.get(&t) {
                 an.callee_purges.insert(f, n);
@@ -748,7 +752,10 @@ impl Analysis {
         let overlaps = new.iter().any(|a| self.body_owner.get(a).is_some_and(|&g| g != f));
         if !self.thunk_of.contains_key(&f) && !overlaps {
             let i = &self.insns[&f];
-            if let Some(t) = i.target.filter(|t| i.flow == Flow::Jump && *t != f && self.bodies.contains_key(t)) {
+            if let Some(t) = i
+                .target
+                .filter(|t| i.flow == Flow::Jump && *t != f && self.bodies.contains_key(t) && self.thunked_end(*t) != f)
+            {
                 self.thunk_of.insert(f, t);
                 if self.bodies.get(&f) != Some(&new) {
                     self.set_body(f, new, changed);
@@ -770,7 +777,7 @@ impl Analysis {
     /// body without a RET; a mark here is kept once made, so a wrong one stays. The functions that call a new one get their bodies
     /// fixed up (`fixCallingFunctionBody`), and the rule runs again. Bodies set go to `changed`.
     fn find_noreturn(&mut self, changed: &mut BTreeSet<u32>) {
-        for _ in 0..4 {
+        for round in 0..4 {
             let found: HashSet<u32> = self
                 .bodies
                 .iter()
@@ -800,6 +807,10 @@ impl Analysis {
                 .collect();
             if found.is_empty() {
                 break;
+            }
+            let cap = "the no-return rule stopped after 4 rounds with non-returning functions still found";
+            if round == 3 && !self.warnings.iter().any(|w| w == cap) {
+                self.warnings.push(cap.to_string());
             }
             self.noreturn.extend(&found);
             let callers: BTreeSet<u32> = self
