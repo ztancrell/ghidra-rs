@@ -200,11 +200,25 @@ ghidra-rs analyze orig/Mercenaries2.analysis.exe --functions-from build/function
 
 What discovery does, after Ghidra's analyzers:
 
+- the order: Ghidra's task queue (`queue.rs`, a port of `AutoAnalysisManager`,
+  `AnalysisTaskList`, `AnalysisScheduler` and `AnalysisPriority`; no background commands yet).
+  A change notifies the analyzers of its type (blocks, code, functions, data), each queues one
+  task at its priority, and the first task of the lowest priority runs next. Discovery's
+  analyzers in it: Disassemble Entry Points (200, the seeds), Function Start Search (402),
+  Function Start Search After Data (898, after the tables), Create Address Tables (899), X86
+  Function Callee Purge (500, on each batch of new functions) and Shared Return Calls (398, on
+  each batch, as Java; superseded (2026-11-19): a last task at 10000 on all functions). The non-returning
+  functions run after the queue (Java: 302). Without the purge analyzer the facts are byte for
+  byte the ones of the loop it replaces (both function sets, 2026-11-18); with it see "Ghidra's
+  task queue and the purge" below;
 - disassembles every executable section by recursive descent from the exports, the entry
   point and RTTI vftable slots (MSVC CompleteObjectLocator -> TypeDescriptor); call targets
   become functions;
 - Function Start Search: the definite `x86win_patterns.xml` prologue pairs (`CC`/`90`/`C3`/
-  `C9 C3`/`C2 nn 00` or `JMP` before a prologue) in bytes no code covers yet;
+  `C9 C3`/`C2 nn 00` or `JMP` before a prologue) in bytes no code covers yet; a pair counts only
+  with Ghidra's `totalbits="32" postbits="16"` (PatternPairSet: 16 fixed bits after, 32 in all),
+  so `CC` + `SUB ESP,small` (8 + 19 bits) is no start while `CC CC` + it is. Superseded
+  (2026-11-18): every pair counted;
 - switch tables `JMP [reg*4 + table]`, bounded by a preceding `CMP reg,imm` (else up to 1024
   entries while they point at code in the jump's own section); in a two-level switch
   (`MOVZX reg,byte ptr [idx + bytetable]` between them) the CMP bounds the byte table and the
@@ -218,10 +232,12 @@ What discovery does, after Ghidra's analyzers:
   targets), and a target becomes a function when an unconditional jump passes the next
   function entry or goes before the previous one, no conditional flow reaches it, no
   instruction falls into it (a call counts, as `getFallFrom`) and it is not a lone return. The
-  functions are created after each walk, and the next walk runs on them alone. Not modelled:
-  Java runs the analyzer on each batch of functions its other analyzers add, and the batch
-  decides the scan set and the cache; here the first walk takes every function discovery made
-  at once. Superseded (2026-11-17): every unconditional jump past the next entry or before the
+  functions are made after the walk by CreateFunctionCmd (the body-from-creation path), and
+  the analyzer runs, as Java's FUNCTION_ANALYZER at 398, on each batch of functions added or
+  with a body set; the functions it walks over are the ones with a body. The CALL_RETURN
+  overrides it sets on jumps to a function (`processFunctionJumpReferences`) stay derived
+  (`call_return`, at any time, not from the moment the analyzer runs). Superseded (2026-11-19):
+  one walk over every function discovery made, after all other analyzers. Superseded (2026-11-17): every unconditional jump past the next entry or before the
   previous one made its target a function, a call did not count as falling into a target, and a
   lone return could become a function;
 - imports are read from the import directory through the loaded image (the mercs2 image keeps
@@ -819,6 +835,31 @@ Java 12.2 that is 2,163 against 2,183 removed and 1,425 against 1,438 refit. The
 function set against the facts export (from the 12.1.2-era project) is 36,856 in both, 779 Java only,
 164 ghidra-rs only (36,602 / 1,033 / 180 before the review fixes). Superseded: the text before this
 note, which says the fold stops and the rule that leaves 0x861190 out is not found; there is no such rule.
+
+Causes of the plain-discovery differences (2026-11-18). `rust/tools/ghidra/TraceCreators.java`
+(pre-script: the analyzer step after or in which each function was made, from the program's
+function events; 888 s headless, against about 7 hours for TraceFunctions.java) and
+`DumpAddressFacts.java` (post-script: function, instruction, byte before and references at listed
+addresses) explain the 899 Java only and 325 ghidra-rs only of the 12.2 trace. Java only: 319 made
+after Subroutine References (call targets in code ghidra-rs never decodes), 297 after Reference
+(Function Start Search's delayed creator: `<possiblefuncstart after="defined"/>`, `PUSH reg : MOV
+reg,[ESP+n]` after filler, at code only a pointer in data or a code constant names, e.g. vtable slot
+0xba8a64 -> 0x4129b0 and `MOV ECX,0x4036e0` at 0x402f15), 124 after Function Start Search After
+Code, 112 after Shared Return Calls, 27 after Call-Fixup Installer, 15 after Decompiler Switch
+Analysis, 4 after Non-Returning Functions - Discovered, 1 in Reference; 864 of them lie in bytes
+ghidra-rs never disassembles. ghidra-rs only: 191 where Java has no instruction and no reference,
+78 instructions with only DATA references, 49 jump targets, 7 others. Fixed: the pattern-pair bit
+threshold (above), 22,358 / 931 / 222 in both / Java only / ghidra-rs only (the 32 new Java only
+are call targets Java reaches from code ghidra-rs does not decode yet; they had been found through
+`CC` + `SUB ESP`). Not fixed: porting Function Start Search After Code with its delayed creator
+over the code the constants pass reaches gave 22,389 / 900 / 272 and made none of the 297, because
+the constants pass does not disassemble those targets (0x4036e0, 0x4129b0); that pass comes first.
+Superseded: 22,390 / 899 / 325 as the current plain-discovery count. With the fix, own plain facts
+(`analyze --protos --facts`, 71 s) against Java: M500 identical 177 / 499 (loud 128, silent 194;
+before 177, 122, 200), M8 identical 2 / 7 (loud 2, silent 3, as before). The shadow check's command
+(`--functions-from build/functions.csv --abi-callers`) writes 56,888 lines, against 56,918 from
+the main checkout's binary of 2026-11-18 11:42 (its commit not recorded); the difference is not
+examined.
 
 Not compared: flow overrides against the 3365 of the facts export (ghidra-rs derives them and
 has no export of them), functions outside `.text`, body ranges beyond their size. The shadow
@@ -4832,7 +4873,8 @@ What still differs, by cause:
 
 Not ported: the demangler (names, namespaces, prototypes and comments of C++ functions: `ns`
 0 of 797, `underived function` and `comments`), switch-case labels, the loader's and RTTI
-structures, a `.gdt` reader, Ghidra's task queue (the order above).
+structures, a `.gdt` reader, Ghidra's task queue (the order above; superseded 2026-11-18: the queue
+is ported with discovery and the purge in it, "Ghidra's task queue and the purge").
 
 **The end effect** (`tools/ghidra-diff.sh` with `FACTS=<file>`, the eight actions skipped as
 in slice 1; both rows run with this build):
@@ -5091,6 +5133,355 @@ that did not resolve, fell back to the Java facts without a word and printed the
 Superseded: the own-facts M500 counts 171 and 173 / 499 (Java's functions) and 90 / 499 (plain
 discovery) of S10 slices 2 and 3, with the eight actions skipped, and `ghidra-diff.sh` in the
 "Not run" list above.
+
+### The own-facts gap with Java's function list: causes and a first fix, branch `worktree-agent-a628570747560462f` (2026-11-18)
+
+**Attribution.** The 133 M500 functions that miss with ghidra-rs's own facts (Java's function
+list, `gap7/own-java.facts`) and not with the Java project's facts (125 silent, 8 loud) were
+traced by swapping one record kind at a time: the own facts with all of Java's records of that
+kind in their place (`underived` records of the kind dropped; `type` records a union), then
+`ghidra-diff.sh m500`. The unchanged own facts give 328 / 499 (loud 31, silent 140) again.
+
+| swapped in from Java | M500 identical (loud, silent) |
+|---|---|
+| nothing | 328 (31, 140) |
+| `func` with `type` and `ns` | 375 (21, 103) |
+| `data` | 371 (36, 92) |
+| only the `extrapop` of each `func` record | 351 (30, 118) |
+| only the `<symbollist>` (stack variables) of each `func` record | 343 (31, 125) |
+| `override` | 333 (31, 135) |
+| `data`, `func` with `type` and `ns`, and `override` together | 429 (21, 49) |
+| `body`, `label`, `string`, `undef`, `comments`, `wref`, `tracked` | 328 (31, 140) each |
+
+`extref` could not be swapped alone (its records name Java's namespace ids); not measured.
+Per function, the swaps that make it identical (`rust/target/gap-row2/causes.txt`):
+
+| cause | functions | example |
+|---|---|---|
+| `data` records (sizes and types of referenced data) | 43 (12 fixed below) | 0x402c20 |
+| `extrapop` (the function purge) | 23 | 0x404710 |
+| stack variables (`<symbollist>`) | 17 | 0x40dc10 |
+| the `func` record, neither part alone (both, or the prototype otherwise) | 14 silent, 4 loud | 0x40e770 |
+| `override` (CALL_RETURN: no-return and Shared Return, discovery's side) | 5 | 0x4f0370 |
+| no single kind (11 of them identical with `data`, `func` and `override` swapped together) | 23 silent, 4 loud | 0x402820 |
+
+Why `extrapop` and the stack variables differ (of 44,983 `func` records, 12,454 differ as text, symbol order included; the
+`extrapop` of 4,888): Java's `FunctionPurgeAnalysisCmd` runs when a function is added and never
+again. A function made before the code its body reaches was disassembled keeps an unknown purge
+although its finished body has a RET (0x4b6580: Java `unknown`, the RET at 0x57b7b8), and a
+CALL_RETURN tail takes the callee's purge as it is at that moment. 2,185 functions of Java's
+own auto-analysis (`functions-analysis.csv`) have an unknown purge in Java's facts where
+ghidra-rs derives one; 1,167 functions Java has a purge for are, here, seeded (not found by
+plain discovery) and get none. Both need the order of Ghidra's analysis queue, which is not
+ported; the `ponytail` notes of `Analysis::ret_purge` and `Exporter::locals` stand.
+Superseded (2026-11-18, branch `analysis-queue`): the queue is ported and the purge runs in it
+(`Analysis::callee_purge`; `ret_purge` is removed); 0x4b6580 (`JMP 0x57b780`, size 5 in Java's
+facts) was made right after 0x57b780 in Java 12.2's trace (`gap-row3-java/creators.log`), as
+CreateFunctionCmd makes a thunk's target first; it is no function made before its code. On the
+merged base the count is 2,182, then 1,743 and 1,769, now 1,778 (superseded: "now 1,743", "now 1,769"); see "Ghidra's task queue and the purge".
+
+**Fix 1: INT_ZEXT and INT_SEXT size data** (`Exporter::accesses`). `SymbolicPropogator`'s
+INT_ZEXT and INT_SEXT cases make a READ reference with the input varnode, as its COPY case does;
+ghidra-rs sized only COPY. A `MOVSX`/`MOVZX` of a direct address now sizes the data
+(0xdf5c2c: `undefined2`, as Java). Facts (`facts-diff.sh`, Java's functions): `data` equal
+230,455 -> 230,932 (84.9% -> 85.1%); 487 `data` and 24 `undef` records changed, nothing else.
+M500 own facts with Java's functions: 328 -> 340 / 499, loud 31 -> 31, silent 140 -> 128 (12
+functions fixed, none newly missing); M8 4 / 7 (loud 2, silent 1), unchanged. The decompiler is
+not touched; the Java-facts row is not affected.
+
+Superseded: "328 / 499 (loud 31, silent 140)" for own facts with Java's function list in the
+table of "Integration `m3-int7`" (now 340, loud 31, silent 128). Not run: plain discovery's
+own-facts row, the full pass, the Mac.
+
+### Ghidra's task queue and the purge, branch `analysis-queue` (2026-11-18)
+
+Base: the branch above merged with the Function Start Search fix (`22d5918c63`, PatternPairSet
+bits). Own facts with Java's function list: M500 343 / 499 (loud 31, silent 125), M8 4 / 7
+(loud 2, silent 1); plain discovery: M500 187 / 499 (loud 128, silent 184), M8 2 / 7 (loud 2,
+silent 3).
+
+**The queue** (`queue.rs`, see "What discovery does"). Discovery runs through it; with only
+discovery's analyzers the facts of both function sets are byte for byte the base's.
+
+**X86 Function Callee Purge in the queue** (`Analysis::callee_purge`). Java's
+`FunctionPurgeAnalysisCmd` runs on each batch of new functions at priority 500, in address
+order, and sets a purge only where it finds one: the first RET (or RETF) of the body by
+address, among its first 2048 instructions; without one, the purge the function its last
+CALL_RETURN flow reaches has at that moment (so a thunk-like `JMP` to a function later in the
+same batch gets none). A known purge is never set again (superseded: "a purge is never set
+again"; an unknown one is looked for again, see "Body changes" below). 471 functions go from a purge to Java's
+`unknown` (0x402fb0: base 4), 42 the other way (below). ghidra-rs worked the purge out
+from the finished body, the callee first
+(`Analysis::ret_purge`, removed). The `extrapop` of the facts is now the purge of that turn,
+of the run without seeds where seeds were given (`Inputs::purges`); the stack analysis goes by
+those purges too. An IRET does not end the search (Java looks for `ret`/`retf`).
+
+| auto-analysis functions (`functions-analysis.csv`), Java's function list | base | queue |
+|---|---|---|
+| `extrapop` equal | 17,602 | 18,004 |
+| Java `unknown`, ghidra-rs known | 2,182 | 1,743 |
+| Java known, ghidra-rs `unknown` | 1,352 | 1,388 |
+| both known, different | 4 | 5 |
+| stack variables (`<symbollist>`) equal | 12,201 | 12,218 |
+
+(Plain discovery: Java `unknown` here known 2,179 -> 1,722, equal 17,540 -> 17,966.) Two
+`data` records change with Java's function list (0x1532024, 0x1532028: size 4 -> 1, as Java),
+two disappear in plain discovery's facts; nothing else but `func` records.
+
+| own facts | M8 | M500 |
+|---|---|---|
+| Java's function list, base | 4 / 7 (loud 2, silent 1) | 343 / 499 (loud 31, silent 125) |
+| Java's function list, queue | 4 / 7 (loud 2, silent 1) | 347 / 499 (loud 31, silent 121) |
+| plain discovery, base | 2 / 7 (loud 2, silent 3) | 187 / 499 (loud 128, silent 184) |
+| plain discovery, queue | 2 / 7 (loud 2, silent 3) | 189 / 499 (loud 128, silent 182) |
+
+No M500 function newly misses (4 and 2 fixed). The decompiler is not touched; the Java-facts
+row is not affected. `analyze --facts` with Java's function list takes 77 s (base 61 s): each
+purge turn recomputes the bodies and the non-returning functions of that moment; plain 53 s
+(base 47 s), measured under the same load, one run each.
+
+**Body changes** (`analysis-queue`, after `52566ad440`). Java's AutoAnalysisManager sends
+FUNCTION_ADDED and FUNCTION_BODY_CHANGED alike to `functionDefined`, so the purge analyzer
+gets a function again when its body changes, and `analyzeFunction` looks again where the purge
+is still unknown (or past 128). After each task the bodies are computed as a purge turn
+computes them (`Analysis::turn_bodies`), and a function whose body differs from the last
+notification is notified; the purge turn uses those bodies. Superseded (2026-11-19): bodies are kept from creation
+and set only where Java sets them; see "Bodies from creation" below. Bodies and the non-returning
+functions of a turn now take only functions with an instruction (CreateFunctionCmd makes none
+without one): 45 to 51 call targets that were never decoded counted as empty, non-returning
+functions before; alone, this changes no record. The fallback to a CALL_RETURN flow also takes
+a computed jump (COMPUTED_CALL_TERMINATOR).
+
+| auto-analysis functions, Java's function list | queue | body changes |
+|---|---|---|
+| `extrapop` equal | 18,004 | 17,979 |
+| Java `unknown`, ghidra-rs known | 1,743 | 1,769 |
+| Java known, ghidra-rs `unknown` | 1,388 | 1,387 |
+| stack variables equal | 12,218 | 12,215 |
+
+(Plain discovery: equal 17,966 both; Java `unknown` here known 1,722 -> 1,723; Java known here
+`unknown` 534 -> 533.) 29 records change: 3 non-thunks get Java's purge (both the facts and a
+fresh Java 12.2 analysis agree); 26 are 5-byte thunks whose target's purge Java leaves
+unknown. Here their `JMP` to a function is a derived CALL_RETURN, so the retry takes the
+target's purge once the target has one; in Java a thunk has no purge of its own
+(`FunctionDB.getStackPurgeSize` returns the thunked function's). These 26 wait for the thunk
+port (below). Own facts: M8 4 / 7 and 2 / 7 unchanged; M500 with Java's function list 346 / 499
+(loud 31, silent 122), plain discovery 189 / 499 (loud 128, silent 182). The one newly silent
+function, 0x5409f0, calls 0x536700, one of the 26 (`unknown` -> 8). `analyze --facts` takes
+82 s with Java's function list and 78 s plain, under a heavier load than the runs above (load
+average 11), one run each.
+
+**Java's own purges are not the facts' on thunks.** A fresh Java 12.2 auto-analysis
+(`rust/target/gap-row3-java/proj`, dumped by `tools/ghidra/DumpPurges.java`;
+`extrapop` = purge + 4) and the facts (`mercs2.facts`, mercs2's project after its pipeline)
+disagree on 663 thunks of the auto-analysis functions. Of the 702 5-byte functions in the
+1,743, Java 12.2 gives 594 the purge ghidra-rs has (0x4b6580: thunk of 0x57b780, purge 0;
+the facts say `unknown`), and leaves 99 unknown. 489 thunks of the 1,388 are known in both
+the facts and Java 12.2. A faithful thunk port can therefore move about 99 of the 1,743 and
+about 489 of the 1,388, not the 702.
+
+**The RTTI analyzer at 599** (`Task::Rtti`, after `e26bc48850`). Java's Windows x86 PE RTTI
+Analyzer is a byte analyzer at `REFERENCE_ANALYSIS.before()` (599), so it makes its functions
+(`EHDataTypeUtilities.createFunctionIfNeeded`: disassemble, then CreateFunctionCmd) after the
+first purge turn; the vftable slots are no longer seeds of Disassemble Entry Points. Superseded:
+"here its functions are seeds of the first turn". With Java's function list: `extrapop` equal
+17,979 -> 17,997, Java known here `unknown` 1,387 -> 1,360, Java `unknown` here known 1,769 ->
+1,778, stack variables equal 12,215 (unchanged); 0x417290 (`ADD ECX,8; JMP`) now 4, as Java.
+The 9 new Java-`unknown` ones (0x8d6470 .. 0x8e8f10, e.g. 0x8dc8b0 `SUB ECX,8; JMP 0x8dc8f0`,
+made by the RTTI analyzer in Java 12.2's trace) are adjustor stubs whose `JMP` reaches a
+function that has a purge by the later turn; here such a jump is a derived CALL_RETURN, in Java
+only Shared Return Calls makes it one (below), and Java 12.2 leaves them `unknown` too. Plain
+discovery: equal 17,966 -> 17,983, Java known here `unknown` 533 -> 506, Java `unknown` here
+known 1,723 -> 1,733. The function lists do not change (plain discovery against Java 12.2,
+`func` records of the facts in `.text`: 22,353 / 931 / 227 before and after). M8 and M500 the
+same for both rows (346 / 499 and 189 / 499), no function newly misses. `analyze --facts`
+111 s with Java's function list, 57 s plain, one run each under varying load.
+
+Not modelled, ranked by what is left of the 1,743:
+
+Superseded (2026-11-19) for the first two items: see "Bodies from creation" below.
+
+- CreateFunctionCmd's thunks: a new function that is a `JMP` makes a function at its target
+  first (`CreateThunkFunctionCmd.getReferencedFunction`), so the thunk's purge is the target's,
+  unknown in the same batch. 702 of the 1,743 are 5-byte functions. 0x4b6580 (`JMP 0x57b780`, Java
+  `unknown`) keeps 4: 0x57b780 is no function at its turn here, so its body runs on to the RET. A first port (the simple
+  flow only, bodies of the turn) brought 1,743 to 1,418 but made 313 functions Java does not
+  have (plain discovery against Java 12.2's list); not kept. A faithful port needs the body
+  each function had when it was made (`getFunctionContaining` and the body containment check of
+  `CreateThunkFunctionCmd.applyTo` run on it) and `getThunkedAddr`'s p-code register tracking.
+- Shared Return Calls at 398 on each batch, the non-returning functions at 302, and the body
+  each function had when it was made (here: the body of the turn, the non-returning functions
+  of this analysis's rule on that turn's bodies, kept for the turn only).
+- the Stack analyzer (903) on each later batch: here every purge turn comes before it.
+- discovery's analyzers are the old discovery at Java's priorities, not ports of Java's analyzers
+  (labelled in `Analysis::run`): Disassemble Entry Points puts every seed in at 200
+  (EntryPointAnalyzer's do-later set of suspect entries, at 599, is not modelled); Function Start
+  Search disassembles inline and repeats until nothing is new (Java searches once and queues
+  DisassembleCommand and CreateFunctionCmd at 400 and 401); Function Start Search After Data
+  sweeps everything and ignores its set (Java's FunctionStartDataPostAnalyzer searches the added
+  data for the `after="data"` patterns), and is notified with the table targets, not new data.
+- `RET n` is read unsigned: Java (the facts and Java 12.2) has extrapop 33175 for 0x1f682c0 (`RET 0x8193`, 0x8193 + 4),
+  so `getScalar(0).getSignedValue()` gives the positive value there.
+
+Not run: the full pass, the Mac, the shadow check (what `--abi` reads, the functions, bodies,
+non-returning functions and `Analysis::purge`, is unchanged). Superseded (2026-11-19): with
+the bodies below, the functions, bodies and non-returning functions change; the shadow check
+was not run on them.
+
+#### Bodies from creation, and CreateFunctionCmd's thunks (2026-11-19)
+
+**Oracles** (the user's decision, DESIGN.md "Decided" 2026-11-19): analysis alone is checked
+against a plain Java 12.2 auto-analysis (`rust/target/aq-java/purges.txt` of the main checkout,
+dumped by `tools/ghidra/DumpPurges.java`: entry, purge, thunked function, body min / max /
+address count, no-return); analysis with the ported mercs2 edit scripts against `mercs2.facts`.
+
+**The body model** (`Analysis::create_function`). A function's body is set when the function is
+made and changed only where Java changes it; `Analysis::bodies` is no longer recomputed from the
+flow after each task. After each task (the purge excepted) the functions without a body are
+made in address order, as CreateFunctionCmd: the flow from the entry up to the entries of the
+functions made so far (`Analysis::walk`, getFunctionBody), less what other bodies hold;
+each function whose body overlaps loses the part from the new entry to the new body's end (it
+lies before) or up to its own entry (it lies after) (subtractBodyFromExisting). Bodies never
+overlap during the run (`body_owner`). The functions made and the bodies set are notified to the
+function analyzers (FUNCTION_ADDED, FUNCTION_BODY_CHANGED). With `--functions-from`, only the
+listed functions are made.
+
+Java's sites that set a body, and what is ported:
+
+| Java site | here |
+|---|---|
+| CreateFunctionCmd.createFunction, subtractBodyFromExisting | ported (`create_function`, `subtract_existing`) |
+| CreateFunctionCmd.resolveThunk, CreateThunkFunctionCmd.applyTo | ported for a direct `JMP` at the entry (getSimpleFlow), `resolve_thunk` |
+| CreateFunctionCmd.fixupFunctionBody | ported (`fixup_body`); its thunk case only for a target that is a function already and a new body that overlaps no other, and not where the target's thunk chain leads back to the function (setThunkedFunction refuses a cycle). A thunk chain past 16 thunks and a no-return rule still finding functions after 4 rounds print a warning (`analyze`, `edit`); on mercs2 the 4-round warning shows with both function sets, the chain one does not |
+| FindNoReturnFunctionsAnalyzer.fixCallingFunctionBody | ported for this analysis's no-return rule (`find_noreturn`): callers of a new non-returning function are fixed up |
+| CreateFunctionCmd with findEntryPoint (setBody of a given body) | not ported: no ported analyzer makes functions that way |
+| CallFixupAnalyzer.fixCallingFunctionBody | not ported (no call-fixup analyzer here) |
+| EntryPointAnalyzer (recreate after the do-later set) | not ported (the do-later set is not modelled) |
+| AddressTable.fixupFunctionBody, DecompilerSwitchAnalyzer / DecompilerSwitchAnalysisCmd | not ported: switch cases are disassembled here before the function is made, so its first body holds them |
+| ClearFlowAndRepairCmd | not ported: FindNoReturnFunctionsAnalyzer runs it on the flow after a new non-returning call ("Repair Flow Damage", on by default: `repairDamagedLocations`), clearing code and refixing bodies; nothing here clears flow, and nothing reports where Java would. Superseded (2026-11-19): "no analyzer here clears flow" read as if Java's did not either |
+| the edit scripts (`store.rs`) | `Store::apply` recomputes only the bodies its edits touch (functions made, removed, given a body or thunk mark; bodies holding a cleared, overridden, switch or new-entry address) from the flow (`body_of`, an approximation of Java re-running its commands); the rest keep their creation bodies. Superseded (2026-11-19): it recomputed every body (`compute_bodies`, removed) |
+
+Also not ported: getThunkedAddr's p-code register tracking (thunks of more than one
+instruction, e.g. adjustor stubs), CALL_TERMINATOR thunks, getThunkedAddr stepping over an entry
+instruction without p-code (`NOP; JMP x` is a thunk of x in Java; `run` counts the functions
+that start with a one-byte `NOP` and a direct `JMP` and prints `warning: not ported:
+getThunkedAddr past a no-p-code entry instruction` when there are any; mercs2: none), the one-byte placeholder body of a
+function made before its code, the no-return analyzer per batch. Superseded (2026-11-19):
+Shared Return Calls now runs per batch at 398; see "Shared Return Calls per batch" below.
+
+**Thunks.** A function whose first instruction is a direct `JMP` is made a thunk of the target,
+the target made first where it is no function yet, unless the target lies in another body, has
+no instruction or is a thunk on the way; the thunk's body is its body less the target's
+(0x4b6580: `JMP 0x57b780`, body 5 bytes, as Java 12.2). A thunk body that would hold code of a
+third function (made with the target) is refused, as createThunkFunction's
+OverlappingFunctionException, and CreateFunctionCmd tries again (2026-11-19 fix).
+Two thunk definitions remain: the purges go by the thunks made here (`Analysis::thunk_of`), the
+facts' thunk names and `Project::thunked` by a body of one direct jump to a function. `run`
+counts where they disagree and `analyze` and `edit` print it (`warning: thunks disagree`):
+mercs2 plain discovery 10 one-jump bodies not made thunks (8 of them thunks in Java 12.2, e.g.
+0x4cefc0 -> 0x6a5590; 0x430e40 and 0x6b3010 not), none the other way; with Java's list none.
+Taking `thunk_of` in the facts was tried and left out: it lost those 8 Java thunks (plain purges
+differing 824 -> 827). A thunk's purge is its thunked
+function's, read and set (`FunctionDB.getStackPurgeSize`); `callee_purges` gives each thunk its
+target's purge when `run` ends. The purge analyzer looks in the body, then in the flow from the
+entry (`locatePurgeInstruction`).
+
+**No-return rule on the bodies set.** A jump out of the body counts as returning unless its
+target is a non-returning function (a body no longer runs on into code another function holds).
+Non-returning functions are kept once found, as Java's flag. Superseded (2026-11-19): "as
+Java's flag" was misleading. The rule is an approximation: Java's FindNoReturnFunctionsAnalyzer
+decides from call-site evidence against a threshold, never from a body without a RET, and a
+wrong mark here is never cleared. Since 2026-11-19 a conditional jump out of the body and a
+fallthrough out of it (into another function's body) count as returning too, so a function cut
+by one made inside it is not marked for falling into it; numbers in "Shared Return Calls per
+batch" below.
+
+Against Java 12.2 (`j12body.sh`, `rust/target/aq/` of this worktree; functions in both lists;
+"auto" = `functions-analysis.csv`):
+
+| | before | after |
+|---|---|---|
+| plain discovery: functions both / Java only / here only | 28,434 / 2,214 / 315 | 28,751 / 1,897 / 316 |
+| plain, purge differs (auto) | 1,925 (1,763) | 1,891 (1,806) |
+| plain, body differs (auto) | 1,275 (919) | 824 (677) |
+| plain, no-return differs (auto) | 437 (28) | 125 (38) |
+| Java's list, purge differs (auto) | 3,714 (2,523) | 3,274 (2,526) |
+| Java's list, body differs (auto) | 2,604 (2,092) | 2,358 (2,002) |
+| Java's list, no-return differs (auto) | 557 (21) | 218 (34) |
+
+Against `mercs2.facts` (`purgecmp.sh`, auto-analysis functions, Java's list): Java `unknown`
+here known 1,778 -> 1,808, Java known here `unknown` 1,360 -> 1,354, equal 17,997 -> 17,973,
+stack variables equal 12,215 -> 12,238; plain discovery: 1,733 -> 1,808, 506 -> 506, equal
+17,983 -> 17,911. 5-byte functions whose purge differs from Java 12.2 (auto, Java's list):
+Java `unknown` here known 128 -> 117, Java known here `unknown` 41 -> 28; plain discovery
+88 -> 118 and 17 -> 3.
+
+The plain purge loss (about 100 functions Java leaves `unknown` that now get one, e.g.
+0x40363f `JMP 0x416bb6`) comes from Shared Return Calls at 10000: 0x416bb6 is made a function
+by it after the first purge turn, so 0x40363f's first body runs on to 0x416bb6's RET; in Java
+Shared Return Calls runs at 398, before the purge. Porting it per batch is the next step.
+Superseded (2026-11-19): ported, see below.
+
+Own facts (`ghidra-diff.sh`): Java's function list M500 346 -> 347 / 499 (loud 31, silent
+122 -> 121; 0x5409f0 fixed, none newly missing), M8 4 / 7 (loud 2, silent 1) unchanged; plain
+discovery M500 189 / 499 (loud 128, silent 182) and M8 2 / 7 (loud 2, silent 3) unchanged.
+`analyze --facts` 81 s with Java's list, 63 s plain, one run each. The facts of two runs are
+byte for byte the same. Not done: the Stack analyzer (903) on later batches. Not run: the full
+pass, the Mac, the shadow check, `--functions` / `--gaps` exports.
+
+#### Shared Return Calls per batch (2026-11-19)
+
+Shared Return Calls is a FUNCTION_ANALYZER at `CODE_ANALYSIS.before().before()` = 398
+(`SharedReturnAnalyzer`), so it runs on each batch of functions added or with a body set
+(AutoAnalysisManager's FUNCTION_ADDED / FUNCTION_BODY_CHANGED), before the purge (500). Its
+targets are made by CreateFunctionCmd after the task (Java schedules them at 397, before any
+other task), through `create_function`: a body that held the target is cut (a body change
+event, so the function goes to Shared Return Calls and the purge again). 0x40363f
+(`JMP 0x416bb6`): body 0x40363f-0x403653 and purge `unknown`, as Java 12.2 (was 4).
+
+| `j12body.sh` against Java 12.2 | before (f0f80bdab6) | after |
+|---|---|---|
+| plain: functions both / Java only / here only | 28,751 / 1,897 / 316 | 28,742 / 1,906 / 271 |
+| plain, purge differs (auto) | 1,891 (1,806) | 846 (761) |
+| plain, body differs (auto) | 824 (677) | 824 (677) |
+| plain, no-return differs (auto) | 125 (38) | 125 (38) |
+| Java's list, purge differs (auto) | 3,274 (2,526) | 2,316 (1,568) |
+| Java's list, body differs (auto) | 2,358 (2,002) | 2,358 (2,002) |
+| Java's list, no-return differs (auto) | 218 (34) | 218 (34) |
+
+Own facts (`ghidra-diff.sh`): Java's function list M500 347 -> 381 / 499 (loud 31 -> 30,
+silent 121 -> 88), M8 4 / 7 unchanged; plain discovery M500 189 -> 208 / 499 (loud 128,
+silent 182 -> 163), M8 2 / 7 unchanged. Not run: the full pass, the Mac, the shadow check.
+
+The no-return rule with conditional jumps and fallthroughs out of the body counting as returning
+(fix, same day; plain, then Java's list, all (auto)): no-return differing 125 (38) -> 50 (22)
+and 218 (34) -> 54 (24); bodies differing 824 (677) -> 756 (674) and 2,358 (2,002) -> 2,288
+(1,997); purges differing 846 (761) -> 824 (761) and 2,316 (1,568) -> 2,294 (1,568); M500 381
+and 208, M8 4 / 7 and 2 / 7 unchanged.
+
+#### Full pass of `analysis-queue` (2026-11-19)
+
+`bars-queue.sh` on 83ee6a86e6 (the tip then; the same tree is 82b968548a since a merge message got its trailers), desktop and Mac, `TIMEOUT` 120; summary (with the rerun)
+`rust/target/baselines/analysis-queue-83ee6a86e6.summary`, 133 lines, compared with
+`m3-int7-249c32cf94.summary`. The prelude changes with the analysis: `cksum` 3436140667, 835,201
+bytes, 30,084 `map function` lines (`m3-int7`: 285336359, 838,446, 30,208); the Mac's was
+regenerated and matched. 132 of 133 pairs in 3 h 54 min, 103 on the desktop (13,455 s busy) and
+29 on the Mac (12,738 s); the Mac dropped off the network during `pcc-t-switch` (`lost`,
+`INCOMPLETE`), rerun on the desktop: 2004 / 2005 (loud 1, silent 0), the baseline line. Silent 0
+in every pair. Lines that moved:
+
+- `pmd-m500` (Mac): reference finished 500 -> 499, identical 497 -> 496 (loud 3);
+  `r5slock-m500` (desktop) and `r5dtlocksv-m500` (Mac): reference finished 499 -> 498,
+  identical 469 -> 468 (loud 30). In all three the reference timed out at 120 s on 0x4c48d0
+  (the 120 s timeout edge noted under `REFCACHE`). Run alone with `TIMEOUT` 400, 0x4c48d0 is
+  identical in all three checks, so no function the port decompiles got worse.
+- "all outputs identical" one higher in 11 M500 lines: 498 -> 499 in `r5`, `r5c`, `r5dt` and
+  `r5typed`; 499 -> 500 in `r5d`, `s6`, `s6int4`, `s8r`, `subvar` and `svs6`; 490 -> 491 in
+  `svlock`. `stack-m500` outputs with stack SSA 318 -> 312. Not traced.
+
+Every other line equals the baseline. Superseded: "Not run: the full pass, the Mac" in the
+sections of this branch above (the shadow check and the `--functions` / `--gaps` exports are
+still not run).
 
 ## Speed
 

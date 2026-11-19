@@ -134,6 +134,15 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   reruns; file dates are not enough. A timeout or any failed or incomplete reference run is
   never cached. ghidra-rs always reruns. `REFCACHE=0` turns it off (`decomp-diff.sh`,
   rust/README.md).
+- 2026-11-19: Bodies are kept from creation. Each function keeps the body CreateFunctionCmd
+  gave it, changed only where Java sets a body (fixupFunctionBody, the cut of an overlapping body
+  when a function is made, thunk creation, the no-return repairs); ghidra-rs no longer recomputes
+  bodies from the flow after each task. Then CreateFunctionCmd's thunks and the Stack analyzer on
+  later batches. Oracles split: analysis alone is checked against a plain Java 12.2
+  auto-analysis (`DumpPurges.java`); analysis with the ported mercs2 edit scripts against
+  `mercs2.facts`, which is mercs2's project after its own pipeline, not plain Java analysis
+  (0x4b6580: purge 0 in Java 12.2, `unknown` in the facts). See `rust/README.md`, "Bodies from
+  creation".
 
 ## Milestones
 
@@ -446,6 +455,35 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    discovery 177 (loud 122, silent 200). A first attempt was invalid (`ghidra-diff.sh` fell back to the Java facts;
    it now stops on a missing or empty `FACTS` file). Superseded: the own-facts M500 counts 171 and 173 of S10 slices
    2 and 3 above (eight actions skipped). See `rust/README.md`, "Integration `m3-int7`".
+   Row 2 traced by swapping record kinds (`data` 43 functions, `extrapop` 23, stack variables 17, the
+   `func` record otherwise 18, `override` 5, no single kind 27); fix 1 (INT_ZEXT/INT_SEXT size data, as
+   `SymbolicPropogator`) gives 340 (loud 31, silent 128). Superseded: the 328 above. `extrapop` and stack
+   variables need the order of Ghidra's analysis queue, not ported.
+   Ghidra's task queue ported (`queue.rs`, branch `analysis-queue`, on the base merged with the
+   Function Start Search bits fix: 343, loud 31, silent 125); X86 Function Callee Purge runs in it:
+   347 (loud 31, silent 121), plain discovery 187 -> 189; Java-unknown purges derived here 2,182 ->
+   1,743. Superseded: "not ported" above. Left: CreateFunctionCmd's thunks, the RTTI analyzer's
+   priority, Shared Return and no-return per batch.
+   Body changes notify the purge analyzer again (FUNCTION_BODY_CHANGED; an unknown purge is looked
+   for again): 346 (loud 31, silent 122), Java-unknown derived here 1,769; the 26 new ones and
+   0x5409f0 are thunks whose purge Java takes from the target. Superseded: 347 and 1,743 above.
+   Java 12.2's own analysis and the facts disagree on 663 thunks (`rust/README.md`, "Body changes").
+   The RTTI analyzer runs at 599, after the first purge turn: Java-known derived `unknown` 1,387 ->
+   1,360, Java-unknown derived 1,769 -> 1,778 (9 adjustor stubs, a derived CALL_RETURN); M500 346.
+   Superseded: "Left: ... the RTTI analyzer's priority" above.
+   Bodies kept from creation and set only at Java's sites, and CreateFunctionCmd's thunks (a
+   direct `JMP`): M500 347 (loud 31, silent 121), plain 189; plain discovery against Java 12.2
+   28,751 / 1,897 / 316 (was 28,434 / 2,214 / 315), bodies differing 1,275 -> 824. Superseded:
+   346 above. Left: Shared Return Calls and no-return per batch, the Stack analyzer per batch,
+   getThunkedAddr's register tracking.
+   Shared Return Calls per batch at 398 (a FUNCTION_ANALYZER, its targets made by
+   CreateFunctionCmd): M500 381 (loud 30, silent 88), plain 208 (silent 163); plain purges
+   differing from Java 12.2 on auto-analysis functions 1,806 -> 761. Superseded: 347 and 189
+   above, and "Shared Return Calls ... per batch" in "Left".
+   Full pass 2026-11-19 (83ee6a86e6, the tree of 82b968548a, desktop and Mac): 133 / 133 pairs, silent 0 in every pair, none
+   worse than `m3-int7` once 0x4c48d0 (a reference timeout at 120 s in `pmd`, `r5slock`,
+   `r5dtlocksv` M500) is run with `TIMEOUT` 400. Superseded: "Not run: the full pass, the Mac" for
+   this branch (`rust/README.md`).
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
@@ -505,7 +543,8 @@ scripts live", decided 2026-11-15 (plain files, see Decided).
 - 2026-11-17: Choices of S10 slice 3 made without the user, to confirm or change (`rust/README.md`,
   "Stage S10, slice 3"): `PseudoDisassembler.checkPseudoBody` is ported whole although, with the
   references of all discovered code at once, it loses 452 labels of SecuROM's code that Java has
-  (Ghidra's order of analysis is not ported: its task queue would be the next port); `--facts`
+  (Ghidra's order of analysis is not ported: its task queue would be the next port; superseded
+  2026-11-18: the queue is ported, `queue.rs`, with discovery and the purge in it); `--facts`
   fails without Ghidra's strings model file; a Function ID comment with a mangled name stays
   `underived` until the demangler is ported.
 - 2026-11-17: Claude's call (1d, "Pieces of symbols"), awaiting the user: where the C++ orders by

@@ -1,7 +1,8 @@
-//! Function discovery, bodies and references for 32-bit x86 PE images, modelled on what
+//! Function discovery, bodies                 Task::SharedReturns => an.shared_returns(&set),nd references for 32-bit x86 PE images, modelled on what
 //! Ghidra's auto-analysis produces for the scripts in `main.rs` (ExportFunctions, ExportGaps).
 //! Every executable section is disassembled; results are reported for `.text`. See rust/README.md "Analysis" for what is and isn't covered.
 
+use crate::queue::{priority, Analyzer, Kind, Manager};
 use crate::sleigh::Sleigh;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -221,6 +222,8 @@ pub struct Analysis {
     pub table_slots: BTreeMap<u32, u32>, // Create Address Tables (`disassemble` with constants): slot -> pointer
     fpu_ip: Option<(u32, u64)>,          // FPUInstructionPointer, which x87 constructors set to inst_start
     purge: HashMap<u32, u32>,            // function -> bytes its RETs pop (RET n), where they agree
+    /// The purge X86 Function Callee Purge set, by function (`callee_purge`); none is unknown.
+    pub callee_purges: HashMap<u32, u32>,
     reg_space: u32,
     /// Flow overrides of the project store (`store.rs`), by instruction: CALL_RETURN (true) or
     /// none (false) in place of what `call_return` derives. Empty without a store.
@@ -229,6 +232,13 @@ pub struct Analysis {
     pub fixed_bodies: BTreeMap<u32, Vec<(u32, u32)>>,
     /// Thunk marks of the store: the thunked function, or `None` for "not a thunk".
     pub thunks: HashMap<u32, Option<u32>>,
+    /// The thunks CreateFunctionCmd made (`resolve_thunk`): thunk -> thunked function.
+    pub thunk_of: BTreeMap<u32, u32>,
+    /// During `run`: the function whose body holds each instruction (Ghidra's bodies do not
+    /// overlap); emptied when `run` ends.
+    body_owner: HashMap<u32, u32>,
+    /// What `run` met that is not ported, one line each, for the caller to print.
+    pub warnings: Vec<String>,
 }
 
 const MAX_STACK: [usize; 2] = [16, 1024]; // local fold, whole-function walk
@@ -258,7 +268,7 @@ const PRE_FILL: [Pat; 6] = [
     &[(0xc2, 0xff), (0, 0x03), (0, 0xff)],
 ];
 const PRE_JMP: [Pat; 2] = [&[(0xe9, 0xff), (0, 0), (0, 0), (0, 0), (0, 0)], &[(0xeb, 0xff), (0, 0)]];
-const POST_ALL: [Pat; 18] = [
+const POST_FILL: [Pat; 19] = [
     &[(0x55, 0xff), (0x8b, 0xff), (0xec, 0xff)],
     &[(0x55, 0xff), (0x89, 0xff), (0xe5, 0xff)],
     &[(0x83, 0xff), (0xec, 0xff), (0x00, 0x83)],
@@ -291,12 +301,23 @@ const POST_ALL: [Pat; 18] = [
     &[(0x53, 0xff), (0x56, 0xff), (0x8b, 0xff), (0xf0, 0xff)],
     &[(0x56, 0xff), (0x57, 0xff), (0x8b, 0xff), (0xf9, 0xff)],
     &[(0x56, 0xff), (0x57, 0xff), (0x8b, 0xff), (0xf1, 0xff)],
+    &[(0x55, 0xff), (0x57, 0xff), (0x56, 0xff), (0x53, 0xff)],
 ];
-const POST_AFTER_JMP: [usize; 4] = [0, 4, 5, 6]; // indexes into POST_ALL
-const POST_EXTRA: Pat = &[(0x55, 0xff), (0x57, 0xff), (0x56, 0xff), (0x53, 0xff)];
+const POST_JMP: [Pat; 4] = [POST_FILL[0], POST_FILL[4], POST_FILL[5], POST_FILL[6]];
 
 fn matches(bytes: &[u8], pat: Pat) -> bool {
     bytes.len() >= pat.len() && pat.iter().zip(bytes).all(|(&(v, m), &b)| b & m == v & m)
+}
+
+/// PatternPairSet.createFinalPatterns: a prepattern/postpattern pair of `<patternpairs
+/// totalbits="32" postbits="16">` is a pattern only when the postpattern has 16 fixed bits and
+/// both together 32 (`getNumFixedBits`); e.g. `CC` + `SUB ESP,small` (8 + 19 bits) is none.
+/// True when such a pair matches with the postpattern at `d[o]`.
+fn pair_hit(d: &[u8], o: usize, pres: &[Pat], posts: &[Pat]) -> bool {
+    let bits = |p: Pat| p.iter().map(|&(_, m)| m.count_ones()).sum::<u32>();
+    pres.iter().filter(|p| o >= p.len() && matches(&d[o - p.len()..o], p)).any(|&pre| {
+        posts.iter().any(|&post| bits(post) >= 16 && bits(pre) + bits(post) >= 32 && matches(&d[o..], post))
+    })
 }
 
 impl Analysis {
@@ -327,10 +348,14 @@ impl Analysis {
             table_slots: BTreeMap::new(),
             fpu_ip: None,
             purge: HashMap::new(),
+            callee_purges: HashMap::new(),
             reg_space: 0,
             overrides: HashMap::new(),
             fixed_bodies: BTreeMap::new(),
             thunks: HashMap::new(),
+            thunk_of: BTreeMap::new(),
+            body_owner: HashMap::new(),
+            warnings: Vec::new(),
         };
         let (rs, list) = sl.registers();
         an.fpu_ip = list.iter().find(|r| r.0 == "FPUInstructionPointer").map(|r| (rs, r.1));
@@ -342,17 +367,19 @@ impl Analysis {
         }
         let mut seeds: Vec<u32> =
             img.exports.iter().map(|e| e.0).chain(img.entry).chain(extra.iter().copied()).collect();
-        // RTTI vftable slots (the RTTI analyzer makes a function of each)
+        seeds.retain(|&a| an.is_code(img, a));
+        // RTTI vftable slots: the RTTI analyzer (599) makes a function of each
+        // (`EHDataTypeUtilities.createFunctionIfNeeded`)
+        let mut rtti = Vec::new();
         let tables = crate::scripts::vftables(img);
         for &v in tables.keys() {
             for i in 0..4096 {
                 match img.read_u32(v + 4 * i) {
-                    Some(t) if an.is_code(img, t) && (i == 0 || !tables.contains_key(&(v + 4 * i))) => seeds.push(t),
+                    Some(t) if an.is_code(img, t) && (i == 0 || !tables.contains_key(&(v + 4 * i))) => rtti.push(t),
                     _ => break,
                 }
             }
         }
-        seeds.retain(|&a| an.is_code(img, a));
         let mut p = sl.new_parse();
         // 1: instruction start, 2: inside an instruction, 3: switch table
         let mut owner = vec![0u8; (an.code_hi - an.code_lo) as usize];
@@ -375,75 +402,459 @@ impl Analysis {
                 run.clear();
             }
         }
-        for &s in &seeds {
-            an.funcs.insert(s);
-            queue.push(s);
+        // Discovery's analyzers, run by Ghidra's task queue at Ghidra's priorities. Disassembly
+        // and Subroutine References (a function at each call target) are `descend`, inside the
+        // analyzer that brings the code.
+        #[derive(Clone, Copy)]
+        enum Task {
+            EntryPoints,
+            StartSearch,
+            Rtti,
+            AddressTables,
+            StartSearchAfterData,
+            SharedReturns,
+            Purge,
         }
-        loop {
-            an.descend(img, sl, &mut p, &mut owner, &mut queue, &mut Vec::new());
-            // Function Start Search: prologue patterns in bytes no code covers yet.
-            let before = an.funcs.len();
-            for sec in exec() {
-                let d = &sec.data;
-                for o in 1..d.len() {
-                    let a = sec.addr + o as u32;
-                    if owner[(a - an.code_lo) as usize] != 0 {
-                        continue;
+        let analyzer = |name, kind, priority, id| Analyzer { name, kind, priority, id };
+        let mut mgr = Manager::new(vec![
+            // Not Java's analyzers, the old discovery at their priorities (to port):
+            // - Disassemble Entry Points: EntryPointAnalyzer's do-later set (suspect entries,
+            //   REFERENCE_ANALYSIS.before()) is not modelled; all seeds go in at 200.
+            // - Function Start Search (402): one search, disassembly inline, skipping covered
+            //   bytes and repeating until nothing is new; Java searches once and queues
+            //   DisassembleCommand and CreateFunctionCmd at priority - 2 and - 1.
+            // - Function Start Search After Data (898): the same full sweep, ignoring its set;
+            //   Java's FunctionStartDataPostAnalyzer searches only the added data for the
+            //   after="data" patterns, and its notify set here is the table targets, not new data.
+            // with External Entry References: the seeds
+            analyzer("Disassemble Entry Points", Kind::Byte, priority::BLOCK_ANALYSIS, Task::EntryPoints),
+            analyzer("Function Start Search", Kind::Byte, priority::CODE_ANALYSIS + 2, Task::StartSearch),
+            analyzer("RTTI Analyzer", Kind::Byte, priority::REFERENCE_ANALYSIS - 1, Task::Rtti),
+            analyzer("Create Address Tables", Kind::Byte, priority::DATA_TYPE_PROPOGATION - 1, Task::AddressTables),
+            analyzer(
+                "Function Start Search After Data",
+                Kind::Data,
+                priority::DATA_TYPE_PROPOGATION - 2,
+                Task::StartSearchAfterData,
+            ),
+            // CODE_ANALYSIS.before().before(): on each batch of functions added or with a changed body
+            analyzer("Shared Return Calls", Kind::Function, priority::CODE_ANALYSIS - 2, Task::SharedReturns),
+            analyzer("X86 Function Callee Purge", Kind::Function, priority::FUNCTION_ANALYSIS, Task::Purge),
+        ]);
+        mgr.notify(Kind::Byte, &exec().map(|s| s.addr).collect());
+        // with `exact`, only the given functions are made (CreateFunctionCmd)
+        let allowed: Option<HashSet<u32>> = exact.then(|| extra.iter().copied().collect());
+        // the non-returning functions the bodies go by (FindNoReturnFunctionsAnalyzer's side);
+        // discovery's disassembly goes by `an.noreturn`, the imports'
+        let mut body_noreturn = an.noreturn.clone();
+        while let Some((task, set)) = mgr.next_task() {
+            let mut data = BTreeSet::new();
+            match task {
+                Task::EntryPoints => {
+                    for &s in &seeds {
+                        an.funcs.insert(s);
+                        queue.push(s);
                     }
-                    let at = &d[o..];
-                    let pre = |list: &[Pat]| list.iter().any(|p| o >= p.len() && matches(&d[o - p.len()..o], p));
-                    let hit = (pre(&PRE_FILL) && (POST_ALL.iter().any(|p| matches(at, p)) || matches(at, POST_EXTRA)))
-                        || (pre(&PRE_JMP) && POST_AFTER_JMP.iter().any(|&i| matches(at, POST_ALL[i])));
-                    if hit {
-                        an.funcs.insert(a);
-                        queue.push(a);
-                        an.descend(img, sl, &mut p, &mut owner, &mut queue, &mut Vec::new());
-                    }
+                    an.descend(img, sl, &mut p, &mut owner, &mut queue, &mut Vec::new());
                 }
+                Task::Rtti => {
+                    for &s in &rtti {
+                        an.funcs.insert(s);
+                        queue.push(s);
+                    }
+                    an.descend(img, sl, &mut p, &mut owner, &mut queue, &mut Vec::new());
+                }
+                // the tables come after everything the seeds reach, so stray pointers cannot
+                // claim their bytes
+                Task::AddressTables => {
+                    data.extend(&tables_queue);
+                    queue.append(&mut tables_queue);
+                    an.descend(img, sl, &mut p, &mut owner, &mut queue, &mut Vec::new());
+                }
+                Task::StartSearch | Task::StartSearchAfterData => {
+                    an.start_search(img, sl, &mut p, &mut owner, &mut queue)
+                }
+                Task::SharedReturns => an.shared_returns(&set),
+                Task::Purge => an.callee_purge(img, &set, &body_noreturn),
             }
-            if an.funcs.len() == before {
-                if tables_queue.is_empty() {
-                    break;
+            mgr.notify(Kind::Data, &data);
+            // CreateFunctionCmd on the functions the task found, in address order, then the
+            // no-return repairs. AutoAnalysisManager sends FUNCTION_ADDED and
+            // FUNCTION_BODY_CHANGED alike to functionDefined: the function analyzers get the
+            // functions made and the ones whose body was set (the purge sets none)
+            if !matches!(task, Task::Purge) {
+                let known = std::mem::replace(&mut an.noreturn, std::mem::take(&mut body_noreturn));
+                let mut defined = BTreeSet::new();
+                let new: Vec<u32> = an.funcs.iter().copied().filter(|f| !an.bodies.contains_key(f)).collect();
+                for f in new {
+                    an.create_function(f, allowed.as_ref(), &mut Vec::new(), &mut defined);
                 }
-                // after everything the seeds reach, so stray pointers cannot claim their bytes
-                queue.append(&mut tables_queue);
-                an.descend(img, sl, &mut p, &mut owner, &mut queue, &mut Vec::new());
+                an.find_noreturn(&mut defined);
+                body_noreturn = std::mem::replace(&mut an.noreturn, known);
+                mgr.notify(Kind::Function, &defined);
             }
         }
-        an.funcs.retain(|a| an.insns.contains_key(a));
-        an.shared_returns();
         if exact {
             an.funcs = extra.iter().copied().filter(|a| an.insns.contains_key(a)).collect();
+            an.bodies.retain(|f, _| an.funcs.contains(f));
         }
-        an.compute_bodies();
-        // Non-returning functions: no RETURN anywhere in the body; then redo the bodies.
-        for _ in 0..4 {
-            let n = an.noreturn.len();
-            let found: Vec<u32> = an
-                .bodies
-                .iter()
-                .filter(|(_, b)| {
-                    !b.iter().any(|a| {
-                        let i = &an.insns[a];
-                        // a JMP [slot] thunk to a non-returning import does not return either
-                        i.flow == Flow::Return
-                            || i.flow == Flow::JumpInd
-                                && !an.tables.contains_key(a)
-                                && !i.slot.is_some_and(|s| an.noreturn.contains(&s))
-                            || i.flow == Flow::Jump
-                                && i.target.is_some_and(|t| an.funcs.contains(&t) && !an.noreturn.contains(&t))
-                    })
-                })
-                .map(|(&f, _)| f)
-                .collect();
-            an.noreturn.extend(found);
-            if an.noreturn.len() == n {
-                break;
+        an.noreturn = body_noreturn;
+        an.body_owner = HashMap::new();
+        // a thunk's purge is its thunked function's (FunctionDB.getStackPurgeSize)
+        let thunked: Vec<(u32, u32)> = an.thunk_of.keys().map(|&f| (f, an.thunked_end(f))).collect();
+        let long = thunked.iter().filter(|(_, t)| an.thunk_of.contains_key(t)).count();
+        if long > 0 {
+            an.warnings.push(format!("{long} thunk chains are longer than 16 thunks; their purge is cut short"));
+        }
+        for (f, t) in thunked {
+            if let Some(&n) = an.callee_purges.get(&t) {
+                an.callee_purges.insert(f, n);
             }
-            an.compute_bodies();
+        }
+        // two thunk definitions: the purges go by `thunk_of`, the facts' names and
+        // `Project::thunked` by a body of one direct jump to a function
+        let (only_made, only_one_jump) = an.bodies.iter().fold((0, 0), |(m, o), (&f, b)| {
+            let one_jump = b.len() == 1
+                && an.insns[&f].flow == Flow::Jump
+                && an.insns[&f].target.is_some_and(|t| t != f && an.funcs.contains(&t));
+            match (an.thunk_of.contains_key(&f), one_jump) {
+                (true, false) => (m + 1, o),
+                (false, true) => (m, o + 1),
+                _ => (m, o),
+            }
+        });
+        if only_made + only_one_jump > 0 {
+            an.warnings.push(format!(
+                "thunks disagree: {only_made} made by CreateFunctionCmd (thunk_of, the purges) are no one-jump body (the facts' names), {only_one_jump} one-jump bodies were not made thunks"
+            ));
+        }
+        // getThunkedAddr steps over an entry instruction without p-code (`NOP; JMP x` is a thunk
+        // of x); resolve_thunk does not. Counted for the one-byte NOP only
+        let nop_thunks = an
+            .bodies
+            .keys()
+            .filter(|&&f| {
+                img.block_of(f).is_some_and(|s| s.data.get((f - s.addr) as usize) == Some(&0x90))
+                    && an.insns.get(&(f + 1)).is_some_and(|i| i.flow == Flow::Jump)
+            })
+            .count();
+        if nop_thunks > 0 {
+            an.warnings.push(format!(
+                "not ported: getThunkedAddr past a no-p-code entry instruction: {nop_thunks} functions start `NOP; JMP` and are no thunks here"
+            ));
         }
         an.stack_purges(img);
         Ok(an)
+    }
+
+    /// X86 Function Callee Purge (`FunctionPurgeAnalysisCmd`) on the functions added or with a
+    /// changed body since its last turn, in address order (`analyzeFunction`). Only a purge
+    /// that is unknown (or past 128) is looked for; a thunk's purge is its thunked function's,
+    /// read and set (`FunctionDB.getStackPurgeSize`). The purge instruction is searched in the
+    /// body, else in the flow from the entry (`locatePurgeInstruction`); its value is the RET's
+    /// operand, or for a CALL_RETURN flow the purge the function it reaches has at this moment
+    /// (none for a non-returning one). `body_noreturn`: the non-returning functions the
+    /// bodies go by.
+    // ponytail: the non-returning functions are this analysis's rule on the bodies (Java's
+    // analyzer runs at 302 with its own rule)
+    fn callee_purge(&mut self, img: &Image, set: &BTreeSet<u32>, body_noreturn: &HashSet<u32>) {
+        let known = std::mem::replace(&mut self.noreturn, body_noreturn.clone());
+        for &f in set.iter().filter(|f| self.bodies.contains_key(f)) {
+            let at = self.thunked_end(f);
+            if self.callee_purges.get(&at).is_some_and(|&n| n <= 128) {
+                continue;
+            }
+            let found = self.purge_insn(img, &self.bodies[&f]).or_else(|| {
+                let flow = self.walk(f, |a| self.bodies.contains_key(&a));
+                self.purge_insn(img, &flow)
+            });
+            if let Some(n) = found.and_then(|(a, n)| n.or_else(|| self.call_purge(a))) {
+                self.callee_purges.insert(at, n);
+            }
+        }
+        self.noreturn = known;
+    }
+
+    /// findPurgeInstruction: the first RET or RETF of `body` by address, among its first 2048
+    /// instructions, with its operand; else the last CALL_RETURN flow (CALL_TERMINATOR or
+    /// COMPUTED_CALL_TERMINATOR), without a value.
+    fn purge_insn(&self, img: &Image, body: &[u32]) -> Option<(u32, Option<u32>)> {
+        let mut backup = None;
+        for &a in body.iter().take(2048) {
+            let i = &self.insns[&a];
+            if i.flow == Flow::Return {
+                let sec = img.block_of(a)?;
+                let b = &sec.data[(a - sec.addr) as usize..];
+                let b = &b[b.iter().take_while(|&&x| matches!(x, 0xf2 | 0xf3 | 0x66)).count()..];
+                // an IRET is no "ret" or "retf": the search goes on
+                match b {
+                    [0xc2 | 0xca, lo, hi, ..] => return Some((a, Some(u16::from_le_bytes([*lo, *hi]) as u32))),
+                    [0xc3 | 0xcb, ..] => return Some((a, Some(0))),
+                    _ => continue,
+                }
+            }
+            if matches!(i.flow, Flow::Jump | Flow::Call | Flow::CallInd | Flow::JumpInd) && self.call_return(a, i) {
+                backup = Some((a, None));
+            }
+        }
+        backup
+    }
+
+    /// getPurgeValue of a CALL_RETURN flow: the purge of the function at its target, unless
+    /// that function does not return.
+    fn call_purge(&self, a: u32) -> Option<u32> {
+        let t = self.insns[&a].target.filter(|t| self.bodies.contains_key(t) && !self.noreturn.contains(t))?;
+        self.callee_purges.get(&self.thunked_end(t)).copied()
+    }
+
+    /// The function a chain of thunks made by `resolve_thunk` ends at (`f` itself if none).
+    fn thunked_end(&self, mut f: u32) -> u32 {
+        for _ in 0..16 {
+            match self.thunk_of.get(&f) {
+                Some(&t) => f = t,
+                None => break,
+            }
+        }
+        f
+    }
+
+    /// CreateFunctionCmd at `f`, a function with an instruction and no body yet: the flow from
+    /// the entry up to the entries of the functions made so far (getFunctionBody), less what
+    /// other bodies hold (subtractBodyFromExisting, which also cuts those bodies), made a thunk
+    /// where the entry is a jump (resolveThunk); once more when the thunk's target, made
+    /// meanwhile, overlaps the body (OverlappingFunctionException). `referring`: the thunks
+    /// whose target this is (referringThunkAddresses); a body that holds one is no function.
+    /// Bodies made or cut go to `changed`. With `allowed`, only those functions are made.
+    fn create_function(
+        &mut self,
+        f: u32,
+        allowed: Option<&HashSet<u32>>,
+        referring: &mut Vec<u32>,
+        changed: &mut BTreeSet<u32>,
+    ) -> bool {
+        if self.bodies.contains_key(&f) || !self.insns.contains_key(&f) || allowed.is_some_and(|s| !s.contains(&f)) {
+            return false;
+        }
+        for _ in 0..2 {
+            let body = self.walk(f, |a| self.bodies.contains_key(&a));
+            let body = self.subtract_existing(f, body, changed);
+            if let Some(b) = self.resolve_thunk(f, &body, allowed, referring, changed) {
+                self.set_body(f, b, changed);
+                return true;
+            }
+            if referring.iter().any(|r| body.binary_search(r).is_ok()) {
+                return false;
+            }
+            if !body.iter().any(|a| self.body_owner.contains_key(a)) {
+                self.set_body(f, body, changed);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// subtractBodyFromExisting: each function whose body overlaps `body` loses the part from
+    /// `f` to the end of `body` (it lies before `f`) or up to its own entry (it lies after);
+    /// `body` loses what the function keeps.
+    fn subtract_existing(&mut self, f: u32, mut body: Vec<u32>, changed: &mut BTreeSet<u32>) -> Vec<u32> {
+        let over: BTreeSet<u32> =
+            body.iter().filter_map(|a| self.body_owner.get(a).copied()).filter(|&g| g != f).collect();
+        for g in over {
+            let Some(&max) = body.last() else { break };
+            let end = if g < f { max } else { g - 1 };
+            if let Some(gb) = self.bodies.get_mut(&g) {
+                let n = gb.len();
+                gb.retain(|&a| {
+                    let cut = (f..=end).contains(&a);
+                    if cut {
+                        self.body_owner.remove(&a);
+                    }
+                    !cut
+                });
+                if gb.len() != n {
+                    changed.insert(g);
+                }
+            }
+            body.retain(|a| self.body_owner.get(a) != Some(&g));
+        }
+        body
+    }
+
+    /// CreateFunctionCmd.resolveThunk with CreateThunkFunctionCmd: a function whose first
+    /// instruction is a direct JMP (getSimpleFlow) is a thunk of the function at the target,
+    /// made first where there is none (getReferencedFunction), but not where the target lies in
+    /// another function's body, has no instruction, or is a thunk on the way. The thunk's body
+    /// is `body` less the target's body; where `body` held the target, that must leave one
+    /// range from the entry, else it must not overlap the target. Returns the thunk's body.
+    fn resolve_thunk(
+        &mut self,
+        f: u32,
+        body: &[u32],
+        allowed: Option<&HashSet<u32>>,
+        referring: &mut Vec<u32>,
+        changed: &mut BTreeSet<u32>,
+    ) -> Option<Vec<u32>> {
+        let t = self.insns.get(&f).filter(|i| i.flow == Flow::Jump)?.target.filter(|&t| t != f)?;
+        if referring.contains(&f) {
+            return None;
+        }
+        if !self.bodies.contains_key(&t) {
+            if self.body_owner.contains_key(&t) || !self.insns.contains_key(&t) || referring.contains(&t) {
+                return None;
+            }
+            referring.push(f);
+            let made = self.create_function(t, allowed, referring, changed);
+            referring.pop();
+            // getFunctionContaining(entry): the target's body may hold the entry now
+            if !made || self.body_owner.contains_key(&f) {
+                return None;
+            }
+        }
+        let thunk: Vec<u32> = body.iter().copied().filter(|a| self.body_owner.get(a) != Some(&t)).collect();
+        // createThunkFunction throws OverlappingFunctionException where the body holds a third
+        // function's code (made with the target); CreateFunctionCmd tries again
+        if thunk.iter().any(|a| self.body_owner.get(a).is_some_and(|&g| g != f)) {
+            return None;
+        }
+        let one_range =
+            thunk.first() == Some(&f) && thunk.windows(2).all(|w| w[0] + self.insns[&w[0]].len as u32 == w[1]);
+        let held = body.binary_search(&t).is_ok();
+        if held && !one_range || !held && thunk.len() != body.len() {
+            return None;
+        }
+        self.thunk_of.insert(f, t);
+        Some(thunk)
+    }
+
+    /// Function.setBody (FUNCTION_BODY_CHANGED; a new function's body with FUNCTION_ADDED).
+    fn set_body(&mut self, f: u32, body: Vec<u32>, changed: &mut BTreeSet<u32>) {
+        for a in self.bodies.get(&f).into_iter().flatten() {
+            if self.body_owner.get(a) == Some(&f) {
+                self.body_owner.remove(a);
+            }
+        }
+        for &a in &body {
+            self.body_owner.insert(a, f);
+        }
+        self.bodies.insert(f, body);
+        self.funcs.insert(f);
+        changed.insert(f);
+    }
+
+    /// CreateFunctionCmd.fixupFunctionBody: the flow from the entry, as at creation; a
+    /// function that is no thunk and whose entry jumps to a function becomes its thunk
+    /// (resolveThunk); a body that overlaps others cuts them as at creation.
+    // ponytail: the thunk case takes a target that is a function already and a body that
+    // overlaps none; Java's would make the target and set the thunk even where the body then
+    // fails (CreateThunkFunctionCmd.applyTo on an existing function)
+    fn fixup_body(&mut self, f: u32, changed: &mut BTreeSet<u32>) {
+        let new = self.walk(f, |a| self.bodies.contains_key(&a));
+        let overlaps = new.iter().any(|a| self.body_owner.get(a).is_some_and(|&g| g != f));
+        if !self.thunk_of.contains_key(&f) && !overlaps {
+            let i = &self.insns[&f];
+            if let Some(t) = i
+                .target
+                .filter(|t| i.flow == Flow::Jump && *t != f && self.bodies.contains_key(t) && self.thunked_end(*t) != f)
+            {
+                self.thunk_of.insert(f, t);
+                if self.bodies.get(&f) != Some(&new) {
+                    self.set_body(f, new, changed);
+                }
+                return;
+            }
+        }
+        if new.is_empty() || self.bodies.get(&f) == Some(&new) {
+            return;
+        }
+        let new = if overlaps { self.subtract_existing(f, new, changed) } else { new };
+        self.set_body(f, new, changed);
+    }
+
+    /// Non-returning functions, this analysis's rule (FindNoReturnFunctionsAnalyzer's place):
+    /// no way out of the body: no RETURN, no jump (conditional or not) or fallthrough out of
+    /// it, unless to a non-returning function. An approximation: Java's analyzer decides from
+    /// the call sites (`FindNoReturnFunctionsAnalyzer`, its evidence threshold), never from a
+    /// body without a RET; a mark here is kept once made, so a wrong one stays. The functions that call a new one get their bodies
+    /// fixed up (`fixCallingFunctionBody`), and the rule runs again. Bodies set go to `changed`.
+    fn find_noreturn(&mut self, changed: &mut BTreeSet<u32>) {
+        for round in 0..4 {
+            let found: HashSet<u32> = self
+                .bodies
+                .iter()
+                .filter(|(f, b)| {
+                    !self.noreturn.contains(f)
+                        && !b.iter().any(|a| {
+                            let i = &self.insns[a];
+                            // a JMP [slot] thunk to a non-returning import does not return either
+                            i.flow == Flow::Return
+                                || i.flow == Flow::JumpInd
+                                    && !self.tables.contains_key(a)
+                                    && !i.slot.is_some_and(|s| self.noreturn.contains(&s))
+                                // a jump out of the body (to a function, made or not, or
+                                // to code the body does not hold) unless to a non-returning one
+                                || matches!(i.flow, Flow::Jump | Flow::CondJump)
+                                    && i.target.is_some_and(|t| {
+                                        !self.noreturn.contains(&t)
+                                            && b.binary_search(&t).is_err()
+                                    })
+                                // a fallthrough out of the body (into another function's)
+                                || i.falls_through()
+                                    && !(matches!(i.flow, Flow::Call | Flow::CallInd) && self.call_return(*a, i))
+                                    && b.binary_search(&(a + i.len as u32)).is_err()
+                        })
+                })
+                .map(|(&f, _)| f)
+                .collect();
+            if found.is_empty() {
+                break;
+            }
+            let cap = "the no-return rule stopped after 4 rounds with non-returning functions still found";
+            if round == 3 && !self.warnings.iter().any(|w| w == cap) {
+                self.warnings.push(cap.to_string());
+            }
+            self.noreturn.extend(&found);
+            let callers: BTreeSet<u32> = self
+                .insns
+                .iter()
+                .filter(|(_, i)| i.flow == Flow::Call && i.target.is_some_and(|t| found.contains(&t)))
+                .filter_map(|(a, _)| self.body_owner.get(a).copied())
+                .collect();
+            for g in callers {
+                self.fixup_body(g, changed);
+            }
+        }
+    }
+
+    /// Function Start Search: functions at prologue patterns in bytes no code covers yet, each
+    /// disassembled when found; again while a sweep finds one.
+    fn start_search(
+        &mut self,
+        img: &Image,
+        sl: &Sleigh,
+        p: &mut crate::sleigh::Parse,
+        owner: &mut [u8],
+        queue: &mut Vec<u32>,
+    ) {
+        loop {
+            let before = self.funcs.len();
+            for sec in img.sections.iter().filter(|s| s.exec) {
+                let d = &sec.data;
+                for o in 1..d.len() {
+                    let a = sec.addr + o as u32;
+                    if owner[(a - self.code_lo) as usize] != 0 {
+                        continue;
+                    }
+                    if pair_hit(d, o, &PRE_FILL, &POST_FILL) || pair_hit(d, o, &PRE_JMP, &POST_JMP) {
+                        self.funcs.insert(a);
+                        queue.push(a);
+                        self.descend(img, sl, p, owner, queue, &mut Vec::new());
+                    }
+                }
+            }
+            if self.funcs.len() == before {
+                return;
+            }
+        }
     }
 
     fn decode(&self, img: &Image, sl: &Sleigh, p: &mut crate::sleigh::Parse, a: u32, fold: &mut Fold) -> Option<Ins> {
@@ -1204,98 +1615,98 @@ impl Analysis {
     }
 
     /// SharedReturnAnalysisCmd with "assume contiguous functions" (x86's default) and without
-    /// conditional branches, run as the FUNCTION analyzer is: first on every function
-    /// discovery made, then on the functions each run created, until none is created. The jump
-    /// scan set is built per function of the run as `checkAboveFunction` /
+    /// conditional branches, on `set`: the entries of the functions added or with a body set
+    /// since its last turn (a FUNCTION_ANALYZER at 398). The jump
+    /// scan set is built per function of `set` as `checkAboveFunction` /
     /// `checkBelowFunction` build it (from the previous function's entry to the next one's,
     /// a single-range body taken out again), and the jump sources in it are walked in address
     /// order with Java's cached "function after / before the source", whose staleness decides
     /// some targets. A target becomes a function when an unconditional jump (a jump's first
     /// flow reference) passes the next function entry or goes before the previous one, no
     /// conditional flow reaches it, no instruction falls into it and it is not a lone return
-    /// (`checkIfCouldHaveFallThruTo`). The functions are created after the walk (Java queues
-    /// them with `AutoAnalysisManager.createFunction`).
-    fn shared_returns(&mut self) {
+    /// (`checkIfCouldHaveFallThruTo`). The functions are the ones with a body (the function
+    /// manager's); the targets go to `funcs` and are made by CreateFunctionCmd after the task
+    /// (Java queues them with `AutoAnalysisManager.createFunction` at 397, before the next
+    /// task). The jumps to a function in `set` are not given CALL_RETURN here
+    /// (`processFunctionJumpReferences`): ghidra-rs derives that override (`call_return`).
+    fn shared_returns(&mut self, set: &BTreeSet<u32>) {
         let mut cond = HashSet::new();
         for i in self.insns.values() {
             if i.flow == Flow::CondJump {
                 cond.extend(i.target);
             }
         }
-        let mut set: Vec<u32> = self.funcs.iter().copied().collect();
-        while !set.is_empty() {
-            let mut scan = RangeSet::default();
-            for &f in &set {
-                // checkAboveFunction
-                let prev = self.funcs.range(..f).next_back().copied().unwrap_or(0);
-                scan.add(prev, f);
-                // checkBelowFunction
-                let body = self.body_ranges(f);
-                if body.len() > 1 {
-                    body.iter().for_each(|&(lo, hi)| scan.add(lo, hi));
-                }
-                let next = self.funcs.range(f + 1..).next().map_or(u32::MAX, |&n| n - 1);
-                scan.add(f, next);
-                if body.len() <= 1 {
-                    body.iter().for_each(|&(lo, hi)| scan.remove(lo, hi));
-                }
+        let funcs = &self.bodies;
+        let mut scan = RangeSet::default();
+        for &f in set.iter().filter(|f| funcs.contains_key(f)) {
+            // checkAboveFunction
+            let prev = funcs.range(..f).next_back().map_or(0, |(&p, _)| p);
+            scan.add(prev, f);
+            // checkBelowFunction
+            let body = self.body_ranges(f);
+            if body.len() > 1 {
+                body.iter().for_each(|&(lo, hi)| scan.add(lo, hi));
             }
-            let mut created = BTreeSet::new();
-            // Java's cache: None is null, Some(None) is Address.NO_ADDRESS
-            let (mut after, mut before): (Option<Option<u32>>, Option<Option<u32>>) = (None, None);
-            let after_of = |a: u32| self.funcs.range(a + 1..).next().copied();
-            let before_of = |a: u32| self.funcs.range(..a).next_back().copied();
-            for (&src, i) in scan.ranges().flat_map(|(lo, hi)| self.insns.range(lo..=hi)) {
-                // the first flow reference: the jump's target, or a computed jump's lowest case
-                let dest = match i.flow {
-                    Flow::Jump => i.target,
-                    Flow::JumpInd => self.tables.get(&src).and_then(|c| c.iter().min().copied()),
-                    _ => None,
-                };
-                let Some(dest) = dest else { continue };
-                if cond.contains(&dest) {
+            let next = funcs.range(f + 1..).next().map_or(u32::MAX, |(&n, _)| n - 1);
+            scan.add(f, next);
+            if body.len() <= 1 {
+                body.iter().for_each(|&(lo, hi)| scan.remove(lo, hi));
+            }
+        }
+        let mut created = BTreeSet::new();
+        // Java's cache: None is null, Some(None) is Address.NO_ADDRESS
+        let (mut after, mut before): (Option<Option<u32>>, Option<Option<u32>>) = (None, None);
+        let after_of = |a: u32| funcs.range(a + 1..).next().map(|(&n, _)| n);
+        let before_of = |a: u32| funcs.range(..a).next_back().map(|(&p, _)| p);
+        for (&src, i) in scan.ranges().flat_map(|(lo, hi)| self.insns.range(lo..=hi)) {
+            // the first flow reference: the jump's target, or a computed jump's lowest case
+            let dest = match i.flow {
+                Flow::Jump => i.target,
+                Flow::JumpInd => self.tables.get(&src).and_then(|c| c.iter().min().copied()),
+                _ => None,
+            };
+            let Some(dest) = dest else { continue };
+            if cond.contains(&dest) {
+                continue;
+            }
+            if src < dest {
+                if after == Some(None) {
                     continue;
                 }
-                if src < dest {
+                if after.is_none_or(|a| a.is_some_and(|a| a <= src)) {
+                    after = Some(after_of(src));
                     if after == Some(None) {
                         continue;
                     }
-                    if after.is_none_or(|a| a.is_some_and(|a| a <= src)) {
-                        after = Some(after_of(src));
-                        if after == Some(None) {
-                            continue;
-                        }
+                }
+                if after.flatten().is_some_and(|a| dest >= a) {
+                    self.shared_target(dest, &mut created);
+                }
+            } else {
+                if after.is_none() {
+                    after = Some(after_of(src));
+                }
+                if before == Some(None) {
+                    let Some(a) = after.flatten() else { continue };
+                    if src < a {
+                        continue;
                     }
-                    if after.flatten().is_some_and(|a| dest >= a) {
-                        self.shared_target(dest, &mut created);
-                    }
-                } else {
-                    if after.is_none() {
-                        after = Some(after_of(src));
-                    }
+                    before = None;
+                    after = Some(after_of(src));
+                }
+                let keep = before.is_some() && after.is_some_and(|a| a.is_none_or(|a| src < a));
+                if !keep {
+                    before = Some(before_of(src));
                     if before == Some(None) {
-                        let Some(a) = after.flatten() else { continue };
-                        if src < a {
-                            continue;
-                        }
-                        before = None;
-                        after = Some(after_of(src));
-                    }
-                    let keep = before.is_some() && after.is_some_and(|a| a.is_none_or(|a| src < a));
-                    if !keep {
-                        before = Some(before_of(src));
-                        if before == Some(None) {
-                            continue;
-                        }
-                    }
-                    if before.flatten().is_some_and(|b| dest < b) {
-                        self.shared_target(dest, &mut created);
+                        continue;
                     }
                 }
+                if before.flatten().is_some_and(|b| dest < b) {
+                    self.shared_target(dest, &mut created);
+                }
             }
-            self.funcs.extend(&created);
-            set = created.into_iter().collect();
         }
+        self.funcs.extend(created);
     }
 
     /// SharedReturnAnalysisCmd.createFunction: nothing for an existing function (its jump
@@ -1303,7 +1714,7 @@ impl Analysis {
     /// into the target (`checkIfCouldHaveFallThruTo`): no instruction there, an instruction
     /// whose fallthrough is the target, or a lone terminator (a return).
     fn shared_target(&self, dest: u32, created: &mut BTreeSet<u32>) {
-        if self.funcs.contains(&dest) {
+        if self.bodies.contains_key(&dest) {
             return;
         }
         let Some(i) = self.insns.get(&dest) else { return };
@@ -1324,7 +1735,8 @@ impl Analysis {
     /// bytes, adjacent ones merged.
     fn body_ranges(&self, f: u32) -> Vec<(u32, u32)> {
         let mut out: Vec<(u32, u32)> = Vec::new();
-        for a in self.body_of(f) {
+        // the body set (func.getBody)
+        for &a in self.bodies.get(&f).into_iter().flatten() {
             let hi = a + self.insns[&a].len as u32 - 1;
             match out.last_mut() {
                 Some(last) if last.1.checked_add(1) == Some(a) => last.1 = hi,
@@ -1344,7 +1756,7 @@ impl Analysis {
         match i.flow {
             Flow::Call => i.target.is_some_and(|t| self.noreturn.contains(&t)),
             Flow::CallInd => i.slot.is_some_and(|s| self.noreturn.contains(&s)),
-            Flow::Jump => i.target.is_some_and(|t| self.funcs.contains(&t)),
+            Flow::Jump => i.target.is_some_and(|t| self.funcs.contains(&t) && self.insns.contains_key(&t)),
             _ => false,
         }
     }
@@ -1355,10 +1767,16 @@ impl Analysis {
         if let Some(ranges) = self.fixed_bodies.get(&f) {
             return ranges.iter().flat_map(|&(lo, hi)| self.insns.range(lo..=hi).map(|(&a, _)| a)).collect();
         }
+        self.walk(f, |a| self.funcs.contains(&a))
+    }
+
+    /// The flow from `f` (getFunctionBody without other functions): fallthroughs (not past a
+    /// CALL_RETURN call), jumps and switch cases, up to the entries `is_entry` names.
+    fn walk(&self, f: u32, is_entry: impl Fn(u32) -> bool) -> Vec<u32> {
         let mut seen = BTreeSet::new();
         let mut work = vec![f];
         while let Some(a) = work.pop() {
-            if (a != f && self.funcs.contains(&a)) || !seen.insert(a) {
+            if (a != f && is_entry(a)) || !seen.insert(a) {
                 continue;
             }
             let Some(i) = self.insns.get(&a) else {
@@ -1380,10 +1798,6 @@ impl Analysis {
             }
         }
         seen.into_iter().collect()
-    }
-
-    pub fn compute_bodies(&mut self) {
-        self.bodies = self.funcs.iter().map(|&f| (f, self.body_of(f))).collect();
     }
 
     /// Each function's stack purge, as Ghidra sets it from the function's returns: the `n` of
@@ -1570,34 +1984,6 @@ impl Analysis {
         self.purge.get(&f).copied()
     }
 
-    /// Ghidra's `FunctionPurgeAnalysisCmd`: the bytes the first RET of the body (by address,
-    /// among its first 2048 instructions) pops; without a RET, the purge of the function the
-    /// last jump out of the body calls (a jump with a `CALL_RETURN` override).
-    // ponytail: Ghidra takes the callee's purge as it is when this function is analysed (in
-    // address order); here the callee is always worked out first, 8 jumps deep at most
-    pub fn ret_purge(&self, img: &Image, f: u32, depth: u32) -> Option<u32> {
-        let mut backup = None;
-        for &a in self.bodies.get(&f)?.iter().take(2048) {
-            let i = &self.insns[&a];
-            match i.flow {
-                Flow::Return => {
-                    let sec = img.block_of(a)?;
-                    let b = &sec.data[(a - sec.addr) as usize..];
-                    let b = &b[b.iter().take_while(|&&x| matches!(x, 0xf2 | 0xf3 | 0x66)).count()..];
-                    return match b {
-                        [0xc2 | 0xca, lo, hi, ..] => Some(u16::from_le_bytes([*lo, *hi]) as u32),
-                        [0xc3 | 0xcb, ..] => Some(0),
-                        _ => None, // IRET
-                    };
-                }
-                Flow::Jump => backup = i.target.filter(|t| *t != f && self.funcs.contains(t)).or(backup),
-                _ => {}
-            }
-        }
-        let t = backup.filter(|t| depth < 8 && !self.noreturn.contains(t))?;
-        self.ret_purge(img, t, depth + 1)
-    }
-
     pub fn body_size(&self, f: u32) -> u64 {
         self.bodies[&f].iter().map(|a| self.insns[a].len as u64).sum()
     }
@@ -1684,7 +2070,16 @@ impl RangeSet {
 
 #[cfg(test)]
 mod tests {
-    use super::RangeSet;
+    use super::{pair_hit, Analysis, Flow, Ins, RangeSet, POST_FILL, PRE_FILL};
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+    #[test]
+    fn pattern_pairs_need_their_bits() {
+        // `CC` + `SUB ESP,8`: 8 + 19 fixed bits, below totalbits 32; `CC CC` + it: 35
+        let d = [0x90, 0xcc, 0x83, 0xec, 0x08, 0xcc, 0xcc, 0x83, 0xec, 0x08];
+        assert!(!pair_hit(&d, 2, &PRE_FILL, &POST_FILL));
+        assert!(pair_hit(&d, 7, &PRE_FILL, &POST_FILL));
+    }
 
     #[test]
     fn range_set_add_remove() {
@@ -1698,5 +2093,68 @@ mod tests {
         s.add(0, u32::MAX);
         s.remove(0, 5);
         assert_eq!(s.ranges().collect::<Vec<_>>(), [(6, u32::MAX)]);
+    }
+
+    /// An analysis of `insns` alone (no image), with a function at each of `funcs` made in
+    /// order as CreateFunctionCmd makes it.
+    fn bare(insns: &[(u32, Flow, Option<u32>)], funcs: &[u32]) -> (Analysis, BTreeSet<u32>) {
+        let ins = |&(a, flow, target): &(u32, Flow, Option<u32>)| {
+            let i = Ins { len: 1, flow, target, slot: None, computed: None, refs: vec![], code_imms: vec![] };
+            (a, i)
+        };
+        let mut an = Analysis {
+            text_start: 0,
+            text_end: 0,
+            code_lo: 0,
+            code_hi: 0,
+            insns: insns.iter().map(ins).collect(),
+            tables: HashMap::new(),
+            funcs: BTreeSet::new(),
+            noreturn: HashSet::new(),
+            bodies: BTreeMap::new(),
+            table_slots: BTreeMap::new(),
+            fpu_ip: None,
+            purge: HashMap::new(),
+            callee_purges: HashMap::new(),
+            reg_space: 0,
+            overrides: HashMap::new(),
+            fixed_bodies: BTreeMap::new(),
+            thunks: HashMap::new(),
+            thunk_of: BTreeMap::new(),
+            body_owner: HashMap::new(),
+            warnings: Vec::new(),
+        };
+        let mut changed = BTreeSet::new();
+        for &f in funcs {
+            an.create_function(f, None, &mut Vec::new(), &mut changed);
+        }
+        (an, changed)
+    }
+
+    #[test]
+    fn noreturn_counts_a_fallthrough_into_another_body_as_returning() {
+        // 0x10 falls into 0x11, made first; 0x20 only loops
+        let (mut an, mut changed) = bare(
+            &[(0x10, Flow::Fall, None), (0x11, Flow::Return, None), (0x20, Flow::Jump, Some(0x20))],
+            &[0x11, 0x10, 0x20],
+        );
+        assert_eq!(an.bodies[&0x10], [0x10]);
+        an.find_noreturn(&mut changed);
+        assert!(!an.noreturn.contains(&0x10));
+        assert!(an.noreturn.contains(&0x20));
+    }
+
+    #[test]
+    fn thunk_body_never_takes_a_third_functions_code() {
+        // 0x10 JMP 0x12; 0x12 JMP 0x11 makes 0x11 first: 0x10's first body less 0x12's would
+        // hold 0x11, so the thunk is tried again on the flow up to the entries made
+        let (an, _) = bare(
+            &[(0x10, Flow::Jump, Some(0x12)), (0x11, Flow::Return, None), (0x12, Flow::Jump, Some(0x11))],
+            &[0x10],
+        );
+        assert_eq!(an.bodies[&0x10], [0x10]);
+        assert_eq!(an.bodies[&0x11], [0x11]);
+        assert_eq!(an.thunk_of.get(&0x10), Some(&0x12));
+        assert_eq!(an.thunk_of.get(&0x12), Some(&0x11));
     }
 }

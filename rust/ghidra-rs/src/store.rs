@@ -198,8 +198,12 @@ impl Store {
         }
     }
 
-    /// Lays the edits over a fresh analysis, in the order of the file, and computes the bodies
-    /// again. A record that cannot hold when its turn comes (no instruction decodes at a
+    /// Lays the edits over a fresh analysis, in the order of the file, and computes again the
+    /// bodies the edits touch: of the functions the file makes, removes, gives a body or a thunk
+    /// mark, and of the functions whose body holds an address it clears, overrides, gives a
+    /// switch or makes a function entry. The other bodies stay as analysis set them.
+    // ponytail: a touched body is the flow from its entry (`body_of`), not Java's
+    // CreateFunctionCmd / fixupFunctionBody on the edited program A record that cannot hold when its turn comes (no instruction decodes at a
     /// `code`, `switch`, `override` or `function` address, a `body` or `thunk` of no function)
     /// is an error.
     pub fn apply(&self, an: &mut Analysis, img: &Image, sl: &Sleigh) -> Result<(), String> {
@@ -207,9 +211,10 @@ impl Store {
             true => Ok(()),
             false => Err(format!("store: {kind} 0x{a:08x}: no instruction there")),
         };
+        let mut touched: BTreeSet<u32> = BTreeSet::new();
         for step in &self.steps {
             match *step {
-                Step::Clear(lo, hi) => drop(clear_insns(an, lo, hi)),
+                Step::Clear(lo, hi) => touched.extend(clear_insns(an, lo, hi)),
                 Step::NoReturn(a, true) => drop(an.noreturn.insert(a)),
                 Step::NoReturn(a, false) => drop(an.noreturn.remove(&a)),
                 Step::Code(a) => {
@@ -218,10 +223,12 @@ impl Store {
                 }
                 Step::Switch(a, ref targets) => {
                     need_insn(an, "switch", a)?;
+                    touched.insert(a);
                     an.tables.insert(a, targets.clone());
                 }
                 Step::Override(a, on) => {
                     need_insn(an, "override", a)?;
+                    touched.insert(a);
                     an.overrides.insert(a, on);
                 }
             }
@@ -241,7 +248,20 @@ impl Store {
         }
         an.fixed_bodies = self.bodies.clone();
         an.thunks = self.thunks.iter().map(|(&f, &t)| (f, t)).collect();
-        an.compute_bodies();
+        touched.extend(self.functions.keys());
+        let mut redo: BTreeSet<u32> =
+            self.functions.keys().chain(self.bodies.keys()).chain(self.thunks.keys()).copied().collect();
+        redo.extend(
+            an.bodies.iter().filter(|(_, b)| touched.iter().any(|a| b.binary_search(a).is_ok())).map(|(&f, _)| f),
+        );
+        for f in redo {
+            if an.funcs.contains(&f) && an.insns.contains_key(&f) {
+                let body = an.body_of(f);
+                an.bodies.insert(f, body);
+            } else {
+                an.bodies.remove(&f);
+            }
+        }
         an.stack_purges(img);
         Ok(())
     }

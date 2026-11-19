@@ -2127,7 +2127,8 @@ to confirm, and the loader is one module (`decomp/facts.rs`) that another source
   register holds, Function ID's plate comments. mercs2 with Java's function set: `func` 81.2%,
   `data` 84.9%, `string` 90.5%, `comments` 71.0% equal (superseded: "`func` 80.6% ... `data`
   47.1%" above); `ghidra-diff.sh` M8 identical 2 / 7, M500 173 / 499. Not ported: the
-  demangler, Ghidra's order of analysis (its task queue), switch-case labels, the loader's and
+  demangler, Ghidra's order of analysis (its task queue; superseded 2026-11-18: ported, `queue.rs`,
+  with discovery and the purge analyzer in it), switch-case labels, the loader's and
   RTTI structures.
 
 Still before the gate: the eight actions (item 1), the misses default options reach (item 2),
@@ -2191,6 +2192,21 @@ own facts with plain discovery (65 s) 177 / 499, loud 122, silent 200 (2 / 7, lo
 facts; it now stops on a missing or empty `FACTS` file. Inputs in `rust/target/gap7/`.
 Superseded: the own-facts M500 counts 171 -> 173 (Java's functions) and 90 (plain discovery) of
 S10 slices 2 and 3 (eight actions skipped).
+
+Own-facts gap, row 2 (branch `worktree-agent-a628570747560462f`): the 133 M500 functions that
+miss with own facts and Java's function list but not with Java's facts, traced by swapping one
+record kind at a time: `data` 43, `extrapop` 23, stack variables 17, the `func` record otherwise
+18, `override` 5, no single kind 27 (`rust/README.md`). Fix 1, `SymbolicPropogator`'s INT_ZEXT
+and INT_SEXT cases size data: 340 / 499, loud 31, silent 128 (was 328, 31, 140); M8 unchanged.
+Superseded: the 328 / 499 above for own facts with Java's function list.
+
+Full pass of branch `analysis-queue` (2026-11-19, `bars-queue.sh` on 83ee6a86e6, the tree of 82b968548a, desktop and
+Mac, compared with `m3-int7-249c32cf94.summary`): 133 / 133 pairs (the Mac lost `pcc-t-switch`,
+rerun on the desktop: the baseline line), silent 0 in every pair. `pmd`, `r5slock` and
+`r5dtlocksv` M500 are one identical lower because the reference timed out on 0x4c48d0 at 120 s;
+with `TIMEOUT` 400 it is identical in all three. "All outputs identical" one higher in 11 M500
+lines; `stack-m500` stack SSA 318 -> 312. New prelude `cksum` 3436140667 (30,084 functions).
+See `rust/README.md`, "Full pass of `analysis-queue`".
 
 ## Running stages in parallel
 

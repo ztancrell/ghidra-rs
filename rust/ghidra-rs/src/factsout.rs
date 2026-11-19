@@ -331,9 +331,10 @@ impl Exporter<'_> {
                 s if s == uniq => consts.get(&v.offset).copied(),
                 _ => None,
             };
-            // a COPY from memory is the one direct access the propagator sizes (its COPY case
-            // makes the reference); a direct write only counts as a write
-            if let Some(v) = op.ins.first().filter(|v| op.opc == 1 && v.space == code) {
+            // a COPY, INT_ZEXT or INT_SEXT from memory are the direct accesses the propagator
+            // sizes (those cases of `SymbolicPropogator.applyPcode` make the reference with the
+            // input varnode); a direct write only counts as a write
+            if let Some(v) = op.ins.first().filter(|v| matches!(op.opc, 1 | 17 | 18) && v.space == code) {
                 out.push((v.offset as u32, v.size, false));
             }
             if let Some(o) = op.out.as_ref().filter(|o| o.space == code) {
@@ -527,8 +528,10 @@ impl Exporter<'_> {
     // ponytail: "an operand names the address" is "not the slot a PUSH, POP or CALL uses
     // itself" (Ghidra adds up the operand's registers and scalars, `getStackOpIndex`). A call
     // whose purge is unknown ends the stack tracking of its path; the purges are the ones
-    // `call_purges` gives the analysis for this walk, which have every function Ghidra's
-    // auto-analysis made, not only those it had made when it analysed the caller
+    // `call_purges` gives the analysis for this walk: those X86 Function Callee Purge (500) set
+    // at its turns in the queue (`Analysis::callee_purges`), which all come before the Stack
+    // analyzer's turn (903). Not modelled: Java's Stack also runs on each later batch of new
+    // functions, before the purge of functions made after that
     fn locals(&self, p: &mut Parse, f: u32) -> String {
         const PREFIXES: [u8; 10] = [0x66, 0x67, 0xf2, 0xf3, 0x26, 0x2e, 0x36, 0x3e, 0x64, 0x65];
         let (rs, _) = self.sl.registers();
@@ -614,11 +617,6 @@ impl Exporter<'_> {
         }
         xml
     }
-
-    /// `Analysis::ret_purge`: Ghidra's purge of the function.
-    fn purge(&self, f: u32, depth: u32) -> Option<u32> {
-        self.an.ret_purge(self.img, f, depth)
-    }
 }
 
 /// The names of the functions: an export's, Function ID's, a thunk's, or `FUN_<address>`.
@@ -684,6 +682,9 @@ pub struct Inputs<'a> {
     /// the functions discovery finds without seeds, where seeds were given: Ghidra's
     /// auto-analysis worked on these, a seeded one stands for a function a script made later
     pub analyzed: Option<&'a BTreeSet<u32>>,
+    /// the purges X86 Function Callee Purge set in auto-analysis (`Analysis::callee_purges` of
+    /// the run without seeds, where seeds were given): Ghidra's purge of each function
+    pub purges: &'a HashMap<u32, u32>,
     /// the text of the compiler spec (its call fixups)
     pub cspec: &'a str,
     /// the trigram model of Ghidra's ASCII Strings analyzer; without it that analyzer does not run
@@ -694,12 +695,11 @@ pub struct Inputs<'a> {
 /// call site (`SymbolicPropogator.getFunctionPurge`), by function entry and by import slot: 0
 /// for a calling convention with a known extrapop (`__cdecl`), whatever the function's purge
 /// is; the prototype's for an import of the archive; else the purge
-/// `FunctionPurgeAnalysisCmd` gave the function, which only a function of auto-analysis has. A
-/// thunk has its target's.
+/// X86 Function Callee Purge gave the function at its turn (`Inputs::purges`), which only a
+/// function of auto-analysis has. A thunk has its target's.
 pub fn call_purges(img: &Image, an: &Analysis, inputs: &Inputs) -> HashMap<u32, u32> {
     let none = Protos::default();
     let protos = inputs.protos.unwrap_or(&none);
-    let auto = |f: u32| inputs.analyzed.is_none_or(|s| s.contains(&f));
     // the prototype of the function itself comes after its symbols
     let proto_purge = |name: &str| {
         let xml = protos.by_name.get(name)?;
@@ -717,8 +717,7 @@ pub fn call_purges(img: &Image, an: &Analysis, inputs: &Inputs) -> HashMap<u32, 
         let purge = match func.import {
             _ if func.model == Some("__cdecl") => Some(0),
             Some(slot) => out.get(&slot).copied(),
-            None if auto(end) => an.ret_purge(img, end, 0),
-            None => None,
+            None => inputs.purges.get(&end).copied(),
         };
         if let Some(n) = purge {
             out.insert(f, n);
@@ -729,7 +728,7 @@ pub fn call_purges(img: &Image, an: &Analysis, inputs: &Inputs) -> HashMap<u32, 
 
 /// Write the facts of `an` to `out`.
 pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mut dyn Write) -> io::Result<()> {
-    let Inputs { fid, protos, analyzed, cspec, strings } = *inputs;
+    let Inputs { fid, protos, analyzed, purges, cspec, strings } = *inputs;
     let none = Protos::default();
     let mut ex = Exporter {
         img,
@@ -850,8 +849,7 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         let purge = match func.import {
             // an import: `__cdecl` pops nothing, any other is the prototype's business
             Some(_) => (func.model == Some("__cdecl")).then_some(0),
-            None if auto(end) => ex.purge(end, 0),
-            None => None,
+            None => purges.get(&end).copied(),
         };
         let thunk = func.thunked.is_some() || func.import.is_some();
         let locals = if auto(f) && !thunk { ex.locals(&mut p, f) } else { String::new() };
