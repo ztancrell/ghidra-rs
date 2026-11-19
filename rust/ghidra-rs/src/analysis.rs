@@ -1742,10 +1742,6 @@ impl Analysis {
         seen.into_iter().collect()
     }
 
-    pub fn compute_bodies(&mut self) {
-        self.bodies = self.funcs.iter().filter(|f| self.insns.contains_key(f)).map(|&f| (f, self.body_of(f))).collect();
-    }
-
     /// Each function's stack purge, as Ghidra sets it from the function's returns: the `n` of
     /// `RET n` (0 for `RET`), where every return of the body agrees.
     pub fn stack_purges(&mut self, img: &Image) {
