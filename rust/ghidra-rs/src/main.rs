@@ -292,6 +292,7 @@ fn edit(path: &str, args: &[String], write: bool) -> Result<(), String> {
     };
     before.check(basis).map_err(|e| format!("{}: {e}", file.as_deref().unwrap_or(path)))?;
     let mut base = analysis::Analysis::run(&img, &sl, &seeds, exact)?;
+    base.warnings.iter().for_each(|w| eprintln!("warning: {w}"));
     // the scripts run after auto-analysis, its constants pass included, as `analyze --store`
     base.disassemble(&img, &sl, &[], true);
     let mut an = base.clone();
@@ -429,6 +430,7 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
         None => None,
     };
     let mut an = analysis::Analysis::run(&img, &sl, &seeds, exact)?;
+    an.warnings.iter().for_each(|w| eprintln!("warning: {w}"));
     // the project's edits, before anything reads the analysis. Java's order: auto-analysis,
     // the constants pass included, then the scripts' edits; `edit` proves the store on the
     // same base

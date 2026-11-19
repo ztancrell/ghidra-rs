@@ -237,6 +237,8 @@ pub struct Analysis {
     /// During `run`: the function whose body holds each instruction (Ghidra's bodies do not
     /// overlap); emptied when `run` ends.
     body_owner: HashMap<u32, u32>,
+    /// What `run` met that is not ported, one line each, for the caller to print.
+    pub warnings: Vec<String>,
 }
 
 const MAX_STACK: [usize; 2] = [16, 1024]; // local fold, whole-function walk
@@ -353,6 +355,7 @@ impl Analysis {
             thunks: HashMap::new(),
             thunk_of: BTreeMap::new(),
             body_owner: HashMap::new(),
+            warnings: Vec::new(),
         };
         let (rs, list) = sl.registers();
         an.fpu_ip = list.iter().find(|r| r.0 == "FPUInstructionPointer").map(|r| (rs, r.1));
@@ -503,6 +506,23 @@ impl Analysis {
             if let Some(&n) = an.callee_purges.get(&t) {
                 an.callee_purges.insert(f, n);
             }
+        }
+        // two thunk definitions: the purges go by `thunk_of`, the facts' names and
+        // `Project::thunked` by a body of one direct jump to a function
+        let (only_made, only_one_jump) = an.bodies.iter().fold((0, 0), |(m, o), (&f, b)| {
+            let one_jump = b.len() == 1
+                && an.insns[&f].flow == Flow::Jump
+                && an.insns[&f].target.is_some_and(|t| t != f && an.funcs.contains(&t));
+            match (an.thunk_of.contains_key(&f), one_jump) {
+                (true, false) => (m + 1, o),
+                (false, true) => (m, o + 1),
+                _ => (m, o),
+            }
+        });
+        if only_made + only_one_jump > 0 {
+            an.warnings.push(format!(
+                "thunks disagree: {only_made} made by CreateFunctionCmd (thunk_of, the purges) are no one-jump body (the facts' names), {only_one_jump} one-jump bodies were not made thunks"
+            ));
         }
         an.stack_purges(img);
         Ok(an)
@@ -2076,6 +2096,7 @@ mod tests {
             thunks: HashMap::new(),
             thunk_of: BTreeMap::new(),
             body_owner: HashMap::new(),
+            warnings: Vec::new(),
         };
         let mut changed = BTreeSet::new();
         for &f in funcs {

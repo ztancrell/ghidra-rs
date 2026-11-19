@@ -5371,7 +5371,14 @@ the target made first where it is no function yet, unless the target lies in ano
 no instruction or is a thunk on the way; the thunk's body is its body less the target's
 (0x4b6580: `JMP 0x57b780`, body 5 bytes, as Java 12.2). A thunk body that would hold code of a
 third function (made with the target) is refused, as createThunkFunction's
-OverlappingFunctionException, and CreateFunctionCmd tries again (2026-11-19 fix). A thunk's purge is its thunked
+OverlappingFunctionException, and CreateFunctionCmd tries again (2026-11-19 fix).
+Two thunk definitions remain: the purges go by the thunks made here (`Analysis::thunk_of`), the
+facts' thunk names and `Project::thunked` by a body of one direct jump to a function. `run`
+counts where they disagree and `analyze` and `edit` print it (`warning: thunks disagree`):
+mercs2 plain discovery 10 one-jump bodies not made thunks (8 of them thunks in Java 12.2, e.g.
+0x4cefc0 -> 0x6a5590; 0x430e40 and 0x6b3010 not), none the other way; with Java's list none.
+Taking `thunk_of` in the facts was tried and left out: it lost those 8 Java thunks (plain purges
+differing 824 -> 827). A thunk's purge is its thunked
 function's, read and set (`FunctionDB.getStackPurgeSize`); `callee_purges` gives each thunk its
 target's purge when `run` ends. The purge analyzer looks in the body, then in the flow from the
 entry (`locatePurgeInstruction`).
