@@ -5358,7 +5358,7 @@ Java's sites that set a body, and what is ported:
 | CallFixupAnalyzer.fixCallingFunctionBody | not ported (no call-fixup analyzer here) |
 | EntryPointAnalyzer (recreate after the do-later set) | not ported (the do-later set is not modelled) |
 | AddressTable.fixupFunctionBody, DecompilerSwitchAnalyzer / DecompilerSwitchAnalysisCmd | not ported: switch cases are disassembled here before the function is made, so its first body holds them |
-| ClearFlowAndRepairCmd | not ported (no analyzer here clears flow) |
+| ClearFlowAndRepairCmd | not ported: FindNoReturnFunctionsAnalyzer runs it on the flow after a new non-returning call ("Repair Flow Damage", on by default: `repairDamagedLocations`), clearing code and refixing bodies; nothing here clears flow, and nothing reports where Java would. Superseded (2026-11-19): "no analyzer here clears flow" read as if Java's did not either |
 | the edit scripts (`store.rs`) | `Store::apply` recomputes only the bodies its edits touch (functions made, removed, given a body or thunk mark; bodies holding a cleared, overridden, switch or new-entry address) from the flow (`body_of`, an approximation of Java re-running its commands); the rest keep their creation bodies. Superseded (2026-11-19): it recomputed every body (`compute_bodies`, removed) |
 
 Also not ported: getThunkedAddr's p-code register tracking (thunks of more than one
