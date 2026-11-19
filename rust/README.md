@@ -5369,7 +5369,9 @@ Shared Return Calls now runs per batch at 398; see "Shared Return Calls per batc
 **Thunks.** A function whose first instruction is a direct `JMP` is made a thunk of the target,
 the target made first where it is no function yet, unless the target lies in another body, has
 no instruction or is a thunk on the way; the thunk's body is its body less the target's
-(0x4b6580: `JMP 0x57b780`, body 5 bytes, as Java 12.2). A thunk's purge is its thunked
+(0x4b6580: `JMP 0x57b780`, body 5 bytes, as Java 12.2). A thunk body that would hold code of a
+third function (made with the target) is refused, as createThunkFunction's
+OverlappingFunctionException, and CreateFunctionCmd tries again (2026-11-19 fix). A thunk's purge is its thunked
 function's, read and set (`FunctionDB.getStackPurgeSize`); `callee_purges` gives each thunk its
 target's purge when `run` ends. The purge analyzer looks in the body, then in the flow from the
 entry (`locatePurgeInstruction`).

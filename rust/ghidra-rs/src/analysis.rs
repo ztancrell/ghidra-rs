@@ -672,6 +672,11 @@ impl Analysis {
             }
         }
         let thunk: Vec<u32> = body.iter().copied().filter(|a| self.body_owner.get(a) != Some(&t)).collect();
+        // createThunkFunction throws OverlappingFunctionException where the body holds a third
+        // function's code (made with the target); CreateFunctionCmd tries again
+        if thunk.iter().any(|a| self.body_owner.get(a).is_some_and(|&g| g != f)) {
+            return None;
+        }
         let one_range =
             thunk.first() == Some(&f) && thunk.windows(2).all(|w| w[0] + self.insns[&w[0]].len as u32 == w[1]);
         let held = body.binary_search(&t).is_ok();
@@ -2090,5 +2095,19 @@ mod tests {
         an.find_noreturn(&mut changed);
         assert!(!an.noreturn.contains(&0x10));
         assert!(an.noreturn.contains(&0x20));
+    }
+
+    #[test]
+    fn thunk_body_never_takes_a_third_functions_code() {
+        // 0x10 JMP 0x12; 0x12 JMP 0x11 makes 0x11 first: 0x10's first body less 0x12's would
+        // hold 0x11, so the thunk is tried again on the flow up to the entries made
+        let (an, _) = bare(
+            &[(0x10, Flow::Jump, Some(0x12)), (0x11, Flow::Return, None), (0x12, Flow::Jump, Some(0x11))],
+            &[0x10],
+        );
+        assert_eq!(an.bodies[&0x10], [0x10]);
+        assert_eq!(an.bodies[&0x11], [0x11]);
+        assert_eq!(an.thunk_of.get(&0x10), Some(&0x12));
+        assert_eq!(an.thunk_of.get(&0x12), Some(&0x11));
     }
 }
