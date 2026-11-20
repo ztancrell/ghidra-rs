@@ -774,10 +774,10 @@ fn check_input_trial_use(
 /// the caller's stack) leaves the local scope. The used trials are renumbered.
 fn build_input_from_trials(fd: &mut Funcdata, arch: &Arch, c: CallId, active: &mut ParamActive) -> Result<()> {
     let op = fd.call(c).op;
-    if fd.call(c).proto.locked.as_ref().is_some_and(|l| l.dotdotdot) {
-        return err(
-            "buildInputFromTrials of a locked varargs call (sortFixedPosition): not implemented in ghidra-rs yet",
-        );
+    // varargs: the fixed arguments move to the front, keeping the variable ones in order (a call
+    // without a model has no trials by now: deriveInputMap refuses them)
+    if let Some(m) = fd.call(c).proto.model.filter(|_| fd.call(c).proto.locked.as_ref().is_some_and(|l| l.dotdotdot)) {
+        active.sort_fixed_position(&arch.spec.models.get(m).input);
     }
     let mut newparam = vec![fd.input(op, 0)?];
     let addr = fd.op(op).seq.addr;
@@ -3091,8 +3091,16 @@ mod tests {
     /// directly written one succeeds.
     #[test]
     fn ancestor_realistic_rejects_a_saved_register() {
-        let mut trial =
-            ParamTrial { space: Space::Sleigh(3), off: 0, size: 4, slot: 1, flags: 0, entry: None, offset: -1 };
+        let mut trial = ParamTrial {
+            space: Space::Sleigh(3),
+            off: 0,
+            size: 4,
+            slot: 1,
+            flags: 0,
+            entry: None,
+            offset: -1,
+            fixed_position: -1,
+        };
         let (fd, call) = call_of_copied_input(false);
         assert!(!ancestor_realistic(&fd, call, 1, &mut trial, true));
         let (fd, call) = call_of_copied_input(true);

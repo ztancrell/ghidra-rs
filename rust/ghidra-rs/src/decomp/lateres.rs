@@ -66,8 +66,13 @@ pub(crate) fn late_restriction(fd: &mut Funcdata, arch: &Arch, c: CallId, newpro
         fd.call_mut(c).proto.copy(newproto);
         return Ok(true);
     }
+    let cur_varargs = cur.locked.as_ref().is_some_and(|l| l.dotdotdot);
+    if cur_varargs && locked.dotdotdot {
+        return err("lateRestriction of a varargs call to a varargs prototype (collectUnlockedTrials): not implemented in ghidra-rs yet");
+    }
     // FuncProto::isCompatible (no prototype here has effects or likely-trash of its own)
     if cur.model != newproto.model
+        || cur_varargs
         || cur.inject != newproto.inject
         || (cur.extrapop != ExtraPop::Unknown && cur.extrapop != newproto.extrapop)
         || locked.dotdotdot

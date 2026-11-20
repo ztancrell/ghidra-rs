@@ -717,6 +717,8 @@ pub(crate) struct ParamTrial {
     /// the parameter entry it fits (index into the list) and its justified offset in it
     pub(crate) entry: Option<usize>,
     pub(crate) offset: i32,
+    /// the argument position of a fixed argument of a varargs call, else -1
+    pub(crate) fixed_position: i32,
 }
 
 impl ParamTrial {
@@ -822,7 +824,16 @@ impl ParamActive {
     /// calls.
     pub(crate) fn register_trial(&mut self, space: Space, off: u64, size: u32) {
         let flags = if space == Space::Stack { 0 } else { ParamTrial::KILLEDBYCALL };
-        self.trials.push(ParamTrial { space, off, size, slot: self.slotbase, flags, entry: None, offset: -1 });
+        self.trials.push(ParamTrial {
+            space,
+            off,
+            size,
+            slot: self.slotbase,
+            flags,
+            entry: None,
+            offset: -1,
+            fixed_position: -1,
+        });
         self.slotbase += 1;
     }
     /// `setPlaceholderSlot`.
@@ -852,16 +863,32 @@ impl ParamActive {
     /// address and size; trials without an entry last. (The C++ `std::sort` on these few
     /// trials is an insertion sort, which keeps ties in order, as this stable sort does.)
     pub(crate) fn sort_trials(&mut self, list: &ParamList) {
-        self.trials.sort_by(|a, b| match (a.entry, b.entry) {
-            (None, None) => std::cmp::Ordering::Equal,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (Some(ea), Some(eb)) => list
-                .group(ea)
-                .cmp(&list.group(eb))
-                .then((a.space.index(), a.off).cmp(&(b.space.index(), b.off)))
-                .then(a.size.cmp(&b.size)),
+        self.trials.sort_by(|a, b| trial_order(list, a, b));
+    }
+    /// Port of `ParamActive::sortFixedPosition` (`ParamTrial::fixedPositionCompare`): the fixed
+    /// arguments of a varargs call first, by position, then the rest by `ParamTrial::operator<`.
+    pub(crate) fn sort_fixed_position(&mut self, list: &ParamList) {
+        self.trials.sort_by(|a, b| match (a.fixed_position, b.fixed_position) {
+            (-1, -1) => trial_order(list, a, b),
+            (-1, _) => std::cmp::Ordering::Greater,
+            (_, -1) => std::cmp::Ordering::Less,
+            (pa, pb) => pa.cmp(&pb),
         });
+    }
+}
+
+/// `ParamTrial::operator<` as an ordering: by the entry's group, then address and size; trials
+/// without an entry last.
+fn trial_order(list: &ParamList, a: &ParamTrial, b: &ParamTrial) -> std::cmp::Ordering {
+    match (a.entry, b.entry) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (Some(ea), Some(eb)) => list
+            .group(ea)
+            .cmp(&list.group(eb))
+            .then((a.space.index(), a.off).cmp(&(b.space.index(), b.off)))
+            .then(a.size.cmp(&b.size)),
     }
 }
 
@@ -1496,13 +1523,14 @@ impl ParamActive {
                 other.slot += 1;
             }
         }
-        let first = ParamTrial { size: sz, entry: None, offset: -1, ..t.clone() };
+        let first = ParamTrial { size: sz, entry: None, offset: -1, fixed_position: -1, ..t.clone() };
         let second = ParamTrial {
             off: t.off.wrapping_add(u64::from(sz)),
             size: t.size - sz,
             slot: t.slot + 1,
             entry: None,
             offset: -1,
+            fixed_position: -1,
             ..t
         };
         self.trials.splice(i..=i, [first, second]);
