@@ -2207,6 +2207,11 @@ edits (Java 12.2's plain analysis agrees with ghidra-rs), 18 from `JMP [slot]` t
 145; Java's list 381, silent 88, and M8 unchanged (`rust/README.md`, "Plain discovery's
 silents").
 
+No-return functions (branch `gap-plain2`, 2026-11-20): FindNoReturnFunctionsAnalyzer's call-site
+evidence replaces the body rule (`Analysis::find_noreturn`); no-return flags differing from Java
+12.2 52 -> 14; Java's list 381 -> 382 (silent 88 -> 87, 0x5dc8f0 fixed), plain 226 and M8
+unchanged (`rust/README.md`, "No-return functions from call-site evidence").
+
 Full pass of branch `analysis-queue` (2026-11-19, `bars-queue.sh` on 83ee6a86e6, the tree of 82b968548a, desktop and
 Mac, compared with `m3-int7-249c32cf94.summary`): 133 / 133 pairs (the Mac lost `pcc-t-switch`,
 rerun on the desktop: the baseline line), silent 0 in every pair. `pmd`, `r5slock` and

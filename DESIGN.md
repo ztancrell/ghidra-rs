@@ -486,6 +486,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    ConstantPropagationAnalyzer and the Reference analyzer: plain 208 -> 226 (silent 163 -> 145); Java's
    list 381 (silent 88) and M8 unchanged. Superseded: plain 208 above. See `rust/README.md`,
    "Plain discovery's silents".
+   No-return functions from call-site evidence (branch `gap-plain2`, 2026-11-20): FindNoReturnFunctionsAnalyzer
+   ported in place of the body rule; 0x5dc8f0, newly silent with Java's list on `gap-plain`, fixed: Java's list
+   382 (silent 87), plain 226 (silent 145) and M8 unchanged. See `rust/README.md`, "No-return functions
+   from call-site evidence".
    Full pass 2026-11-19 (83ee6a86e6, the tree of 82b968548a, desktop and Mac): 133 / 133 pairs, silent 0 in every pair, none
    worse than `m3-int7` once 0x4c48d0 (a reference timeout at 120 s in `pmd`, `r5slock`,
    `r5dtlocksv` M500) is run with `TIMEOUT` 400. Superseded: "Not run: the full pass, the Mac" for

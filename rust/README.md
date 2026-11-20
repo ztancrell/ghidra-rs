@@ -777,7 +777,7 @@ are not ported.
 Java's three `switch` rows of the fold report have no counterpart: ghidra-rs's own switch
 recovery already has those jumps' targets. ghidra-rs flags far more functions no-return than
 Ghidra (every body without a return); 0x00401740, the one the Java script was written for, is
-not flagged here.
+not flagged here. Superseded (2026-11-20): the no-return rule is now FindNoReturnFunctionsAnalyzer's call-site evidence (see "No-return functions from call-site evidence"); the no-return flag of functions in both plain discovery and Java 12.2 differs in 14 where it did in 52.
 
 The function set in `.text` against the Java project's facts (37635 functions):
 
@@ -5353,8 +5353,8 @@ Java's sites that set a body, and what is ported:
 |---|---|
 | CreateFunctionCmd.createFunction, subtractBodyFromExisting | ported (`create_function`, `subtract_existing`) |
 | CreateFunctionCmd.resolveThunk, CreateThunkFunctionCmd.applyTo | ported for a direct `JMP` at the entry (getSimpleFlow), `resolve_thunk` |
-| CreateFunctionCmd.fixupFunctionBody | ported (`fixup_body`); its thunk case only for a target that is a function already and a new body that overlaps no other, and not where the target's thunk chain leads back to the function (setThunkedFunction refuses a cycle). A thunk chain past 16 thunks and a no-return rule still finding functions after 4 rounds print a warning (`analyze`, `edit`); on mercs2 the 4-round warning shows with both function sets, the chain one does not |
-| FindNoReturnFunctionsAnalyzer.fixCallingFunctionBody | ported for this analysis's no-return rule (`find_noreturn`): callers of a new non-returning function are fixed up |
+| CreateFunctionCmd.fixupFunctionBody | ported (`fixup_body`); its thunk case only for a target that is a function already and a new body that overlaps no other, and not where the target's thunk chain leads back to the function (setThunkedFunction refuses a cycle). A thunk chain past 16 thunks prints a warning (`analyze`, `edit`); on mercs2 it does not show. Superseded (2026-11-20): the 4-round no-return warning went with the body rule |
+| FindNoReturnFunctionsAnalyzer (added, detectNoReturn, checkNonReturningIndicators, targetOnlyCallsNoReturn, setNoFallThru, fixCallingFunctionBody) | ported (`find_noreturn`), run after each batch of functions made where Java's instruction analyzer runs on instructions added; not ported: "Repair Flow Damage" (below), a function made at a target that is none, the call-fixup exception. Superseded (2026-11-20): only fixCallingFunctionBody, for a rule of this analysis on the bodies |
 | CreateFunctionCmd with findEntryPoint (setBody of a given body) | not ported: no ported analyzer makes functions that way |
 | CallFixupAnalyzer.fixCallingFunctionBody | not ported (no call-fixup analyzer here) |
 | EntryPointAnalyzer (recreate after the do-later set) | not ported (the do-later set is not modelled) |
@@ -5395,7 +5395,7 @@ decides from call-site evidence against a threshold, never from a body without a
 wrong mark here is never cleared. Since 2026-11-19 a conditional jump out of the body and a
 fallthrough out of it (into another function's body) count as returning too, so a function cut
 by one made inside it is not marked for falling into it; numbers in "Shared Return Calls per
-batch" below.
+batch" below. Superseded (2026-11-20): this body rule is gone; see "No-return functions from call-site evidence" below.
 
 Against Java 12.2 (`j12body.sh`, `rust/target/aq/` of this worktree; functions in both lists;
 "auto" = `functions-analysis.csv`):
@@ -5509,6 +5509,43 @@ The 18 fixed are the 18 of the table; none newly missing in the plain row. The J
 reads no ghidra-rs analysis and was not rerun (461, loud 22, silent 16 on the base). The 13
 functions made here that Java 12.2 does not make were not traced. Not run: the full pass, the
 Mac, the shadow check.
+
+#### No-return functions from call-site evidence, branch `gap-plain2` (2026-11-20)
+
+0x5dc8f0, newly silent with Java's function list on `gap-plain` (above), calls
+`thunk_FUN_0256c420` (0x6a4870, `JMP [0x24d6f7c]`, made a thunk of 0x256c420 by the slot-jump
+port). 0x256c420 is `PUSH 0x256c42a; CALL 0x1b950a0` and then bytes that are no code; 0x1b950a0
+is `JMP [0x2299230]`, a thunk of 0x2ab0000 (`JMP 0x2ab0028`). In Java 12.2's plain analysis
+(`rust/target/aq-java/purges.txt`) all three are no-return, so 0x256c420's body ends at the
+call (0x256c420-0x256c429) and its purge is unknown. Here 0x2ab0028 (no RET, but a fallthrough
+out of its body) was not marked by the body rule, the body ran on to `RET 0x7b` at 0x256c456
+and the thunk took that purge of 123. Java marks 0x1b950a0 from its call sites (a function or
+no instruction right after the call, on at least 3 of them), and the mark goes to the thunked
+function.
+
+`find_noreturn` is now FindNoReturnFunctionsAnalyzer: the calls of the instructions it has not
+looked at; at each, checkNonReturningIndicators from the fallthrough on while instructions fall
+through (a function starts there or inside the instruction, no instruction, a read or write from
+earlier in the calling function or a call refers to it, an address table, an INT3); 3 call sites
+with such evidence (the default threshold) or a target that only calls non-returning functions
+(targetOnlyCallsNoReturn, SimpleBlockModel's walk) mark the target, a second pass if some stayed
+suspicious. A mark on a thunk is its thunked function's, and so every thunk of it (FunctionDB);
+callers' bodies are fixed up as before. Not ported (`ponytail` note): it runs after each batch of
+functions made, where Java's instruction analyzer runs at DISASSEMBLY + 2 on instructions added,
+so it may see other functions; Repair Flow Damage; a function made at a target that is none; the
+call-fixup exception.
+
+| | before | after |
+|---|---|---|
+| no-return flag, functions in plain discovery and Java 12.2: here only / Java only | 33 / 19 | 2 / 12 |
+| own facts, Java's function list, M500 | 381 (loud 30, silent 88) | 382 (loud 30, silent 87): 0x5dc8f0 fixed, nothing else moved |
+| own facts, Java's function list, M8 | 4 / 7 (loud 2, silent 1) | unchanged |
+| own facts, plain discovery, M500 | 226 (loud 128, silent 145) | unchanged, the same misses |
+| own facts, plain discovery, M8 | 2 / 7 (loud 2, silent 3) | unchanged |
+
+Superseded: "0x5dc8f0 newly silent" in the table above. The 12 Java-only no-return functions
+(0x401740 among them, the one ClearFalseNoReturn was written for) were not traced. Not run: the
+Java-facts row (reads no ghidra-rs analysis), the full pass, the Mac, the shadow check.
 
 #### Full pass of `analysis-queue` (2026-11-19)
 
