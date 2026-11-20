@@ -413,6 +413,7 @@ impl Analysis {
             AddressTables,
             StartSearchAfterData,
             SharedReturns,
+            SlotJumps,
             Purge,
         }
         let analyzer = |name, kind, priority, id| Analyzer { name, kind, priority, id };
@@ -440,6 +441,9 @@ impl Analysis {
             // CODE_ANALYSIS.before().before(): on each batch of functions added or with a changed body
             analyzer("Shared Return Calls", Kind::Function, priority::CODE_ANALYSIS - 2, Task::SharedReturns),
             analyzer("X86 Function Callee Purge", Kind::Function, priority::FUNCTION_ANALYSIS, Task::Purge),
+            // ConstantPropagationAnalyzer (REFERENCE_ANALYSIS.before() x4) on each batch: only its
+            // jumps through a pointer, with the thunks the Reference analyzer makes of them
+            analyzer("Constant Reference Analyzer", Kind::Function, priority::REFERENCE_ANALYSIS - 4, Task::SlotJumps),
         ]);
         mgr.notify(Kind::Byte, &exec().map(|s| s.addr).collect());
         // with `exact`, only the given functions are made (CreateFunctionCmd)
@@ -449,6 +453,8 @@ impl Analysis {
         let mut body_noreturn = an.noreturn.clone();
         while let Some((task, set)) = mgr.next_task() {
             let mut data = BTreeSet::new();
+            // (thunk, target) of SlotJumps: the target is made with the task's new functions
+            let mut slot_thunks = Vec::new();
             match task {
                 Task::EntryPoints => {
                     for &s in &seeds {
@@ -475,6 +481,7 @@ impl Analysis {
                     an.start_search(img, sl, &mut p, &mut owner, &mut queue)
                 }
                 Task::SharedReturns => an.shared_returns(&set),
+                Task::SlotJumps => slot_thunks = an.slot_jumps(img, sl, &mut p, &mut owner, &set),
                 Task::Purge => an.callee_purge(img, &set, &body_noreturn),
             }
             mgr.notify(Kind::Data, &data);
@@ -488,6 +495,13 @@ impl Analysis {
                 let new: Vec<u32> = an.funcs.iter().copied().filter(|f| !an.bodies.contains_key(f)).collect();
                 for f in new {
                     an.create_function(f, allowed.as_ref(), &mut Vec::new(), &mut defined);
+                }
+                // CreateFunctionCmd again on the function, now a thunk (functionDefined)
+                for (f, t) in slot_thunks {
+                    if an.bodies.contains_key(&t) && an.thunked_end(t) != f {
+                        an.thunk_of.insert(f, t);
+                        defined.insert(f);
+                    }
                 }
                 an.find_noreturn(&mut defined);
                 body_noreturn = std::mem::replace(&mut an.noreturn, known);
@@ -514,9 +528,14 @@ impl Analysis {
         // two thunk definitions: the purges go by `thunk_of`, the facts' names and
         // `Project::thunked` by a body of one direct jump to a function
         let (only_made, only_one_jump) = an.bodies.iter().fold((0, 0), |(m, o), (&f, b)| {
-            let one_jump = b.len() == 1
-                && an.insns[&f].flow == Flow::Jump
-                && an.insns[&f].target.is_some_and(|t| t != f && an.funcs.contains(&t));
+            let i = &an.insns[&f];
+            let target = match (i.flow, i.slot) {
+                (Flow::Jump, _) => i.target,
+                // through a pointer that holds a function's entry (the facts' SecuROM slots)
+                (Flow::JumpInd, Some(s)) if !img.imports.contains_key(&s) => img.read_u32(s),
+                _ => None,
+            };
+            let one_jump = b.len() == 1 && target.is_some_and(|t| t != f && an.funcs.contains(&t));
             match (an.thunk_of.contains_key(&f), one_jump) {
                 (true, false) => (m + 1, o),
                 (false, true) => (m, o + 1),
@@ -724,6 +743,62 @@ impl Analysis {
         }
         self.thunk_of.insert(f, t);
         Some(thunk)
+    }
+
+    /// The target of a jump through a pointer (`JMP [slot]`, SecuROM's slots) as
+    /// ConstantPropagationAnalyzer finds it: the slot's value (VarnodeContext reads writable
+    /// memory, as the analyzer's "trust writable memory" default; an import slot is external),
+    /// non-zero, in an executable block, not inside an instruction nor inside a function but at
+    /// its entry (evaluatePureDataRef).
+    fn slot_jump(&self, img: &Image, owner: &[u8], a: u32) -> Option<u32> {
+        let i = self.insns.get(&a).filter(|i| i.flow == Flow::JumpInd)?;
+        let s = i.slot.filter(|s| !img.imports.contains_key(s))?;
+        let t = img.read_u32(s).filter(|&t| t != 0 && self.is_code(img, t))?;
+        let inside = owner[(t - self.code_lo) as usize] >= 2 || self.body_owner.get(&t).is_some_and(|&g| g != t);
+        (!inside).then_some(t)
+    }
+
+    /// Constant propagation's computed jumps through a pointer on the functions of `set`: the
+    /// COMPUTED_JUMP reference's target is disassembled (evaluateReference), and a function
+    /// whose entry is such a jump becomes a thunk of it, its target made a function, as the
+    /// Reference analyzer does (OperandReferenceAnalyzer: a computed jump of a function that
+    /// is no thunk but CreateThunkFunctionCmd.isThunk, CreateFunctionCmd again). Returns
+    /// (thunk, target); the targets are in `funcs`, for CreateFunctionCmd after the task.
+    // ponytail: only jumps through a direct slot, with the slot's value as the image holds it
+    // (Java's propagation would see a store to the slot earlier in the flow); and the thunk
+    // step runs here, at 596, where Java's Reference analyzer (600) runs on code added.
+    fn slot_jumps(
+        &mut self,
+        img: &Image,
+        sl: &Sleigh,
+        p: &mut crate::sleigh::Parse,
+        owner: &mut [u8],
+        set: &BTreeSet<u32>,
+    ) -> Vec<(u32, u32)> {
+        let jumps: Vec<(u32, u32)> = set
+            .iter()
+            .filter_map(|f| self.bodies.get(f))
+            .flatten()
+            .filter_map(|&a| self.slot_jump(img, owner, a).map(|t| (a, t)))
+            .collect();
+        let mut queue: Vec<u32> =
+            jumps.iter().map(|&(_, t)| t).filter(|&t| owner[(t - self.code_lo) as usize] == 0).collect();
+        self.descend(img, sl, p, owner, &mut queue, &mut Vec::new());
+        let mut thunks = Vec::new();
+        for (a, t) in jumps {
+            if !set.contains(&a) || self.thunk_of.contains_key(&a) || t == a || !self.insns.contains_key(&t) {
+                continue;
+            }
+            // getReferencedFunction: a function at the target, or none containing it
+            if !self.bodies.contains_key(&t) {
+                if self.body_owner.contains_key(&t) {
+                    continue;
+                }
+                self.funcs.insert(t);
+            }
+            thunks.push((a, t));
+        }
+        thunks
     }
 
     /// Function.setBody (FUNCTION_BODY_CHANGED; a new function's body with FUNCTION_ADDED).

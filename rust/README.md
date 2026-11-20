@@ -206,7 +206,8 @@ What discovery does, after Ghidra's analyzers:
   task at its priority, and the first task of the lowest priority runs next. Discovery's
   analyzers in it: Disassemble Entry Points (200, the seeds), Function Start Search (402),
   Function Start Search After Data (898, after the tables), Create Address Tables (899), X86
-  Function Callee Purge (500, on each batch of new functions) and Shared Return Calls (398, on
+  Function Callee Purge (500, on each batch of new functions), jumps through a pointer and
+  their thunks (596, see "Plain discovery's silents" below) and Shared Return Calls (398, on
   each batch, as Java; superseded (2026-11-19): a last task at 10000 on all functions). The non-returning
   functions run after the queue (Java: 302). Without the purge analyzer the facts are byte for
   byte the ones of the loop it replaces (both function sets, 2026-11-18); with it see "Ghidra's
@@ -5458,6 +5459,56 @@ The no-return rule with conditional jumps and fallthroughs out of the body count
 and 218 (34) -> 54 (24); bodies differing 824 (677) -> 756 (674) and 2,358 (2,002) -> 2,288
 (1,997); purges differing 846 (761) -> 824 (761) and 2,316 (1,568) -> 2,294 (1,568); M500 381
 and 208, M8 4 / 7 and 2 / 7 unchanged.
+
+#### Plain discovery's silents and the SecuROM slot thunks, branch `gap-plain` (2026-11-20)
+
+The 163 M500 silents of own facts with plain discovery (master f4881c73da: 208 / 499, loud 128,
+silent 163), by their outcome in the other rows: 85 are identical with Java's function list (a
+discovery cause), 64 silent with it and identical or loud with Java's facts (the facts' own
+causes, above), 13 silent in all three rows, 1 loud in both. The 85 by the C lines that differ,
+checked against Java 12.2's plain auto-analysis (`rust/target/aq-java/purges.txt`) and the
+mercs2 project's facts (table in `rust/target/gap-plain/causes.txt` of the branch):
+
+| cause | silents | example |
+|---|---|---|
+| mercs2's pipeline, no analyzer: a callee (or its JMP target) is a function in Java 12.2's plain analysis and here, not in the mercs2 project (fold-slot-fragments, RecoverFunctions and the audits) | 43 | 0x402d60 (0x407b60 -> 0x517180) |
+| mercs2's pipeline: a pointer in data to a function of the mercs2 project that Java 12.2's plain analysis does not make | 20 | 0x405c40 (0xba8958 -> 0x40b580) |
+| `JMP [slot]` thunks into `.securom` (below) | 18 | 0x417230 |
+| the slot typed a pointer here, undefined in Java (only an INDIRECTION reference) | 2 | 0x48cc40 |
+| a pointer in data to a Java 12.2 function | 1 | 0x495db0 |
+| not traced | 1 | 0x4919f0 |
+
+So 63 of the 85 cannot be closed by porting analyzers: Java's own plain analysis agrees with
+ghidra-rs there. They need mercs2's edits (`analyze --store`) or a reference made from Java's
+plain analysis.
+
+**Jumps through a pointer** (`Analysis::slot_jumps`, a Function analyzer at
+REFERENCE_ANALYSIS - 4 = 596, ConstantPropagationAnalyzer's place). A SecuROM slot in `Sdata`
+(executable, writable) holds the entry of a `.securom` stub: `0x4172e0 JMP [0x24d7e8c]` ->
+0x2562160. Java's propagation reads the slot (VarnodeContext; "trust writable memory" is on by
+default), makes a COMPUTED_JUMP reference and disassembles the target
+(ConstantPropagationContextEvaluator.evaluateReference); the Reference analyzer then makes a
+function whose entry is such a jump a thunk, and its target a function
+(OperandReferenceAnalyzer, CreateThunkFunctionCmd.getThunkedAddr: getSimpleFlow over the flow
+reference). Java 12.2's project has both references (INDIRECTION to the slot, COMPUTED_JUMP to
+the target). Here the task disassembles each such target of the batch's bodies and makes the
+thunks after the task's new functions. Not ported (`ponytail` note): the slot's value is the
+image's (Java's propagation would see a store to the slot earlier in the flow), only a direct
+slot, and the thunk step runs at 596 where Java's Reference analyzer runs at 600 on code added.
+`thunks disagree` now counts a one-instruction `JMP [slot]` body to a function as a one-jump body.
+
+| | before | after |
+|---|---|---|
+| plain: functions both / Java 12.2 only / here only | 28,742 / 1,906 / 271 | 29,431 / 1,217 / 284 |
+| own facts, plain discovery, M500 | 208 (loud 128, silent 163) | 226 (loud 128, silent 145) |
+| own facts, plain discovery, M8 | 2 / 7 (loud 2, silent 3) | unchanged |
+| own facts, Java's function list, M500 | 381 (loud 30, silent 88) | 381 (loud 30, silent 88): 0x5d9cb0 fixed, 0x5dc8f0 newly silent (the purge of `thunk_FUN_0256c420`, now its target's) |
+| own facts, Java's function list, M8 | 4 / 7 (loud 2, silent 1) | unchanged |
+
+The 18 fixed are the 18 of the table; none newly missing in the plain row. The Java-facts row
+reads no ghidra-rs analysis and was not rerun (461, loud 22, silent 16 on the base). The 13
+functions made here that Java 12.2 does not make were not traced. Not run: the full pass, the
+Mac, the shadow check.
 
 #### Full pass of `analysis-queue` (2026-11-19)
 
