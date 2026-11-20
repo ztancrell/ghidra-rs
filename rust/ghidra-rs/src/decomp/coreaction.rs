@@ -1824,9 +1824,10 @@ fn analyze_extra_pop(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
 
 /// Port of `ActionDeindirect::apply`: an indirect call whose target is a known function (an
 /// external-reference slot, or a constant through COPYs) becomes a direct call to it
-/// (`FuncCallSpecs::deindirect`). With unlocked prototypes `lateRestriction` always succeeds and
-/// only copies the callee's prototype, so no restart is needed. (Type recovery is off, so the
-/// typed path does not apply.)
+/// (`FuncCallSpecs::deindirect`), recorded as an override. With unlocked prototypes
+/// `lateRestriction` always succeeds and only copies the callee's prototype; a callee that does
+/// not return or is inlined, or a locked prototype the call cannot take, asks for a restart.
+/// (Type recovery is off, so the typed path does not apply.)
 pub(crate) fn deindirect(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     let mut count = 0;
     for i in 0..fd.qlst.len() {
@@ -1860,17 +1861,21 @@ pub(crate) fn deindirect(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         let call = fd.call_mut(c);
         call.entry = Some(entry);
         call.known = true;
-        if callee.locked.is_some() {
-            // FuncCallSpecs::deindirect with lateRestriction (stage S6, lateres.rs)
+        let addr = fd.op(op).seq.addr;
+        fd.deindirect.insert(addr, entry);
+        // a callee that does not return or is inlined, or a locked prototype the call cannot
+        // take (lateRestriction, stage S6, lateres.rs): decompile again with the call direct
+        if callee.no_return || callee.inject.is_some() || callee.locked.is_some() {
             let fspec = fd.new_varnode_callspecs(c);
             fd.op_set_input(op, fspec, 0)?;
             fd.op_set_opcode(op, Opcode::Call);
-            if !super::lateres::late_restriction(fd, arch, c, &callee)? {
-                return err("deindirect: restarting for a locked prototype the call cannot take is not implemented in ghidra-rs yet");
+            if callee.no_return || callee.inject.is_some() || !super::lateres::late_restriction(fd, arch, c, &callee)? {
+                fd.restart_pending = true;
             }
             count += 1;
             continue;
         }
+        let call = fd.call_mut(c);
         // lateRestriction: the call has a model, and neither prototype is locked
         call.proto.copy(&callee);
         if call.proto.model.is_none() {

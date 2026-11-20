@@ -164,6 +164,11 @@ pub struct Funcdata {
     /// `doublePrecisRecovery` (`Funcdata::isDoublePrecisOn`): set by `RuleDoubleIn::reset` when
     /// the running action has group `doubleprecis` ([`super::actiontree::ActionTree::perform`])
     pub(crate) double_precis_on: bool,
+    /// `Override::deindirect`: the target of each indirect call `ActionDeindirect` made direct,
+    /// by the call's address; the flow applies it after a restart (`Override::applyIndirect`)
+    pub(crate) deindirect: BTreeMap<u64, u64>,
+    /// `restart_pending`: an action asked the `universal` group to decompile again from scratch
+    pub(crate) restart_pending: bool,
 }
 
 impl Funcdata {
@@ -220,7 +225,23 @@ impl Funcdata {
             jumptablerecovery_on: false,
             symtab: super::scope::Database::for_function(),
             double_precis_on: false,
+            deindirect: BTreeMap::new(),
+            restart_pending: false,
         }
+    }
+
+    /// Port of `Architecture::clearAnalysis` (`Funcdata::clear` and the warning comments) for a
+    /// restart: what the analysis made goes; the data-types, the facts' names and comments and
+    /// the overrides stay, and the prototype is `start`, the one the decompile started from
+    /// (the C++ clears the unlocked inputs and output of the prototype it has).
+    pub(crate) fn clear_analysis(&mut self, start: FuncProto) {
+        let mut fresh = Funcdata::new(self.entry);
+        std::mem::swap(&mut fresh.types, &mut self.types);
+        fresh.proto = start;
+        fresh.name_recs = std::mem::take(&mut self.name_recs);
+        fresh.listing_comments = std::mem::take(&mut self.listing_comments);
+        fresh.deindirect = std::mem::take(&mut self.deindirect);
+        *self = fresh;
     }
 
     pub(crate) fn op(&self, id: OpId) -> &PcodeOp {

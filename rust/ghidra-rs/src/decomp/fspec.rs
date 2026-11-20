@@ -444,8 +444,10 @@ pub(crate) struct FuncProto {
     pub(crate) locked: Option<Box<super::locked::Locked>>,
     /// `returnBytesConsumed`: the bytes of the return value the callers are known to use, 0
     /// for all (a hint to dead code, from `RulePiecePathology`)
-    /// The C++ resets it in `clearUnlockedOutput` (a decompile restart); restarts are not
-    /// ported, and the reset must come with them.
+    /// The C++ resets it in `clearUnlockedOutput` (a decompile restart); a restart here starts
+    /// from the prototype the decompile started with ([`Funcdata::clear_analysis`]).
+    ///
+    /// [`Funcdata::clear_analysis`]: super::funcdata::Funcdata::clear_analysis
     pub(crate) return_bytes_consumed: u32,
     /// the return value `ActionOutputPrototype` stores (`ProtoStoreSymbol::outparam`): storage and
     /// data-type; none is `void`. The inputs are the local scope's category-0 symbols.
