@@ -26,7 +26,9 @@
 #                java/<corpus>/<address> (the captured C, kept: delete a file to capture it
 #                again). Ghidra refuses a project path with a component starting with `.`, so in
 #                a worktree under .claude/ set GHIDRA_REF to a path without one
-#   GHIDRA       the Ghidra install (default /opt/ghidra)
+#   GHIDRA_RS    the ghidra-rs binary (default rust/target/release/ghidra-rs), as decomp-diff.sh
+#   GHIDRA       the Ghidra install (default /opt/ghidra; the reference is 12.3, README "The 12.3
+#                reference"); its analyzeHeadless finds Java through JAVA_HOME or PATH
 #   PROJECT      the mercs2 Ghidra project to copy (default ~/projects/mercs/mercs2-decomp/build/ghidra)
 #   OUT          output directory (default rust/target/ghidra-diff/<corpus>): con/<address> (the
 #                console engine's C), <corpus>.miss (one line per function that differs)
@@ -55,7 +57,7 @@ export SLEIGHHOME=$root TIMEOUT=${TIMEOUT:-120}
 export BIN=${BIN:-$HOME/projects/mercs/mercs2-decomp/orig/Mercenaries2.analysis.exe}
 export PRELUDE=${PRELUDE:-$rust/target/decomp-check/mercs2.prelude}
 export out=${OUT:-$rust/target/ghidra-diff/$name}
-if [ "$ENGINE" = ref ]; then eng="$rust/target/decomp-build/decomp_dbg"; else eng="$rust/target/release/ghidra-rs decompile"; fi
+if [ "$ENGINE" = ref ]; then eng="$rust/target/decomp-build/decomp_dbg"; else eng="${GHIDRA_RS:-$rust/target/release/ghidra-rs} decompile"; fi
 export eng DECOMP_SKIP_ACTIONS=$SKIP
 "$rust/tools/decomp-diff.sh" --prelude
 facts=$FACTS
