@@ -95,7 +95,7 @@ fn recover_name_recommendations(fd: &mut Funcdata) -> Result<()> {
         }
         let name = fd.symtab.make_name_unique(LOCAL, &rec.name)?;
         fd.symtab.rename_symbol(sym, &name);
-        fd.symtab.lock_symbol(sym, false, true);
+        fd.symtab.lock_symbol(&fd.types, sym, false, true);
     }
     Ok(())
 }

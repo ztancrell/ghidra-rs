@@ -847,7 +847,7 @@ pub(crate) fn query_symbol(fd: &mut Funcdata, arch: &Arch, space: Space, addr: u
         piece: None,
     };
     let sym = fd.symtab.add_symbol(GLOBAL, &d.name, Some(d.ty), None, Some(entry))?;
-    fd.symtab.lock_symbol(sym, d.type_locked, true);
+    fd.symtab.lock_symbol(&fd.types, sym, d.type_locked, true);
     Ok(())
 }
 
@@ -870,14 +870,28 @@ pub(crate) fn symbol_types(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
         if locked {
             continue;
         }
-        let Some(d) = facts.data_symbol(&mut fd.types, off)? else { continue };
-        let base = fd.types.strip_typedefs(d.ty);
+        // ScopeGhidra::findContainer: the cache (the global scope) first, which keeps what
+        // ActionNameVars gave a size-locked symbol over a restart; then Ghidra
+        let cached = fd.symtab.find_container(GLOBAL, Space::Sleigh(ram), off, size, None)?;
+        let (name, ty, type_locked, addr, sz) = match cached {
+            Some((sym, ei)) => {
+                let s = fd.symtab.symbol(sym);
+                let Some(ty) = s.ty else { continue };
+                let e = &s.entries[ei];
+                (s.name.clone(), ty, s.flags.type_locked, e.offset, e.size)
+            }
+            None => {
+                let Some(d) = facts.data_symbol(&mut fd.types, off)? else { continue };
+                (d.name, d.ty, d.type_locked, d.addr, d.size)
+            }
+        };
+        let base = fd.types.strip_typedefs(ty);
         if matches!(fd.types.meta(base), Meta::Struct | Meta::Union | Meta::Array) || fd.types.is_enum(base) {
-            return err(format!("facts: a variable in {}, a symbol of a composite data-type, is not ported", d.name));
+            return err(format!("facts: a variable in {name}, a symbol of a composite data-type, is not ported"));
         }
         // Symbol::getSizedType: the symbol's type for the whole symbol; a primitive has no pieces
-        if d.type_locked && off == d.addr && size == d.size && fd.types.meta(d.ty) != Meta::Unknown {
-            update_type(fd, vn, d.ty, true, true);
+        if type_locked && off == addr && size == sz && fd.types.meta(ty) != Meta::Unknown {
+            update_type(fd, vn, ty, true, true);
         }
     }
     Ok(())

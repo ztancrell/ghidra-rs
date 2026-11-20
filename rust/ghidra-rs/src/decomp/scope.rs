@@ -548,6 +548,19 @@ impl Database {
         self.symbols[sym.0 as usize].entries.clear();
     }
 
+    /// What a restart leaves of the function's database: the global scope, its symbols kept;
+    /// every other scope empty (the local scope is rebuilt from scratch).
+    pub(crate) fn clear_local(&mut self) {
+        for i in 0..self.symbols.len() {
+            if self.symbols[i].scope != GLOBAL {
+                self.remove_symbol(SymbolId(i as u32));
+            }
+        }
+        for sc in self.scopes.iter_mut().skip(1) {
+            *sc = Scope::default();
+        }
+    }
+
     /// `ScopeInternal::clearCategory` for a category of its own (not -1).
     pub(crate) fn clear_category(&mut self, scope: ScopeId, cat: u32) {
         for sym in self.category(scope, cat) {
@@ -685,11 +698,20 @@ impl Database {
     }
 
     /// `Scope::setAttribute` of the type lock and the name lock (`Symbol::decodeHeader` sets
-    /// them from a symbol's record; `recoverNameRecommendationsForSymbols` locks a name).
-    pub(crate) fn lock_symbol(&mut self, sym: SymbolId, type_locked: bool, name_locked: bool) {
-        let f = &mut self.symbols[sym.0 as usize].flags;
-        f.type_locked |= type_locked;
-        f.name_locked |= name_locked;
+    /// them from a symbol's record; `recoverNameRecommendationsForSymbols` locks a name), with
+    /// `Symbol::checkSizeTypeLock`: a type-locked symbol of an unknown data-type is size-locked.
+    pub(crate) fn lock_symbol(
+        &mut self,
+        types: &super::types::TypeFactory,
+        sym: SymbolId,
+        type_locked: bool,
+        name_locked: bool,
+    ) {
+        let s = &mut self.symbols[sym.0 as usize];
+        s.flags.type_locked |= type_locked;
+        s.flags.name_locked |= name_locked;
+        s.flags.size_type_locked =
+            s.flags.type_locked && s.ty.is_some_and(|t| types.meta(t) == super::types::Meta::Unknown);
     }
 }
 
