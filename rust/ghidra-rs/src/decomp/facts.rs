@@ -202,7 +202,7 @@ impl TypeDecoder<'_> {
             _ => Err(format!("<{}> {name}: expected one data-type", el.name)),
         };
         match (el.name.as_str(), el.attr("metatype")) {
-            ("void", _) => Ok(types.base(1, Meta::Void)),
+            ("void", _) => Ok(types.base(0, Meta::Void)),
             ("def", _) => {
                 if el.attr("format").is_some() {
                     return Err(format!("typedef {name}: a display format is not ported"));
@@ -385,6 +385,13 @@ impl Facts {
                     let entry = hex(a)?;
                     f.funcs.insert(entry, at(x));
                     arch.add_function(entry, function_name(x).ok_or_else(|| bad(line))?);
+                    // FunctionSymbol::decode: the function's size from 2 to 8 bytes is its symbol's
+                    if let Some(f) = arch.functions.get_mut(&entry) {
+                        let size = attr_of(x, "<function", "size").and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+                        if (2..=8).contains(&size) {
+                            f.consume = size;
+                        }
+                    }
                     scoped.push((entry, scope_id(x)?));
                 }
                 ("body", Some(a), ..) => {

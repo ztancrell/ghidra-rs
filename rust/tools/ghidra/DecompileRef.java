@@ -2,12 +2,15 @@
 // options, 60 s per function), written to one file per address instead of the log.
 // Arguments: the output directory, then the addresses. A function that does not decompile gets
 // its error message; an address without a function gets "no function at <address>".
+// With DECOMP_DEBUG_DIR set, also writes the decompiler's debug XML (DecompInterface.enableDebug)
+// of each function to <dir>/<address>.xml, for decomp_dbg's `restore`.
 //@category ghidra-rs
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 
 import ghidra.app.decompiler.DecompInterface;
+import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.listing.Function;
@@ -26,6 +29,12 @@ public class DecompileRef extends GhidraScript {
                 text = "no function at " + args[i];
             }
             else {
+                String dbg = System.getenv("DECOMP_DEBUG_DIR");
+                if (dbg != null) {
+                    // the debug dump needs options set (DecompileOptions' defaults)
+                    decompiler.setOptions(new DecompileOptions());
+                    decompiler.enableDebug(new File(dbg, args[i] + ".xml"));
+                }
                 DecompileResults r = decompiler.decompileFunction(f, 60, monitor);
                 text = r.decompileCompleted() ? r.getDecompiledFunction().getC() : r.getErrorMessage();
             }

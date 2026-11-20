@@ -2190,6 +2190,8 @@ facts 461 / 499 identical, loud 22, silent 16 (7 / 7); own facts with Java's fun
 own facts with plain discovery (65 s) 177 / 499, loud 122, silent 200 (2 / 7, loud 2, silent
 3). The first attempt's own-facts counts were invalid: `ghidra-diff.sh` fell back to the Java
 facts; it now stops on a missing or empty `FACTS` file. Inputs in `rust/target/gap7/`.
+
+Java-facts gap (2026-11-20, branch `gap-javafacts`, M500 identical of 499): 461 (loud 22, silent 16) -> 467 (loud 23, silent 9), M8 7 / 7, the 57 M8 bars as `analysis-queue`. Fixed: `void` is the size-0 TypeVoid (3 silent), a function symbol covers its facts size of 2 to 8 bytes (`FunctionSymbol::consumeSize`; 2 silent, 1 silent now loud), `isString` takes the empty string (1 silent). Of the 9 silent left, 8 are reference-version differences: `/opt/ghidra` is 12.3 and its decompiler lacks GP-7356 (`register0x00000010` for `register_ESP`) and GP-7474 (`_BinkPause_8`); the repo C++ replaying Java's debug XML (`DecompileRef.java` with `DECOMP_DEBUG_DIR`) prints what ghidra-rs prints. The ninth (0x47f890, variable numbering) is open. Superseded: the 461 / 16 counts above.
 Superseded: the own-facts M500 counts 171 -> 173 (Java's functions) and 90 (plain discovery) of
 S10 slices 2 and 3 (eight actions skipped).
 

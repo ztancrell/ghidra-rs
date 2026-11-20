@@ -447,6 +447,7 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    function changed; the mercs2 shadow check is byte-identical to `m3-int6`'s; `mercs2-exports.sh --compare` 4
    identical, 2 call-contexts the same references in another order, 0x00401780 not identical (one reference more),
    as on the export branch. Not run: M500, the full pass. See `rust/README.md`, "Integration `m3-int7`".
+   Java-facts gap (2026-11-20, branch `gap-javafacts`, M500 identical of 499): 461 (loud 22, silent 16) -> 467 (loud 23, silent 9), M8 7 / 7, the 57 M8 bars as `analysis-queue`. Fixed: `void` is the size-0 TypeVoid (3 silent), a function symbol covers its facts size of 2 to 8 bytes (`FunctionSymbol::consumeSize`; 2 silent, 1 silent now loud), `isString` takes the empty string (1 silent). Of the 9 silent left, 8 are reference-version differences: `/opt/ghidra` is 12.3 and its decompiler lacks GP-7356 (`register0x00000010` for `register_ESP`) and GP-7474 (`_BinkPause_8`); the repo C++ replaying Java's debug XML (`DecompileRef.java` with `DECOMP_DEBUG_DIR`) prints what ghidra-rs prints. The ninth (0x47f890, variable numbering) is open. Superseded: the 461 / 16 counts above.
    Full pass 2026-11-18 (249c32cf94): 133 / 133 pairs, silent 0 in every pair, none worse than `m3-int6`;
    `r5s`, `r5slock`, `r5dtlocksv` and `pmd` M500 gained identical functions. Superseded: "Not run: M500, the full
    pass". Merged to master with the reference-output cache of `decomp-diff.sh`.

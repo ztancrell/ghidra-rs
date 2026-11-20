@@ -2120,11 +2120,12 @@ fn java_reads_the_same(arch: &Arch, addr: u64, charsize: u32, data: Option<&(Vec
 }
 
 /// Port of `StringManager::isString`: whether a string of characters of `charsize` bytes
-/// (not an empty one) is at `addr`.
+/// is at `addr`. An empty one counts: `getStringData` keeps the terminator, so its buffer is not
+/// empty. Superseded: "(not an empty one)".
 pub(crate) fn is_string(arch: &Arch, addr: u64, charsize: u32) -> Result<bool> {
     let data = string_data(arch, addr, charsize as usize);
     java_reads_the_same(arch, addr, charsize, data.as_ref())?;
-    Ok(data.is_some_and(|(chars, _)| !chars.is_empty()))
+    Ok(data.is_some())
 }
 
 /// Port of `StringManagerUnicode::getStringData` (with `checkCharacters` and

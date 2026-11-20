@@ -5127,6 +5127,8 @@ full pipeline against Java Ghidra with default options; inputs kept in `rust/tar
 | ghidra-rs's own, Java's function list (`analyze --functions-from`, 73 s) | identical 4 / 7 (loud 2, silent 1) | identical 328 / 499 (loud 31, silent 140) |
 | ghidra-rs's own, plain discovery (65 s) | identical 2 / 7 (loud 2, silent 3) | identical 177 / 499 (loud 122, silent 200) |
 
+Java-facts gap (2026-11-20, branch `gap-javafacts`, M500 identical of 499): 461 (loud 22, silent 16) -> 467 (loud 23, silent 9), M8 7 / 7, the 57 M8 bars as `analysis-queue`. Fixed: `void` is the size-0 TypeVoid (3 silent), a function symbol covers its facts size of 2 to 8 bytes (`FunctionSymbol::consumeSize`; 2 silent, 1 silent now loud), `isString` takes the empty string (1 silent). Of the 9 silent left, 8 are reference-version differences: `/opt/ghidra` is 12.3 and its decompiler lacks GP-7356 (`register0x00000010` for `register_ESP`) and GP-7474 (`_BinkPause_8`); the repo C++ replaying Java's debug XML (`DecompileRef.java` with `DECOMP_DEBUG_DIR`) prints what ghidra-rs prints. The ninth (0x47f890, variable numbering) is open. Superseded: the 461 / 16 counts above.
+
 The first attempt's own-facts counts were not valid: `ghidra-diff.sh` was given facts paths
 that did not resolve, fell back to the Java facts without a word and printed the Java row.
 `ghidra-diff.sh` now stops on a missing or empty `FACTS` file (see "Stage S10, slice 1").
