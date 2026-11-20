@@ -471,7 +471,7 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
         let t = std::time::Instant::now();
         let files = ghidra_rs::fid::default_files();
         let dbs = files.iter().map(|f| ghidra_rs::fid::FidDb::open(f)).collect::<Result<Vec<_>, _>>()?;
-        let fid = ghidra_rs::fid::apply(&img, &an, &sl, &dbs, &scripts::demangle);
+        let fid = ghidra_rs::fid::apply(&img, &an, &sl, &dbs);
         eprintln!(
             "function id: {} functions named from {} databases in {:.1}s",
             fid.len(),
