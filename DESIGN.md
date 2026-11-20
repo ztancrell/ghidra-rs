@@ -143,6 +143,16 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   `mercs2.facts`, which is mercs2's project after its own pipeline, not plain Java analysis
   (0x4b6580: purge 0 in Java 12.2, `unknown` in the facts). See `rust/README.md`, "Bodies from
   creation".
+- 2026-11-20: The Java reference is Ghidra built from this repo's own source (12.3), not the
+  installed 12.2 (`/opt/ghidra`). ghidra-rs ports the 12.3 source, so comparing it with 12.2
+  showed version differences as silent misses (GP-7356 register names such as `register_ESP`
+  against `register0x00000010`, GP-7474; 7-8 of the M500 Java-facts silents). With the reference
+  built from the same source, every difference is a port bug or a loud gap. User's decision
+  ("the most logical"), chosen over listing the version differences as known. The Java reference
+  outputs (ghidra-diff, `DumpPurges`, the Java 12.2 project of the analysis oracle) are made again
+  with 12.3; mercs2's own project is copied, never upgraded in place. Superseded: "plain Java 12.2
+  auto-analysis" in the entry above means plain Java 12.3 auto-analysis once the outputs are made
+  again.
 
 ## Milestones
 
