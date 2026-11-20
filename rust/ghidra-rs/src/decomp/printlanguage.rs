@@ -66,7 +66,12 @@ struct NodePending {
 /// A leaf token (`PrintLanguage::Atom`): its text, or nothing (`blanktoken`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Atom {
+    /// an operator, keyword or constant token: printed as it is
     Text(String),
+    /// a function, variable, type, field or label name that is not a constant: Java's
+    /// `PrettyPrinter` (`DecompileResults.getDecompiledFunction`) prints it through
+    /// `IllegalCharCppTransformer` ([`clean_name`])
+    Name(String),
     Blank,
 }
 
@@ -158,11 +163,11 @@ impl<'a> PrintC<'a> {
             self.recurse()?;
         }
         if self.revpol.is_empty() {
-            self.emit_atom(&atom);
+            self.emit_atom(&atom)?;
             return Ok(());
         }
         self.emit_op_top();
-        self.emit_atom(&atom);
+        self.emit_atom(&atom)?;
         while let Some(top) = self.revpol.last_mut() {
             top.visited += 1;
             if top.visited != top.tok.stage {
@@ -334,11 +339,29 @@ impl<'a> PrintC<'a> {
         }
     }
 
-    /// Port of `PrintLanguage::emitAtom` (plain text: every kind but blank prints its name).
-    fn emit_atom(&mut self, atom: &Atom) {
-        if let Atom::Text(s) = atom {
-            self.emit.print_str(s);
+    /// The text of a name token: with Java's facts loaded ghidra-rs prints what Java's
+    /// `DecompileResults.getDecompiledFunction` prints, the name cleaned by its
+    /// `PrettyPrinter` ([`clean_name`]); without them, what the C++ console prints (the name).
+    pub(crate) fn name_text(&self, name: &str) -> Result<String> {
+        if self.arch.facts.is_some() {
+            clean_name(name)
+        } else {
+            Ok(name.to_string())
         }
+    }
+
+    /// Port of `PrintLanguage::emitAtom` (plain text: every kind but blank prints its name; a
+    /// name as Java's `PrettyPrinter` cleans it).
+    fn emit_atom(&mut self, atom: &Atom) -> Result<()> {
+        match atom {
+            Atom::Text(s) => self.emit.print_str(s),
+            Atom::Name(s) => {
+                let text = self.name_text(s)?;
+                self.emit.print_str(&text)
+            }
+            Atom::Blank => {}
+        }
+        Ok(())
     }
 
     /// Port of `PrintLanguage::pushVnExplicit`.
@@ -398,9 +421,101 @@ pub(crate) fn most_natural_base(val: u64) -> u32 {
     }
 }
 
+/// A name as Java's `PrettyPrinter` prints it: the facts glue a symbol's namespace path to its
+/// name (`ns::name`), which the C++ prints as separate syntax tokens (`emitSymbolScope`, not
+/// cleaned) before the name token (cleaned, [`illegal_char_cpp`]). The prefix is the text up to
+/// the last `::` outside template brackets.
+pub(crate) fn clean_name(name: &str) -> Result<String> {
+    let mut depth = 0u32;
+    let mut cut = None;
+    for (i, c) in name.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            ':' if depth == 0 && name[i + 1..].starts_with(':') => cut = Some(i),
+            _ => {}
+        }
+    }
+    match cut {
+        Some(i) => Ok(format!("{}::{}", &name[..i], illegal_char_cpp(&name[i + 2..])?)),
+        None => illegal_char_cpp(name),
+    }
+}
+
+/// Port of `IllegalCharCppTransformer.simplify` (Java, Decompiler): each character not legal in a
+/// C++ identifier at its position becomes `_`. Letters are always legal; `_` and digits after the
+/// first character (`_` and `~` also first); `*:()[],&~` inside template brackets; operator
+/// characters right after a leading `operator`. Positions count UTF-16 units, as Java's `String`
+/// does: a character outside the BMP is two illegal units, so two `_`. A non-ASCII alphabetic
+/// character is an error: `Character.isLetter` (general categories L*) is not ported, and Rust's
+/// `is_alphabetic` is a wider set.
+pub(crate) fn illegal_char_cpp(input: &str) -> Result<String> {
+    const AFTER_FIRST: u8 = 1;
+    const TEMPLATE: u8 = 2;
+    const OPERATOR: u8 = 4;
+    const FIRST: u8 = 8;
+    fn legal(c: char) -> u8 {
+        match c {
+            '_' => AFTER_FIRST | TEMPLATE | OPERATOR | FIRST,
+            '0'..='9' => AFTER_FIRST | TEMPLATE | OPERATOR,
+            '*' | '(' | ')' | '[' | ']' | '&' => TEMPLATE | OPERATOR,
+            ':' | ',' => TEMPLATE,
+            '+' | '-' | '|' | '=' | '!' | '/' | '%' | '^' => OPERATOR,
+            '~' => TEMPLATE | OPERATOR | FIRST,
+            _ => 0,
+        }
+    }
+    let operator = input.starts_with("operator");
+    let mut depth = 0u32;
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize; // the UTF-16 index of `c`
+    for c in input.chars() {
+        let units = c.len_utf16();
+        let ok = if c.is_ascii_alphabetic() {
+            true
+        } else if c.is_alphabetic() {
+            return err(format!("print C: the name {input:?} has a non-ASCII letter (Character.isLetter) not ported"));
+        } else if c == '<' {
+            depth += 1;
+            true
+        } else if c == '>' {
+            depth = depth.saturating_sub(1);
+            true
+        } else {
+            let val = legal(c);
+            (val & AFTER_FIRST != 0 && i > 0)
+                || (val & FIRST != 0 && i == 0)
+                || (val & TEMPLATE != 0 && depth > 0)
+                || (val & OPERATOR != 0 && (8..=10).contains(&i) && operator)
+        };
+        if ok {
+            out.push(c);
+        } else {
+            out.extend(std::iter::repeat_n('_', units));
+        }
+        i += units;
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn illegal_char_cpp_as_java() {
+        let s = |t: &str| illegal_char_cpp(t).ok();
+        assert_eq!(s("_BinkPause@8").as_deref(), Some("_BinkPause_8"));
+        assert_eq!(s("8a~b").as_deref(), Some("_a_b"));
+        assert_eq!(s("~A").as_deref(), Some("~A"));
+        assert_eq!(s("vec<int*,a::b> x").as_deref(), Some("vec<int*,a::b>_x"));
+        assert_eq!(s("a::b").as_deref(), Some("a__b"));
+        assert_eq!(s("operator==").as_deref(), Some("operator=="));
+        assert_eq!(s("x\u{1F600}").as_deref(), Some("x__"));
+        assert!(s("\u{e9}").is_none());
+        assert_eq!(clean_name("hkpEntityListener::vftable").ok().as_deref(), Some("hkpEntityListener::vftable"));
+        assert_eq!(clean_name("a@b::f@4").ok().as_deref(), Some("a@b::f_4"));
+    }
 
     #[test]
     fn natural_base() {
