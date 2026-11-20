@@ -730,6 +730,7 @@ impl Facts {
                 inputs: params.into_iter().map(|p| p.1).collect(),
                 output: Param { name: String::new(), storage: storage.filter(|_| types.meta(ty) != Meta::Void), ty },
                 dotdotdot: p.flag("dotdotdot"),
+                output_size_locked: types.meta(ty) == Meta::Unknown,
             }));
         } else if p.flag("dotdotdot") {
             return Err(unported("an unlocked varargs prototype"));

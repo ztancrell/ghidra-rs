@@ -29,6 +29,10 @@ pub(crate) struct Locked {
     pub(crate) inputs: Vec<Param>,
     pub(crate) output: Param,
     pub(crate) dotdotdot: bool,
+    /// `ParameterBasic::isSizeTypeLocked` of the output: locked with an unknown data-type
+    /// (`setTypeLock`), so `ActionOutputPrototype` may retype it (`overrideSizeLockType`) and a
+    /// restart resets it (`resetSizeLockType`)
+    pub(crate) output_size_locked: bool,
 }
 
 fn type_class(types: &TypeFactory, ty: TypeId) -> TypeClass {
@@ -129,6 +133,7 @@ pub(crate) fn lock_prototype(
     proto.model_locked = true;
     proto.locked = Some(Box::new(Locked {
         inputs: params,
+        output_size_locked: types.meta(output.1) == Meta::Unknown,
         output: Param { name: output.0, storage: out_storage, ty: output.1 },
         dotdotdot,
     }));

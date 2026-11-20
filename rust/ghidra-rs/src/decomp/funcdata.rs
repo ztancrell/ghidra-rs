@@ -232,12 +232,13 @@ impl Funcdata {
 
     /// Port of `Architecture::clearAnalysis` (`Funcdata::clear` and the warning comments) for a
     /// restart: what the analysis made goes; the data-types, the facts' names and comments and
-    /// the overrides stay, and the prototype is `start`, the one the decompile started from
-    /// (the C++ clears the unlocked inputs and output of the prototype it has).
-    pub(crate) fn clear_analysis(&mut self, start: FuncProto) {
+    /// the overrides stay, and the prototype keeps what the pass set but its unlocked output
+    /// (`clearUnlockedOutput`; its unlocked inputs are local symbols, cleared with the scope).
+    pub(crate) fn clear_analysis(&mut self) {
         let mut fresh = Funcdata::new(self.entry);
         std::mem::swap(&mut fresh.types, &mut self.types);
-        fresh.proto = start;
+        fresh.proto = std::mem::take(&mut self.proto);
+        fresh.proto.clear_unlocked_output(&mut fresh.types);
         fresh.name_recs = std::mem::take(&mut self.name_recs);
         fresh.listing_comments = std::mem::take(&mut self.listing_comments);
         fresh.deindirect = std::mem::take(&mut self.deindirect);

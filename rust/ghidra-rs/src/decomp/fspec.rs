@@ -453,10 +453,7 @@ pub(crate) struct FuncProto {
     pub(crate) locked: Option<Box<super::locked::Locked>>,
     /// `returnBytesConsumed`: the bytes of the return value the callers are known to use, 0
     /// for all (a hint to dead code, from `RulePiecePathology`)
-    /// The C++ resets it in `clearUnlockedOutput` (a decompile restart); a restart here starts
-    /// from the prototype the decompile started with ([`Funcdata::clear_analysis`]).
-    ///
-    /// [`Funcdata::clear_analysis`]: super::funcdata::Funcdata::clear_analysis
+    /// A restart resets it ([`FuncProto::clear_unlocked_output`]).
     pub(crate) return_bytes_consumed: u32,
     /// the return value `ActionOutputPrototype` stores (`ProtoStoreSymbol::outparam`): storage and
     /// data-type; none is `void`. The inputs are the local scope's category-0 symbols.
@@ -474,6 +471,26 @@ impl FuncProto {
             self.return_bytes_consumed = val;
         }
         smaller
+    }
+
+    /// Port of `FuncProto::clearUnlockedOutput` (`Funcdata::clear`, a restart): a locked output
+    /// stays, a size-locked one back to an unknown data-type of its size (`resetSizeLockType`);
+    /// an unlocked output is forgotten (`store->clearOutput`); `returnBytesConsumed` is reset.
+    /// The model, extrapop and flags stay as the pass before set them.
+    pub(crate) fn clear_unlocked_output(&mut self, types: &mut super::types::TypeFactory) {
+        match &mut self.locked {
+            Some(l) => {
+                if l.output_size_locked && self.model.is_some() {
+                    let size = types.size(l.output.ty);
+                    l.output.ty = types.base(size, super::types::Meta::Unknown);
+                }
+            }
+            None => {
+                self.output = None;
+                self.out_param = None;
+            }
+        }
+        self.return_bytes_consumed = 0;
     }
 
     /// Port of `FuncProto::setModel`: the model and its extrapop, except that a model replacing

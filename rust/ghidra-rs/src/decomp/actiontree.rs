@@ -66,8 +66,6 @@ pub struct ActionTree {
     pub(crate) double_precis: bool,
     /// `ActionRestartGroup::curstart`: the restarts so far
     restarts: u32,
-    /// the function's prototype when the restart group first ran, which a restart starts from
-    start_proto: Option<super::fspec::FuncProto>,
 }
 
 /// `maxrestarts` of the `universal` group.
@@ -220,9 +218,6 @@ impl ActionTree {
         if restart && self.nodes[id.0].finished {
             return Ok(0);
         }
-        if restart && self.start_proto.is_none() {
-            self.start_proto = Some(fd.proto.clone());
-        }
         loop {
             if self.nodes[id.0].status != Status::Mid {
                 self.nodes[id.0].state = 0;
@@ -253,7 +248,7 @@ impl ActionTree {
                 fd.warning_header("Exceeded maximum restarts with more pending");
                 break;
             }
-            fd.clear_analysis(self.start_proto.clone().unwrap_or_default());
+            fd.clear_analysis();
             // reset everything but ourselves
             for (i, n) in self.nodes.iter_mut().enumerate() {
                 if i != id.0 {
