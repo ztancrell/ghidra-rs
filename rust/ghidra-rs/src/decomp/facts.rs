@@ -712,6 +712,11 @@ impl Facts {
         if p.kid("internallist").is_some() {
             return Err(unported("an <internallist>"));
         }
+        // FuncProto::decodeEffect / decodeLikelyTrash: a prototype's own lists (isCompatible
+        // compares them)
+        if ["unaffected", "killedbycall", "returnaddress", "likelytrash"].iter().any(|k| p.kid(k).is_some()) {
+            return Err(unported("a prototype with its own effect or likely-trash list"));
+        }
         if input_locked != output_locked {
             return Err(unported("a prototype with only its inputs or only its output locked"));
         }

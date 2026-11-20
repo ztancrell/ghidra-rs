@@ -425,6 +425,15 @@ impl Models {
             .map(|i| ModelId(i as u32))
             .ok_or_else(|| LowlevelError(format!("Missing prototype model: {name}")))
     }
+
+    /// Port of `ProtoModel::isCompatible`: the same model, or one is the copy of the other
+    /// (`compatModel`). The only copy here is the facts' `unknown` model
+    /// (`createUnknownModel`, an `UnknownProtoModel` of the default model); the x86 cspec has no
+    /// `<modelalias>`.
+    pub(crate) fn is_compatible(&self, a: ModelId, b: ModelId) -> bool {
+        let copy_of = |m: ModelId| (self.get(m).name == "unknown" && m != self.default).then_some(self.default);
+        a == b || copy_of(a) == Some(b) || copy_of(b) == Some(a)
+    }
 }
 
 /// Port of `FuncProto`, the fields the actions up to `heritage` read.
