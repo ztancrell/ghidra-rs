@@ -187,7 +187,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    identical, and the last three missing `violation` rows (0x84af20 at 0x41d7be, 0x41d834,
    0x675611) are found. On branch `constprop` (whole-function constant propagation, see
    milestone 2): 98.8% identical against the reference of mercs2 f14e5c4, and `CALL EAX` at
-   0x73b4d1 resolves.
+   0x73b4d1 resolves. Ledger (2026-11-20, ghidra-rs b6b02b2ca5, `rust/tools/abi-ledger.csv`):
+   all 1,076 rows of the shadow diff are in it; no row has ghidra-rs `ok`/`(none)` where the
+   truth is `violation`, but 39 true call sites are missing on our side (undecoded code, vtable
+   slots, SecuROM sections) and 92 rows where we are the looser side are still `unknown` or
+   `unverified`, so the bar to switch is not met; the swapped sweeps have not started.
 3. Decompilation: a Rust decompiler, checked against Ghidra's C++ one.
    Plan: `docs/plans/m3-decompiler.md` (stages, reference checks, decisions).
    S0 (harness) done on branch `m3-s0`: the reference `decomp_dbg` builds with the `print raw`
