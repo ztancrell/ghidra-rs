@@ -242,6 +242,8 @@ impl Funcdata {
         fresh.name_recs = std::mem::take(&mut self.name_recs);
         fresh.listing_comments = std::mem::take(&mut self.listing_comments);
         fresh.deindirect = std::mem::take(&mut self.deindirect);
+        // the join records are global (AddrSpaceManager) and survive a restart
+        fresh.joins = std::mem::take(&mut self.joins);
         // Funcdata::clear clears the local scope only: the global scope (ScopeGhidra's cache)
         // keeps its symbols, with the types ActionNameVars gave the size-locked ones
         fresh.symtab = std::mem::take(&mut self.symtab);

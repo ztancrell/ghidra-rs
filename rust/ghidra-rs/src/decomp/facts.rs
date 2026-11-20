@@ -387,7 +387,10 @@ impl Facts {
                     arch.add_function(entry, function_name(x).ok_or_else(|| bad(line))?);
                     // FunctionSymbol::decode: the function's size from 2 to 8 bytes is its symbol's
                     if let Some(f) = arch.functions.get_mut(&entry) {
-                        let size = attr_of(x, "<function", "size").and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+                        let size = match attr_of(x, "<function", "size") {
+                            None => 0,
+                            Some(s) => s.parse::<u32>().map_err(|_| bad(line))?,
+                        };
                         if (2..=8).contains(&size) {
                             f.consume = size;
                         }
@@ -882,7 +885,10 @@ pub(crate) fn symbol_types(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
         let (name, ty, type_locked, addr, sz) = match cached {
             Some((sym, ei)) => {
                 let s = fd.symtab.symbol(sym);
-                let Some(ty) = s.ty else { continue };
+                // a C++ symbol always has a data-type
+                let Some(ty) = s.ty else {
+                    return err(format!("facts: the cached global symbol {} has no data-type", s.name));
+                };
                 let e = &s.entries[ei];
                 (s.name.clone(), ty, s.flags.type_locked, e.offset, e.size)
             }

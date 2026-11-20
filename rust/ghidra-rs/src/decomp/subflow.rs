@@ -1042,7 +1042,10 @@ impl Replacement {
     /// `AddrSpaceManager::renormalizeJoinAddress`): the `size` bytes `sa` bytes above the least
     /// significant end of join record `join`, as a piece when one piece holds them, else as a
     /// join of the truncated pieces.
-    fn join_replacement(fd: &mut Funcdata, join: u64, sa: u32, size: u32) -> Result<(Space, u64)> {
+    fn join_replacement(fd: &mut Funcdata, arch: &Arch, join: u64, sa: u32, size: u32) -> Result<(Space, u64)> {
+        if arch.sleigh.big_endian {
+            return err("subflow: renormalizeJoinAddress on a big-endian target is not ported");
+        }
         let Some(pieces) = usize::try_from(join).ok().and_then(|i| fd.joins.get(i)).cloned() else {
             return err("subflow: join address not covered by a join record");
         };
@@ -1063,6 +1066,11 @@ impl Replacement {
         };
         if pos1 == pos2 {
             let (space, off, _) = pieces[pos1];
+            // `!addr1.isConstant()` (space 0 is the constant space): a constant piece goes on to
+            // the join of one piece in the C++
+            if space == 0 {
+                return err("subflow: renormalizeJoinAddress of a constant piece is not ported");
+            }
             return Ok((Space::Sleigh(space), off + u64::from(trunc1)));
         }
         let mut new = pieces[pos2..=pos1].to_vec();
@@ -1110,7 +1118,7 @@ impl Replacement {
             let v = fd.vn(vn);
             let sa = (leastsigbit_set(mask) / 8) as u32;
             let (space, off) = if v.space == Space::Join {
-                Self::join_replacement(fd, v.offset, sa, self.flowsize)?
+                Self::join_replacement(fd, arch, v.offset, sa, self.flowsize)?
             } else {
                 (v.space, v.offset + u64::from(sa))
             };
