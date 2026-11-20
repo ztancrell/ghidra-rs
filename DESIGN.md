@@ -490,6 +490,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    ported in place of the body rule; 0x5dc8f0, newly silent with Java's list on `gap-plain`, fixed: Java's list
    382 (silent 87), plain 226 (silent 145) and M8 unchanged. See `rust/README.md`, "No-return functions
    from call-site evidence".
+   The store row (branch `gap-plain2`, 2026-11-20): plain discovery with mercs2's edit scripts replayed
+   on a fresh store (`edit`, then `analyze --store --facts`): M500 365 (loud 33, silent 101), M8 4 / 7.
+   `Store::apply` now re-flows the bodies that jump or fall into a removed function, as the live edit
+   does. See `rust/README.md`, "The store row".
    Full pass 2026-11-19 (83ee6a86e6, the tree of 82b968548a, desktop and Mac): 133 / 133 pairs, silent 0 in every pair, none
    worse than `m3-int7` once 0x4c48d0 (a reference timeout at 120 s in `pmd`, `r5slock`,
    `r5dtlocksv` M500) is run with `TIMEOUT` 400. Superseded: "Not run: the full pass, the Mac" for

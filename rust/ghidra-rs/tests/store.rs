@@ -97,6 +97,22 @@ fn records_replay_in_edit_order() {
 }
 
 #[test]
+fn removing_a_function_re_flows_what_falls_into_it() {
+    let path = Sleigh::sla_path("x86");
+    let (sl, img) = (Sleigh::load(&path).unwrap(), image());
+    // a base where 0x401014 is a function: 0x401010's body (the JZ and its target) falls into it
+    let mut base = Analysis::run(&img, &sl, &[], false).unwrap();
+    let made = Store::parse(&format!("{}function 0x00401014 create\n", Store::default())).unwrap();
+    made.apply(&mut base, &img, &sl).unwrap();
+    let mut p = Project::new(&img, &sl, base.clone(), Store::default());
+    assert_eq!(p.body_bytes(0x401010), 5);
+    p.remove_function(0x401014);
+    assert_eq!(p.body_bytes(0x401010), 6);
+    // the store alone gives the same body (Store::apply re-flows 0x401010 too)
+    p.finish(base).unwrap();
+}
+
+#[test]
 fn a_store_names_its_binary_and_seeds() {
     let basis = Basis::new(b"MZ", &[0x401010, 0x401000, 0x401010], false);
     assert_eq!(basis, Basis::new(b"MZ", &[0x401000, 0x401010], false));

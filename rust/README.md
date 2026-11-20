@@ -673,6 +673,12 @@ applied right after discovery and the constants pass of `--abi-callers` and `--f
 after it, on a program `edit` never proved the store on. Bodies are computed again from the
 flow at the end, so a function re-flows whenever a neighbour is created or removed or a flag
 changes; only a `body` record pins one, and `edit reflow <addr>` drops that record.
+`Store::apply` re-flows the bodies with an instruction that jumps or falls into a function a
+`function ... remove` record removes, as the live `Project::remove_function` does (those jumps
+are no tail calls now, their owners flow on); `ghidra-rs/tests/store.rs`
+(`removing_a_function_re_flows_what_falls_into_it`). Superseded: only bodies holding a record's
+address were re-flowed, and `fold-slot-fragments` on mercs2 failed with "the store does not
+reproduce the edits ... 0x00416c5d".
 
 What fails instead of being skipped: a first line other than version 2's, a store made on
 another binary or seed set (`analyze --store` and `edit` both check; note that
@@ -5546,6 +5552,33 @@ call-fixup exception.
 Superseded: "0x5dc8f0 newly silent" in the table above. The 12 Java-only no-return functions
 (0x401740 among them, the one ClearFalseNoReturn was written for) were not traced. Not run: the
 Java-facts row (reads no ghidra-rs analysis), the full pass, the Mac, the shadow check.
+
+#### The store row: plain discovery with mercs2's edits, branch `gap-plain2` (2026-11-20)
+
+A third own-facts row: plain discovery, then mercs2's `analysis_pipeline.sh` edit scripts
+replayed on a fresh store in its order (`edit --new-store export-bindings <csv> --recover`,
+`recover-functions`, `audit-recovered-functions --remove-empty`, `fold-slot-fragments` with
+`build/functions-original.csv` and `build/slot-rewrites.csv`, `add-relocated-entries
+config/securom_functions.csv`, `clear-false-noreturn`), then `analyze --store <store> --protos
+<win32.protos> --facts <out>` and `ghidra-diff.sh` with `FACTS=<out>`. The run scripts are
+`rust/target/gap-plain2/store.sh` and `rows.sh` (not kept in the repo). Store: 24,083 records
+(19,320 `function`, 2,468 `override`, 1,451 `body`, 810 `thunk`, 34 `code`), 44,772 functions;
+recover-functions 16,513 created, fold-slot-fragments 2,159 removed and 1,431 refit in 2 rounds,
+add-relocated-entries 43, clear-false-noreturn 0 cleared. Each `edit` takes 60 to 70 s, `analyze
+--store` 86 s. `fold-slot-fragments` needed the `Store::apply` fix above.
+
+| row (own facts) | M500 identical (loud, silent) | M8 |
+|---|---|---|
+| Java's function list | 382 (30, 87) | 4 / 7 (loud 2, silent 1) |
+| plain discovery | 226 (128, 145) | 2 / 7 (loud 2, silent 3) |
+| plain discovery with the store | 365 (33, 101) | 4 / 7 (loud 2, silent 1) |
+
+The store row's 101 silents: 82 are silent with Java's function list too (77 of those also
+with plain discovery); 17 are functions the store creates (all 17 have a `function ... create`
+record: RecoverFunctions, ExportBindings `--recover`), where the own facts give stack locals
+(`local_c`) and mercs2's project has none, since its scripts create those functions without
+analysis (Java prints `fStack_c`); 2 (0x40ad80, 0x442c90) are silent with plain discovery and
+identical or loud with Java's function list.
 
 #### Full pass of `analysis-queue` (2026-11-19)
 
