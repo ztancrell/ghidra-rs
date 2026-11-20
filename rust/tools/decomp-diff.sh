@@ -12,7 +12,7 @@
 #   BREAK    action to stop before (`break start`), e.g. funclink, heritage, paramdouble; empty: none
 #   PRINT    what to print after `decompile` (default: print raw)
 #   OPTIONS  file of extra commands run before `load function` (option togglerule ..., option currentaction ...)
-#   JOBS     parallel runs (default: nproc)
+#   JOBS     parallel runs (default: nproc less 2, left for the desktop)
 #   CONTINUES  after the print, this many times `continue` and the print again (next hit of BREAK)
 #   OPTIONS_SKIP_SELF=1  drop the OPTIONS lines declaring the decompiled function (`<name>(`), so
 #            a `decomp-locked-options.sh` file locks only its callees
@@ -163,7 +163,7 @@ if [ -n "$STOP" ]; then
         refbad "$out/ref/$a" || cmp -s "$out/ref/$a" "$out/rust/$a" || { echo "stopped at $a"; break; }
     done
 else
-    xargs -P "${JOBS:-$(nproc)}" -I{} bash -c 'one "$1"' _ {} <<<"$list"
+    xargs -P "${JOBS:-$(nproc --ignore=2)}" -I{} bash -c 'one "$1"' _ {} <<<"$list"
 fi
 
 total=0 same=0 refok=0

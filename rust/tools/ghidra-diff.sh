@@ -119,10 +119,10 @@ classify() {
 }
 export -f one classify
 export CLASSIFY rust
-xargs -P "${JOBS:-$(nproc)}" -I{} bash -c 'one "$1"' _ {} <<<"$list"
+xargs -P "${JOBS:-$(nproc --ignore=2)}" -I{} bash -c 'one "$1"' _ {} <<<"$list"
 if [ -n "$CLASSIFY" ]; then
     mkdir -p "$out/cls"
-    xargs -P "${JOBS:-$(nproc)}" -I{} bash -c 'classify "$1"' _ {} <<<"$list"
+    xargs -P "${JOBS:-$(nproc --ignore=2)}" -I{} bash -c 'classify "$1"' _ {} <<<"$list"
 fi
 # the mark of a miss: `skip` when the function needs the CLASSIFY actions (or decomp_dbg did
 # not print it with them), `own` otherwise

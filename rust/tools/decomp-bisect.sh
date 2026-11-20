@@ -27,7 +27,7 @@ mkdir -p "$b"
 echo "$a" > "$b/corpus.txt"
 export b n rust
 # shellcheck disable=SC2016
-xargs -n1 -P "${JOBS:-$(nproc)}" bash -c 'env -u ORDER -u STOP -u VERBOSE OUT="$b/$1" BREAK="$1" CONTINUES="$n" \
+xargs -n1 -P "${JOBS:-$(nproc --ignore=2)}" bash -c 'env -u ORDER -u STOP -u VERBOSE OUT="$b/$1" BREAK="$1" CONTINUES="$n" \
     "$rust/tools/decomp-diff.sh" "$b/corpus.txt" >/dev/null' _ <<<"$ACTIONS"
 
 for ((h = 0; h <= n; h++)); do

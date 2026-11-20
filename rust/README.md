@@ -1252,7 +1252,7 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
   `pmd` is `print map` and `print raw` with the same options at `break start startcleanup` (the
   local symbols and the typed ops after `mapped_local_sync`); `D` is empty now. M8 and M500 run
   57 checks, `simple` six (superseded: "56 checks" and "five").
-- `JOBS` (default `nproc`), `TIMEOUT` (seconds per function and engine, default 120 as for every bar here; 0x4c48d0 of M500 takes
+- `JOBS` (default `nproc` less 2, left for the desktop), `TIMEOUT` (seconds per function and engine, default 120 as for every bar here; 0x4c48d0 of M500 takes
   the reference about 485 s and ghidra-rs about 600 s alone, so at 120 s it counts as a function
   the reference does not finish), `OUT`
   (default `rust/target/bars`), `KEEP=1` keeps the per-function outputs.

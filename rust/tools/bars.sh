@@ -12,7 +12,7 @@
 #            switch only the S3 bar (paramdouble), the six switch checks and pcc-r, pcc-t (with
 #            `switchnorm` on: the sw options), and simple only the print C checks.
 #   CHECKS   names from the `case` below. Default: every check that applies to the corpus.
-#   JOBS     parallel functions per check (default: nproc); TIMEOUT seconds per function and
+#   JOBS     parallel functions per check (default: nproc less 2, left for the desktop); TIMEOUT seconds per function and
 #            engine (default 120)
 #   OUT      output directory (default rust/target/bars): summary.out (the lines printed, appended),
 #            <check>-<corpus>.log (decomp-diff.sh's output) and .miss (one line per function that
@@ -31,7 +31,7 @@
 # Writes only under rust/target/. Needs the reference (decomp-ref.sh) and a release build.
 cd "$(dirname "$0")/.." || exit 1
 t=$PWD/tools; c=$t/corpus; o=${OUT:-$PWD/target/bars}; l=$PWD/target/locks
-export JOBS=${JOBS:-$(nproc)} TIMEOUT=${TIMEOUT:-120}
+export JOBS=${JOBS:-$(nproc --ignore=2)} TIMEOUT=${TIMEOUT:-120}
 mkdir -p "$o"
 # Rule-stage actions the older checks skip on both engines, as they did before the actions were
 # ported (branch `m3-default`); `pcd` and `pmd` run them. (Superseded: "not ported".)
