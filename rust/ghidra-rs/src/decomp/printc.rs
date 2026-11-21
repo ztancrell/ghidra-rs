@@ -335,7 +335,8 @@ impl PrintC<'_> {
         }
         self.emit.open_group();
         // emitSymbolScope: a function in the global scope needs no scope prefix
-        self.emit.print_str(name);
+        let text = self.name_text(name)?;
+        self.emit.print_str(&text);
         self.emit.spaces(FUNCTION_CALL.spacing, FUNCTION_CALL.bump);
         self.emit.open_paren("(");
         self.emit.spaces(0, FUNCTION_CALL.bump);
@@ -403,7 +404,7 @@ impl PrintC<'_> {
         let name = s.name.clone();
         self.emit.open_group(); // beginVarDecl
         self.push_type_start(ty, false)?;
-        self.push_atom(Atom::Text(name))?; // pushSymbol
+        self.push_atom(Atom::Name(name))?; // pushSymbol
         self.push_type_end(ty)?;
         self.recurse()?;
         self.emit.close_group();
@@ -441,7 +442,7 @@ impl PrintC<'_> {
             None => generic_type_name(self.fd.types.meta(base), self.fd.types.size(base)),
         };
         self.push_op(tok)?;
-        self.push_atom(Atom::Text(name))?;
+        self.push_atom(Atom::Name(name))?;
         for &t in stack[..stack.len() - 1].iter().rev() {
             match self.fd.types.get(t).kind {
                 TKind::Pointer { .. } => self.push_op(&PTR_EXPR)?,
@@ -889,7 +890,8 @@ impl PrintC<'_> {
             let first_op = block.ops.first().map(|&op| self.fd.op(op).seq.addr);
             let label = block.entry_addr(first_op).map(|a| facts.label(a, self.fd.entry)).transpose()?;
             if let Some(label) = label.flatten() {
-                self.emit.print_str(label);
+                let text = self.name_text(label)?;
+                self.emit.print_str(&text);
                 return Ok(());
             }
         }
@@ -908,6 +910,7 @@ impl PrintC<'_> {
         let sp =
             self.arch.sleigh.spaces.get(code as usize).ok_or_else(|| LowlevelError("print C: bad space".into()))?;
         let text = format!("{prefix}{}{}", super::print::shortcut(&sp.name), self.raw_addr(code, start)?);
+        let text = self.name_text(&text)?;
         self.emit.print_str(&text);
         Ok(())
     }
@@ -1169,7 +1172,7 @@ impl PrintC<'_> {
             }
         };
         self.check_scope_depth(&name)?;
-        self.push_atom(Atom::Text(name))?;
+        self.push_atom(Atom::Name(name))?;
         if ins.len() > 1 {
             for _ in 0..ins.len() - 2 {
                 self.push_op(&COMMA)?;
@@ -1388,7 +1391,7 @@ impl PrintC<'_> {
                 if foff == byte_off && sz <= self.fd.types.size(fty) {
                     self.push_op(&OBJECT_MEMBER)?;
                     self.push_vn(input, op, self.mods);
-                    return self.push_atom(Atom::Text(name));
+                    return self.push_atom(Atom::Name(name));
                 }
             }
         }
@@ -1471,7 +1474,7 @@ impl PrintC<'_> {
                     }
                     let name = if e.externref { self.externref_name(off)? } else { self.function_name(off)? };
                     self.check_scope_depth(&name)?;
-                    return self.push_atom(Atom::Text(name));
+                    return self.push_atom(Atom::Name(name));
                 }
                 // `linkSymbol` asks for the symbol at the first byte only
                 if super::infertypes::query_global(self.arch, off, 1).is_some() {
@@ -1508,7 +1511,7 @@ impl PrintC<'_> {
                     );
                 }
                 let name = format!("_{name}");
-                return self.push_atom(Atom::Text(name));
+                return self.push_atom(Atom::Name(name));
             }
             return self.push_unnamed_location(vn, size);
         }
@@ -1523,7 +1526,7 @@ impl PrintC<'_> {
         if global {
             self.check_scope_depth(&name)?;
         }
-        self.push_atom(Atom::Text(name))
+        self.push_atom(Atom::Name(name))
     }
 
     /// Port of `AddrSpace::printRaw` (wordsize 1, as every x86 space): `0x` and the offset in hex,
@@ -1567,7 +1570,7 @@ impl PrintC<'_> {
             Some((reg, base, regsize)) if base == off && regsize == size => format!("{name}_{reg}"),
             _ => format!("{name}{}", self.raw_addr(i, off)?),
         };
-        self.push_atom(Atom::Text(text))
+        self.push_atom(Atom::Name(text))
     }
 
     /// Port of `PrintC::pushConstant` with the constant's high type
@@ -1610,7 +1613,7 @@ impl PrintC<'_> {
                         // pushPtrCodeConstant: the function at the address (`queryFunction`; the
                         // code space has word size 1)
                         let name = self.function_name(val)?;
-                        return self.push_atom(Atom::Text(name));
+                        return self.push_atom(Atom::Name(name));
                     }
                 }
             }
@@ -1773,7 +1776,7 @@ impl PrintC<'_> {
                     self.push_op(&POINTER_MEMBER)?;
                     self.push_vn(in0, op, m);
                 }
-                self.push_atom(Atom::Text(fieldname))?;
+                self.push_atom(Atom::Name(fieldname))?;
                 if arrayvalue {
                     self.push_integer(0, 4, false, None)?;
                 }
@@ -1810,7 +1813,7 @@ impl PrintC<'_> {
                     }
                     Some(SbRef::Func(name)) => {
                         self.check_scope_depth(&name)?;
-                        self.push_atom(Atom::Text(name))?;
+                        self.push_atom(Atom::Name(name))?;
                     }
                     Some(SbRef::Sym(sym, 0)) => self.push_symbol(sym)?,
                     Some(SbRef::Sym(sym, off)) => self.push_partial_symbol(sym, off, 0, None)?,
@@ -1997,10 +2000,10 @@ impl PrintC<'_> {
         self.push_symbol(sym)?;
         for p in stack {
             match p {
-                Part::Field(_, name) => self.push_atom(Atom::Text(name))?,
+                Part::Field(_, name) => self.push_atom(Atom::Name(name))?,
                 Part::Index(el) => self.push_integer(el as u64, 0, el < 0, None)?,
                 Part::Unnamed(o, s) if s <= 0 => self.push_integer(o as u64, s as u32, o < 0, None)?,
-                Part::Unnamed(o, s) => self.push_atom(Atom::Text(format!("_{o}_{s}_")))?,
+                Part::Unnamed(o, s) => self.push_atom(Atom::Name(format!("_{o}_{s}_")))?,
             }
         }
         Ok(())
@@ -2120,11 +2123,12 @@ fn java_reads_the_same(arch: &Arch, addr: u64, charsize: u32, data: Option<&(Vec
 }
 
 /// Port of `StringManager::isString`: whether a string of characters of `charsize` bytes
-/// (not an empty one) is at `addr`.
+/// is at `addr`. An empty one counts: `getStringData` keeps the terminator, so its buffer is not
+/// empty. Superseded: "(not an empty one)".
 pub(crate) fn is_string(arch: &Arch, addr: u64, charsize: u32) -> Result<bool> {
     let data = string_data(arch, addr, charsize as usize);
     java_reads_the_same(arch, addr, charsize, data.as_ref())?;
-    Ok(data.is_some_and(|(chars, _)| !chars.is_empty()))
+    Ok(data.is_some())
 }
 
 /// Port of `StringManagerUnicode::getStringData` (with `checkCharacters` and

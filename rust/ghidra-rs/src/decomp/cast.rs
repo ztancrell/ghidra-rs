@@ -1036,7 +1036,7 @@ mod tests {
             t.base(1, Meta::Bool),
             t.base(1, Meta::Int),
         );
-        let void = t.base(1, Meta::Void);
+        let void = t.base(0, Meta::Void);
         // equal types, unknown targets and sign changes without care need no cast
         assert_eq!(cast_standard(&t, i4, i4, true, true), None);
         assert_eq!(cast_standard(&t, x4, i4, true, true), None);

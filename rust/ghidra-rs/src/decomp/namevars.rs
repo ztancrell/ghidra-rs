@@ -81,9 +81,9 @@ pub(crate) fn name_vars(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
 /// of stage S10 make (`Funcdata::name_recs`: stack variables, without a use point): the
 /// address-tied symbol starting at the recommended storage, when its name is undefined, takes
 /// the name and is name-locked. (`remapVarnode` of the linked varnode changes nothing for a
-/// symbol mapped at that address without a use point.)
+/// symbol mapped at that address without a use point.) The recommendations stay for a restart.
 fn recover_name_recommendations(fd: &mut Funcdata) -> Result<()> {
-    for rec in std::mem::take(&mut fd.name_recs) {
+    for rec in fd.name_recs.clone() {
         let super::fspec::Storage::Stack { offset, size } = rec.storage else {
             return err("namevars: a name recommended for a variable outside the stack is not ported");
         };
@@ -95,7 +95,7 @@ fn recover_name_recommendations(fd: &mut Funcdata) -> Result<()> {
         }
         let name = fd.symtab.make_name_unique(LOCAL, &rec.name)?;
         fd.symtab.rename_symbol(sym, &name);
-        fd.symtab.lock_symbol(sym, false, true);
+        fd.symtab.lock_symbol(&fd.types, sym, false, true);
     }
     Ok(())
 }
@@ -662,7 +662,7 @@ mod tests {
         assert_eq!((s(a).name.as_str(), s(a).flags.name_locked), ("local_bc", true));
         assert!(s(b).is_name_undefined() && !s(b).flags.name_locked);
         assert_eq!(s(c).name, "named");
-        assert!(fd.name_recs.is_empty());
+        assert_eq!(fd.name_recs.len(), 4, "the recommendations stay for a restart");
         // a recommendation outside the stack is not ported
         fd.name_recs = vec![NameRec { storage: Storage::Space { space: 2, offset: 0, size: 4 }, name: "x".into() }];
         assert!(recover_name_recommendations(&mut fd).is_err());

@@ -774,10 +774,10 @@ fn check_input_trial_use(
 /// the caller's stack) leaves the local scope. The used trials are renumbered.
 fn build_input_from_trials(fd: &mut Funcdata, arch: &Arch, c: CallId, active: &mut ParamActive) -> Result<()> {
     let op = fd.call(c).op;
-    if fd.call(c).proto.locked.as_ref().is_some_and(|l| l.dotdotdot) {
-        return err(
-            "buildInputFromTrials of a locked varargs call (sortFixedPosition): not implemented in ghidra-rs yet",
-        );
+    // varargs: the fixed arguments move to the front, keeping the variable ones in order (a call
+    // without a model has no trials by now: deriveInputMap refuses them)
+    if let Some(m) = fd.call(c).proto.model.filter(|_| fd.call(c).proto.locked.as_ref().is_some_and(|l| l.dotdotdot)) {
+        active.sort_fixed_position(&arch.spec.models.get(m).input);
     }
     let mut newparam = vec![fd.input(op, 0)?];
     let addr = fd.op(op).seq.addr;
@@ -1824,9 +1824,10 @@ fn analyze_extra_pop(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
 
 /// Port of `ActionDeindirect::apply`: an indirect call whose target is a known function (an
 /// external-reference slot, or a constant through COPYs) becomes a direct call to it
-/// (`FuncCallSpecs::deindirect`). With unlocked prototypes `lateRestriction` always succeeds and
-/// only copies the callee's prototype, so no restart is needed. (Type recovery is off, so the
-/// typed path does not apply.)
+/// (`FuncCallSpecs::deindirect`), recorded as an override, and takes the callee's prototype
+/// (`lateRestriction`, lateres.rs); a callee that does not return, or a prototype the call cannot
+/// take (not compatible: `FuncProto::isCompatible`), asks for a restart.
+/// (Type recovery is off, so the typed path does not apply.)
 pub(crate) fn deindirect(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     let mut count = 0;
     for i in 0..fd.qlst.len() {
@@ -1860,26 +1861,18 @@ pub(crate) fn deindirect(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         let call = fd.call_mut(c);
         call.entry = Some(entry);
         call.known = true;
-        if callee.locked.is_some() {
-            // FuncCallSpecs::deindirect with lateRestriction (stage S6, lateres.rs)
-            let fspec = fd.new_varnode_callspecs(c);
-            fd.op_set_input(op, fspec, 0)?;
-            fd.op_set_opcode(op, Opcode::Call);
-            if !super::lateres::late_restriction(fd, arch, c, &callee)? {
-                return err("deindirect: restarting for a locked prototype the call cannot take is not implemented in ghidra-rs yet");
-            }
-            count += 1;
-            continue;
-        }
-        // lateRestriction: the call has a model, and neither prototype is locked
-        call.proto.copy(&callee);
-        if call.proto.model.is_none() {
-            let models = &arch.spec.models;
-            call.proto.set_model(models, models.default);
-        }
+        let addr = fd.op(op).seq.addr;
+        fd.deindirect.insert(addr, entry);
+        // FuncCallSpecs::deindirect: a callee that does not return, or a prototype the call
+        // cannot take (lateRestriction), decompiles again with the call direct. No prototype
+        // is inline (facts.rs refuses the flag) and no call site has a prototype override
+        // (isOverride; facts.rs refuses them).
         let fspec = fd.new_varnode_callspecs(c);
         fd.op_set_input(op, fspec, 0)?;
         fd.op_set_opcode(op, Opcode::Call);
+        if callee.no_return || !super::lateres::late_restriction(fd, arch, c, &callee)? {
+            fd.restart_pending = true;
+        }
         count += 1;
     }
     Ok(count)
@@ -2788,10 +2781,16 @@ pub(crate) fn map_globals(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     use super::scope::{NameFlags, NameRequest, SymbolEntry, UseLimit, GLOBAL};
     let ptr = u64::from(arch.spec.stack_pointer.2);
     // `Varnode::getSymbolEntry`: only a type-locked symbol holding the whole varnode links it
-    // when it is made (`setSymbolProperties` queries with the varnode's size): a function (one
-    // byte) or an external reference. Superseded: the query with one byte, which took a
+    // when it is made (`setSymbolProperties` queries with the varnode's size): a function (its
+    // `consume` bytes) or an external reference. Superseded: the query with one byte, which took a
     // function at an import's slot over the external reference holding the 4-byte varnode.
-    let span = |e: &super::infertypes::Entry| if e.externref { ptr } else { 1 };
+    let span = |e: &super::infertypes::Entry| {
+        if e.externref {
+            ptr
+        } else {
+            arch.functions.get(&e.addr).map_or(1, |f| u64::from(f.consume))
+        }
+    };
     // With facts (stage S10) a data symbol holding the whole varnode links it too.
     let linked = |fd: &Funcdata, vn: VarnodeId| {
         let v = fd.vn(vn);
@@ -3080,8 +3079,16 @@ mod tests {
     /// directly written one succeeds.
     #[test]
     fn ancestor_realistic_rejects_a_saved_register() {
-        let mut trial =
-            ParamTrial { space: Space::Sleigh(3), off: 0, size: 4, slot: 1, flags: 0, entry: None, offset: -1 };
+        let mut trial = ParamTrial {
+            space: Space::Sleigh(3),
+            off: 0,
+            size: 4,
+            slot: 1,
+            flags: 0,
+            entry: None,
+            offset: -1,
+            fixed_position: -1,
+        };
         let (fd, call) = call_of_copied_input(false);
         assert!(!ancestor_realistic(&fd, call, 1, &mut trial, true));
         let (fd, call) = call_of_copied_input(true);

@@ -1002,10 +1002,12 @@ impl Entry {
 }
 
 /// Port of `Scope::queryContainer(addr, size)` on the global scope: the symbol holding the whole
-/// range. A function covers its entry byte, an external reference its pointer-sized slot.
+/// range. A function covers its symbol's bytes from the entry (`consume`), an external reference
+/// its pointer-sized slot.
 pub(crate) fn query_global(arch: &Arch, addr: u64, size: u32) -> Option<Entry> {
-    if size == 1 && arch.functions.contains_key(&addr) {
-        return Some(Entry { addr, externref: false });
+    let holds = |f: &u64| arch.functions.get(f).is_some_and(|x| addr - f + u64::from(size) <= u64::from(x.consume));
+    if let Some(f) = (0..8).filter_map(|d| addr.checked_sub(d)).find(holds) {
+        return Some(Entry { addr: f, externref: false });
     }
     let slot = u64::from(arch.externref_size());
     let fits = |s: &u64| addr - s + u64::from(size) <= slot && arch.externrefs.contains_key(s);

@@ -29,6 +29,10 @@ pub(crate) struct Locked {
     pub(crate) inputs: Vec<Param>,
     pub(crate) output: Param,
     pub(crate) dotdotdot: bool,
+    /// `ParameterBasic::isSizeTypeLocked` of the output: locked with an unknown data-type
+    /// (`setTypeLock`), so `ActionOutputPrototype` may retype it (`overrideSizeLockType`) and a
+    /// restart resets it (`resetSizeLockType`)
+    pub(crate) output_size_locked: bool,
 }
 
 fn type_class(types: &TypeFactory, ty: TypeId) -> TypeClass {
@@ -129,6 +133,7 @@ pub(crate) fn lock_prototype(
     proto.model_locked = true;
     proto.locked = Some(Box::new(Locked {
         inputs: params,
+        output_size_locked: types.meta(output.1) == Meta::Unknown,
         output: Param { name: output.0, storage: out_storage, ty: output.1 },
         dotdotdot,
     }));
@@ -257,24 +262,28 @@ pub(crate) fn param_symbol(fd: &Funcdata, vn: VarnodeId) -> Option<usize> {
 /// for an unlocked one (the caller runs the unlocked path).
 pub(crate) fn func_link(fd: &mut Funcdata, arch: &Arch, c: CallId) -> Result<bool> {
     let Some(locked) = fd.call(c).proto.locked.clone() else { return Ok(false) };
-    if locked.dotdotdot {
-        return err("a call to a locked varargs prototype: not implemented in ghidra-rs yet");
-    }
+    let varargs = locked.dotdotdot;
     let op = fd.call(c).op;
     let model = fd.call(c).proto.model;
     let mut spacebase = model.is_some_and(|m| arch.spec.models.get(m).input.has_stack());
-    let mut setplaceholder = false;
+    // a varargs call marks no stack parameter as the placeholder: it gets its own
+    let mut setplaceholder = varargs;
     let spec = &arch.spec;
     let uniq = arch.sleigh.uniq_space();
-    // the trials activeinput holds for a locked call, never active (isinputactive stays off):
-    // one per parameter with storage, marked active (checkCallDoubleUse reads them)
-    let mut trials = ParamActive::subcall(0);
-    for p in &locked.inputs {
+    // the trials activeinput holds for a locked call: one per parameter with storage, marked
+    // active (checkCallDoubleUse reads them); the recovery is on (initActiveInput) only for
+    // varargs, whose fixed arguments keep their position
+    let delay = model.map_or(0, |m| arch.spec.models.get(m).input.max_delay());
+    let mut trials = ParamActive::subcall(if varargs { delay } else { 0 });
+    for (i, p) in locked.inputs.iter().enumerate() {
         if let Some(st) = &p.storage {
             let (space, off, size) = location(fd, st)?;
             trials.register_trial(space, off, size);
             if let Some(t) = trials.trials.last_mut() {
                 t.mark_active();
+                if varargs {
+                    t.fixed_position = i as i32;
+                }
             }
         }
         let slot = fd.op(op).ins.len();
@@ -304,7 +313,11 @@ pub(crate) fn func_link(fd: &mut Funcdata, arch: &Arch, c: CallId) -> Result<boo
         };
         fd.op_insert_input(op, vn, slot)?;
     }
-    fd.call_mut(c).kept_input = Some(trials);
+    if varargs {
+        fd.call_mut(c).active_input = Some(trials);
+    } else {
+        fd.call_mut(c).kept_input = Some(trials);
+    }
     if spacebase {
         super::action::create_placeholder(fd, arch, c)?;
     }

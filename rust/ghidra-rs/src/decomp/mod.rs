@@ -135,6 +135,9 @@ fn loaded_len(s: &crate::analysis::Section) -> usize {
 pub(crate) struct Function {
     pub(crate) name: String,
     pub(crate) proto: FuncProto,
+    /// `FunctionSymbol::consumeSize`: the bytes its symbol covers from the entry (1, or with the
+    /// facts the function's size when it is 2 to 8)
+    pub(crate) consume: u32,
 }
 
 /// The program-wide state a decompilation reads (the parts of C++ `Architecture` used so far):
@@ -335,7 +338,7 @@ impl Arch {
     }
 
     pub(crate) fn add_function(&mut self, entry: u64, name: String) {
-        self.functions.insert(entry, Function { name, proto: FuncProto::default() });
+        self.functions.insert(entry, Function { name, proto: FuncProto::default(), consume: 1 });
     }
 
     /// `map externalref <slot> ...`

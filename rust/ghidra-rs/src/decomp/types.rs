@@ -139,7 +139,7 @@ impl TypeFactory {
             typedefs: HashMap::new(),
         };
         let core: &[(&'static str, u32, Meta, u8)] = &[
-            ("void", 1, Meta::Void, sub::VOID),
+            ("void", 0, Meta::Void, sub::VOID),
             ("bool", 1, Meta::Bool, sub::BOOL),
             ("uint1", 1, Meta::Uint, sub::UINT_PLAIN),
             ("uint2", 2, Meta::Uint, sub::UINT_PLAIN),
@@ -560,8 +560,8 @@ impl TypeFactory {
                 (Meta::Int, _, true) => sub::INT_UNICODE,
                 _ => base2sub(c.meta),
             };
-            // TypeVoid has no size of its own; the console's table gives it 1
-            let size = if c.meta == Meta::Void { 1 } else { c.size };
+            // setCoreType makes `void` the TypeVoid (size 0), whatever size the record gives
+            let size = if c.meta == Meta::Void { 0 } else { c.size };
             let id =
                 self.intern(Datatype { meta: c.meta, submeta, size, name: Some(c.name.to_string()), kind: Kind::Base });
             ids.insert(c.id, id);
@@ -679,7 +679,7 @@ mod tests {
         let u3 = f.base(3, Meta::Unknown);
         let arr = f.array_of(u3, 2).unwrap();
         assert_eq!(f.size(arr), 8);
-        let void = f.base(1, Meta::Void);
+        let void = f.base(0, Meta::Void);
         assert!(f.aggregate("v", false, vec![("v".into(), void)]).is_err());
         assert!(f.array_of(i4, u32::MAX).is_err());
     }

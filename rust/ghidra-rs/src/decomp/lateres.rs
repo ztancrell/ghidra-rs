@@ -57,22 +57,80 @@ fn transfer_input_param(fd: &mut Funcdata, c: CallId, space: Space, off: u64, si
     }
 }
 
-/// Port of `FuncCallSpecs::lateRestriction` + `commitNewInputs` + `commitNewOutputs`. Returns
-/// false when the call cannot take the prototype (the C++ then restarts the function).
+/// `FuncProto::copy` onto the call. A prototype without a model stands for one with the default
+/// model (the C++ model pointer is never null).
+fn copy_proto(fd: &mut Funcdata, arch: &Arch, c: CallId, newproto: &FuncProto) {
+    let proto = &mut fd.call_mut(c).proto;
+    proto.copy(newproto);
+    if proto.model.is_none() {
+        let models = &arch.spec.models;
+        proto.set_model(models, models.default);
+    }
+}
+
+/// The address of a parameter's storage (`ProtoParameter::getAddress`; none for `void`).
+fn param_addr(st: &Option<Storage>) -> Result<Option<(Space, u64)>> {
+    match st {
+        None => Ok(None),
+        Some(s) => {
+            let (space, off, _) =
+                range(s).ok_or_else(|| LowlevelError("isCompatible: a join output is not ported".into()))?;
+            Ok(Some((space, off)))
+        }
+    }
+}
+
+/// Port of `FuncProto::isCompatible` (`cur` is the call's prototype, which has a model). No
+/// prototype has an effect list or likely-trash list of its own (facts.rs refuses them), and no
+/// prototype is inline (facts.rs refuses the flag), so those lists and `is_inline` compare equal.
+fn is_compatible(arch: &Arch, cur: &FuncProto, op2: &FuncProto) -> Result<bool> {
+    let models = &arch.spec.models;
+    let (Some(m1), m2) = (cur.model, op2.model.unwrap_or(models.default)) else {
+        return err("isCompatible: a call prototype without a model");
+    };
+    if !models.is_compatible(m1, m2) {
+        return Ok(false);
+    }
+    // both outputs locked (a prototype here locks its inputs and output together): operator==
+    // compares the storage address and the data-type
+    if let (Some(l1), Some(l2)) = (&cur.locked, &op2.locked) {
+        if param_addr(&l1.output.storage)? != param_addr(&l2.output.storage)? || l1.output.ty != l2.output.ty {
+            return Ok(false);
+        }
+    }
+    if cur.extrapop != ExtraPop::Unknown && cur.extrapop != op2.extrapop {
+        return Ok(false);
+    }
+    let dots = |p: &FuncProto| p.locked.as_ref().is_some_and(|l| l.dotdotdot);
+    if dots(cur) != dots(op2) && (!dots(op2) || cur.locked.is_some()) {
+        // a generic (unlocked) prototype still recovers varargs, so it may take a varargs one
+        return Ok(false);
+    }
+    Ok(cur.inject == op2.inject && cur.no_return == op2.no_return)
+}
+
+/// Port of `FuncCallSpecs::lateRestriction` + `commitNewInputs` + `commitNewOutputs` (which do
+/// their work only for a locked prototype). Returns false when the call cannot take the
+/// prototype (`FuncCallSpecs::deindirect` then restarts the function).
 pub(crate) fn late_restriction(fd: &mut Funcdata, arch: &Arch, c: CallId, newproto: &FuncProto) -> Result<bool> {
-    let Some(locked) = newproto.locked.clone() else { return Ok(false) };
     let cur = &fd.call(c).proto;
     if cur.model.is_none() {
-        fd.call_mut(c).proto.copy(newproto);
+        copy_proto(fd, arch, c, newproto);
         return Ok(true);
     }
-    // FuncProto::isCompatible (no prototype here has effects or likely-trash of its own)
-    if cur.model != newproto.model
-        || cur.inject != newproto.inject
-        || (cur.extrapop != ExtraPop::Unknown && cur.extrapop != newproto.extrapop)
-        || locked.dotdotdot
-    {
+    if !is_compatible(arch, cur, newproto)? {
         return Ok(false);
+    }
+    let Some(locked) = newproto.locked.clone() else {
+        copy_proto(fd, arch, c, newproto);
+        return Ok(true);
+    };
+    if locked.dotdotdot {
+        if fd.call(c).active_input.is_none() {
+            return Ok(false); // !isinputactive
+        }
+        // the unlocked trials after the locked parameters (collectUnlockedTrials, reregisterTrial)
+        return err("lateRestriction of a varargs prototype onto a call recovering its inputs (collectUnlockedTrials): not implemented in ghidra-rs yet");
     }
     let op = fd.call(c).op;
     let ins = fd.op(op).ins.clone();
@@ -119,7 +177,7 @@ pub(crate) fn late_restriction(fd: &mut Funcdata, arch: &Arch, c: CallId, newpro
             prev = fd.previous_op(ind);
         }
     }
-    fd.call_mut(c).proto.copy(newproto);
+    copy_proto(fd, arch, c, newproto);
     commit_new_inputs(fd, arch, c, &locked, newinput, stackref)?;
     commit_new_outputs(fd, c, &locked, newoutput)?;
     Ok(true)
