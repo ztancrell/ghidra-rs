@@ -76,13 +76,15 @@ fn template_arg(s: &str) -> Option<(String, &str)> {
 
 /// The name the Demangler analyzer leaves on a function's symbol (`mdmang::microsoft_demangle`
 /// at a function of a 32-bit program; `DemangledObject.applyTo`: its namespaces' and its safe
-/// names, as `getName(true)` shows them), else the symbol's own name.
-pub fn demangle(sym: &str) -> String {
+/// names, as `getName(true)` shows them), else the symbol's own name (where Java returns `null`
+/// or fails). An error where the conversion is not ported.
+pub fn demangle(sym: &str) -> std::io::Result<String> {
     let ctx = crate::mdmang::Context { arch: 32, is_function: true };
-    match crate::mdmang::microsoft_demangle(sym, ctx) {
+    Ok(match crate::mdmang::microsoft_demangle(sym, ctx) {
         Ok(Some(d)) => d.qualified_name().unwrap_or_else(|| sym.to_string()),
+        Err(e) if e.is_not_ported() => return Err(std::io::Error::other(format!("{sym}: {e}"))),
         _ => sym.to_string(),
-    }
+    })
 }
 
 /// RTTI: vftable address -> owning class, from MSVC CompleteObjectLocators.
@@ -186,9 +188,9 @@ pub fn export_functions(
         // Ghidra's references to code constants (`PUSH offset callback`) are data references too
         let data_refs: usize = body.iter().map(|a| an.insns[a].refs.len() + an.insns[a].code_imms.len()).sum();
         let name = match (exports.get(&f), fid.get(&f)) {
-            (Some(s), _) => demangle(s),
+            (Some(s), _) => demangle(s)?,
             (None, Some(a)) if a.conflict => a.name.clone(),
-            (None, Some(a)) => demangle(&a.name),
+            (None, Some(a)) => demangle(&a.name)?,
             _ => String::new(),
         };
         writeln!(

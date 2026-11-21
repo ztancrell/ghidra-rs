@@ -541,7 +541,8 @@ fn plate_comment(kind: &str, names: &[String], versions: &HashMap<&str, Versions
 /// Run Function ID over every function of `an` (FidAnalyzer with default options) and
 /// return the functions it marks, with the name it gives them. Exported functions keep their
 /// names (hasUserOrImportedSymbols) and are not marked.
-pub fn apply(img: &Image, an: &Analysis, sl: &Sleigh, dbs: &[FidDb]) -> BTreeMap<u32, Applied> {
+/// `Err` where the demangled base of a `FID_conflict:` name is not ported.
+pub fn apply(img: &Image, an: &Analysis, sl: &Sleigh, dbs: &[FidDb]) -> Result<BTreeMap<u32, Applied>, String> {
     let quads = hashes(img, an, sl);
     let mut owner = HashMap::new();
     for (&f, body) in &an.bodies {
@@ -642,13 +643,15 @@ pub fn apply(img: &Image, an: &Analysis, sl: &Sleigh, dbs: &[FidDb]) -> BTreeMap
             _ => {
                 // applyConflictLabels: the first label is the primary symbol
                 // NameVersions.demangle(...).getName(), else the label's own name
-                let d = fid_demangle(&unused[0]).ok().flatten().and_then(|d| d.name);
+                let d = fid_demangle(&unused[0])
+                    .map_err(|()| format!("not ported: the demangled FID_conflict base of {}", unused[0]))?
+                    .and_then(|d| d.name);
                 let base = d.unwrap_or_else(|| unused[0].clone());
                 out.insert(f, Applied { name: format!("FID_conflict:{base}"), conflict: true, comment })
             }
         };
     }
-    out
+    Ok(out)
 }
 
 /// The FID hash of every function (None for those under 4 code units).

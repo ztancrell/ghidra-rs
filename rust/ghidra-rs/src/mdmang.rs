@@ -629,9 +629,28 @@ struct Parser {
     arch: u32,
     is_function: bool,
     fault: RefCell<Option<String>>,
+    /// how many data types and C++ objects are being parsed inside each other ([`MAX_DEPTH`])
+    depth: usize,
 }
 
+/// How deep data types and C++ objects may nest. Java recurses until the JVM stack overflows
+/// (a `StackOverflowError`, which `AbstractDemanglerAnalyzer` catches as a failed demangle; the
+/// depth depends on the JVM stack size); this port fails the demangle at this depth instead of
+/// aborting the process, well inside a 2 MiB thread stack.
+const MAX_DEPTH: usize = 200;
+
 impl Parser {
+    /// `f` one nesting level deeper; past [`MAX_DEPTH`] a failed demangle.
+    fn nest<T>(&mut self, f: impl FnOnce(&mut Self) -> R<T>) -> R<T> {
+        if self.depth >= MAX_DEPTH {
+            return err(format!("MDMang: nested deeper than {MAX_DEPTH} (Java: StackOverflowError)"));
+        }
+        self.depth += 1;
+        let r = f(self);
+        self.depth -= 1;
+        r
+    }
+
     fn out(&self) -> Out<'_> {
         Out { opts: OutputOptions::default(), arch: self.arch, fault: &self.fault }
     }
@@ -943,7 +962,7 @@ impl Parser {
             return err("Invalid ObjectCPP");
         }
         self.inc();
-        self.object_cpp_body()
+        self.nest(Self::object_cpp_body)
     }
 
     fn object_cpp_body(&mut self) -> R<ObjectCpp> {
@@ -2036,6 +2055,10 @@ impl Parser {
 
     /// The data type's `parseInternal`.
     fn dt_body(&mut self, c: Ctor) -> R<Dt> {
+        self.nest(|p| p.dt_body_nested(c))
+    }
+
+    fn dt_body_nested(&mut self, c: Ctor) -> R<Dt> {
         let (kind, sign) = match c {
             Ctor::Done(k, s) => (k, s),
             Ctor::QualNamed => (DtKind::QualNamed(self.qualified_name()?), Sign::Signed),
@@ -3265,6 +3288,11 @@ impl Demangled {
         self.to_string_with(OutputOptions::default())
     }
 
+    /// The item is an `MDDataType`.
+    pub fn is_data_type(&self) -> bool {
+        matches!(self.item, Item::DataType(_))
+    }
+
     /// `MDObjectC.getCallingConvention` of a C symbol (`None` for any other item).
     pub fn c_calling_convention(&self) -> Option<&'static str> {
         match &self.item {
@@ -3291,6 +3319,10 @@ pub fn demangle(mangled: &str, cfg: Config) -> Result<Option<Demangled>, Error> 
             return Ok(None);
         }
     }
+    // Java iterates UTF-16 units (a character past U+FFFF is two), this port `char`s
+    if mangled.chars().any(|c| c > '\u{FFFF}') {
+        return err("not ported: a mangled name with a character past U+FFFF (Java reads UTF-16 units)");
+    }
     let mut p = Parser {
         s: mangled.chars().collect(),
         i: 0,
@@ -3299,6 +3331,7 @@ pub fn demangle(mangled: &str, cfg: Config) -> Result<Option<Demangled>, Error> 
         arch: cfg.arch,
         is_function: cfg.is_function,
         fault: RefCell::new(None),
+        depth: 0,
     };
     let item = p.determine_item();
     if let Some(f) = p.fault.borrow().as_ref() {
@@ -3591,5 +3624,24 @@ mod tests {
         assert_eq!(md("??_7name0@name1@@6B@"), "const name1::name0::`vftable'");
         assert_eq!(md("?var@@YMXXZ"), "void __clrcall var(void)");
         assert_eq!(hex_to_dec(&[0xf; 20]), "1208925819614629174706175");
+    }
+
+    /// Java overflows its stack on this (a caught `StackOverflowError`); the port fails the demangle.
+    #[test]
+    fn deep_nesting_fails() {
+        let deep = format!("?x@@3PAP{}HA", "AP".repeat(20000));
+        let ctx = Context { arch: 32, is_function: false };
+        let e = microsoft_demangle(&deep, ctx).err();
+        assert!(e.is_some_and(|e| !e.is_not_ported() && e.0.contains("nested deeper")));
+        // just inside the limit (the object, the pointers, char): parsed and printed without overflowing a test thread's stack
+        let ok = md(&format!("?x@@3{}DA", "PA".repeat(MAX_DEPTH - 2)));
+        assert_eq!(ok, format!("char {}x", "* ".repeat(MAX_DEPTH - 2)));
+        assert_eq!(md(&format!("?x@@3{}DA", "PA".repeat(MAX_DEPTH - 1))), "");
+    }
+
+    #[test]
+    fn non_bmp_not_ported() {
+        let e = demangle("?x\u{1F600}@@3HA", Config::default()).err();
+        assert!(e.is_some_and(|e| e.is_not_ported()));
     }
 }

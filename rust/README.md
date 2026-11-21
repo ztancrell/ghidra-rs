@@ -5505,18 +5505,24 @@ string, `DemangledObject`'s name, demangled name, namespace nodes and calling co
 encoded anonymous namespace and no UDT tag for the conversion). Back references share one data
 type (`Rc`) and `MDFunctionType.setFromModifier`, which printing calls, sticks (`Cell`), as in
 Java. A Java runtime exception (a `null` type name, an empty context stack, a negative string
-length) fails the demangle. The VS2013/VS2015, parse-info and genericize variants of `MDMang`
-are not ported.
+length) fails the demangle. Data types and C++ objects nested deeper than 200 (`MAX_DEPTH`) fail
+the demangle, where Java recurses until its `StackOverflowError` (a depth set by the JVM stack;
+`AbstractDemanglerAnalyzer` catches it as a failed demangle). The VS2013/VS2015, parse-info
+and genericize variants of `MDMang` are not ported.
 
 **The oracle.** `tools/mdmang-vectors.sh` (awk) extracts the 1,696 calls of `demangleAndTest*`
 of `MDMangBaseTest.java` (mangled input, `mdTruth`, architecture, JUnit status) into
 `ghidra-rs/tests/data/mdmang-vectors.tsv`; `tests/mdmang.rs` runs them as
-`MDBaseTestConfiguration` does. Of the 1,664 tests JUnit runs: 1,664 pass. The 23 in
+`MDBaseTestConfiguration` does (the output against `mdTruth`, and a `.?A` name must give an
+`MDDataType`). Of the 1,665 tests JUnit runs: 1,665 pass. The 23 in
 `MDMangFailingTestCategory` (Ghidra fails them too) fail here; whether this port's output for
-them equals Java's actual output is not checked (Java was not run on them). Of the 9 methods
-JUnit does not run (`@Ignore`, no `@Test`) 7 pass, 2 fail (`testCatch_2`: `__catch$_main$0`
-does not parse; `testLLVMWeakPrefixDefaultXmmSuffix`: characters remain), as Ghidra's would by
-the same code paths (not run in Java either).
+them equals Java's actual output is not checked (Java was not run on them). Of the 8 methods
+JUnit does not run (`@Ignore`, no `@Test`) 5 pass, 3 fail (`testCatch_2`: `__catch$_main$0`
+does not parse; `testLLVMWeakPrefixDefaultXmmSuffix` and `testMangledTypeWithNamespaceSuffix`:
+characters remain, so no `MDDataType` for the latter), as Ghidra's would by the same code paths
+(not run in Java either). Superseded: "1,664 tests JUnit runs" and "9 methods JUnit does not
+run"; the extraction carried the "not run" status of `setUp()` (no `@Test`) into the next
+method, `testTripleQ0`, which JUnit runs.
 
 **Wired.**
 - Function ID (`fid.rs`): `NameVersions.generate` (the full demangled form, the name without
@@ -5560,7 +5566,12 @@ so a C++ name keeps `underived function` and `ns` stays 0 of 797), `processDataT
 variable of a pointer to `std::nullptr_t` fails as "not ported"), the import names
 (`Func::named` keeps its rules for them), the RTTI class names (`scripts::vftables` keeps its
 own reader), `ensureNameLength`, and Java's `Character.isLetter`/`isDigit` outside ASCII
-(Rust's `is_alphabetic`/`is_numeric` are used).
+(Rust's `is_alphabetic`/`is_numeric` are used). A mangled name with a character past U+FFFF
+fails as "not ported" (Java reads UTF-16 units, a surrogate pair is two; this port reads `char`s).
+A "not ported" failure is loud everywhere: Function ID's and the plate comment's `underived
+comments`, an error that stops `--functions` (`scripts::demangle`) and Function ID
+(`fid::apply`, the `FID_conflict:` base name); a genuine failure (Java's `null` or
+`MDException`) keeps the raw name, as Ghidra does.
 
 ## Speed
 

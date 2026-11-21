@@ -495,7 +495,7 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `r5dtlocksv` M500) is run with `TIMEOUT` 400. Superseded: "Not run: the full pass, the Mac" for
    this branch (`rust/README.md`).
    The Microsoft demangler on branch `demangler` (2026-11-20, user's decision): `mdmang.rs` ports
-   `MDMang` and the name parts of `MicrosoftDemangler`; MDMangBaseTest's vectors 1,664 / 1,664 of
+   `MDMang` and the name parts of `MicrosoftDemangler`; MDMangBaseTest's vectors 1,665 / 1,665 (Superseded: 1,664, the extraction mislabelled `testTripleQ0`) of
    the tests JUnit runs. Wired into Function ID (`NameVersions`, the demangled sets of
    `MatchNameAnalysis`), the Demangler analyzer's plate comment and the `--functions` names:
    own facts `comments` 1,151 -> 1,532 of 1,613 equal, `underived` 9,053 -> 8,609. Applying the

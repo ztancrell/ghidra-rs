@@ -1,4 +1,4 @@
-testTripleQ0	64	2	???__E??_7name0@name1@@6B@@@YMXXZ@?A0x647dec29@@$$FYMXXZ	void __clrcall `anonymous namespace'::void __clrcall `dynamic initializer for 'const name1::name0::`vftable'''(void)(void)
+testTripleQ0	64	0	???__E??_7name0@name1@@6B@@@YMXXZ@?A0x647dec29@@$$FYMXXZ	void __clrcall `anonymous namespace'::void __clrcall `dynamic initializer for 'const name1::name0::`vftable'''(void)(void)
 testTripleQ0_mod1	64	0	???__E??_7name0@name1@@6Bx@xx@@y@yy@@@z@zz@@YMXXZ@?A0x647dec29@@$$FYMXXZ	void __clrcall `anonymous namespace'::void __clrcall zz::z::`dynamic initializer for 'const name1::name0::`vftable'{for `xx::x's `yy::y'}''(void)(void)
 testTripleQ0_mod2	64	0	???__E??_7name0@name1@@6B@z@@YMXXZ@?A0x647dec29@@$$FYMXXZ	void __clrcall `anonymous namespace'::void __clrcall z::`dynamic initializer for 'const name1::name0::`vftable'''(void)(void)
 testTripleQ0_breakdown1	64	0	?var@?A0x647dec29@@$$FYMXXZ	void __clrcall `anonymous namespace'::var(void)

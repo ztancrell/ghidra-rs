@@ -1,6 +1,7 @@
 //! The test vectors of Ghidra's MDMangBaseTest (`tests/data/mdmang-vectors.tsv`, extracted by
 //! `tools/mdmang-vectors.sh`), run as `MDBaseTestConfiguration` runs them: `MDMang` with
-//! `setErrorOnRemainingChars(true)`, compared with `mdTruth`. Every failure is listed; the test
+//! `setErrorOnRemainingChars(true)`, compared with `mdTruth` (and a `.?A` name must give an
+//! `MDDataType`). Every failure is listed; the test
 //! fails when a vector outside `MDMangFailingTestCategory` (which Ghidra fails too) fails, or
 //! when a vector in it passes or fails differently than the known list says.
 use ghidra_rs::mdmang::{demangle, Config};
@@ -50,12 +51,16 @@ fn mdmang_base_test_vectors() {
             _ => (64, false),
         };
         let cfg = Config { arch, is_function, error_on_remaining: true, only_known_patterns: false };
-        let got = demangle(&mangled, cfg).map(|d| d.map(|d| d.original()));
+        let d = demangle(&mangled, cfg);
+        let is_data_type = matches!(&d, Ok(Some(d)) if d.is_data_type());
+        let got = d.map(|d| d.map(|d| d.original()));
         let out = match &got {
             Ok(Some(Ok(s))) => s.clone(),
             _ => String::new(),
         };
         let ok = if truth == mangled && is_mangled(&mangled) { out.is_empty() } else { out == truth };
+        // MDBaseTestConfiguration: a `.?A` name demangles to an `MDDataType`
+        let ok = ok && (!mangled.starts_with(".?A") || is_data_type);
         let report = || format!("{name}\n  mangled {mangled}\n  want    {truth}\n  got     {out}\n  ({got:?})");
         match (ok, failing) {
             (true, "0") => pass += 1,

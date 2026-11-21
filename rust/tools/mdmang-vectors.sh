@@ -51,14 +51,14 @@ function assign(stmt,   var, rhs) {
 	else { sub(/[ \t]+$/, "", rhs); v[var] = (rhs in v) ? v[rhs] : "NULL" }
 }
 /^[ \t]*\/\// { next }
-/@Category\(MDMangFailingTestCategory/ { failing = 1 }
+/@Category\(MDMangFailingTestCategory/ { category = 1 }
 /^[ \t]*@Test/ { istest = 1 }
 /^[ \t]*@Ignore/ { ignored = 1 }
 /public void [A-Za-z0-9_]+\(\)/ {
 	name = $0; sub(/.*public void /, "", name); sub(/\(.*/, "", name)
 	split("", v); stmt = ""
-	if (!istest || ignored) failing = 2
-	istest = 0; ignored = 0
+	failing = (!istest || ignored) ? 2 : category
+	istest = 0; ignored = 0; category = 0
 }
 stmt != "" { stmt = stmt " " $0; sub(/^[ \t]+/, "", stmt) }
 stmt == "" && /^[ \t]*(mangled|msTruth|mdTruth|ghTruth|dbTruth|ms2013Truth)[ \t]*=/ { stmt = $0 }
@@ -73,6 +73,5 @@ stmt != "" {
 	m = ("mangled" in v) ? v["mangled"] : "NULL"
 	t = ("mdTruth" in v) ? v["mdTruth"] : "NULL"
 	printf "%s\t%s\t%d\t%s\t%s\n", name, mode, failing, m, t
-	failing = 0
 }
 ' "$src"
