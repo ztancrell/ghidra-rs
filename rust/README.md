@@ -5917,7 +5917,7 @@ The archive: `gdt-protos` of `windows_vs12_32.gdt` is byte-identical to
 M8 bars (`CORPORA=m8 bars.sh`, `JOBS` 10, a new prelude from the `int8` analysis: cksum
 3963700924, 29,768 functions): all 57 lines equal those of
 `baselines/analysis-queue-83ee6a86e6.summary` (the newest) and of `m3-int7-249c32cf94.summary`.
-Not run: M500 bars, the full 133-pair pass, the Mac.
+Not run: M500 bars, the full 133-pair pass, the Mac. Superseded: see "Full pass of `int8`" below.
 
 ### Review fixes on `int8` (2026-11-20)
 
@@ -5971,6 +5971,36 @@ f64489e2e1); each finding checked against the Java first. The rows rerun with
   `___report_gsfailure` (0x9ef1dc) non-returning from the archive's `__report_gsfailure`
   prototype (ApplyFunctionDataTypesCmd.lookupSymbol also tries `_` + the name), and here a
   prototype of the archive goes only to an import (`factsout.rs`); not fixed.
+
+#### Full pass of `int8` (2026-11-21)
+
+The pass ran on c730b2db7d with `TIMEOUT` 120. The summary is
+`rust/target/baselines/int8-c730b2db7d.summary` (133 lines), compared with
+`analysis-queue-83ee6a86e6.summary`. The inputs on both machines were the 12.3 `x86.sla`
+(cksum 114282992, 439,217 bytes, the `java123` build's; the Mac's earlier 444,359-byte file was
+replaced) and the `int8` prelude (cksum 3963700924, 851,045 bytes, 29,768 functions).
+
+- The queue started on both machines: the desktop at `JOBS` 6 under `taskset -c 0-7`, the Mac at 16. It was
+  stopped after 8 M500 pairs (5 desktop, 3 Mac) because the desktop ran low on memory.
+- The other 125 pairs ran on the Mac only, as two direct `bars.sh` runs (`JOBS` 16, about 9 h).
+- Match check: `s4-m500` was rerun on the Mac. Its reference-finished, identical, loud, silent and
+  timeout counts and its `.miss` (0x4c48d0 a reference timeout) equal the desktop's. "All outputs
+  identical" is 500 on the Mac against 499 on the desktop, a difference only on 0x4c48d0, which
+  the reference does not finish.
+
+Silent 0 in every pair. Lines that moved:
+
+- `r5s-m500`: reference finished 499 -> 498, identical 499 -> 498 (loud 0). The reference times
+  out on 0x6b21e0. It does not finish there alone on the Mac at `TIMEOUT` 400 (also with the
+  `analysis-queue` prelude, and with that prelude and the old `x86.sla`) or at 1500. It is the
+  known reference timeout of the `m3-int6` pass (0x6b21e0 of `r5s` not compared there either),
+  and the other eight R5 checks count it as not finished, as in the baseline.
+- `pcd-m500`: identical 493 -> 499 (loud 6 -> 0). `pmd-m500`: identical 496 -> 499 (loud 3 -> 0).
+- "all outputs identical" 499 -> 500 in `s6void`, `s6callee`, `r1`, `r4`, `s8`, `swsn-r` and
+  `swsn-t` (M500): all on 0x4c48d0, which the reference does not finish. `stack-m500` outputs with stack SSA 312 -> 313.
+
+Every other line equals the baseline. Superseded: "Not run: M500 bars, the full 133-pair pass,
+the Mac" under "Integration `int8`" above.
 
 ## Speed
 

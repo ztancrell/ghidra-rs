@@ -550,6 +550,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    (mercs2 plain 308); the low findings (a CALL_RETURN call has no indicators, the slot thunk's
    memRefs bound, a warning for isThunk past the entry) leave the rows unchanged; rows unchanged. See `rust/README.md`,
    "Review fixes on `int8`".
+   Full pass 2026-11-21 (c730b2db7d, the 12.3 `x86.sla`, 8 pairs on the desktop and Mac, 125 on the Mac only):
+   133 / 133 pairs, silent 0 in every pair. Against `analysis-queue`: `r5s-m500` 499 -> 498 (the
+   known reference timeout on 0x6b21e0; it does not finish in 1500 s), `pcd-m500` 493 -> 499 and
+   `pmd-m500` 496 -> 499 (loud 0). The rest are equal apart from "all outputs identical" on 0x4c48d0.
+   Superseded: "Not run: the full pass" for `int8`. See `rust/README.md`, "Full pass of `int8`".
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
