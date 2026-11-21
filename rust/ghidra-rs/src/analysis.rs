@@ -3,6 +3,8 @@
 //! Every executable section is disassembled; results are reported for `.text`. See rust/README.md "Analysis" for what is and isn't covered.
 
 use crate::queue::{priority, Analyzer, Kind, Manager};
+
+mod repair;
 use crate::sleigh::Sleigh;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -464,6 +466,7 @@ impl Analysis {
         // the instructions the no-return analyzer looked at, and INT3 (checkNonReturningIndicators)
         let mut noreturn_seen = HashSet::new();
         let int3 = |a: u32| img.block_of(a).is_some_and(|s| s.data[(a - s.addr) as usize] == 0xcc);
+        let mut repair = repair::RepairCounts::default();
         while let Some((task, set)) = mgr.next_task() {
             let mut data = BTreeSet::new();
             // (thunk, target) of SlotJumps: the target is made with the task's new functions
@@ -516,7 +519,33 @@ impl Analysis {
                         defined.insert(f);
                     }
                 }
-                an.find_noreturn(&mut defined, &mut noreturn_seen, &int3);
+                let mut found = an.find_noreturn(&mut defined, &mut noreturn_seen, &int3);
+                // Repair Flow Damage, then what its disassembly feeds: Subroutine References'
+                // functions at the new calls, the no-return analyzer on the instructions
+                // cleared, re-disassembled or handed to codeDefined
+                while !found.is_empty() {
+                    let before = an.funcs.clone();
+                    let again = an.repair_flow_damage(
+                        img,
+                        sl,
+                        &mut p,
+                        &mut owner,
+                        &found,
+                        allowed.as_ref(),
+                        &mut defined,
+                        &mut repair,
+                    );
+                    if again.is_empty() {
+                        break;
+                    }
+                    noreturn_seen.retain(|a| !again.contains(a));
+                    let new: Vec<u32> =
+                        an.funcs.difference(&before).copied().filter(|f| !an.bodies.contains_key(f)).collect();
+                    for f in new {
+                        an.create_function(f, allowed.as_ref(), &mut Vec::new(), &mut defined);
+                    }
+                    found = an.find_noreturn(&mut defined, &mut noreturn_seen, &int3);
+                }
                 body_noreturn = std::mem::replace(&mut an.noreturn, known);
                 mgr.notify(Kind::Function, &defined);
             }
@@ -525,39 +554,35 @@ impl Analysis {
             an.funcs = extra.iter().copied().filter(|a| an.insns.contains_key(a)).collect();
             an.bodies.retain(|f, _| an.funcs.contains(f));
         }
-        let known = std::mem::replace(&mut an.noreturn, body_noreturn);
-        // Repair Flow Damage (ClearFlowAndRepairCmd, on by default) is not ported: Java clears the
-        // flow from the fallthrough of a call of a function the no-return analyzer found, where
-        // an instruction is and no flow refers to it (findRepairLocations; its NOP skip and the
-        // external entry points not counted here)
-        let flows_to: HashSet<u32> = an
-            .insns
-            .values()
-            .filter(|i| matches!(i.flow, Flow::Jump | Flow::CondJump | Flow::Call))
-            .filter_map(|i| i.target)
-            .chain(an.tables.values().flatten().copied())
-            .collect();
-        let damaged = an
-            .insns
-            .iter()
-            .filter(|&(&a, i)| {
-                let fall = a + i.len as u32;
-                i.flow == Flow::Call
-                    && !an.fallthru.contains(&a)
-                    && i.target.is_some_and(|t| t != fall && an.noreturn.contains(&t) && !known.contains(&t))
-                    && an.insns.contains_key(&fall)
-                    && !flows_to.contains(&fall)
-            })
-            .count();
+        an.noreturn = body_noreturn;
+        if repair.runs > 0 {
+            an.warnings.push(format!(
+                "Repair Flow Damage (ClearFlowAndRepairCmd): {} runs, {} instructions cleared, {} functions removed, {} instructions disassembled again",
+                repair.runs, repair.cleared, repair.removed, repair.redisassembled
+            ));
+        }
+        if !repair.data.is_empty() {
+            an.warnings.push(format!(
+                "not ported: Repair Flow Damage clearing data (addDereferencedInstructionStarts): {} addresses only cleared code refers to, which Java clears where a pointer or undefined data is",
+                repair.data.len()
+            ));
+        }
+        if !repair.stale.is_empty() {
+            an.warnings.push(format!(
+                "Repair Flow Damage: {} function bodies keep the cleared bytes in Java (no repaired subroutine reaches them); here they lose them",
+                repair.stale.len()
+            ));
+        }
+        if repair.overlap > 0 {
+            an.warnings.push(format!(
+                "Repair Flow Damage: {} repaired bodies overlap another function and stay as they were (OverlappingFunctionException)",
+                repair.overlap
+            ));
+        }
         if !an.slot_jumps_inside.is_empty() {
             an.warnings.push(format!(
                 "not ported: CreateThunkFunctionCmd.isThunk for a jump through a slot past the entry: {} such jumps, no thunk made here",
                 an.slot_jumps_inside.len()
-            ));
-        }
-        if damaged > 0 {
-            an.warnings.push(format!(
-                "not ported: Repair Flow Damage (ClearFlowAndRepairCmd): {damaged} calls of a function found non-returning fall into instructions no flow refers to, which Java clears"
             ));
         }
         an.body_owner = HashMap::new();
@@ -914,9 +939,15 @@ impl Analysis {
     /// INT3.
     // ponytail: run after each batch of functions made, where Java's instruction analyzer runs
     // on instructions added (DISASSEMBLY + 2), so the functions it sees may differ;
-    // "Repair Flow Damage" (ClearFlowAndRepairCmd) is not ported, nor a function made at a
-    // target that is none (setFunctionNonReturning), nor the call-fixup exception
-    fn find_noreturn(&mut self, changed: &mut BTreeSet<u32>, seen: &mut HashSet<u32>, int3: &dyn Fn(u32) -> bool) {
+    // "Repair Flow Damage" follows (`repair_flow_damage`, on the addresses returned); not
+    // ported: a function made at a target that is none (setFunctionNonReturning), nor the
+    // call-fixup exception
+    fn find_noreturn(
+        &mut self,
+        changed: &mut BTreeSet<u32>,
+        seen: &mut HashSet<u32>,
+        int3: &dyn Fn(u32) -> bool,
+    ) -> BTreeSet<u32> {
         // the references the analyzer reads: calls (with computed ones) and reads or writes
         let mut calls_to: HashMap<u32, Vec<u32>> = HashMap::new();
         let mut data_to: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -937,7 +968,7 @@ impl Analysis {
             }
         }
         if found.is_empty() {
-            return;
+            return found;
         }
         let ends: HashSet<u32> = found.iter().map(|&t| self.thunked_end(t)).collect();
         let marked: Vec<u32> =
@@ -962,6 +993,7 @@ impl Analysis {
         for g in callers {
             self.fixup_body(g, changed);
         }
+        found
     }
 
     /// The call targets of an instruction (Instruction.getFlows, getAllFlows): the direct one,
@@ -2393,11 +2425,15 @@ impl RangeSet {
     fn ranges(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
         self.0.iter().map(|(&l, &h)| (l, h))
     }
+
+    fn contains(&self, a: u32) -> bool {
+        self.0.range(..=a).next_back().is_some_and(|(_, &h)| h >= a)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{pair_hit, Analysis, Flow, Ins, RangeSet, POST_FILL, PRE_FILL};
+    use super::{pair_hit, repair, Analysis, Flow, Image, Ins, RangeSet, Section, POST_FILL, PRE_FILL};
     use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
     #[test]
@@ -2521,5 +2557,47 @@ mod tests {
         assert_eq!(an.bodies[&0x11], [0x11]);
         assert_eq!(an.thunk_of.get(&0x10), Some(&0x12));
         assert_eq!(an.thunk_of.get(&0x12), Some(&0x11));
+    }
+
+    #[test]
+    fn repair_flow_damage_clears_only_unreferenced_fallthroughs() {
+        // 0x10 and 0x20 call the non-returning 0x40; 0x30 jumps to 0x21, so only 0x11..0x12
+        // (and the call 0x60 makes from there) is damage
+        let (mut an, mut changed) = bare(
+            &[
+                (0x10, Flow::Call, Some(0x40)),
+                (0x11, Flow::Call, Some(0x60)),
+                (0x12, Flow::Return, None),
+                (0x20, Flow::Call, Some(0x40)),
+                (0x21, Flow::Fall, None),
+                (0x22, Flow::Return, None),
+                (0x30, Flow::Jump, Some(0x21)),
+                (0x40, Flow::Jump, Some(0x40)),
+                (0x60, Flow::Return, None),
+            ],
+            &[0x10, 0x20, 0x30, 0x40, 0x60],
+        );
+        an.noreturn.insert(0x40);
+        for f in [0x10, 0x20] {
+            an.fixup_body(f, &mut changed);
+        }
+        an.code_hi = 0x80;
+        let mut owner = vec![0u8; 0x80];
+        for &a in an.insns.keys() {
+            owner[a as usize] = 1;
+        }
+        let text =
+            Section { name: ".text".into(), exec: true, readonly: true, zero_tail: 0, addr: 0, data: vec![0x90; 0x80] };
+        let img = Image { sections: vec![text], ..Image::default() };
+        let sl = crate::sleigh::Sleigh::load(&crate::sleigh::Sleigh::sla_path("x86")).unwrap();
+        let mut counts = repair::RepairCounts::default();
+        let found = BTreeSet::from([0x40]);
+        let again =
+            an.repair_flow_damage(&img, &sl, &mut sl.new_parse(), &mut owner, &found, None, &mut changed, &mut counts);
+        assert_eq!(again, BTreeSet::from([0x11, 0x12, 0x60]));
+        assert!(an.insns.contains_key(&0x21) && !an.insns.contains_key(&0x11));
+        // 0x60 was called from the cleared code only: its function goes (ClearCmd)
+        assert!(!an.bodies.contains_key(&0x60) && an.bodies.contains_key(&0x40));
+        assert_eq!(owner[0x11..0x13], [0, 0]);
     }
 }

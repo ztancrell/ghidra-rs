@@ -5464,7 +5464,7 @@ Java's sites that set a body, and what is ported:
 | CallFixupAnalyzer.fixCallingFunctionBody | not ported (no call-fixup analyzer here) |
 | EntryPointAnalyzer (recreate after the do-later set) | not ported (the do-later set is not modelled) |
 | AddressTable.fixupFunctionBody, DecompilerSwitchAnalyzer / DecompilerSwitchAnalysisCmd | not ported: switch cases are disassembled here before the function is made, so its first body holds them |
-| ClearFlowAndRepairCmd | not ported: FindNoReturnFunctionsAnalyzer runs it on the flow after a new non-returning call ("Repair Flow Damage", on by default: `repairDamagedLocations`), clearing code and refixing bodies; nothing here clears flow, and nothing reports where Java would. Superseded (2026-11-19): "no analyzer here clears flow" read as if Java's did not either |
+| ClearFlowAndRepairCmd | not ported: FindNoReturnFunctionsAnalyzer runs it on the flow after a new non-returning call ("Repair Flow Damage", on by default: `repairDamagedLocations`), clearing code and refixing bodies; nothing here clears flow, and nothing reports where Java would. Superseded (2026-11-19): "no analyzer here clears flow" read as if Java's did not either. Superseded (2026-11-21): ported, see "Repair Flow Damage, branch `repairflow`" |
 | the edit scripts (`store.rs`) | `Store::apply` recomputes only the bodies its edits touch (functions made, removed, given a body or thunk mark; bodies holding a cleared, overridden, switch or new-entry address) from the flow (`body_of`, an approximation of Java re-running its commands); the rest keep their creation bodies. Superseded (2026-11-19): it recomputed every body (`compute_bodies`, removed) |
 
 Also not ported: getThunkedAddr's p-code register tracking (thunks of more than one
@@ -5638,7 +5638,8 @@ suspicious. A mark on a thunk is its thunked function's, and so every thunk of i
 callers' bodies are fixed up as before. Not ported (`ponytail` note): it runs after each batch of
 functions made, where Java's instruction analyzer runs at DISASSEMBLY + 2 on instructions added,
 so it may see other functions; Repair Flow Damage; a function made at a target that is none; the
-call-fixup exception.
+call-fixup exception. Superseded (2026-11-21) for Repair Flow Damage: see "Repair Flow Damage,
+branch `repairflow`".
 
 | | before | after |
 |---|---|---|
@@ -5709,7 +5710,8 @@ Causes left among the `data` cases, not fixed: 7 are SecuROM counters in `.secur
 (0x256facf and others). Here they lie inside instructions decoded after a call of a no-return
 function (0x256f870 `PUSH; CALL 0x1b950a0`, then `ADD [EAX],AL` runs). Java clears those
 instructions with FindNoReturnFunctionsAnalyzer's Repair Flow Damage (ClearFlowAndRepairCmd, about
-1,000 lines, not ported), so they are data there. Others: a size Java gives (`undefined4` at
+1,000 lines, not ported), so they are data there. Superseded (2026-11-21): ported; the 7 are
+data here too, see "Repair Flow Damage, branch `repairflow`". Others: a size Java gives (`undefined4` at
 0x198c758, here `undefined`), labels outside the image (`DAT_9fe1234a`, `DAT_00000004`: 5),
 `ThreadLocalStoragePointer` (1). Not run: the full pass, the Mac, the shadow check. Measured
 against Java 12.2's outputs, not 12.3.
@@ -5958,7 +5960,8 @@ f64489e2e1); each finding checked against the Java first. The rows rerun with
   (not an import's flag, not a call that keeps its fallthrough) whose fallthrough holds an
   instruction no jump, call or switch case refers to; findRepairLocations' NOP skip and external
   entries are not counted. mercs2: 308 such calls with plain discovery, 317 with Java's list.
-  Output unchanged (plain and Java-list facts byte-identical).
+  Output unchanged (plain and Java-list facts byte-identical). Superseded (2026-11-21): the
+  command is ported and this warning is gone; see "Repair Flow Damage, branch `repairflow`".
 - checkNonReturningIndicators of a call under a CALL_RETURN override is false (Java's
   `getFallThrough` is null), where the walk went on from the call's end. The Reference
   analyzer's thunk step for a jump through a slot (`slot_jumps`) also needs `memRefs.length <= 2`;
@@ -6001,6 +6004,57 @@ Silent 0 in every pair. Lines that moved:
 
 Every other line equals the baseline. Superseded: "Not run: M500 bars, the full 133-pair pass,
 the Mac" under "Integration `int8`" above.
+
+### Repair Flow Damage, branch `repairflow` (2026-11-21)
+
+`ghidra-rs/src/analysis/repair.rs` ports FindNoReturnFunctionsAnalyzer's "Repair Flow Damage"
+step (`repairDamagedLocations`, on by default): for each address the analyzer found,
+`findRepairLocations` (the fallthroughs of its calls that hold an instruction no flow refers to,
+`skipNOPS` and the external entries included), then ClearFlowAndRepairCmd with `clearData`,
+without `clearLabels`, the found addresses protected: `findInstructionFlow` over
+SimpleBlockModel's blocks (a block starts at a symbol or reference and after any flow other than
+a fallthrough; blocks something outside flows into are pruned), `addDereferencedInstructionStarts`,
+ClearCmd (instructions with their references and flow overrides, functions whose entry is
+cleared, with their thunks), `repairFallThroughsInto` and `repairFlowsInto` (disassembly at the
+fallthroughs into the cleared bytes and at cleared addresses a flow still refers to; the sources
+of data references into them go to codeDefined, so the no-return analyzer sees them again),
+and `repairFunctions` (MultEntSubModel's subroutines over the code disassembled again: functions
+not at an entry are removed, the others get their body less the cleared bytes plus the flow from
+the entry, the other entries become functions). After a repair the run loop makes the functions
+its disassembly found and runs the no-return analyzer on the new instructions. The offcut checks
+of the command never fire here (the listing holds no overlapping instructions).
+
+Counted in warnings, not ported: clearing data (this model has no data code units where cleared
+code refers: mercs2 plain 273 addresses, Java's list 287, where Java clears a pointer or
+undefined data); a body that keeps the cleared bytes in Java (here a body holds instructions
+only; 0 on mercs2); a repaired body that overlaps another function (0). Not modelled: names of
+USER_DEFINED source (the flow stops at a function of IMPORTED or higher name: here the exports
+and the entry only); the vertex order of the prune (address order where Java walks a Hashtable;
+a prune takes every block it reaches, so a later check it made true is covered). The warning of
+9057ffa2d3 (308 calls plain, 317 Java's list) is gone. mercs2 plain: 10 runs, 6,858 instructions
+cleared, 6 functions removed, 16 instructions disassembled again; Java's list: 7,349, 14, 11.
+
+Rows against the 12.3 reference (`rust/target/rf/rows.sh`, the `int8` rows.sh with `JOBS` 4,
+desktop; M500 identical of 499 (loud, silent), M8 of 7):
+
+| row | before (master 04739accdd) | after |
+|---|---|---|
+| Java facts | 488 (11, 0), M8 7 | 488 (11, 0), M8 7 |
+| own facts, Java's list | 413 (18, 68), M8 4 | 419 (18, 62), M8 5 |
+| own facts, plain | 246 (120, 133), M8 2 | 246 (120, 133), M8 2 |
+| own facts, store | 391 (21, 87), M8 4 | 397 (21, 81), M8 5 |
+
+No function is newly silent. Now identical in Java's list and store: 0x4078a0, 0x415ae0,
+0x41d560, 0x4312e0, 0x434f00, 0x4f1770; M8 0x401000. The 7 SecuROM counters of `.securom`
+(0x256facf and others) are `data` as in Java's facts; of the 10 plain `undef` ranges that
+moved, 9 now equal Java's facts (0x407769 now ends at 0x40776f: a new label 0x407770 from
+code disassembled again; not traced). Plain against Java 12.3's auto-analysis
+(`ref123/aq/purges.txt`, the facts' `body` records): functions in both 29,433 -> 29,433, Java
+only 1,198 -> 1,198, here only 286 -> 288 (0x250d37f, 0x25600d0, 0x256cae0 new in `.securom`,
+0x256f77d merged into 0x256f770), body size differs 671 -> 671.
+Superseded: "Repair Flow Damage ... not ported" in the ported-analyzers table, under "No-return
+functions from call-site evidence", in "Causes left among the `data` cases" and the warning
+bullet of "Review fixes on `int8`".
 
 ## Speed
 
