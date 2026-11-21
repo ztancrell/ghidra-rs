@@ -583,15 +583,39 @@ By cause:
   and ClearFalseNoReturn passes, which the `--functions-from` export lacks.
 
 `tools/abi-ledger.csv` judges the shadow diff by safety rather than agreement with Java (see
-`../DESIGN.md`). It has one row for each `differ` and `Java-only` row of the shadow run at
-ghidra-rs bd56d2f09a against mercs2 395ba6b (58 and 174 rows; that run gave same 55,362, differ
-58, Java only 174, ghidra-rs only 309; the ghidra-rs-only rows are not in the ledger yet).
-The columns are `address,site,java,ghidra_rs` (from the diff), `truth` (`ok`, `violation`,
-`unknown`, `not-a-caller`, or `unverified` for a row grouped but not checked by itself),
-`evidence` (the bytes or reasoning behind the truth, or `group:<cause>; checked <site>` naming
-a checked row of the group) and `cause` (a kebab-case group). mercs2's abi_test callee trace
-(`build/abi_callees.csv`) held one row at that commit, so every truth comes from the
-disassembly and the contracts.
+`../DESIGN.md`). It has a row for every row of the shadow run of 2026-11-20 (ghidra-rs
+b6b02b2ca5, the script's command and diff reproduced outside the mercs2 tree, against mercs2's
+`config/abi_callers.csv` and `config/register_abi.csv` of 2026-11-18 14:43): same 56,099,
+differ 124, Java only 152, ghidra-rs only 800, so 1,076 diff rows. 200 of them were judged
+before, with the same statuses on both sides (none changed); 76 differ / Java-only rows and the
+800 ghidra-rs-only rows are new. 32 older rows no longer differ and stay as history. The
+columns are `address,site,java,ghidra_rs` (from the diff), `truth` (`ok`, `violation`,
+`unknown`, `not-a-caller`, `trivial`, or `unverified` for a row grouped but not checked by
+itself), `evidence` (the bytes or reasoning behind the truth, or `group:<cause>; checked
+<site>` naming a checked row of the group) and `cause` (a kebab-case group). `trivial` means
+the original's own code (through its entry JMP) writes every clobber, the rule both tools
+apply; it is not a path-by-path proof. mercs2's abi_test callee trace (`build/abi_callees.csv`)
+lists 19 contracts and their callees but no call sites, so it settles no row: every truth comes
+from the disassembly and the contracts. (Superseded: the first ledger, of the run at ghidra-rs
+bd56d2f09a against mercs2 395ba6b, had the 58 differ and 174 Java-only rows; same 55,362,
+ghidra-rs only 309, not in the ledger then.)
+
+Against the bar (no row where ghidra-rs is wrong on the unsafe side), as of that run:
+
+- No row has truth `violation` where ghidra-rs says `ok`, `trivial` or `(none)`.
+- 39 site rows are true callers ghidra-rs has no row for (`missed-code-undecoded` 16,
+  `data-pointer-missed` 19, `missed-ref-securom-section` 4; truth `ok` 19, `unknown` 8,
+  `unverified` 12). The bar counts a missing true caller as unsafe, so it is not met yet.
+- Not settled: 92 rows where ghidra-rs gives no finding or `ok` and the truth is `unknown` or
+  `unverified` (38 + 16 `output:`/`input:` rows, 10 "no references" rows, 5 + 23 `ok` sites).
+- The 52 `rs-body-lacks-jump-target` rows (0x407aa0, 0x430e40, 0x470be0, 0x4cc830: Java
+  `trivial`, ghidra-rs walks the callers) and the 16 `rs-body-has-callee-code` rows (0x470600:
+  ghidra-rs `trivial`, right in effect) come from function bodies that differ: ghidra-rs gives
+  the code behind an entry JMP (0x6b8f60, 0x4063c0, 0x403f00, 0x527020) to another function or
+  to none, where Ghidra gives it to the JMP's function. Safe in all 68 rows; a body that takes
+  a callee's code could make `trivial` too loose elsewhere.
+- The 703 `rs-only-stricter` rows (626 `unconcluded`, 72 `unknown`, 5 `violation`) are findings
+  Java does not make: the safe side whatever the truth, not checked one by one.
 
 Following pointers in data (`pointer_targets`, see the analysis section) gives 17 of the
 ledger's `(none)` rows their caller, each now with Java's status: the undecoded tails of
