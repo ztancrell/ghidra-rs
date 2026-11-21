@@ -82,7 +82,8 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   far as that is reachable. Old games and mercs2 stay the first user and the test bed. Still no
   GUI. How it is pursued:
   - Knowledge is reused as data, never rewritten: Ghidra's processor specs (`.sla`, `.pspec`,
-    `.cspec`), Function ID databases and (not started) data-type archives are read as they are.
+    `.cspec`), Function ID databases and data-type archives (`.gdt`, `rust/ghidra-rs/src/gdt/`) are
+    read as they are.
   - Engines are ported, not features: the instruction decoder, the analysis core and the
     decompiler, each checked against Ghidra's own output. Java Ghidra and the C++ decompiler stay
     the oracle; parity first, improvements behind options (the 2026-11-12 decision).
@@ -548,6 +549,10 @@ scripts live", decided 2026-11-15 (plain files, see Decided).
   script made after auto-analysis (no purge, no stack variables); the import prototypes come from a
   one-time headless export of Ghidra's archive, not from a `.gdt` reader in Rust (the 2026-11-13
   decision names data-type archives as data to read in place: not started).
+  Superseded (2026-11-20, the user's decision "port the .gdt reader now"): the archive is read in
+  place (`rust/ghidra-rs/src/gdt/`, `analyze --facts --gdt <archive>`, `ghidra-rs gdt-protos`);
+  its prototype file is byte-identical to the 12.3 Java export, which stays only as the reference
+  (`rust/README.md`, "The archive read in Rust").
   Superseded in part: "a rule ... ported with an approximation is written and measured instead" is
   decided (2026-11-17, see Decided): approximations give way to ports; the other choices stay open.
 - 2026-11-17: Choices of S10 slice 3 made without the user, to confirm or change (`rust/README.md`,

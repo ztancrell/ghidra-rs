@@ -7,6 +7,7 @@ pub mod edits;
 pub mod exports;
 pub mod factsout;
 pub mod fid;
+pub mod gdt;
 pub mod queue;
 pub mod scripts;
 pub mod sla;
