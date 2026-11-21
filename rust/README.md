@@ -1,3 +1,4 @@
+| removing a function re-flows no other body | unchanged | unchanged | unchanged | unchanged |
 | setNoFallThru only on the calls of the addresses found | unchanged | unchanged | unchanged | unchanged |
 # ghidra-rs
 
@@ -686,7 +687,8 @@ clear <first>-<last>               instructions overlapping the range are remove
 noreturn <addr> on|off             the no-return flag of a function (or import slot)
 switch <jump> <target>...          the targets of a computed jump
 code <addr>                        disassemble from here (flow is followed)
-override <addr> call_return|none   the flow override of an instruction
+override <addr> call_returnreflow <entry>                     fixupFunctionBody: the body is the flow from the entry again
+|none   the flow override of an instruction
 function <entry> create|remove     a function analysis lacks, or one it has
 body <entry> <first>-<last>...     a fixed body in place of the flow from the entry
 thunk <entry> off|<target>         the function is (not) a thunk
@@ -707,12 +709,16 @@ applied right after discovery and the constants pass of `--abi-callers` and `--f
 after it, on a program `edit` never proved the store on. Bodies are computed again from the
 flow at the end, so a function re-flows whenever a neighbour is created or removed or a flag
 changes; only a `body` record pins one, and `edit reflow <addr>` drops that record.
-`Store::apply` re-flows the bodies with an instruction that jumps or falls into a function a
-`function ... remove` record removes, as the live `Project::remove_function` does (those jumps
-are no tail calls now, their owners flow on); `ghidra-rs/tests/store.rs`
-(`removing_a_function_re_flows_what_falls_into_it`). Superseded: only bodies holding a record's
-address were re-flowed, and `fold-slot-fragments` on mercs2 failed with "the store does not
-reproduce the edits ... 0x00416c5d".
+Removing a function re-flows no other body, as Java's FunctionManagerDB.removeFunction (it
+deletes the function only); a script that fixes up a neighbour does so itself
+(`fold-slot-fragments` re-bodies the owners that jump into a fragment it removes:
+`fixupFunctionBody` or `setBody`). `edit reflow` and a script's fixup write a `reflow` record,
+so `Store::apply` re-flows the same bodies; `ghidra-rs/tests/store.rs`
+(`removing_a_function_leaves_what_falls_into_it`). Superseded (2026-11-20, review of `int8`):
+`Project::remove_function` re-flowed the bodies that jump or fall into the removed function and
+`Store::apply` copied it for every `function ... remove` record; before that only bodies holding
+a record's address were re-flowed, and `fold-slot-fragments` on mercs2 failed with "the store
+does not reproduce the edits ... 0x00416c5d".
 
 What fails instead of being skipped: a first line other than version 2's, a store made on
 another binary or seed set (`analyze --store` and `edit` both check; note that
@@ -792,7 +798,7 @@ Where a port cannot do what Java does:
   failed Unable to create function at ... due to overlap with range [...]", the old body
   kept), but only for the instructions the body gains: bodies the flow derives here may share
   instructions, where Java's never do. The range named is the first such instruction, which
-  may not be the one Java names. Bodies here re-flow as soon as a fragment goes, so "refit
+  may not be the one Java names. A disassembly here re-flows the bodies that flow into it, so "refit
   before->after" compares with the body at the start of the round (Java's body until
   `setBody`). An owner that its own walk removes ends the command with an error, as Java's
   next call on the deleted function throws. Superseded: `setBody` could not fail, and such an
@@ -5937,6 +5943,14 @@ f64489e2e1); each finding checked against the Java first. The rows rerun with
   call of an address found get their bodies fixed up. Superseded: every thunk's callers lost
   the fallthrough and were fixed up. No facts file of the three rows changed; the test
   `noreturn_takes_three_call_sites_of_evidence` covers a call of a thunk made before the mark.
+- `Project::remove_function` and `Store::apply` no longer re-flow the bodies that jump or fall
+  into a removed function (FunctionManagerDB.removeFunction deletes the function only); mercs2's
+  `FoldSlotFragments.java` fixes up the jump sources itself, and that fixup (`Project::reflow`)
+  now writes a `reflow` record (3 in the store row) so the replay gives the same bodies. Store
+  row facts: 12 bodies changed, 11 of them now the reference's (0x406120, 0x416c5d, 0x4ea606,
+  ...), one no longer: 0x5442e9 (`MOV; JMP 0x7f57a5`) loses the `RET` at 0x7f57a5, which plain
+  discovery's body lacks too and the store's re-flow had added; 11 `data` lines and 1 `func`
+  line moved with them. No function outside M500's counts moved, no silent is new.
 
 ## Speed
 

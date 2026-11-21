@@ -544,7 +544,9 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    Review fixes on `int8` (2026-11-20): targetOnlyCallsNoReturn follows a computed jump's switch
    cases and computed target (Java skips only INDIRECTION); setNoFallThru and the body
    fixup act on the calls of the addresses found only, other thunks' earlier calls keep their
-   fallthrough; rows unchanged. See `rust/README.md`,
+   fallthrough; removing a function re-flows no other body (a script's fixup is a `reflow`
+   record); superseded: "`Store::apply` now re-flows the bodies that jump or fall into a removed
+   function" above; rows unchanged. See `rust/README.md`,
    "Review fixes on `int8`".
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at

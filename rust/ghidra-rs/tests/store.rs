@@ -37,11 +37,13 @@ fn edits_round_trip_through_the_store() {
     assert!(!p.create_function(0x401030));
     assert!(p.disassemble(0x401030) && p.create_function(0x401030));
     assert_eq!(p.body_bytes(0x401030), 3);
-    // a function inside another splits it; removing it re-flows the owner
+    // a function inside another splits it; removing it leaves the owner until a fixup
     assert_eq!(p.function_containing(0x401014), Some(0x401010));
     assert!(p.create_function(0x401014));
     assert_eq!((p.body_bytes(0x401010), p.body_bytes(0x401014)), (5, 2));
     p.remove_function(0x401014);
+    assert_eq!(p.body_bytes(0x401010), 5);
+    p.reflow(0x401010);
     assert_eq!((p.body_bytes(0x401010), p.function_containing(0x401014)), (6, Some(0x401010)));
     assert!(!p.store.functions.contains_key(&0x401014), "created and removed: no record left");
     // a no-return callee cuts its caller; an override of the call brings the rest back
@@ -66,8 +68,10 @@ fn edits_round_trip_through_the_store() {
         text,
         "ghidra-rs-store 2 binary 0x0000000000000000 seeds 0x0000000000000000\n\
          code 0x00401030\n\
+         reflow 0x00401010\n\
          noreturn 0x00401010 on\n\
          override 0x00401003 none\n\
+         reflow 0x00401010\n\
          function 0x00401000 remove\n\
          function 0x00401030 create\n\
          body 0x00401030 0x00401030-0x00401031\n"
@@ -97,7 +101,7 @@ fn records_replay_in_edit_order() {
 }
 
 #[test]
-fn removing_a_function_re_flows_what_falls_into_it() {
+fn removing_a_function_leaves_what_falls_into_it() {
     let path = Sleigh::sla_path("x86");
     let (sl, img) = (Sleigh::load(&path).unwrap(), image());
     // a base where 0x401014 is a function: 0x401010's body (the JZ and its target) falls into it
@@ -106,9 +110,12 @@ fn removing_a_function_re_flows_what_falls_into_it() {
     made.apply(&mut base, &img, &sl).unwrap();
     let mut p = Project::new(&img, &sl, base.clone(), Store::default());
     assert_eq!(p.body_bytes(0x401010), 5);
+    // FunctionManagerDB.removeFunction deletes the function only; fixupFunctionBody re-flows
     p.remove_function(0x401014);
+    assert_eq!(p.body_bytes(0x401010), 5);
+    p.reflow(0x401010);
     assert_eq!(p.body_bytes(0x401010), 6);
-    // the store alone gives the same body (Store::apply re-flows 0x401010 too)
+    // the store alone gives the same body (its `reflow` record)
     p.finish(base).unwrap();
 }
 
