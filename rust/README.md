@@ -4608,7 +4608,17 @@ takes the archive itself; `ghidra-rs gdt-protos <archive> <out>` writes the prot
   `HighSymbol`'s encoders. Written into the code, not read: the registers and pentries of
   `x86win.cspec` (a `ponytail:` note names the upgrade) and the ids of the built-ins `long`,
   `uchar` and `ulong`, which `facts_coretypes.xml` lacks (the order of Java's class search).
-  `__thiscall`, a `__return_storage_ptr__` parameter and other built-in classes fail by name.
+  The archive's `default` convention (id 1) is the cspec's default model: model `default`,
+  `modellock`, `__stdcall`'s storage (`getCallingConvention("default")`,
+  `FunctionPrototype.grabFromFunction`); `windows_vs12_32.gdt` has no definition with it, so
+  this is not checked against Java. `__thiscall` (which `x86win.cspec` has: `ECX`,
+  `thisbeforeretpointer`), a `__return_storage_ptr__` parameter and other built-in classes
+  fail by name. Superseded: before, a `__thiscall` definition silently got model `unknown`
+  and `__stdcall`'s storage, and `default` got `unknown`. A corrupt archive is an error, not a
+  crash: a B-tree with a cycle or deeper than 64, lengths and sizes past the file, block sizes
+  too small for a chained buffer, a data buffer of another node type, schema names that do not
+  match the columns. Duplication: `fid.rs` has its own small buffer-file and B-tree reader for
+  the `.fidbf` files; it is left as it is.
   The archive's types are not put in `decomp/types.rs`: that store is the C++ decompiler's
   type factory and is filled from this XML by `facts.rs` as before.
 - Result: `gdt-protos` of `windows_vs12_32.gdt` is byte-identical to the 12.3 Java export

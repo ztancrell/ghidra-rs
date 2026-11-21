@@ -1,15 +1,17 @@
-//! Checks over the archive of the Ghidra tree, `windows_vs12_32.gdt` (skipped without it).
+//! Checks over the archive of the Ghidra tree, `windows_vs12_32.gdt` (a test fails without it,
+//! as the decoder tests do without the .sla files).
 use super::*;
 
-fn archive() -> Option<Archive> {
+fn archive() -> Archive {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../Ghidra/Features/Base/data/typeinfo/win32/windows_vs12_32.gdt");
-    p.exists().then(|| Archive::open(&p).unwrap())
+    assert!(p.exists(), "{} is missing", p.display());
+    Archive::open(&p).unwrap()
 }
 
 #[test]
 fn reads_every_table() {
-    let Some(ar) = archive() else { return };
+    let ar = archive();
     let count = |k: i64| ar.types.keys().filter(|&&id| kind(id) == k).count();
     // the record counts of the archive's tables
     assert_eq!(ar.function_defs.len(), 22825);
@@ -25,7 +27,7 @@ fn reads_every_table() {
 /// with parameters, one by name, and the first type records.
 #[test]
 fn protos_match_java_slice() {
-    let Some(ar) = archive() else { return };
+    let ar = archive();
     let text = protos::export(&ar).unwrap();
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines.len(), 1 + 22825 + 17957);

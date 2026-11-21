@@ -20,7 +20,10 @@ const DEFAULT_DECOMPILER_ID: u64 = 0xc000_0000_0000_0000;
 const ID_BASE: u64 = 0x4000_0000_0000_0000;
 /// Built-in ids (`BuiltInDataTypeManager.getID | BUILTIN_ID_HEADER`, the order of Ghidra
 /// 12.3's class search) of the archive's built-ins that the core-type list lacks (the core list
-/// has one type per size: `int`, `uint`): as Java's export writes them.
+/// has one type per size: `int`, `uint`): as Java's export writes them. They depend on that
+/// order (the `DataType` classes Ghidra 12.3's `ClassSearcher` finds, in the order it finds
+/// them): another Ghidra version or plugin set can number them differently, and the export
+/// would then differ from Java's in these three ids.
 const EXTRA_BUILTIN_IDS: [(&str, u64); 3] =
     [("long", 0xc000_0000_0000_009b), ("uchar", 0xc000_0000_0000_00c7), ("ulong", 0xc000_0000_0000_00cf)];
 /// The data organization of x86:LE:32 windows: pointer size.
@@ -107,20 +110,23 @@ const FASTCALL_INPUT: [Entry; 3] = [
     STACK,
 ];
 
-/// A model of x86win.cspec: name, its extrapop (`None`: unknown) and inputs.
+/// A model of x86win.cspec: name, its extrapop (`None`: unknown) and inputs. `default` is the
+/// cspec's `<default_proto>`, `__stdcall` (`getCallingConvention("default")`); `__thiscall`
+/// (ECX, `thisbeforeretpointer`) is not ported.
 fn model(name: &str) -> Result<(Option<i32>, &'static [Entry])> {
     const STD: [Entry; 1] = [STACK];
     match name {
-        "__stdcall" => Ok((None, &STD)),
+        "__stdcall" | "default" => Ok((None, &STD)),
         "__cdecl" => Ok((Some(4), &STD)),
         "__fastcall" => Ok((None, &FASTCALL_INPUT)),
         n => Err(format!("calling convention {n} not ported")),
     }
 }
 
-/// `CompilerSpec.getCallingConvention`: a model the cspec has, else none (`unknown`).
+/// `CompilerSpec.getCallingConvention`: a model the cspec has (or `default`), else none
+/// (`unknown`).
 fn known_model(name: &str) -> Option<&str> {
-    ["__stdcall", "__cdecl", "__fastcall"].contains(&name).then_some(name)
+    ["__stdcall", "__cdecl", "__fastcall", "__thiscall", "default"].contains(&name).then_some(name)
 }
 
 /// The display name, metatype and size of a built-in class (`getDecompilerDisplayName`);
@@ -682,9 +688,6 @@ impl<'a> Exporter<'a> {
         // getCallingConvention: a name the cspec lacks gives none (unknown, default model)
         let conv = known_model(&convention);
         let (extrapop_model, inputs) = model(conv.unwrap_or("__stdcall"))?;
-        if conv == Some("__thiscall") {
-            return Err("__thiscall not ported".into());
-        }
         // createParameters
         let mut ret_ty = Ty::Arch(ret);
         let mut args: Vec<(Option<String>, Ty)> = Vec::new();

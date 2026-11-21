@@ -5,7 +5,7 @@
 //! (`db.LongKeyInteriorNode`, `db.FixedRecNode`, `db.VarRecNode`), records (`db.DBRecord`,
 //! `db.SparseRecord`) and big records (`db.ChainedBuffer`). Nothing is ever written.
 //! What is not ported (index tables, other key types, obfuscated chained buffers) fails by name.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
 
 /// `LocalBufferFile.MAGIC_NUMBER`.
@@ -26,6 +26,8 @@ const CHAINED_BUFFER_INDEX_NODE: u8 = 8;
 const CHAINED_BUFFER_DATA_NODE: u8 = 9;
 /// `LongKeyRecordNode.RECORD_LEAF_HEADER_SIZE`: node type, key count, previous and next leaf.
 const LEAF_HEADER: usize = 13;
+/// How deep a table's B-tree may be (Java has no limit; a real tree is a few levels deep).
+const MAX_TREE_DEPTH: usize = 64;
 /// `Field` type codes.
 const BYTE_TYPE: u8 = 0;
 const SHORT_TYPE: u8 = 1;
@@ -42,7 +44,9 @@ const SPARSE_FIELD_LIST_EXTENSION: u8 = 1;
 pub type Result<T> = std::result::Result<T, String>;
 
 fn get(b: &[u8], o: usize, n: usize) -> Result<&[u8]> {
-    b.get(o..o + n).ok_or_else(|| format!("read of {n} bytes at {o} past the end of a {}-byte buffer", b.len()))
+    o.checked_add(n)
+        .and_then(|e| b.get(o..e))
+        .ok_or_else(|| format!("read of {n} bytes at {o} past the end of a {}-byte buffer", b.len()))
 }
 fn be_i32(b: &[u8], o: usize) -> Result<i32> {
     Ok(i32::from_be_bytes(get(b, o, 4)?.try_into().map_err(|_| "short read")?))
@@ -89,8 +93,12 @@ pub fn unpack(packed: &[u8]) -> Result<Vec<u8>> {
     if method != 8 {
         return Err(format!("packed file: zip method {method} not ported (only deflate)"));
     }
-    let mut out = Vec::with_capacity(usize::try_from(length).map_err(|_| "packed file: bad length")?);
-    flate2::read::DeflateDecoder::new(&zip[30 + name_len + extra_len..])
+    let limit = u64::try_from(length).map_err(|_| "packed file: bad length")?;
+    let data = zip.get(30 + name_len + extra_len..).ok_or("packed file: truncated zip entry")?;
+    // no more than the header's length (and one byte to tell a longer entry)
+    let mut out = Vec::new();
+    flate2::read::DeflateDecoder::new(data)
+        .take(limit.saturating_add(1))
         .read_to_end(&mut out)
         .map_err(|e| format!("packed file: {e}"))?;
     if out.len() as i64 != length {
@@ -146,11 +154,13 @@ impl BufferFile {
             CHAINED_BUFFER_DATA_NODE => Ok(get(first, 5, size)?.to_vec()),
             CHAINED_BUFFER_INDEX_NODE => {
                 // buildIndex: data buffer ids after next-index id, data after the node type
-                let space = self.buffer_size() - 1;
-                let per_index = (self.buffer_size() - 9) / 4;
+                let bad = || format!("chained buffer {id}: buffer size {} too small", self.buffer_size());
+                let space = self.buffer_size().checked_sub(1).filter(|&s| s > 0).ok_or_else(bad)?;
+                let per_index = self.buffer_size().checked_sub(9).map(|s| s / 4).filter(|&p| p > 0).ok_or_else(bad)?;
                 let count = if size == 0 { 0 } else { (size - 1) / space + 1 };
                 let (mut index, mut ix) = (first, 0);
-                let mut out = Vec::with_capacity(size);
+                // `size` is the file's word: no more capacity than the file has bytes
+                let mut out = Vec::with_capacity(size.min(self.data.len()));
                 for _ in 0..count {
                     if ix == per_index {
                         index = self.buffer(be_i32(index, 5)?)?;
@@ -162,7 +172,11 @@ impl BufferFile {
                     if data_id < 0 {
                         out.resize(out.len() + n, 0);
                     } else {
-                        out.extend_from_slice(get(self.buffer(data_id)?, 1, n)?);
+                        let data = self.buffer(data_id)?;
+                        if byte(data, 0)? != CHAINED_BUFFER_DATA_NODE {
+                            return Err(format!("chained buffer {id}: data buffer {data_id} is not a data node"));
+                        }
+                        out.extend_from_slice(get(data, 1, n)?);
                     }
                 }
                 Ok(out)
@@ -177,8 +191,25 @@ impl BufferFile {
     /// layouts with a key of `key` bytes. `fixed` is the record length of a fixed-length
     /// schema; records with indirect storage come from their chained buffer.
     fn records(&self, root: i32, key: usize, fixed: Option<usize>, out: &mut Vec<(i64, Vec<u8>)>) -> Result<()> {
+        self.walk(root, key, fixed, out, &mut HashSet::new(), 0)
+    }
+
+    /// [`Self::records`] below `root` at `depth`; `seen`: the nodes read, so a node referenced
+    /// twice (a cycle) or a tree deeper than [`MAX_TREE_DEPTH`] is an error, not a stack overflow.
+    fn walk(
+        &self,
+        root: i32,
+        key: usize,
+        fixed: Option<usize>,
+        out: &mut Vec<(i64, Vec<u8>)>,
+        seen: &mut HashSet<i32>,
+        depth: usize,
+    ) -> Result<()> {
         if root < 0 {
             return Ok(());
+        }
+        if depth > MAX_TREE_DEPTH || !seen.insert(root) {
+            return Err(format!("buffer {root}: corrupt B-tree (a cycle, or deeper than {MAX_TREE_DEPTH})"));
         }
         let b = self.buffer(root)?;
         let n = usize::try_from(be_i32(b, 1)?).map_err(|_| format!("buffer {root}: bad key count"))?;
@@ -189,7 +220,7 @@ impl BufferFile {
         match (byte(b, 0)?, key == 8) {
             (LONGKEY_INTERIOR_NODE, true) | (FIXEDKEY_INTERIOR_NODE, false) => {
                 for i in 0..n {
-                    self.records(be_i32(b, 5 + (key + 4) * i + key)?, key, fixed, out)?;
+                    self.walk(be_i32(b, 5 + (key + 4) * i + key)?, key, fixed, out, seen, depth + 1)?;
                 }
             }
             (LONGKEY_FIXED_REC_NODE, true) | (FIXEDKEY_FIXED_REC_NODE, false) => {
@@ -280,8 +311,11 @@ impl Schema {
                 sparse.push(c as usize);
             }
         }
-        // getPackedFieldNames: key name first, ';'-separated
-        let names: Vec<String> = names.split(';').skip(1).map(str::to_string).collect();
+        // parseNames (StringTokenizer: empty names dropped): key name first, ';'-separated
+        let names: Vec<String> = names.split(';').filter(|n| !n.is_empty()).skip(1).map(str::to_string).collect();
+        if names.len() != types.len() {
+            return Err(format!("schema: {} field names for {} column types", names.len(), types.len()));
+        }
         Ok(Schema { version, key, names, types, sparse })
     }
 
@@ -496,5 +530,39 @@ impl Db {
                 })
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A corrupt file is an error: a B-tree node that is its own child, a chained buffer in
+    /// blocks too small for its index, schema names that do not match the columns.
+    #[test]
+    fn corrupt_is_an_error() {
+        // a buffer file of `blocks` blocks of `block` bytes with `node` (type, then a count or
+        // size, then an id) in buffer `id`
+        let file = |block: usize, blocks: usize, id: usize, node: (u8, i32, i32)| {
+            let mut data = vec![0u8; blocks * block];
+            data[..8].copy_from_slice(&BUFFER_FILE_MAGIC.to_be_bytes());
+            data[16..20].copy_from_slice(&1i32.to_be_bytes());
+            data[20..24].copy_from_slice(&(block as i32).to_be_bytes());
+            let b = (id + 1) * block + BUFFER_PREFIX;
+            data[b] = node.0;
+            data[b + 1..b + 5].copy_from_slice(&node.1.to_be_bytes());
+            if let Some(d) = data.get_mut(b + 13..b + 17) {
+                d.copy_from_slice(&node.2.to_be_bytes());
+            }
+            BufferFile::new(data).unwrap()
+        };
+        // a long-key interior node whose one child is itself
+        let f = file(32, 2, 0, (LONGKEY_INTERIOR_NODE, 1, 0));
+        assert!(f.records(0, 8, None, &mut Vec::new()).unwrap_err().contains("corrupt B-tree"));
+        // a chained buffer index node in 12-byte blocks (7 bytes a buffer)
+        let f = file(12, 3, 1, (CHAINED_BUFFER_INDEX_NODE, 100, 0));
+        assert!(f.chained(1).unwrap_err().contains("too small"));
+        assert!(Schema::parse(0, LONG_TYPE as i8, &[INT_TYPE], "Key;A;B;").is_err());
+        assert_eq!(Schema::parse(0, LONG_TYPE as i8, &[INT_TYPE], "Key;A;").unwrap().names, ["A"]);
     }
 }
