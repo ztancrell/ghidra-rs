@@ -521,7 +521,35 @@ impl Analysis {
             an.funcs = extra.iter().copied().filter(|a| an.insns.contains_key(a)).collect();
             an.bodies.retain(|f, _| an.funcs.contains(f));
         }
-        an.noreturn = body_noreturn;
+        let known = std::mem::replace(&mut an.noreturn, body_noreturn);
+        // Repair Flow Damage (ClearFlowAndRepairCmd, on by default) is not ported: Java clears the
+        // flow from the fallthrough of a call of a function the no-return analyzer found, where
+        // an instruction is and no flow refers to it (findRepairLocations; its NOP skip and the
+        // external entry points not counted here)
+        let flows_to: HashSet<u32> = an
+            .insns
+            .values()
+            .filter(|i| matches!(i.flow, Flow::Jump | Flow::CondJump | Flow::Call))
+            .filter_map(|i| i.target)
+            .chain(an.tables.values().flatten().copied())
+            .collect();
+        let damaged = an
+            .insns
+            .iter()
+            .filter(|&(&a, i)| {
+                let fall = a + i.len as u32;
+                i.flow == Flow::Call
+                    && !an.fallthru.contains(&a)
+                    && i.target.is_some_and(|t| t != fall && an.noreturn.contains(&t) && !known.contains(&t))
+                    && an.insns.contains_key(&fall)
+                    && !flows_to.contains(&fall)
+            })
+            .count();
+        if damaged > 0 {
+            an.warnings.push(format!(
+                "not ported: Repair Flow Damage (ClearFlowAndRepairCmd): {damaged} calls of a function found non-returning fall into instructions no flow refers to, which Java clears"
+            ));
+        }
         an.body_owner = HashMap::new();
         // a thunk's purge is its thunked function's (FunctionDB.getStackPurgeSize)
         let thunked: Vec<(u32, u32)> = an.thunk_of.keys().map(|&f| (f, an.thunked_end(f))).collect();

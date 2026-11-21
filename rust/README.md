@@ -1,3 +1,4 @@
+| Repair Flow Damage warning | unchanged | unchanged | unchanged | (in the next row's run) |
 | removing a function re-flows no other body | unchanged | unchanged | unchanged | unchanged |
 | setNoFallThru only on the calls of the addresses found | unchanged | unchanged | unchanged | unchanged |
 # ghidra-rs
@@ -5951,6 +5952,12 @@ f64489e2e1); each finding checked against the Java first. The rows rerun with
   ...), one no longer: 0x5442e9 (`MOV; JMP 0x7f57a5`) loses the `RET` at 0x7f57a5, which plain
   discovery's body lacks too and the store's re-flow had added; 11 `data` lines and 1 `func`
   line moved with them. No function outside M500's counts moved, no silent is new.
+- A run-time warning counts where Java's Repair Flow Damage (ClearFlowAndRepairCmd, on by
+  default, not ported) would clear flow: a call of a function the no-return analyzer found
+  (not an import's flag, not a call that keeps its fallthrough) whose fallthrough holds an
+  instruction no jump, call or switch case refers to; findRepairLocations' NOP skip and external
+  entries are not counted. mercs2: 308 such calls with plain discovery, 317 with Java's list.
+  Output unchanged (plain and Java-list facts byte-identical).
 
 ## Speed
 
