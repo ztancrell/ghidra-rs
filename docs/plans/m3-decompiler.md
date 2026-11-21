@@ -2226,6 +2226,17 @@ with `TIMEOUT` 400 it is identical in all three. "All outputs identical" one hig
 lines; `stack-m500` stack SSA 318 -> 312. New prelude `cksum` 3436140667 (30,084 functions).
 See `rust/README.md`, "Full pass of `analysis-queue`".
 
+### Integration `int8` (2026-11-20)
+
+`ref123`, `gap-javafacts2`, `gap-plain2`, `demangler`, `gdt` and `abi-ledger2` merged on `int8`
+(from master b6b02b2ca5). Against the 12.3 reference, M500 identical of 499 (loud, silent):
+Java facts 488 (11, 0), Java's list 413 (18, 68), plain 246 (120, 133), store 391 (21, 87);
+M8 7, 4, 2, 4 of 7. No function went from identical on its branch to silent; the new silents
+were loud there. The 57 M8 bars equal `analysis-queue-83ee6a86e6.summary` on a new prelude
+(`cksum` 3963700924, 29,768 functions). Not run: M500 bars, the full pass, the Mac. Superseded:
+the branches' own 12.3 numbers as the current measure. See `rust/README.md`, "Integration
+`int8`".
+
 ## Running stages in parallel
 
 Strict chain first: S0 → S1a → S1b → S2. After S2 the work fans out. Under the cap of two

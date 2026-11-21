@@ -5782,6 +5782,8 @@ are 0x401890, 0x4173a0, 0x429b80, 0x494400, 0x4b6f5a, 0x4c0070, 0x5c64a0, 0x6b02
 `gap-javafacts2` the one silent left is 0x5c64a0: ghidra-rs prints the call `_BinkPause@8`
 (the facts' name), Java `_BinkPause_8`; not traced. The nine 12.2 silents of that branch are
 gone, 0x5d9a20 with them (so not GP-7115 in the port: 12.3 prints what ghidra-rs prints).
+Superseded: the `gap-javafacts2` 3dfa4de4d6 and `gap-plain2` 20fac3a4db rows as the current
+numbers; see "Integration `int8`" below for the merged build against 12.3.
 
 ### The Microsoft demangler, branch `demangler` (2026-11-20)
 
@@ -5861,6 +5863,52 @@ A "not ported" failure is loud everywhere: Function ID's and the plate comment's
 comments`, an error that stops `--functions` (`scripts::demangle`) and Function ID
 (`fid::apply`, the `FID_conflict:` base name); a genuine failure (Java's `null` or
 `MDException`) keeps the raw name, as Ghidra does.
+
+### Integration `int8` (2026-11-20)
+
+`int8` merges, from master b6b02b2ca5 and in this order, `ref123` (57d7ac31ac), `gap-javafacts2`
+(ba1b0c37cd), `gap-plain2` (f64489e2e1), `demangler` (7e4c3ea5c3), `gdt` (cd4945f9c8) and
+`abi-ledger2` (ae9e0d6f84). Conflicts: only in docs (this file and DESIGN.md: two new
+sections each side, both kept) and `lib.rs` (`pub mod gdt` and `pub mod mdmang`, both kept).
+`cargo fmt --check`, `cargo clippy --release --all-targets -- -D warnings` clean; `cargo test
+--release` 177 passed, 0 failed.
+
+Measured on the merged binary against the 12.3 reference (`GHIDRA_RS` the `int8` build,
+`GHIDRA_REF` the main checkout's `rust/target/ref123`, desktop, `JOBS` 10, `TIMEOUT` 120),
+M500 identical of 499 (loud, silent), M8 of 7:
+
+| row | `int8` M500 | `int8` M8 | the row's branch, M500 | M8 |
+|---|---|---|---|---|
+| Java facts | 488 (11, 0) | 7 (0, 0) | `gap-javafacts2` ba1b0c37cd, 12.3: 488 (11, 0) | 7 |
+| own facts, Java's list | 413 (18, 68) | 4 (1, 2) | `gap-plain2` f64489e2e1, 12.2: 395 (30, 74) | 4 (2, 1) |
+| own facts, plain | 246 (120, 133) | 2 (1, 4) | `gap-plain2` f64489e2e1, 12.2: 238 (128, 133) | 2 (2, 3) |
+| own facts, store | 391 (21, 87) | 4 (1, 2) | `gap-plain2` f64489e2e1, 12.2: 377 (33, 89) | 4 (2, 1) |
+
+(the `gap-plain2` f64489e2e1 numbers are against 12.2, its `gap-plain2/r3` outputs; that
+build was not measured against 12.3.) Every function silent on `int8` and not silent on the
+row's branch was loud there, none identical: the decompiler fixes of `gap-javafacts2` (the
+deindirect restart for a locked prototype, `StringSequence`, the join logical value in
+SubvariableFlow) and the demangler's plate comment take away the error that hid a difference
+in the own facts. With Java's facts all of them are identical.
+
+- Java's list: 0x4b8e50, 0x6c3cb0 (were deindirect restart), 0x5d9a20 (was `StringSequence`;
+  one of the 10 functions whose Java C changed from 12.2 to 12.3); M8 0x9eec5e.
+- plain: 0x4b8e50, 0x4c1230, 0x6c3cb0 (deindirect restart), 0x5a9b80, 0x5d9a20
+  (`StringSequence`); M8 0x9eec5e.
+- store: 0x4b8e50, 0x5d84e0, 0x5d8680, 0x5d87c0, 0x6c3cb0 (deindirect restart), 0x5cee30
+  (subflow join logical value), 0x5d9a20 (`StringSequence`); M8 0x9eec5e.
+- 0x9eec5e (`__security_check_cookie`, all three rows) was loud ("the comments are not
+  derived"); with the demangler's comment it prints, and differs in the flow: the own facts
+  do not make `___report_gsfailure` no-return. Not traced further.
+
+The archive: `gdt-protos` of `windows_vs12_32.gdt` is byte-identical to
+`ref123/win32.protos`; `analyze --facts` with `--gdt` that archive and with `--protos` that file
+(plain discovery) write byte-identical facts.
+
+M8 bars (`CORPORA=m8 bars.sh`, `JOBS` 10, a new prelude from the `int8` analysis: cksum
+3963700924, 29,768 functions): all 57 lines equal those of
+`baselines/analysis-queue-83ee6a86e6.summary` (the newest) and of `m3-int7-249c32cf94.summary`.
+Not run: M500 bars, the full 133-pair pass, the Mac.
 
 ## Speed
 

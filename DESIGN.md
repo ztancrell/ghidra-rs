@@ -532,6 +532,15 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    own facts `comments` 1,151 -> 1,532 of 1,613 equal, `underived` 9,053 -> 8,609. Applying the
    demangled signatures and namespaces is not ported. See `rust/README.md`, "The Microsoft
    demangler".
+   Integration `int8` (2026-11-20: `ref123`, `gap-javafacts2`, `gap-plain2`, `demangler`, `gdt`,
+   `abi-ledger2` on master b6b02b2ca5), against the 12.3 reference, M500 identical of 499 (loud,
+   silent): Java facts 488 (11, 0), Java's list 413 (18, 68), plain 246 (120, 133), store 391
+   (21, 87); M8 7, 4, 2, 4 of 7. Every new silent was a loud on its branch (an error the
+   decompiler fixes or the demangler's comment took away); 0x9eec5e in M8 is one. `gdt-protos`
+   byte-identical to the 12.3 export, `--gdt` and `--protos` facts identical; the 57 M8 bars as
+   `analysis-queue` on a new prelude (29,768 functions; `analysis-queue` 30,084). Superseded:
+   the per-branch 12.3 numbers above as the current measure. See `rust/README.md`, "Integration
+   `int8`".
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
