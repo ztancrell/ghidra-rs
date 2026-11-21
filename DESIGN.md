@@ -492,6 +492,24 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    CreateFunctionCmd): M500 381 (loud 30, silent 88), plain 208 (silent 163); plain purges
    differing from Java 12.2 on auto-analysis functions 1,806 -> 761. Superseded: 347 and 189
    above, and "Shared Return Calls ... per batch" in "Left".
+   Plain discovery's 163 M500 silents traced (branch `gap-plain`, 2026-11-20): 85 are discovery's, and 63 of
+   those come from mercs2's pipeline edits, not auto-analysis (Java 12.2's plain analysis agrees with
+   ghidra-rs there). Jumps through SecuROM slots (`JMP [slot]`) are disassembled and made thunks, as
+   ConstantPropagationAnalyzer and the Reference analyzer: plain 208 -> 226 (silent 163 -> 145); Java's
+   list 381 (silent 88) and M8 unchanged. Superseded: plain 208 above. See `rust/README.md`,
+   "Plain discovery's silents".
+   No-return functions from call-site evidence (branch `gap-plain2`, 2026-11-20): FindNoReturnFunctionsAnalyzer
+   ported in place of the body rule; 0x5dc8f0, newly silent with Java's list on `gap-plain`, fixed: Java's list
+   382 (silent 87), plain 226 (silent 145) and M8 unchanged. See `rust/README.md`, "No-return functions
+   from call-site evidence".
+   The store row (branch `gap-plain2`, 2026-11-20): plain discovery with mercs2's edit scripts replayed
+   on a fresh store (`edit`, then `analyze --store --facts`): M500 365 (loud 33, silent 101), M8 4 / 7.
+   `Store::apply` now re-flows the bodies that jump or fall into a removed function, as the live edit
+   does. See `rust/README.md`, "The store row".
+   Slots read only by a computed jump or call get no pointer (OperandReferenceAnalyzer's INDIRECTION
+   skip): Java's list 382 -> 395 (silent 87 -> 74), plain 226 -> 238 (145 -> 133), store 365 -> 377
+   (101 -> 89), M8 unchanged, no new silent. Superseded: the 365 / 101 above. See `rust/README.md`,
+   "Slots read only by a computed jump or call".
    Full pass 2026-11-19 (83ee6a86e6, the tree of 82b968548a, desktop and Mac): 133 / 133 pairs, silent 0 in every pair, none
    worse than `m3-int7` once 0x4c48d0 (a reference timeout at 120 s in `pmd`, `r5slock`,
    `r5dtlocksv` M500) is run with `TIMEOUT` 400. Superseded: "Not run: the full pass, the Mac" for

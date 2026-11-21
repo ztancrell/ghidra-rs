@@ -206,7 +206,8 @@ What discovery does, after Ghidra's analyzers:
   task at its priority, and the first task of the lowest priority runs next. Discovery's
   analyzers in it: Disassemble Entry Points (200, the seeds), Function Start Search (402),
   Function Start Search After Data (898, after the tables), Create Address Tables (899), X86
-  Function Callee Purge (500, on each batch of new functions) and Shared Return Calls (398, on
+  Function Callee Purge (500, on each batch of new functions), jumps through a pointer and
+  their thunks (596, see "Plain discovery's silents" below) and Shared Return Calls (398, on
   each batch, as Java; superseded (2026-11-19): a last task at 10000 on all functions). The non-returning
   functions run after the queue (Java: 302). Without the purge analyzer the facts are byte for
   byte the ones of the loop it replaces (both function sets, 2026-11-18); with it see "Ghidra's
@@ -672,6 +673,12 @@ applied right after discovery and the constants pass of `--abi-callers` and `--f
 after it, on a program `edit` never proved the store on. Bodies are computed again from the
 flow at the end, so a function re-flows whenever a neighbour is created or removed or a flag
 changes; only a `body` record pins one, and `edit reflow <addr>` drops that record.
+`Store::apply` re-flows the bodies with an instruction that jumps or falls into a function a
+`function ... remove` record removes, as the live `Project::remove_function` does (those jumps
+are no tail calls now, their owners flow on); `ghidra-rs/tests/store.rs`
+(`removing_a_function_re_flows_what_falls_into_it`). Superseded: only bodies holding a record's
+address were re-flowed, and `fold-slot-fragments` on mercs2 failed with "the store does not
+reproduce the edits ... 0x00416c5d".
 
 What fails instead of being skipped: a first line other than version 2's, a store made on
 another binary or seed set (`analyze --store` and `edit` both check; note that
@@ -776,7 +783,7 @@ are not ported.
 Java's three `switch` rows of the fold report have no counterpart: ghidra-rs's own switch
 recovery already has those jumps' targets. ghidra-rs flags far more functions no-return than
 Ghidra (every body without a return); 0x00401740, the one the Java script was written for, is
-not flagged here.
+not flagged here. Superseded (2026-11-20): the no-return rule is now FindNoReturnFunctionsAnalyzer's call-site evidence (see "No-return functions from call-site evidence"); the no-return flag of functions in both plain discovery and Java 12.2 differs in 14 where it did in 52.
 
 The function set in `.text` against the Java project's facts (37635 functions):
 
@@ -5358,8 +5365,8 @@ Java's sites that set a body, and what is ported:
 |---|---|
 | CreateFunctionCmd.createFunction, subtractBodyFromExisting | ported (`create_function`, `subtract_existing`) |
 | CreateFunctionCmd.resolveThunk, CreateThunkFunctionCmd.applyTo | ported for a direct `JMP` at the entry (getSimpleFlow), `resolve_thunk` |
-| CreateFunctionCmd.fixupFunctionBody | ported (`fixup_body`); its thunk case only for a target that is a function already and a new body that overlaps no other, and not where the target's thunk chain leads back to the function (setThunkedFunction refuses a cycle). A thunk chain past 16 thunks and a no-return rule still finding functions after 4 rounds print a warning (`analyze`, `edit`); on mercs2 the 4-round warning shows with both function sets, the chain one does not |
-| FindNoReturnFunctionsAnalyzer.fixCallingFunctionBody | ported for this analysis's no-return rule (`find_noreturn`): callers of a new non-returning function are fixed up |
+| CreateFunctionCmd.fixupFunctionBody | ported (`fixup_body`); its thunk case only for a target that is a function already and a new body that overlaps no other, and not where the target's thunk chain leads back to the function (setThunkedFunction refuses a cycle). A thunk chain past 16 thunks prints a warning (`analyze`, `edit`); on mercs2 it does not show. Superseded (2026-11-20): the 4-round no-return warning went with the body rule |
+| FindNoReturnFunctionsAnalyzer (added, detectNoReturn, checkNonReturningIndicators, targetOnlyCallsNoReturn, setNoFallThru, fixCallingFunctionBody) | ported (`find_noreturn`), run after each batch of functions made where Java's instruction analyzer runs on instructions added; not ported: "Repair Flow Damage" (below), a function made at a target that is none, the call-fixup exception. Superseded (2026-11-20): only fixCallingFunctionBody, for a rule of this analysis on the bodies |
 | CreateFunctionCmd with findEntryPoint (setBody of a given body) | not ported: no ported analyzer makes functions that way |
 | CallFixupAnalyzer.fixCallingFunctionBody | not ported (no call-fixup analyzer here) |
 | EntryPointAnalyzer (recreate after the do-later set) | not ported (the do-later set is not modelled) |
@@ -5400,7 +5407,7 @@ decides from call-site evidence against a threshold, never from a body without a
 wrong mark here is never cleared. Since 2026-11-19 a conditional jump out of the body and a
 fallthrough out of it (into another function's body) count as returning too, so a function cut
 by one made inside it is not marked for falling into it; numbers in "Shared Return Calls per
-batch" below.
+batch" below. Superseded (2026-11-20): this body rule is gone; see "No-return functions from call-site evidence" below.
 
 Against Java 12.2 (`j12body.sh`, `rust/target/aq/` of this worktree; functions in both lists;
 "auto" = `functions-analysis.csv`):
@@ -5464,6 +5471,155 @@ The no-return rule with conditional jumps and fallthroughs out of the body count
 and 218 (34) -> 54 (24); bodies differing 824 (677) -> 756 (674) and 2,358 (2,002) -> 2,288
 (1,997); purges differing 846 (761) -> 824 (761) and 2,316 (1,568) -> 2,294 (1,568); M500 381
 and 208, M8 4 / 7 and 2 / 7 unchanged.
+
+#### Plain discovery's silents and the SecuROM slot thunks, branch `gap-plain` (2026-11-20)
+
+The 163 M500 silents of own facts with plain discovery (master f4881c73da: 208 / 499, loud 128,
+silent 163), by their outcome in the other rows: 85 are identical with Java's function list (a
+discovery cause), 64 silent with it and identical or loud with Java's facts (the facts' own
+causes, above), 13 silent in all three rows, 1 loud in both. The 85 by the C lines that differ,
+checked against Java 12.2's plain auto-analysis (`rust/target/aq-java/purges.txt`) and the
+mercs2 project's facts (table in `rust/target/gap-plain/causes.txt` of the branch):
+
+| cause | silents | example |
+|---|---|---|
+| mercs2's pipeline, no analyzer: a callee (or its JMP target) is a function in Java 12.2's plain analysis and here, not in the mercs2 project (fold-slot-fragments, RecoverFunctions and the audits) | 43 | 0x402d60 (0x407b60 -> 0x517180) |
+| mercs2's pipeline: a pointer in data to a function of the mercs2 project that Java 12.2's plain analysis does not make | 20 | 0x405c40 (0xba8958 -> 0x40b580) |
+| `JMP [slot]` thunks into `.securom` (below) | 18 | 0x417230 |
+| the slot typed a pointer here, undefined in Java (only an INDIRECTION reference) | 2 | 0x48cc40 |
+| a pointer in data to a Java 12.2 function | 1 | 0x495db0 |
+| not traced | 1 | 0x4919f0 |
+
+So 63 of the 85 cannot be closed by porting analyzers: Java's own plain analysis agrees with
+ghidra-rs there. They need mercs2's edits (`analyze --store`) or a reference made from Java's
+plain analysis.
+
+**Jumps through a pointer** (`Analysis::slot_jumps`, a Function analyzer at
+REFERENCE_ANALYSIS - 4 = 596, ConstantPropagationAnalyzer's place). A SecuROM slot in `Sdata`
+(executable, writable) holds the entry of a `.securom` stub: `0x4172e0 JMP [0x24d7e8c]` ->
+0x2562160. Java's propagation reads the slot (VarnodeContext; "trust writable memory" is on by
+default), makes a COMPUTED_JUMP reference and disassembles the target
+(ConstantPropagationContextEvaluator.evaluateReference); the Reference analyzer then makes a
+function whose entry is such a jump a thunk, and its target a function
+(OperandReferenceAnalyzer, CreateThunkFunctionCmd.getThunkedAddr: getSimpleFlow over the flow
+reference). Java 12.2's project has both references (INDIRECTION to the slot, COMPUTED_JUMP to
+the target). Here the task disassembles each such target of the batch's bodies and makes the
+thunks after the task's new functions. Not ported (`ponytail` note): the slot's value is the
+image's (Java's propagation would see a store to the slot earlier in the flow), only a direct
+slot, and the thunk step runs at 596 where Java's Reference analyzer runs at 600 on code added.
+`thunks disagree` now counts a one-instruction `JMP [slot]` body to a function as a one-jump body.
+
+| | before | after |
+|---|---|---|
+| plain: functions both / Java 12.2 only / here only | 28,742 / 1,906 / 271 | 29,431 / 1,217 / 284 |
+| own facts, plain discovery, M500 | 208 (loud 128, silent 163) | 226 (loud 128, silent 145) |
+| own facts, plain discovery, M8 | 2 / 7 (loud 2, silent 3) | unchanged |
+| own facts, Java's function list, M500 | 381 (loud 30, silent 88) | 381 (loud 30, silent 88): 0x5d9cb0 fixed, 0x5dc8f0 newly silent (the purge of `thunk_FUN_0256c420`, now its target's) |
+| own facts, Java's function list, M8 | 4 / 7 (loud 2, silent 1) | unchanged |
+
+The 18 fixed are the 18 of the table; none newly missing in the plain row. The Java-facts row
+reads no ghidra-rs analysis and was not rerun (461, loud 22, silent 16 on the base). The 13
+functions made here that Java 12.2 does not make were not traced. Not run: the full pass, the
+Mac, the shadow check.
+
+#### No-return functions from call-site evidence, branch `gap-plain2` (2026-11-20)
+
+0x5dc8f0, newly silent with Java's function list on `gap-plain` (above), calls
+`thunk_FUN_0256c420` (0x6a4870, `JMP [0x24d6f7c]`, made a thunk of 0x256c420 by the slot-jump
+port). 0x256c420 is `PUSH 0x256c42a; CALL 0x1b950a0` and then bytes that are no code; 0x1b950a0
+is `JMP [0x2299230]`, a thunk of 0x2ab0000 (`JMP 0x2ab0028`). In Java 12.2's plain analysis
+(`rust/target/aq-java/purges.txt`) all three are no-return, so 0x256c420's body ends at the
+call (0x256c420-0x256c429) and its purge is unknown. Here 0x2ab0028 (no RET, but a fallthrough
+out of its body) was not marked by the body rule, the body ran on to `RET 0x7b` at 0x256c456
+and the thunk took that purge of 123. Java marks 0x1b950a0 from its call sites (a function or
+no instruction right after the call, on at least 3 of them), and the mark goes to the thunked
+function.
+
+`find_noreturn` is now FindNoReturnFunctionsAnalyzer: the calls of the instructions it has not
+looked at; at each, checkNonReturningIndicators from the fallthrough on while instructions fall
+through (a function starts there or inside the instruction, no instruction, a read or write from
+earlier in the calling function or a call refers to it, an address table, an INT3); 3 call sites
+with such evidence (the default threshold) or a target that only calls non-returning functions
+(targetOnlyCallsNoReturn, SimpleBlockModel's walk) mark the target, a second pass if some stayed
+suspicious. A mark on a thunk is its thunked function's, and so every thunk of it (FunctionDB);
+callers' bodies are fixed up as before. Not ported (`ponytail` note): it runs after each batch of
+functions made, where Java's instruction analyzer runs at DISASSEMBLY + 2 on instructions added,
+so it may see other functions; Repair Flow Damage; a function made at a target that is none; the
+call-fixup exception.
+
+| | before | after |
+|---|---|---|
+| no-return flag, functions in plain discovery and Java 12.2: here only / Java only | 33 / 19 | 2 / 12 |
+| own facts, Java's function list, M500 | 381 (loud 30, silent 88) | 382 (loud 30, silent 87): 0x5dc8f0 fixed, nothing else moved |
+| own facts, Java's function list, M8 | 4 / 7 (loud 2, silent 1) | unchanged |
+| own facts, plain discovery, M500 | 226 (loud 128, silent 145) | unchanged, the same misses |
+| own facts, plain discovery, M8 | 2 / 7 (loud 2, silent 3) | unchanged |
+
+Superseded: "0x5dc8f0 newly silent" in the table above. The 12 Java-only no-return functions
+(0x401740 among them, the one ClearFalseNoReturn was written for) were not traced. Not run: the
+Java-facts row (reads no ghidra-rs analysis), the full pass, the Mac, the shadow check.
+
+#### The store row: plain discovery with mercs2's edits, branch `gap-plain2` (2026-11-20)
+
+A third own-facts row: plain discovery, then mercs2's `analysis_pipeline.sh` edit scripts
+replayed on a fresh store in its order (`edit --new-store export-bindings <csv> --recover`,
+`recover-functions`, `audit-recovered-functions --remove-empty`, `fold-slot-fragments` with
+`build/functions-original.csv` and `build/slot-rewrites.csv`, `add-relocated-entries
+config/securom_functions.csv`, `clear-false-noreturn`), then `analyze --store <store> --protos
+<win32.protos> --facts <out>` and `ghidra-diff.sh` with `FACTS=<out>`. The run scripts are
+`rust/target/gap-plain2/store.sh` and `rows.sh` (not kept in the repo). Store: 24,083 records
+(19,320 `function`, 2,468 `override`, 1,451 `body`, 810 `thunk`, 34 `code`), 44,772 functions;
+recover-functions 16,513 created, fold-slot-fragments 2,159 removed and 1,431 refit in 2 rounds,
+add-relocated-entries 43, clear-false-noreturn 0 cleared. Each `edit` takes 60 to 70 s, `analyze
+--store` 86 s. `fold-slot-fragments` needed the `Store::apply` fix above.
+
+| row (own facts) | M500 identical (loud, silent) | M8 |
+|---|---|---|
+| Java's function list | 382 (30, 87) | 4 / 7 (loud 2, silent 1) |
+| plain discovery | 226 (128, 145) | 2 / 7 (loud 2, silent 3) |
+| plain discovery with the store | 365 (33, 101) | 4 / 7 (loud 2, silent 1) |
+
+The store row's 101 silents: 82 are silent with Java's function list too (77 of those also
+with plain discovery); 17 are functions the store creates (all 17 have a `function ... create`
+record: RecoverFunctions, ExportBindings `--recover`), where the own facts give stack locals
+(`local_c`) and mercs2's project has none, since its scripts create those functions without
+analysis (Java prints `fStack_c`); 2 (0x40ad80, 0x442c90) are silent with plain discovery and
+identical or loud with Java's function list.
+
+#### Slots read only by a computed jump or call get no pointer, branch `gap-plain2` (2026-11-20)
+
+The 87 M500 silents with Java's function list, by the record kind that makes each identical when
+Java's records of that kind replace the own ones (`rust/target/gap-plain2/swap.sh`, run on those 87
+only): `data` 38, Java's whole facts only (no single kind) 12, `func` with the stack variables 8,
+`override` 5, `func` 4, stack variables 3, `func` with the purge 2; 15 stay silent with Java's
+facts. Of the 38 `data` cases, 15 were a pointer (`PTR_FUN_024dd2e4`) where Java has an undefined
+`DAT_` at a SecuROM slot that only `JMP [slot]` thunks read. Java 12.2's plain analysis (dumped from
+`gap-row3-java/proj`) has only INDIRECTION references to those slots. OperandReferenceAnalyzer
+skips such a reference before its string and pointer checks ("assume someone else will handle this
+correctly": a jump or call instruction, and the target has no read or write reference,
+`hasDataAccessReferences`). The slots Java makes pointers also have a DATA reference (`PUSH slot`
+in `.securom`). `Exporter::reference_data` now skips a target whose references are all the memory
+operand of a computed jump or call, unless an immediate refers to it as well. JMP-thunk slots in
+`.text`: Java makes 38 pointers, the own facts made 746 before this change.
+
+| row (own facts) | M500 before | M500 after | M8 |
+|---|---|---|---|
+| Java's function list | 382 (30, 87) | 395 (30, 74) | 4 / 7, unchanged |
+| plain discovery | 226 (128, 145) | 238 (128, 133) | 2 / 7, unchanged |
+| plain discovery with the store | 365 (33, 101) | 377 (33, 89) | 4 / 7, unchanged |
+
+No row has a new silent function. A first try without the immediate made 0x6ee4c0 silent (slot
+0x24db55c, which `PUSH 0x24db55c` at 0x25612bb also refers to). Superseded: the store row's 365 / 101
+in the section above.
+
+Causes left among the `data` cases, not fixed: 7 are SecuROM counters in `.securom`
+(0x256facf and others). Here they lie inside instructions decoded after a call of a no-return
+function (0x256f870 `PUSH; CALL 0x1b950a0`, then `ADD [EAX],AL` runs). Java clears those
+instructions with FindNoReturnFunctionsAnalyzer's Repair Flow Damage (ClearFlowAndRepairCmd, about
+1,000 lines, not ported), so they are data there. Others: a size Java gives (`undefined4` at
+0x198c758, here `undefined`), labels outside the image (`DAT_9fe1234a`, `DAT_00000004`: 5),
+`ThreadLocalStoragePointer` (1). Not run: the full pass, the Mac, the shadow check. Measured
+against Java 12.2's outputs, not 12.3.
 
 #### Full pass of `analysis-queue` (2026-11-19)
 

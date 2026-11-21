@@ -25,7 +25,7 @@
 
 use crate::analysis::{Analysis, Flow, Image, Ins};
 use crate::sleigh::Sleigh;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 
 const MAGIC: &str = "ghidra-rs-store";
@@ -251,8 +251,25 @@ impl Store {
         touched.extend(self.functions.keys());
         let mut redo: BTreeSet<u32> =
             self.functions.keys().chain(self.bodies.keys()).chain(self.thunks.keys()).copied().collect();
+        // and the bodies that jump or fall into a function removed (`Project::remove_function`:
+        // those jumps are no tail calls now, their owners flow on)
+        let removed: HashSet<u32> = self.functions.iter().filter(|(_, &c)| !c).map(|(&f, _)| f).collect();
+        let into: HashSet<u32> = an
+            .insns
+            .iter()
+            .filter(|(&a, i)| {
+                removed.contains(&(a + i.len as u32))
+                    || refs_from(an, a, i).iter().any(|(t, r)| r.is_jump() && removed.contains(t))
+            })
+            .map(|(&a, _)| a)
+            .collect();
         redo.extend(
-            an.bodies.iter().filter(|(_, b)| touched.iter().any(|a| b.binary_search(a).is_ok())).map(|(&f, _)| f),
+            an.bodies
+                .iter()
+                .filter(|(_, b)| {
+                    b.iter().any(|a| into.contains(a)) || touched.iter().any(|a| b.binary_search(a).is_ok())
+                })
+                .map(|(&f, _)| f),
         );
         for f in redo {
             if an.funcs.contains(&f) && an.insns.contains_key(&f) {
