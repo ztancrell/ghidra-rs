@@ -74,50 +74,17 @@ fn template_arg(s: &str) -> Option<(String, &str)> {
     simple.iter().find(|(k, _)| s.starts_with(k)).map(|(k, v)| (v.to_string(), &s[k.len()..]))
 }
 
-/// Ghidra's qualified display name for an exported MSVC symbol (no parameters).
-pub fn demangle(sym: &str) -> String {
-    // __fastcall C names `@name@N` (Function ID's names)
-    if let Some((name, n)) = sym.strip_prefix('@').and_then(|s| s.rsplit_once('@')) {
-        if !name.is_empty() && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) {
-            return name.to_string();
-        }
-    }
-    let Some(r) = sym.strip_prefix('?') else { return sym.to_string() };
-    // compiler-generated helpers (Function ID's names); a global one has no class
-    let helpers = [
-        ("?_E", "`vector_deleting_destructor'"),
-        ("?_G", "`scalar_deleting_destructor'"),
-        ("?_L", "`eh_vector_constructor_iterator'"),
-        ("?_M", "`eh_vector_destructor_iterator'"),
-    ];
-    if let Some((x, name)) = helpers.iter().find_map(|(k, n)| Some((r.strip_prefix(k)?, n))) {
-        return match qualified(x) {
-            Some((cls, _)) if !cls.is_empty() && !x.starts_with('@') => format!("{cls}::{name}"),
-            _ => name.to_string(),
-        };
-    }
-    let special = |code: &str, r: &str| {
-        let (cls, _) = qualified(r)?;
-        let last = cls.rsplit("::").next().unwrap_or(&cls).to_string();
-        let base = last.split('<').next().unwrap_or(&last).to_string();
-        let name = match code {
-            "0" => base,
-            "1" => format!("~{base}"),
-            "_F" => "`default_constructor_closure'".to_string(),
-            _ => return None,
-        };
-        Some(format!("{cls}::{name}"))
-    };
-    let out = if let Some(x) = r.strip_prefix("?_F") {
-        special("_F", x)
-    } else if let Some(x) = r.strip_prefix("?0") {
-        special("0", x)
-    } else if let Some(x) = r.strip_prefix("?1") {
-        special("1", x)
-    } else {
-        qualified(r).map(|(n, _)| n)
-    };
-    out.unwrap_or_else(|| sym.to_string())
+/// The name the Demangler analyzer leaves on a function's symbol (`mdmang::microsoft_demangle`
+/// at a function of a 32-bit program; `DemangledObject.applyTo`: its namespaces' and its safe
+/// names, as `getName(true)` shows them), else the symbol's own name (where Java returns `null`
+/// or fails). An error where the conversion is not ported.
+pub fn demangle(sym: &str) -> std::io::Result<String> {
+    let ctx = crate::mdmang::Context { arch: 32, is_function: true };
+    Ok(match crate::mdmang::microsoft_demangle(sym, ctx) {
+        Ok(Some(d)) => d.qualified_name().unwrap_or_else(|| sym.to_string()),
+        Err(e) if e.is_not_ported() => return Err(std::io::Error::other(format!("{sym}: {e}"))),
+        _ => sym.to_string(),
+    })
 }
 
 /// RTTI: vftable address -> owning class, from MSVC CompleteObjectLocators.
@@ -221,9 +188,9 @@ pub fn export_functions(
         // Ghidra's references to code constants (`PUSH offset callback`) are data references too
         let data_refs: usize = body.iter().map(|a| an.insns[a].refs.len() + an.insns[a].code_imms.len()).sum();
         let name = match (exports.get(&f), fid.get(&f)) {
-            (Some(s), _) => demangle(s),
+            (Some(s), _) => demangle(s)?,
             (None, Some(a)) if a.conflict => a.name.clone(),
-            (None, Some(a)) => demangle(&a.name),
+            (None, Some(a)) => demangle(&a.name)?,
             _ => String::new(),
         };
         writeln!(

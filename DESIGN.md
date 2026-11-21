@@ -520,6 +520,13 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    487 (11, 1, 0x5c64a0). Own facts (`gap-plain2`): Java's list 394 -> 400, plain 237 -> 240, store
    376 -> 382. Superseded: the 12.2 numbers above as the measure. See `rust/README.md`, "The 12.3
    reference".
+   The Microsoft demangler on branch `demangler` (2026-11-20, user's decision): `mdmang.rs` ports
+   `MDMang` and the name parts of `MicrosoftDemangler`; MDMangBaseTest's vectors 1,665 / 1,665 (Superseded: 1,664, the extraction mislabelled `testTripleQ0`) of
+   the tests JUnit runs. Wired into Function ID (`NameVersions`, the demangled sets of
+   `MatchNameAnalysis`), the Demangler analyzer's plate comment and the `--functions` names:
+   own facts `comments` 1,151 -> 1,532 of 1,613 equal, `underived` 9,053 -> 8,609. Applying the
+   demangled signatures and namespaces is not ported. See `rust/README.md`, "The Microsoft
+   demangler".
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
@@ -582,7 +589,9 @@ scripts live", decided 2026-11-15 (plain files, see Decided).
   (Ghidra's order of analysis is not ported: its task queue would be the next port; superseded
   2026-11-18: the queue is ported, `queue.rs`, with discovery and the purge in it); `--facts`
   fails without Ghidra's strings model file; a Function ID comment with a mangled name stays
-  `underived` until the demangler is ported.
+  `underived` until the demangler is ported. Superseded (2026-11-20): the demangler is ported
+  (`mdmang.rs`); such a comment is written, and stays `underived` only where a name's
+  conversion is not ported (`rust/README.md`, "The Microsoft demangler").
 - 2026-11-17: Claude's call (1d, "Pieces of symbols"), awaiting the user: where the C++ orders by
   `HighVariable` address (`snipOutputInterference` over reads of several variables of one group),
   ghidra-rs fails loudly instead of guessing the snip order. The order is the C++ allocator's (a

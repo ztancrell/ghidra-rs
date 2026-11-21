@@ -15,7 +15,7 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
 - `ghidra-rs/src/analysis.rs`: PE32 loading and Ghidra-style analysis: disassembly by recursive
   descent, function discovery, switch tables, function bodies, flows and data references.
 - `ghidra-rs/src/scripts.rs`: writers for the ExportFunctions and ExportGaps CSV files, plus
-  RTTI vftables and a small MSVC name demangler.
+  RTTI vftables and (since 2026-11-20) Ghidra's Microsoft demangler, `ghidra-rs/src/mdmang.rs`.
 - `ghidra-rs/src/store.rs`: the project store: a text file of edits (functions, bodies, no-return
   flags, flow overrides, thunk marks) laid over the analysis, and the script primitives that
   edit both (see "Project store and the editing scripts").
@@ -44,6 +44,10 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   databases, and FID's matching and naming.
 - `ghidra-rs/tests/fid.rs`: the FID hash of a known CRT function, and its record in Ghidra's
   databases (skipped when they are not installed).
+- `ghidra-rs/src/mdmang.rs`: Ghidra's Microsoft demangler (`MDMang`) and the name parts of
+  `MicrosoftDemangler` ("The Microsoft demangler").
+- `ghidra-rs/tests/mdmang.rs`, `tests/data/mdmang-vectors.tsv`: MDMangBaseTest's vectors,
+  extracted by `tools/mdmang-vectors.sh`.
 - `ghidra-rs/tests/abi.rs`: register reads and writes (sub-registers as base-register bytes)
   of a few fixed instructions.
 - `build-sla.sh`: builds Ghidra's SLEIGH compiler and compiles `x86-64.sla` and `x86.sla`.
@@ -347,11 +351,14 @@ and writes its results to the `fid` and `name` columns (`ghidra-rs/src/fid.rs`):
   holds, and `FID_conflict:<base name>` when more than one is left (the first of them in
   Java `HashSet` order is the base). Exported functions keep their names and are not marked.
   Names are demangled for the CSV (`@name@4` fastcall names, and `` `vector_deleting_destructor' ``
-  and the other compiler helpers, added to `scripts::demangle`).
+  and the other compiler helpers, added to `scripts::demangle`). Superseded (2026-11-20):
+  `scripts::demangle` is the ported Microsoft demangler's applied name ("The Microsoft
+  demangler" below).
 
 Not ported: the demangled-name variants of MatchNameAnalysis (`demangledNoTemplate`,
 `demangledBaseName`), removing a conflicting label when a later function matches it alone,
-thunks, and the library names in plate comments and bookmarks.
+thunks, and the library names in plate comments and bookmarks. Superseded (2026-11-20): the
+demangled-name variants are ported ("The Microsoft demangler").
 
 Result on 2026-11-12 against the `fid` column of Ghidra's own exports (no new Ghidra run was
 needed):
@@ -4788,7 +4795,9 @@ mangled name the final list is the raw or the underscore-stripped names, whichev
 shorter, so the count can reach 1 only through the demangled sets, and those are dropped
 as soon as one name does not demangle. That holds while the Microsoft demangler demangles no
 name without `?` or `@` (the test `fid.rs` uses for "mangled"), which was not checked in the
-demangler's sources.
+demangler's sources. Superseded (2026-11-20): `fid.rs` demangles every name with the ported
+demangler and ports the demangled sets and "Multiple Matches With Same Base Name" ("The
+Microsoft demangler").
 
 **Against Java** (mercs2, `FUNCS=java`; equal records and their share of Java's; each row adds
 its piece to the rows above it):
@@ -4881,7 +4890,9 @@ What still differs, by cause:
 - data sizes where two accesses disagree (the last one in the order of the functions wins).
 
 Not ported: the demangler (names, namespaces, prototypes and comments of C++ functions: `ns`
-0 of 797, `underived function` and `comments`), switch-case labels, the loader's and RTTI
+0 of 797, `underived function` and `comments`; superseded 2026-11-20: the demangler and its
+comments are ported, the namespaces and prototypes it applies are not, "The Microsoft
+demangler"), switch-case labels, the loader's and RTTI
 structures, a `.gdt` reader, Ghidra's task queue (the order above; superseded 2026-11-18: the queue
 is ported with discovery and the purge in it, "Ghidra's task queue and the purge").
 
@@ -5698,6 +5709,85 @@ are 0x401890, 0x4173a0, 0x429b80, 0x494400, 0x4b6f5a, 0x4c0070, 0x5c64a0, 0x6b02
 `gap-javafacts2` the one silent left is 0x5c64a0: ghidra-rs prints the call `_BinkPause@8`
 (the facts' name), Java `_BinkPause_8`; not traced. The nine 12.2 silents of that branch are
 gone, 0x5d9a20 with them (so not GP-7115 in the port: 12.3 prints what ghidra-rs prints).
+
+### The Microsoft demangler, branch `demangler` (2026-11-20)
+
+`ghidra-rs/src/mdmang.rs` ports `Ghidra/Features/MicrosoftDmang` (`MDMang` and its object
+model: the parser over the mangled characters, with `MDContext`'s back references, and the
+`insert`/`append` printing of `MDParsableItem.toString()`) and the name parts of
+`MicrosoftDemangler` / `MicrosoftDemanglerUtil` (`microsoft_demangle`: the original demangled
+string, `DemangledObject`'s name, demangled name, namespace nodes and calling convention, with
+`MicrosoftDemanglerOptions`' defaults: error on remaining characters, only known patterns, the
+encoded anonymous namespace and no UDT tag for the conversion). Back references share one data
+type (`Rc`) and `MDFunctionType.setFromModifier`, which printing calls, sticks (`Cell`), as in
+Java. A Java runtime exception (a `null` type name, an empty context stack, a negative string
+length) fails the demangle. Data types and C++ objects nested deeper than 200 (`MAX_DEPTH`) fail
+the demangle, where Java recurses until its `StackOverflowError` (a depth set by the JVM stack;
+`AbstractDemanglerAnalyzer` catches it as a failed demangle). The VS2013/VS2015, parse-info
+and genericize variants of `MDMang` are not ported.
+
+**The oracle.** `tools/mdmang-vectors.sh` (awk) extracts the 1,696 calls of `demangleAndTest*`
+of `MDMangBaseTest.java` (mangled input, `mdTruth`, architecture, JUnit status) into
+`ghidra-rs/tests/data/mdmang-vectors.tsv`; `tests/mdmang.rs` runs them as
+`MDBaseTestConfiguration` does (the output against `mdTruth`, and a `.?A` name must give an
+`MDDataType`). Of the 1,665 tests JUnit runs: 1,665 pass. The 23 in
+`MDMangFailingTestCategory` (Ghidra fails them too) fail here; whether this port's output for
+them equals Java's actual output is not checked (Java was not run on them). Of the 8 methods
+JUnit does not run (`@Ignore`, no `@Test`) 5 pass, 3 fail (`testCatch_2`: `__catch$_main$0`
+does not parse; `testLLVMWeakPrefixDefaultXmmSuffix` and `testMangledTypeWithNamespaceSuffix`:
+characters remain, so no `MDDataType` for the latter), as Ghidra's would by the same code paths
+(not run in Java either). Superseded: "1,664 tests JUnit runs" and "9 methods JUnit does not
+run"; the extraction carried the "not run" status of `setUp()` (no `@Test`) into the next
+method, `testTripleQ0`, which JUnit runs.
+
+**Wired.**
+- Function ID (`fid.rs`): `NameVersions.generate` (the full demangled form, the name without
+  its first template arguments, `constructBaseName`) for every matched name, through
+  `DemanglerUtil.demangle(program, name)`'s context (architecture 0, not a function);
+  `MatchNameAnalysis`'s demangled sets, the most optimistic count and name (the threshold, and
+  "Multiple Matches With Same Base Name" with its single label); the plate comment shows each
+  name's demangled form; the `FID_conflict:` base is the demangled `getName()`. A name whose
+  conversion is not ported keeps the function's `underived comments`.
+- The Demangler analyzer's plate comment (`factsout.rs`, `plate_comment`): the original
+  demangled string of a function's export or Function ID name (a function of a 32-bit
+  program), appended to Function ID's comment on its own line unless the comment holds it
+  (`applyPlateCommentOnly`). So `@__security_check_cookie@4` gets `__fastcall
+  __security_check_cookie,4` and `_memset` gets nothing (`memset` is in the comment).
+- `scripts::demangle` (the `--functions` CSV's names) is the analyzer's applied name: the
+  namespaces' and the object's safe names. Where the small demangler had matched it is the
+  same; a `_name` Function ID name is now `name` (Java's `MDObjectC` with `__cdecl`), and a
+  name the port cannot demangle stays raw (the small one guessed a partial name). The CSV was
+  not compared with Ghidra's again.
+
+**Measured** (`facts-own.sh`, plain discovery, against the 12.3 facts; before is this branch's
+build without the wiring, the same analysis):
+
+| kind | before: equal / different / missing / extra | after |
+|---|---|---|
+| `comments` (Java 1,613) | 1,151 / 0 / 462 / 13 | 1,532 / 65 / 16 / 33 |
+| `func` (Java 44,990) | 22,682 / 3,978 / 18,330 / 2,353 | 22,692 / 3,968 / 18,330 / 2,353 |
+| `label` (Java 218,095) | 182,832 / 21,697 / 13,566 / 5,028 | 182,842 / 21,687 / 13,566 / 5,028 |
+| `underived` | 9,053 extra | 8,609 extra |
+
+Of the 65 different comments 59 equal Java's once Java's second comment (`user2`, the PE
+loader's `0x<rva>  <ordinal>  <name>` of an export, not ported) is left out; 5 differ in the
+kind of match and 1 in the matches (Function ID's scores). The 33 extra and 16 missing are
+functions Function ID matches on one side only. Of the 142 distinct demangled names in
+ghidra-rs's comments, 139 appear verbatim in Java's comments; the 3 others are names of matches
+Java does not make.
+
+Not ported (loud or listed): applying the demangled object (`DemangledFunction.applyTo`: the
+namespaces as Ghidra symbols, the signature, return and parameter types, calling convention;
+so a C++ name keeps `underived function` and `ns` stays 0 of 797), `processDataType` (a
+variable of a pointer to `std::nullptr_t` fails as "not ported"), the import names
+(`Func::named` keeps its rules for them), the RTTI class names (`scripts::vftables` keeps its
+own reader), `ensureNameLength`, and Java's `Character.isLetter`/`isDigit` outside ASCII
+(Rust's `is_alphabetic`/`is_numeric` are used). A mangled name with a character past U+FFFF
+fails as "not ported" (Java reads UTF-16 units, a surrogate pair is two; this port reads `char`s).
+A "not ported" failure is loud everywhere: Function ID's and the plate comment's `underived
+comments`, an error that stops `--functions` (`scripts::demangle`) and Function ID
+(`fid::apply`, the `FID_conflict:` base name); a genuine failure (Java's `null` or
+`MDException`) keeps the raw name, as Ghidra does.
 
 ## Speed
 

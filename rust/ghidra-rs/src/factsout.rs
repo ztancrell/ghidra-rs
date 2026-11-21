@@ -630,6 +630,25 @@ impl Exporter<'_> {
     }
 }
 
+/// A function's plate comment: Function ID's (`fid`: `Some(None)` where its demangled names are
+/// not ported), then the Demangler analyzer's of the function's symbol `raw`
+/// (`DemangledObject.applyPlateCommentOnly`: the original demangled string, appended on a line
+/// of its own unless the comment already holds it). `Err` where a part is not derived.
+fn plate_comment(fid: Option<&Option<String>>, raw: Option<&str>) -> Result<Option<String>, ()> {
+    let ctx = crate::mdmang::Context { arch: 32, is_function: true };
+    let demangled = match raw.map(|r| crate::mdmang::microsoft_demangle(r, ctx)) {
+        Some(Err(e)) if e.is_not_ported() => return Err(()),
+        Some(Ok(Some(d))) if !d.original.is_empty() => Some(d.original),
+        _ => None,
+    };
+    Ok(match (fid, demangled) {
+        (Some(None), _) => return Err(()),
+        (Some(Some(c)), Some(d)) if !c.contains(&d) => Some(format!("{c}\n{d}")),
+        (Some(Some(c)), _) => Some(c.clone()),
+        (None, d) => d,
+    })
+}
+
 /// The names of the functions: an export's, Function ID's, a thunk's, or `FUN_<address>`.
 fn name_functions(img: &Image, an: &Analysis, fid: &BTreeMap<u32, Applied>, protos: &Protos) -> BTreeMap<u32, Func> {
     let exports: HashMap<u32, &str> = img.exports.iter().map(|(a, n)| (*a, n.as_str())).collect();
@@ -852,6 +871,7 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         }
     }
     sets.sort();
+    let exports: HashMap<u32, &str> = img.exports.iter().map(|(a, n)| (*a, n.as_str())).collect();
     let entries: Vec<u32> = an.funcs.iter().copied().filter(|f| an.bodies.contains_key(f)).collect();
     for (n, &f) in entries.iter().enumerate() {
         let func = ex.funcs[&f].clone();
@@ -883,21 +903,21 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         if func.underived || (func.import.is_some() && !cdecl && !ex.protos.by_name.contains_key(&func.name)) {
             ex.underived.insert((f, Underived::Function));
         }
-        // Function ID's plate comment; the demangler's comment of a C++ name is not derived
-        match fid.get(&f).map(|a| &a.comment) {
-            Some(Some(text)) if !func.underived => writeln!(
+        // Function ID's plate comment, then the Demangler analyzer's
+        match plate_comment(
+            fid.get(&f).map(|a| &a.comment),
+            exports.get(&f).copied().or(fid.get(&f).map(|a| a.name.as_str())),
+        ) {
+            Ok(Some(text)) => writeln!(
                 out,
                 "comments\t{f:x}\t<commentdb><comment type=\"header\"><addr space=\"ram\" offset=\"0x{f:x}\"/>\
                  <addr space=\"ram\" offset=\"0x{f:x}\"/><text>{}</text></comment></commentdb>",
-                esc(text).replace('\n', "&#10;")
+                esc(&text).replace('\n', "&#10;")
             )?,
-            Some(_) => {
+            Ok(None) => {}
+            Err(()) => {
                 ex.underived.insert((f, Underived::Comments));
             }
-            None if func.underived => {
-                ex.underived.insert((f, Underived::Comments));
-            }
-            None => {}
         }
     }
 
