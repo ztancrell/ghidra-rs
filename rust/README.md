@@ -4207,7 +4207,8 @@ The check, `tools/ghidra-diff.sh <corpus>`: `tools/ghidra/DecompileRef.java` (th
 headless Ghidra on a copy of the mercs2 Ghidra project, opened `-readOnly`; the console side is
 `print C` with default options, from ghidra-rs or, with `ENGINE=ref`, from `decomp_dbg`. The
 Java output is kept under `rust/target/ghidra-ref/java/<corpus>/` (the installed Ghidra is 12.2,
-the sources of this repository 12.3). Summary line: `java finished F / N, identical I / F (loud
+the sources of this repository 12.3; superseded: the reference is now 12.3 built from this
+repository, see "The 12.3 reference" below). Summary line: `java finished F / N, identical I / F (loud
 L, silent S)`.
 
 Results:
@@ -5482,6 +5483,60 @@ in every pair. Lines that moved:
 Every other line equals the baseline. Superseded: "Not run: the full pass, the Mac" in the
 sections of this branch above (the shadow check and the `--functions` / `--gaps` exports are
 still not run).
+
+### The 12.3 reference (2026-11-20)
+
+The Java reference is Ghidra 12.3 built from this repository's source (DESIGN.md, "Decided"
+2026-11-20), not the installed 12.2 (`/opt/ghidra`). The tools take the Ghidra install from
+`GHIDRA` (default `/opt/ghidra`, unchanged) and Java from `JAVA_HOME` or `PATH`; 12.3 needs
+Java 25. `ghidra-diff.sh` also takes the ghidra-rs binary from `GHIDRA_RS` (as `decomp-diff.sh`),
+so another branch's build can be checked without writing into its worktree. The reference
+(main checkout, `rust/target/`; Ghidra refuses a project path with a `.` component):
+
+```
+export GHIDRA=$PWD/rust/target/java123/ghidra_12.3_DEV JAVA_HOME=/usr/lib/jvm/java-25-openjdk
+export PATH=$JAVA_HOME/bin:$PATH GHIDRA_REF=$PWD/rust/target/ref123
+rust/tools/ghidra-facts.sh; rust/tools/ghidra-protos.sh   # proj/ (a copy of mercs2's project), mercs2.facts, win32.protos
+rust/tools/ghidra-diff.sh m8; rust/tools/ghidra-diff.sh m500   # java/m8, java/m500
+```
+
+`proj/` is a copy of `mercs2-decomp/build/ghidra`; 12.3 opens it `-readOnly`, upgrades the
+language (x86 4.9) in memory and discards it on each run, so the copy stays a 12.2 project and
+mercs2's own is never opened. `ref123/java-funcs.csv` is the `func` entries of the facts (Java's
+function list, equal to `gap7/java-funcs.csv`). The plain auto-analysis oracle is
+`ref123/aq/purges.txt` (`DumpPurges.java` on a fresh import of `orig/Mercenaries2.analysis.exe`,
+646 s; project `ref123/aq/proj`). Superseded: `rust/target/aq-java/purges.txt` (12.2) and
+`ghidra-ref/` (12.2) as the reference; both are kept for comparison.
+
+12.2 against 12.3, the Java outputs:
+
+- `mercs2.facts`: 671,558 -> 671,557 lines; 242 `label` names lose a library prefix
+  (`MSVCR80.DLL_malloc` -> `malloc`), the `type_info` namespace record goes, 3 records name
+  it by another id. `win32.protos` is the same file.
+- M8: the C of all 7 functions is the same. M500: 10 of 500 differ: 0x53d340, 0x5e1190,
+  0x63c040, 0x732ef0, 0x741460, 0x746320 (`register0x00000010` -> `register_ESP`, GP-7356);
+  0x47f890, 0x5d58c0 (locals and their types); 0x5d9a20 (an `if` block); 0x4c48d0 fails in
+  both (12.2 a timeout, 12.3 "Response buffer size exceeded").
+- plain auto-analysis: 30,648 -> 30,631 functions, 25 only in 12.2, 8 only in 12.3; of the
+  30,623 in both, 10 differ (purge 3, body size 8). The 12.2 run also had a `TraceCreators.java`
+  pre-script; not checked whether it changes anything.
+
+`ghidra-diff.sh`, M500 identical of 499 (loud, silent), M8 of 7, 12.2 -> 12.3:
+
+| build | row | M500 12.2 | M500 12.3 | M8 |
+|---|---|---|---|---|
+| master b6b02b2ca5 | Java facts | 461 (22, 16) | 469 (22, 8) | 7 / 7 both |
+| `gap-javafacts2` 3dfa4de4d6 | Java facts | 478 (11, 10) | 487 (11, 1) | 7 / 7 both |
+| `gap-plain2` 20fac3a4db | own facts, Java's list | 394 (30, 75) | 400 (30, 69) | 4 / 7 both |
+| `gap-plain2` 20fac3a4db | own facts, plain | 237 (128, 134) | 240 (128, 131) | 2 / 7 both |
+| `gap-plain2` 20fac3a4db | own facts, store | 376 (33, 90) | 382 (33, 84) | 4 / 7 both |
+
+(the `gap-plain2` 12.2 numbers are that worktree's `gap-plain2/r2.log`, the same binary.)
+Superseded: master's 461 (loud 22, silent 16) as the Java-facts row; with 12.3 the silents
+are 0x401890, 0x4173a0, 0x429b80, 0x494400, 0x4b6f5a, 0x4c0070, 0x5c64a0, 0x6b0260. On
+`gap-javafacts2` the one silent left is 0x5c64a0: ghidra-rs prints the call `_BinkPause@8`
+(the facts' name), Java `_BinkPause_8`; not traced. The nine 12.2 silents of that branch are
+gone, 0x5d9a20 with them (so not GP-7115 in the port: 12.3 prints what ghidra-rs prints).
 
 ## Speed
 

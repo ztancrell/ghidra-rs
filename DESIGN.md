@@ -494,6 +494,12 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    worse than `m3-int7` once 0x4c48d0 (a reference timeout at 120 s in `pmd`, `r5slock`,
    `r5dtlocksv` M500) is run with `TIMEOUT` 400. Superseded: "Not run: the full pass, the Mac" for
    this branch (`rust/README.md`).
+   The 12.3 reference made (2026-11-20, `rust/target/ref123/`, `GHIDRA` names the install): Java
+   12.2 and 12.3 print different C for 10 of 500 M500 functions, none of M8. Java-facts row M500:
+   master 461 (loud 22, silent 16) -> 469 (loud 22, silent 8); `gap-javafacts2` 478 (11, 10) ->
+   487 (11, 1, 0x5c64a0). Own facts (`gap-plain2`): Java's list 394 -> 400, plain 237 -> 240, store
+   376 -> 382. Superseded: the 12.2 numbers above as the measure. See `rust/README.md`, "The 12.3
+   reference".
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
