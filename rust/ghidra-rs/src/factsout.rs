@@ -126,6 +126,9 @@ struct Target {
     /// a write among the first 100 references (`MappedEntry.getMutabilityOfAddress`)
     write: bool,
     refs: u32,
+    /// of `refs`, the memory operands of a computed jump or call through them (`JMP [slot]`:
+    /// Ghidra's INDIRECTION reference, neither a read nor a write)
+    indirect: u32,
 }
 
 /// Data the Reference analyzer defines at a reference target.
@@ -385,6 +388,14 @@ impl Exporter<'_> {
                 continue;
             }
             if holding(&defs, t).is_some() {
+                continue;
+            }
+            // a computed jump or call through it and no other reference (a read, a write, an
+            // immediate such as `PUSH slot`): "assume someone else will handle this correctly"
+            // (`hasDataAccessReferences`)
+            // ponytail: Java skips at the first reference it comes to, so an immediate it looks
+            // at after the jump would not count there; here any other reference does
+            if targets.get(&t).is_some_and(|x| x.indirect > 0 && x.indirect == x.refs) && !code_refs.contains(&t) {
                 continue;
             }
             let bytes = &sec.data[(t - sec.addr) as usize..];
@@ -783,6 +794,7 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         for &r in &i.refs {
             let t = targets.entry(r).or_default();
             t.refs += 1;
+            t.indirect += u32::from(i.slot == Some(r) && matches!(i.flow, Flow::JumpInd | Flow::CallInd));
             for &(_, size, write) in sized.iter().filter(|x| x.0 == r) {
                 if (1..=8).contains(&size) {
                     t.size = size;

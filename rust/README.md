@@ -5580,6 +5580,41 @@ record: RecoverFunctions, ExportBindings `--recover`), where the own facts give 
 analysis (Java prints `fStack_c`); 2 (0x40ad80, 0x442c90) are silent with plain discovery and
 identical or loud with Java's function list.
 
+#### Slots read only by a computed jump or call get no pointer, branch `gap-plain2` (2026-11-20)
+
+The 87 M500 silents with Java's function list, by the record kind that makes each identical when
+Java's records of that kind replace the own ones (`rust/target/gap-plain2/swap.sh`, run on those 87
+only): `data` 38, Java's whole facts only (no single kind) 12, `func` with the stack variables 8,
+`override` 5, `func` 4, stack variables 3, `func` with the purge 2; 15 stay silent with Java's
+facts. Of the 38 `data` cases, 15 were a pointer (`PTR_FUN_024dd2e4`) where Java has an undefined
+`DAT_` at a SecuROM slot that only `JMP [slot]` thunks read. Java 12.2's plain analysis (dumped from
+`gap-row3-java/proj`) has only INDIRECTION references to those slots. OperandReferenceAnalyzer
+skips such a reference before its string and pointer checks ("assume someone else will handle this
+correctly": a jump or call instruction, and the target has no read or write reference,
+`hasDataAccessReferences`). The slots Java makes pointers also have a DATA reference (`PUSH slot`
+in `.securom`). `Exporter::reference_data` now skips a target whose references are all the memory
+operand of a computed jump or call, unless an immediate refers to it as well. JMP-thunk slots in
+`.text`: Java makes 38 pointers, the own facts made 746 before this change.
+
+| row (own facts) | M500 before | M500 after | M8 |
+|---|---|---|---|
+| Java's function list | 382 (30, 87) | 395 (30, 74) | 4 / 7, unchanged |
+| plain discovery | 226 (128, 145) | 238 (128, 133) | 2 / 7, unchanged |
+| plain discovery with the store | 365 (33, 101) | 377 (33, 89) | 4 / 7, unchanged |
+
+No row has a new silent function. A first try without the immediate made 0x6ee4c0 silent (slot
+0x24db55c, which `PUSH 0x24db55c` at 0x25612bb also refers to). Superseded: the store row's 365 / 101
+in the section above.
+
+Causes left among the `data` cases, not fixed: 7 are SecuROM counters in `.securom`
+(0x256facf and others). Here they lie inside instructions decoded after a call of a no-return
+function (0x256f870 `PUSH; CALL 0x1b950a0`, then `ADD [EAX],AL` runs). Java clears those
+instructions with FindNoReturnFunctionsAnalyzer's Repair Flow Damage (ClearFlowAndRepairCmd, about
+1,000 lines, not ported), so they are data there. Others: a size Java gives (`undefined4` at
+0x198c758, here `undefined`), labels outside the image (`DAT_9fe1234a`, `DAT_00000004`: 5),
+`ThreadLocalStoragePointer` (1). Not run: the full pass, the Mac, the shadow check. Measured
+against Java 12.2's outputs, not 12.3.
+
 #### Full pass of `analysis-queue` (2026-11-19)
 
 `bars-queue.sh` on 83ee6a86e6 (the tip then; the same tree is 82b968548a since a merge message got its trailers), desktop and Mac, `TIMEOUT` 120; summary (with the rerun)
