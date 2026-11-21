@@ -36,6 +36,8 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   an object's vtable, resolved through a value stored via a symbolic register; whole-function
   propagation, where a vtable stored to the stack survives a call to a `RET 4` function and a
   join; ExportFunctions counting a computed call in `callees` and `callers`.
+- `ghidra-rs/src/gdt/`: Ghidra's packed data-type archives (`.gdt`) read in place, read-only, and
+  the import prototypes made from them (`--gdt`, `gdt-protos`).
 - `ghidra-rs/src/factsout.rs`: `analyze --facts`: the facts of ghidra-rs's own analysis in the
   format of `tools/ghidra/ExportFacts.java` (stage S10, slices 2 and 3), for `load facts`.
 - `ghidra-rs/src/strings.rs`: Ghidra's ASCII Strings analyzer (the string search and the
@@ -4543,7 +4545,8 @@ The facts of slice 1 come from a Java Ghidra project. This slice writes the same
 ghidra-rs's own analysis of the binary, so `load facts` needs no project:
 
 ```sh
-ghidra-rs analyze <pe32> --facts <out> [--protos <file>] [--seeds <csv> | --functions-from <csv>]
+ghidra-rs analyze <pe32> --facts <out> [--protos <file> | --gdt <archive>] [--seeds <csv> | --functions-from <csv>]
+ghidra-rs gdt-protos <archive.gdt> <out>   # the same file as ghidra-protos.sh, from the archive
 tools/facts-own.sh            # mercs2: writes rust/target/facts/mercs2.facts and compares it
 tools/ghidra-protos.sh        # once per Ghidra version: $GHIDRA_REF/win32.protos
 ```
@@ -4591,6 +4594,52 @@ does (`ApplyFunctionSignatureCmd`, source IMPORTED) and records what
 `DecompileCallback.getExternalRef` answers: `$GHIDRA_REF/win32.protos`, 22,825 prototypes and
 17,957 data-types, 41 MB, for every 32-bit Windows program. It reads no program and no project
 of the user's. Without `--protos` every import is `underived`.
+Superseded (2026-11-20): "Not done here"; the archive is now read in place, see "The archive
+read in Rust (`--gdt`)" below. The export stays as the reference it is checked against.
+
+**The archive read in Rust (`--gdt`, `ghidra-rs/src/gdt/`).** `analyze --facts --gdt <archive>`
+takes the archive itself; `ghidra-rs gdt-protos <archive> <out>` writes the prototype file
+`ghidra-protos.sh` makes. Nothing is ever written to the archive.
+- `gdt/db.rs`, the database read-only: the packed file (`ItemDeserializer`: Java object-stream
+  header, zip entry `FOLDER_ITEM`, deflate), the buffer file (`LocalBufferFile`, version 1),
+  `DBParms`, the master table (`TableRecord`), schemas (`Schema`, sparse columns), long-key and
+  fixed-key B-tree nodes (`LongKeyInteriorNode`, `FixedRecNode`, `VarRecNode`, the `FixedKey*`
+  nodes), records and big records (`DBRecord`, `SparseRecord`, `ChainedBuffer`). Not ported, and
+  failing by name: variable-length keys (`VarKey*` nodes; the `DataTypeManager` options table),
+  index tables, XOR-obfuscated chained buffers, field types past `FIXED_10`.
+- `gdt/mod.rs`, the data types (`DataTypeManagerDB`'s adapters, by column name, versions checked):
+  built-ins V0, calling conventions V0, categories V0, composites V6 and components V0 (with
+  `BitFieldDBDataType` ids), typedefs V2, pointers V2, arrays V1, enums and values V1, function
+  definitions V2 and parameters V1. Another version, an unknown table, auto-named typedefs or
+  default settings fail by name. `windows_vs12_32.gdt` has 22,825 function definitions, 6,065
+  composites, 9,441 typedefs, 18,114 pointers, 379 arrays, 32,504 enums, 16 built-ins.
+- `gdt/protos.rs`, what `ExportArchiveProtos.java` writes, simulated: each definition applied as
+  `ApplyFunctionSignatureCmd` does (`settleCDataType`, unknown conventions left unknown, the
+  stack purge), the program's data-type keys in `DataTypeManagerDB.resolve`'s order (a typedef's
+  base first; a composite or function definition first, its pointers last through the
+  post-resolve queue, smallest key first), symbol ids (function, then each parameter), the
+  storage of `x86win.cspec`'s `__stdcall`, `__cdecl` and `__fastcall` (`ParamListStandard`
+  fallback, `ParamEntry.getAddrBySlot`, the hidden return pointer), the symbol order of
+  `LocalSymbolMap`'s `HashMap`, and `PcodeDataTypeManager`'s, `FunctionPrototype`'s and
+  `HighSymbol`'s encoders. Written into the code, not read: the registers and pentries of
+  `x86win.cspec` (a `ponytail:` note names the upgrade) and the ids of the built-ins `long`,
+  `uchar` and `ulong`, which `facts_coretypes.xml` lacks (the order of Java's class search).
+  The archive's `default` convention (id 1) is the cspec's default model: model `default`,
+  `modellock`, `__stdcall`'s storage (`getCallingConvention("default")`,
+  `FunctionPrototype.grabFromFunction`); `windows_vs12_32.gdt` has no definition with it, so
+  this is not checked against Java. `__thiscall` (which `x86win.cspec` has: `ECX`,
+  `thisbeforeretpointer`), a `__return_storage_ptr__` parameter and other built-in classes
+  fail by name. Superseded: before, a `__thiscall` definition silently got model `unknown`
+  and `__stdcall`'s storage, and `default` got `unknown`. A corrupt archive is an error, not a
+  crash: a B-tree with a cycle or deeper than 64, lengths and sizes past the file, block sizes
+  too small for a chained buffer, a data buffer of another node type, schema names that do not
+  match the columns. Duplication: `fid.rs` has its own small buffer-file and B-tree reader for
+  the `.fidbf` files; it is left as it is.
+  The archive's types are not put in `decomp/types.rs`: that store is the C++ decompiler's
+  type factory and is filled from this XML by `facts.rs` as before.
+- Result: `gdt-protos` of `windows_vs12_32.gdt` is byte-identical to the 12.3 Java export
+  (`rust/target/ref123/win32.protos`, 40,783 lines, 41 MB), in 1.4 s. The test `gdt::tests`
+  checks the table counts and a slice of the export.
 
 **Stack variables** (`Exporter::locals`, `Analysis::flow_walk`): a port of
 `NewFunctionStackAnalysisCmd` with its defaults (locals, no parameters) on the constant
