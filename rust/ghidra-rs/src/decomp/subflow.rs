@@ -1038,6 +1038,50 @@ impl Replacement {
         v.consume | ((1u64 << self.bitsize) - 1) == mask
     }
 
+    /// `getReplacementAddress` in a join (`Address::renormalize`, little-endian
+    /// `AddrSpaceManager::renormalizeJoinAddress`): the `size` bytes `sa` bytes above the least
+    /// significant end of join record `join`, as a piece when one piece holds them, else as a
+    /// join of the truncated pieces.
+    fn join_replacement(fd: &mut Funcdata, arch: &Arch, join: u64, sa: u32, size: u32) -> Result<(Space, u64)> {
+        if arch.sleigh.big_endian {
+            return err("subflow: renormalizeJoinAddress on a big-endian target is not ported");
+        }
+        let Some(pieces) = usize::try_from(join).ok().and_then(|i| fd.joins.get(i)).cloned() else {
+            return err("subflow: join address not covered by a join record");
+        };
+        // JoinRecord::getEquivalentAddress: the piece holding byte `off` (from the least
+        // significant end, the last piece) and the byte's offset in it
+        let equivalent = |off: u32| {
+            let mut small = off;
+            for (pos, p) in pieces.iter().enumerate().rev() {
+                if small < p.2 {
+                    return Some((pos, small));
+                }
+                small -= p.2;
+            }
+            None
+        };
+        let (Some((pos1, trunc1)), Some((pos2, trunc2))) = (equivalent(sa), equivalent(sa + size - 1)) else {
+            return err("subflow: join address range not covered");
+        };
+        if pos1 == pos2 {
+            let (space, off, _) = pieces[pos1];
+            // `!addr1.isConstant()` (space 0 is the constant space): a constant piece goes on to
+            // the join of one piece in the C++
+            if space == 0 {
+                return err("subflow: renormalizeJoinAddress of a constant piece is not ported");
+            }
+            return Ok((Space::Sleigh(space), off + u64::from(trunc1)));
+        }
+        let mut new = pieces[pos2..=pos1].to_vec();
+        if let Some(last) = new.last_mut() {
+            last.1 += u64::from(trunc1);
+            last.2 -= trunc1;
+        }
+        new[0].2 -= pieces[pos2].2 - trunc2 - 1;
+        Ok((Space::Join, fd.join_pieces(new)?))
+    }
+
     /// Port of `SubvariableFlow::replaceInput`: an input being shrunk moves to a temporary,
     /// so the new input does not overlap it.
     fn replace_input(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, uniq: u32) -> Result<VarnodeId> {
@@ -1072,10 +1116,12 @@ impl Replacement {
         let mut repl = if self.use_same_address(fd, vn, mask) {
             // getReplacementAddress: the bytes of the logical value within the container
             let v = fd.vn(vn);
-            if v.space == Space::Join {
-                return err("subflow: a logical value in a join varnode is not ported");
-            }
-            let (space, off) = (v.space, v.offset + (leastsigbit_set(mask) / 8) as u64);
+            let sa = (leastsigbit_set(mask) / 8) as u32;
+            let (space, off) = if v.space == Space::Join {
+                Self::join_replacement(fd, arch, v.offset, sa, self.flowsize)?
+            } else {
+                (v.space, v.offset + u64::from(sa))
+            };
             if is_input {
                 self.g.vars[rvn.0].vn = Some(Self::replace_input(fd, arch, vn, uniq)?);
             }

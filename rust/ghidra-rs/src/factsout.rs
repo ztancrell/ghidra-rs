@@ -126,6 +126,9 @@ struct Target {
     /// a write among the first 100 references (`MappedEntry.getMutabilityOfAddress`)
     write: bool,
     refs: u32,
+    /// of `refs`, the memory operands of a computed jump or call through them (`JMP [slot]`:
+    /// Ghidra's INDIRECTION reference, neither a read nor a write)
+    indirect: u32,
 }
 
 /// Data the Reference analyzer defines at a reference target.
@@ -387,6 +390,18 @@ impl Exporter<'_> {
             if holding(&defs, t).is_some() {
                 continue;
             }
+            // a computed jump or call through it and no other reference (a read, a write, an
+            // immediate such as `PUSH slot`): "assume someone else will handle this correctly"
+            // (`hasDataAccessReferences`). Java's guards hold here: subroutinesEnabled is on by
+            // default; isUndefinedStuff needs undefined data at the target, and the only data here
+            // are pointers and strings, a target inside one skipped above; doneSubTest holds a
+            // target inside an instruction (skipped above, `insn_at`) or one tested before, and
+            // `checked` visits a target once
+            // ponytail: Java skips at the first reference it comes to, so an immediate it looks
+            // at after the jump would not count there; here any other reference does
+            if targets.get(&t).is_some_and(|x| x.indirect > 0 && x.indirect == x.refs) && !code_refs.contains(&t) {
+                continue;
+            }
             let bytes = &sec.data[(t - sec.addr) as usize..];
             let within = |refs: &BTreeSet<u32>, len: u32| refs.range(t + 1..t.saturating_add(len)).next().is_some();
             let free = |defs: &BTreeMap<u32, Def>, len: u32| {
@@ -619,6 +634,25 @@ impl Exporter<'_> {
     }
 }
 
+/// A function's plate comment: Function ID's (`fid`: `Some(None)` where its demangled names are
+/// not ported), then the Demangler analyzer's of the function's symbol `raw`
+/// (`DemangledObject.applyPlateCommentOnly`: the original demangled string, appended on a line
+/// of its own unless the comment already holds it). `Err` where a part is not derived.
+fn plate_comment(fid: Option<&Option<String>>, raw: Option<&str>) -> Result<Option<String>, ()> {
+    let ctx = crate::mdmang::Context { arch: 32, is_function: true };
+    let demangled = match raw.map(|r| crate::mdmang::microsoft_demangle(r, ctx)) {
+        Some(Err(e)) if e.is_not_ported() => return Err(()),
+        Some(Ok(Some(d))) if !d.original.is_empty() => Some(d.original),
+        _ => None,
+    };
+    Ok(match (fid, demangled) {
+        (Some(None), _) => return Err(()),
+        (Some(Some(c)), Some(d)) if !c.contains(&d) => Some(format!("{c}\n{d}")),
+        (Some(Some(c)), _) => Some(c.clone()),
+        (None, d) => d,
+    })
+}
+
 /// The names of the functions: an export's, Function ID's, a thunk's, or `FUN_<address>`.
 fn name_functions(img: &Image, an: &Analysis, fid: &BTreeMap<u32, Applied>, protos: &Protos) -> BTreeMap<u32, Func> {
     let exports: HashMap<u32, &str> = img.exports.iter().map(|(a, n)| (*a, n.as_str())).collect();
@@ -783,6 +817,7 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         for &r in &i.refs {
             let t = targets.entry(r).or_default();
             t.refs += 1;
+            t.indirect += u32::from(i.slot == Some(r) && matches!(i.flow, Flow::JumpInd | Flow::CallInd));
             for &(_, size, write) in sized.iter().filter(|x| x.0 == r) {
                 if (1..=8).contains(&size) {
                     t.size = size;
@@ -840,6 +875,7 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         }
     }
     sets.sort();
+    let exports: HashMap<u32, &str> = img.exports.iter().map(|(a, n)| (*a, n.as_str())).collect();
     let entries: Vec<u32> = an.funcs.iter().copied().filter(|f| an.bodies.contains_key(f)).collect();
     for (n, &f) in entries.iter().enumerate() {
         let func = ex.funcs[&f].clone();
@@ -871,21 +907,21 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         if func.underived || (func.import.is_some() && !cdecl && !ex.protos.by_name.contains_key(&func.name)) {
             ex.underived.insert((f, Underived::Function));
         }
-        // Function ID's plate comment; the demangler's comment of a C++ name is not derived
-        match fid.get(&f).map(|a| &a.comment) {
-            Some(Some(text)) if !func.underived => writeln!(
+        // Function ID's plate comment, then the Demangler analyzer's
+        match plate_comment(
+            fid.get(&f).map(|a| &a.comment),
+            exports.get(&f).copied().or(fid.get(&f).map(|a| a.name.as_str())),
+        ) {
+            Ok(Some(text)) => writeln!(
                 out,
                 "comments\t{f:x}\t<commentdb><comment type=\"header\"><addr space=\"ram\" offset=\"0x{f:x}\"/>\
                  <addr space=\"ram\" offset=\"0x{f:x}\"/><text>{}</text></comment></commentdb>",
-                esc(text).replace('\n', "&#10;")
+                esc(&text).replace('\n', "&#10;")
             )?,
-            Some(_) => {
+            Ok(None) => {}
+            Err(()) => {
                 ex.underived.insert((f, Underived::Comments));
             }
-            None if func.underived => {
-                ex.underived.insert((f, Underived::Comments));
-            }
-            None => {}
         }
     }
 

@@ -82,7 +82,8 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   far as that is reachable. Old games and mercs2 stay the first user and the test bed. Still no
   GUI. How it is pursued:
   - Knowledge is reused as data, never rewritten: Ghidra's processor specs (`.sla`, `.pspec`,
-    `.cspec`), Function ID databases and (not started) data-type archives are read as they are.
+    `.cspec`), Function ID databases and data-type archives (`.gdt`, `rust/ghidra-rs/src/gdt/`) are
+    read as they are.
   - Engines are ported, not features: the instruction decoder, the analysis core and the
     decompiler, each checked against Ghidra's own output. Java Ghidra and the C++ decompiler stay
     the oracle; parity first, improvements behind options (the 2026-11-12 decision).
@@ -187,7 +188,11 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    identical, and the last three missing `violation` rows (0x84af20 at 0x41d7be, 0x41d834,
    0x675611) are found. On branch `constprop` (whole-function constant propagation, see
    milestone 2): 98.8% identical against the reference of mercs2 f14e5c4, and `CALL EAX` at
-   0x73b4d1 resolves.
+   0x73b4d1 resolves. Ledger (2026-11-20, ghidra-rs b6b02b2ca5, `rust/tools/abi-ledger.csv`):
+   all 1,076 rows of the shadow diff are in it; no row has ghidra-rs `ok`/`(none)` where the
+   truth is `violation`, but 39 true call sites are missing on our side (undecoded code, vtable
+   slots, SecuROM sections) and 92 rows where we are the looser side are still `unknown` or
+   `unverified`, so the bar to switch is not met; the swapped sweeps have not started.
 3. Decompilation: a Rust decompiler, checked against Ghidra's C++ one.
    Plan: `docs/plans/m3-decompiler.md` (stages, reference checks, decisions).
    S0 (harness) done on branch `m3-s0`: the reference `decomp_dbg` builds with the `print raw`
@@ -457,6 +462,8 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    function changed; the mercs2 shadow check is byte-identical to `m3-int6`'s; `mercs2-exports.sh --compare` 4
    identical, 2 call-contexts the same references in another order, 0x00401780 not identical (one reference more),
    as on the export branch. Not run: M500, the full pass. See `rust/README.md`, "Integration `m3-int7`".
+   Java-facts gap (2026-11-20, branch `gap-javafacts`, M500 identical of 499): 461 (loud 22, silent 16) -> 467 (loud 23, silent 9), M8 7 / 7, the 57 M8 bars as `analysis-queue`. Fixed: `void` is the size-0 TypeVoid (3 silent), a function symbol covers its facts size of 2 to 8 bytes (`FunctionSymbol::consumeSize`; 2 silent, 1 silent now loud), `isString` takes the empty string (1 silent). Of the 9 silent left, 8 are reference-version differences: `/opt/ghidra` is 12.3 and its decompiler lacks GP-7356 (`register0x00000010` for `register_ESP`) and GP-7474 (`_BinkPause_8`); the repo C++ replaying Java's debug XML (`DecompileRef.java` with `DECOMP_DEBUG_DIR`) prints what ghidra-rs prints. The ninth (0x47f890, variable numbering) is open. Superseded: the 461 / 16 counts above.
+   Java-facts gap, continued (2026-11-20, branch `gap-javafacts2`, M500 identical of 499): 467 (loud 23, silent 9) -> 469 (loud 21, silent 9), M8 7 / 7. The deindirect restart is ported: `ActionDeindirect` records the call as an override (`Override::insertDeindirect`) and asks for a restart when the callee does not return, is inlined, or has a locked prototype the call cannot take; the `universal` group (`ActionRestartGroup`, at most 1 restart) clears the function (`clearAnalysis`) and runs again, and the flow makes the call direct (`Override::applyIndirect`). The restart starts from the prototype the decompile started with, where the C++ clears only the unlocked inputs and output of the one it has. Of the 9 functions that stopped there, 2 are identical; 7 stop at later not-ported paths: a call to a locked varargs prototype 4, a logical value in a join varnode (subflow) 2, a data-type needing resolution in `setcasts` 1. 0x47f890 is a reference-version difference too: decomp_dbg built from this repo's C++, on Java's debug XML with Java's options, prints `auStack_82 [2]` where Java prints `uStack_90` and `unaff_EDI`, as ghidra-rs does; so all 9 silent are reference-version differences. Correction: `/opt/ghidra` is 12.2 (its application.properties) and this repo's source is 12.3. Superseded: the 467 / 23 counts, "`/opt/ghidra` is 12.3" and "0x47f890 is open" above. Then a logical value in a join varnode (`SubvariableFlow::getReplacementAddress` with `renormalizeJoinAddress`, little-endian) is ported: 469 (loud 21, silent 9) -> 470 (loud 20, silent 9), M8 7 / 7; 0x5cee30 is identical, 0x5d8680 and 0x5d87c0 now stop at a call to a locked varargs prototype, which 7 functions stop at. 0x4098c0 stops at type propagation into a union. Superseded: the 469 / 21 counts. Then a call to a locked varargs prototype is ported (`funcLinkInput` with `initActiveInput` and the fixed position of each locked parameter, `sortFixedPosition` in `buildInputFromTrials`; `lateRestriction` refuses to give a varargs call a non-varargs prototype, as `isCompatible` does, and a varargs call taking a varargs prototype stays loud), and the name recommendations stay for a restart (the C++ keeps `nameRecommend`; the restart lost `local_80` of 0x6c3cb0): 470 (loud 20, silent 9) -> 473 (loud 16, silent 10), M8 7 / 7, the M8 bars unchanged (57 lines). 0x4b8e50, 0x5d84e0 and 0x5d87c0 are identical; 0x5d8680 stops at StringSequence, 0x5e66c0 at `getTypePartialStruct`, 0x74d520 at type propagation into a struct. 0x6c3cb0 is newly silent and no version difference (the repo C++ on Java's debug XML prints Java's C): in the pass after the restart the C++ gives the COPYs in the split return blocks the global's types (`char`, `float`) where ghidra-rs keeps `undefined1` / `undefined4`, so ghidra-rs prints `DAT_014e0432 = 1` for `'\x01'` three times; the first passes agree, and keeping the global scope's symbols over the restart did not change it. Superseded: the 470 / 20 counts. Then the global scope keeps its symbols over a restart (`Funcdata::clear` clears the local scope only) and a type-locked data symbol of an unknown data-type is size-locked (`Symbol::checkSizeTypeLock`), so `ActionNameVars` gives it the type of its high variable (`overrideSizeLockType`) and the varnodes of the pass after the restart take that type from the symbol (`setSymbolProperties`, the global scope before the facts): 473 (loud 16, silent 10) -> 474 (loud 16, silent 9), M8 7 / 7, the M8 bars unchanged (57 lines); 0x6c3cb0 is identical. Superseded: the 473 / 10 counts and "0x6c3cb0 is newly silent" above. Then `StringSequence` is ported up to its validity (the constructor: `collectCopyOps`, `checkInterference`, `formByteArray`); a COPY that roots no sequence of four characters in an array of the symbol is left alone, a valid one and a symbol of a struct or union stay loud (`StringSequence::transform` is not ported): 474 (loud 16, silent 9) -> 478 (loud 11, silent 10), M8 7 / 7, the M8 bars unchanged (57 lines). 0x5a9b80, 0x5bed50, 0x5d8680 and 0x740a90 are identical. 0x5d9a20 is newly silent and a reference-version difference: decomp_dbg built from this repo's C++, on Java's debug XML, prints what ghidra-rs prints (early returns where Java nests if / else); which 12.3 change it is was not traced (GP-7115, which splits out `BlockIfNoExit`, is a candidate). Superseded: the 474 / 16 counts. On the 12.3 reference (`rust/target/ref123/`, Ghidra 12.3 built from this repository, `GHIDRA` names the install) the row is 487 (loud 11, silent 1: 0x5c64a0), M8 7 / 7. Superseded: the 478 / 10 counts (12.2) as the measure. With Java's facts loaded, name tokens (function, variable, type, field and label names, not constants) print as Java's `PrettyPrinter` prints them through `IllegalCharCppTransformer` (`DecompileResults.getDecompiledFunction`; a namespace prefix, printed by `emitSymbolScope` as syntax, is kept): `_BinkPause@8` -> `_BinkPause_8`, 488 (loud 11, silent 0), M8 7 / 7; without facts names print as the C++ console prints them (M8 bars unchanged, 57 lines). A non-ASCII letter in a name fails loudly (`Character.isLetter` is not ported). `lateRestriction` is ported for every prototype a deindirected call takes, locked or not, with `FuncProto::isCompatible` (`ProtoModel::isCompatible`: the facts' `unknown` model is compatible with the default; both outputs locked compare storage and data-type; extrapop; varargs, where an unlocked call may take a varargs prototype; call fixup; no-return), so an unlocked callee that is not compatible restarts as in the C++, no longer copied; a varargs prototype onto a call still recovering its inputs fails loudly (`collectUnlockedTrials`), one onto a call not recovering them restarts. A call fixup no longer stands for `isInline` (no prototype is inline: the facts refuse the flag); a prototype with its own effect or likely-trash list is refused by the facts. Java-facts row on 12.3 unchanged: 488 (loud 11, silent 0), M8 7 / 7; M8 bars unchanged. A restart keeps the prototype as the pass before left it (model, extrapop, flags, as `Funcdata::clear` keeps `funcp`) and clears only its unlocked output and `returnBytesConsumed` (`FuncProto::clearUnlockedOutput`; a size-locked output back to an unknown data-type, `resetSizeLockType`). Superseded: "the restart starts from the prototype" above. Small fixes after a review: a restart keeps the join records (global in the C++, `AddrSpaceManager`); `renormalizeJoinAddress` in SubvariableFlow fails loudly on a constant piece (`!addr1.isConstant()`) and on a big-endian target; a function record's malformed `size` attribute is a facts error, no longer read as 0; a cached global symbol without a data-type fails loudly instead of skipping the facts. Not done: `findContainer`'s smallest container in `query_global` (functions are still checked before external references) and the split of `string_sequence_valid` (constseq.rs).
    Full pass 2026-11-18 (249c32cf94): 133 / 133 pairs, silent 0 in every pair, none worse than `m3-int6`;
    `r5s`, `r5slock`, `r5dtlocksv` and `pmd` M500 gained identical functions. Superseded: "Not run: M500, the full
    pass". Merged to master with the reference-output cache of `decomp-diff.sh`.
@@ -490,10 +497,64 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    CreateFunctionCmd): M500 381 (loud 30, silent 88), plain 208 (silent 163); plain purges
    differing from Java 12.2 on auto-analysis functions 1,806 -> 761. Superseded: 347 and 189
    above, and "Shared Return Calls ... per batch" in "Left".
+   Plain discovery's 163 M500 silents traced (branch `gap-plain`, 2026-11-20): 85 are discovery's, and 63 of
+   those come from mercs2's pipeline edits, not auto-analysis (Java 12.2's plain analysis agrees with
+   ghidra-rs there). Jumps through SecuROM slots (`JMP [slot]`) are disassembled and made thunks, as
+   ConstantPropagationAnalyzer and the Reference analyzer: plain 208 -> 226 (silent 163 -> 145); Java's
+   list 381 (silent 88) and M8 unchanged. Superseded: plain 208 above. See `rust/README.md`,
+   "Plain discovery's silents".
+   No-return functions from call-site evidence (branch `gap-plain2`, 2026-11-20): FindNoReturnFunctionsAnalyzer
+   ported in place of the body rule; 0x5dc8f0, newly silent with Java's list on `gap-plain`, fixed: Java's list
+   382 (silent 87), plain 226 (silent 145) and M8 unchanged. See `rust/README.md`, "No-return functions
+   from call-site evidence".
+   The store row (branch `gap-plain2`, 2026-11-20): plain discovery with mercs2's edit scripts replayed
+   on a fresh store (`edit`, then `analyze --store --facts`): M500 365 (loud 33, silent 101), M8 4 / 7.
+   `Store::apply` now re-flows the bodies that jump or fall into a removed function, as the live edit
+   does. See `rust/README.md`, "The store row".
+   Slots read only by a computed jump or call get no pointer (OperandReferenceAnalyzer's INDIRECTION
+   skip): Java's list 382 -> 395 (silent 87 -> 74), plain 226 -> 238 (145 -> 133), store 365 -> 377
+   (101 -> 89), M8 unchanged, no new silent. Superseded: the 365 / 101 above. See `rust/README.md`,
+   "Slots read only by a computed jump or call".
    Full pass 2026-11-19 (83ee6a86e6, the tree of 82b968548a, desktop and Mac): 133 / 133 pairs, silent 0 in every pair, none
    worse than `m3-int7` once 0x4c48d0 (a reference timeout at 120 s in `pmd`, `r5slock`,
    `r5dtlocksv` M500) is run with `TIMEOUT` 400. Superseded: "Not run: the full pass, the Mac" for
    this branch (`rust/README.md`).
+   The 12.3 reference made (2026-11-20, `rust/target/ref123/`, `GHIDRA` names the install): Java
+   12.2 and 12.3 print different C for 10 of 500 M500 functions, none of M8. Java-facts row M500:
+   master 461 (loud 22, silent 16) -> 469 (loud 22, silent 8); `gap-javafacts2` 478 (11, 10) ->
+   487 (11, 1, 0x5c64a0). Own facts (`gap-plain2`): Java's list 394 -> 400, plain 237 -> 240, store
+   376 -> 382. Superseded: the 12.2 numbers above as the measure. See `rust/README.md`, "The 12.3
+   reference".
+   The Microsoft demangler on branch `demangler` (2026-11-20, user's decision): `mdmang.rs` ports
+   `MDMang` and the name parts of `MicrosoftDemangler`; MDMangBaseTest's vectors 1,665 / 1,665 (Superseded: 1,664, the extraction mislabelled `testTripleQ0`) of
+   the tests JUnit runs. Wired into Function ID (`NameVersions`, the demangled sets of
+   `MatchNameAnalysis`), the Demangler analyzer's plate comment and the `--functions` names:
+   own facts `comments` 1,151 -> 1,532 of 1,613 equal, `underived` 9,053 -> 8,609. Applying the
+   demangled signatures and namespaces is not ported. See `rust/README.md`, "The Microsoft
+   demangler".
+   Integration `int8` (2026-11-20: `ref123`, `gap-javafacts2`, `gap-plain2`, `demangler`, `gdt`,
+   `abi-ledger2` on master b6b02b2ca5), against the 12.3 reference, M500 identical of 499 (loud,
+   silent): Java facts 488 (11, 0), Java's list 413 (18, 68), plain 246 (120, 133), store 391
+   (21, 87); M8 7, 4, 2, 4 of 7. Every new silent was a loud on its branch (an error the
+   decompiler fixes or the demangler's comment took away); 0x9eec5e in M8 is one. `gdt-protos`
+   byte-identical to the 12.3 export, `--gdt` and `--protos` facts identical; the 57 M8 bars as
+   `analysis-queue` on a new prelude (29,768 functions; `analysis-queue` 30,084). Superseded:
+   the per-branch 12.3 numbers above as the current measure. See `rust/README.md`, "Integration
+   `int8`".
+   Review fixes on `int8` (2026-11-20): targetOnlyCallsNoReturn follows a computed jump's switch
+   cases and computed target (Java skips only INDIRECTION); setNoFallThru and the body
+   fixup act on the calls of the addresses found only, other thunks' earlier calls keep their
+   fallthrough; removing a function re-flows no other body (a script's fixup is a `reflow`
+   record); superseded: "`Store::apply` now re-flows the bodies that jump or fall into a removed
+   function" above; a warning counts the calls whose flow Java's Repair Flow Damage would clear
+   (mercs2 plain 308); the low findings (a CALL_RETURN call has no indicators, the slot thunk's
+   memRefs bound, a warning for isThunk past the entry) leave the rows unchanged; rows unchanged. See `rust/README.md`,
+   "Review fixes on `int8`".
+   Full pass 2026-11-21 (c730b2db7d, the 12.3 `x86.sla`, 8 pairs on the desktop and Mac, 125 on the Mac only):
+   133 / 133 pairs, silent 0 in every pair. Against `analysis-queue`: `r5s-m500` 499 -> 498 (the
+   known reference timeout on 0x6b21e0; it does not finish in 1500 s), `pcd-m500` 493 -> 499 and
+   `pmd-m500` 496 -> 499 (loud 0). The rest are equal apart from "all outputs identical" on 0x4c48d0.
+   Superseded: "Not run: the full pass" for `int8`. See `rust/README.md`, "Full pass of `int8`".
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.
@@ -548,6 +609,10 @@ scripts live", decided 2026-11-15 (plain files, see Decided).
   script made after auto-analysis (no purge, no stack variables); the import prototypes come from a
   one-time headless export of Ghidra's archive, not from a `.gdt` reader in Rust (the 2026-11-13
   decision names data-type archives as data to read in place: not started).
+  Superseded (2026-11-20, the user's decision "port the .gdt reader now"): the archive is read in
+  place (`rust/ghidra-rs/src/gdt/`, `analyze --facts --gdt <archive>`, `ghidra-rs gdt-protos`);
+  its prototype file is byte-identical to the 12.3 Java export, which stays only as the reference
+  (`rust/README.md`, "The archive read in Rust").
   Superseded in part: "a rule ... ported with an approximation is written and measured instead" is
   decided (2026-11-17, see Decided): approximations give way to ports; the other choices stay open.
 - 2026-11-17: Choices of S10 slice 3 made without the user, to confirm or change (`rust/README.md`,
@@ -556,7 +621,9 @@ scripts live", decided 2026-11-15 (plain files, see Decided).
   (Ghidra's order of analysis is not ported: its task queue would be the next port; superseded
   2026-11-18: the queue is ported, `queue.rs`, with discovery and the purge in it); `--facts`
   fails without Ghidra's strings model file; a Function ID comment with a mangled name stays
-  `underived` until the demangler is ported.
+  `underived` until the demangler is ported. Superseded (2026-11-20): the demangler is ported
+  (`mdmang.rs`); such a comment is written, and stays `underived` only where a name's
+  conversion is not ported (`rust/README.md`, "The Microsoft demangler").
 - 2026-11-17: Claude's call (1d, "Pieces of symbols"), awaiting the user: where the C++ orders by
   `HighVariable` address (`snipOutputInterference` over reads of several variables of one group),
   ghidra-rs fails loudly instead of guessing the snip order. The order is the C++ allocator's (a

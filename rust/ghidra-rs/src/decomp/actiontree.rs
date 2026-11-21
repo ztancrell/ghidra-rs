@@ -64,7 +64,12 @@ pub struct ActionTree {
     /// `reset` sets `Funcdata::doublePrecisRecovery` (also when `togglerule` switched it off:
     /// `ActionPool::reset` resets every rule it holds)
     pub(crate) double_precis: bool,
+    /// `ActionRestartGroup::curstart`: the restarts so far
+    restarts: u32,
 }
+
+/// `maxrestarts` of the `universal` group.
+const MAX_RESTARTS: u32 = 1;
 
 /// What a run of [`ActionTree::perform`] ended with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,8 +144,7 @@ impl ActionTree {
 
     /// Port of `Action::perform` on the root: run, or resume after a breakpoint.
     pub fn perform(&mut self, fd: &mut Funcdata, arch: &Arch) -> Result<Outcome> {
-        fd.typerecovery_on = self.has_leaf("starttypes"); // ActionStartTypes::reset
-        fd.double_precis_on |= self.double_precis; // RuleDoubleIn::reset
+        self.reset_funcdata(fd);
         let root = self.root();
         if self.perform_node(root, fd, arch)? < 0 {
             let mut path = String::new();
@@ -148,6 +152,12 @@ impl ActionTree {
             return Ok(Outcome::Break(path));
         }
         Ok(Outcome::Complete)
+    }
+
+    /// What the actions' `reset` sets on the function.
+    fn reset_funcdata(&self, fd: &mut Funcdata) {
+        fd.typerecovery_on = self.has_leaf("starttypes"); // ActionStartTypes::reset
+        fd.double_precis_on |= self.double_precis; // RuleDoubleIn::reset
     }
 
     /// Port of `Action::perform`: apply (again while a repeating action changes something) and
@@ -185,8 +195,8 @@ impl ActionTree {
     }
 
     /// The `apply` of each kind: `ActionGroup::apply` runs the members from where it stopped;
-    /// `ActionRestartGroup::apply` runs once more while the function asks for a restart (nothing
-    /// ported asks yet, so it finishes after one run).
+    /// `ActionRestartGroup::apply` clears the function and runs again while it asks for a restart
+    /// (`ActionDeindirect`), at most [`MAX_RESTARTS`] times.
     fn apply(&mut self, id: ActionId, fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         let restart = match &self.nodes[id.0].kind {
             Kind::Leaf(f) => {
@@ -208,24 +218,48 @@ impl ActionTree {
         if restart && self.nodes[id.0].finished {
             return Ok(0);
         }
-        if self.nodes[id.0].status != Status::Mid {
-            self.nodes[id.0].state = 0;
-        }
         loop {
-            let n = &self.nodes[id.0];
-            let Kind::Group { kids, .. } = &n.kind else { break };
-            let Some(&kid) = kids.get(n.state) else { break };
-            let res = self.perform_node(kid, fd, arch)?;
-            if res > 0 {
-                self.nodes[id.0].count += res;
-            } else if res < 0 {
-                return Ok(-1);
+            if self.nodes[id.0].status != Status::Mid {
+                self.nodes[id.0].state = 0;
             }
-            self.nodes[id.0].state += 1;
+            loop {
+                let n = &self.nodes[id.0];
+                let Kind::Group { kids, .. } = &n.kind else { break };
+                let Some(&kid) = kids.get(n.state) else { break };
+                let res = self.perform_node(kid, fd, arch)?;
+                if res > 0 {
+                    self.nodes[id.0].count += res;
+                } else if res < 0 {
+                    return Ok(-1);
+                }
+                self.nodes[id.0].state += 1;
+            }
+            if !restart {
+                return Ok(0);
+            }
+            if !fd.restart_pending {
+                break;
+            }
+            if fd.jumptablerecovery_on {
+                return Ok(0); // no restart within jump-table recovery
+            }
+            self.restarts += 1;
+            if self.restarts > MAX_RESTARTS {
+                fd.warning_header("Exceeded maximum restarts with more pending");
+                break;
+            }
+            fd.clear_analysis();
+            // reset everything but ourselves
+            for (i, n) in self.nodes.iter_mut().enumerate() {
+                if i != id.0 {
+                    n.status = Status::Start;
+                    n.state = 0;
+                }
+            }
+            self.reset_funcdata(fd);
+            self.nodes[id.0].status = Status::Start;
         }
-        if restart {
-            self.nodes[id.0].finished = true;
-        }
+        self.nodes[id.0].finished = true;
         Ok(0)
     }
 

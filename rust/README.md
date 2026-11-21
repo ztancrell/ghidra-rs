@@ -1,3 +1,7 @@
+| Repair Flow Damage warning | unchanged | unchanged | unchanged | unchanged (run with the next fix) |
+| the low findings (below) | unchanged | unchanged | unchanged | unchanged |
+| removing a function re-flows no other body | unchanged | unchanged | unchanged | unchanged |
+| setNoFallThru only on the calls of the addresses found | unchanged | unchanged | unchanged | unchanged |
 # ghidra-rs
 
 A headless Rust reverse-engineering core that decodes machine code with Ghidra's compiled
@@ -15,7 +19,7 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
 - `ghidra-rs/src/analysis.rs`: PE32 loading and Ghidra-style analysis: disassembly by recursive
   descent, function discovery, switch tables, function bodies, flows and data references.
 - `ghidra-rs/src/scripts.rs`: writers for the ExportFunctions and ExportGaps CSV files, plus
-  RTTI vftables and a small MSVC name demangler.
+  RTTI vftables and (since 2026-11-20) Ghidra's Microsoft demangler, `ghidra-rs/src/mdmang.rs`.
 - `ghidra-rs/src/store.rs`: the project store: a text file of edits (functions, bodies, no-return
   flags, flow overrides, thunk marks) laid over the analysis, and the script primitives that
   edit both (see "Project store and the editing scripts").
@@ -36,6 +40,8 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   an object's vtable, resolved through a value stored via a symbolic register; whole-function
   propagation, where a vtable stored to the stack survives a call to a `RET 4` function and a
   join; ExportFunctions counting a computed call in `callees` and `callers`.
+- `ghidra-rs/src/gdt/`: Ghidra's packed data-type archives (`.gdt`) read in place, read-only, and
+  the import prototypes made from them (`--gdt`, `gdt-protos`).
 - `ghidra-rs/src/factsout.rs`: `analyze --facts`: the facts of ghidra-rs's own analysis in the
   format of `tools/ghidra/ExportFacts.java` (stage S10, slices 2 and 3), for `load facts`.
 - `ghidra-rs/src/strings.rs`: Ghidra's ASCII Strings analyzer (the string search and the
@@ -44,6 +50,10 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   databases, and FID's matching and naming.
 - `ghidra-rs/tests/fid.rs`: the FID hash of a known CRT function, and its record in Ghidra's
   databases (skipped when they are not installed).
+- `ghidra-rs/src/mdmang.rs`: Ghidra's Microsoft demangler (`MDMang`) and the name parts of
+  `MicrosoftDemangler` ("The Microsoft demangler").
+- `ghidra-rs/tests/mdmang.rs`, `tests/data/mdmang-vectors.tsv`: MDMangBaseTest's vectors,
+  extracted by `tools/mdmang-vectors.sh`.
 - `ghidra-rs/tests/abi.rs`: register reads and writes (sub-registers as base-register bytes)
   of a few fixed instructions.
 - `build-sla.sh`: builds Ghidra's SLEIGH compiler and compiles `x86-64.sla` and `x86.sla`.
@@ -206,7 +216,8 @@ What discovery does, after Ghidra's analyzers:
   task at its priority, and the first task of the lowest priority runs next. Discovery's
   analyzers in it: Disassemble Entry Points (200, the seeds), Function Start Search (402),
   Function Start Search After Data (898, after the tables), Create Address Tables (899), X86
-  Function Callee Purge (500, on each batch of new functions) and Shared Return Calls (398, on
+  Function Callee Purge (500, on each batch of new functions), jumps through a pointer and
+  their thunks (596, see "Plain discovery's silents" below) and Shared Return Calls (398, on
   each batch, as Java; superseded (2026-11-19): a last task at 10000 on all functions). The non-returning
   functions run after the queue (Java: 302). Without the purge analyzer the facts are byte for
   byte the ones of the loop it replaces (both function sets, 2026-11-18); with it see "Ghidra's
@@ -346,11 +357,14 @@ and writes its results to the `fid` and `name` columns (`ghidra-rs/src/fid.rs`):
   holds, and `FID_conflict:<base name>` when more than one is left (the first of them in
   Java `HashSet` order is the base). Exported functions keep their names and are not marked.
   Names are demangled for the CSV (`@name@4` fastcall names, and `` `vector_deleting_destructor' ``
-  and the other compiler helpers, added to `scripts::demangle`).
+  and the other compiler helpers, added to `scripts::demangle`). Superseded (2026-11-20):
+  `scripts::demangle` is the ported Microsoft demangler's applied name ("The Microsoft
+  demangler" below).
 
 Not ported: the demangled-name variants of MatchNameAnalysis (`demangledNoTemplate`,
 `demangledBaseName`), removing a conflicting label when a later function matches it alone,
-thunks, and the library names in plate comments and bookmarks.
+thunks, and the library names in plate comments and bookmarks. Superseded (2026-11-20): the
+demangled-name variants are ported ("The Microsoft demangler").
 
 Result on 2026-11-12 against the `fid` column of Ghidra's own exports (no new Ghidra run was
 needed):
@@ -573,15 +587,39 @@ By cause:
   and ClearFalseNoReturn passes, which the `--functions-from` export lacks.
 
 `tools/abi-ledger.csv` judges the shadow diff by safety rather than agreement with Java (see
-`../DESIGN.md`). It has one row for each `differ` and `Java-only` row of the shadow run at
-ghidra-rs bd56d2f09a against mercs2 395ba6b (58 and 174 rows; that run gave same 55,362, differ
-58, Java only 174, ghidra-rs only 309; the ghidra-rs-only rows are not in the ledger yet).
-The columns are `address,site,java,ghidra_rs` (from the diff), `truth` (`ok`, `violation`,
-`unknown`, `not-a-caller`, or `unverified` for a row grouped but not checked by itself),
-`evidence` (the bytes or reasoning behind the truth, or `group:<cause>; checked <site>` naming
-a checked row of the group) and `cause` (a kebab-case group). mercs2's abi_test callee trace
-(`build/abi_callees.csv`) held one row at that commit, so every truth comes from the
-disassembly and the contracts.
+`../DESIGN.md`). It has a row for every row of the shadow run of 2026-11-20 (ghidra-rs
+b6b02b2ca5, the script's command and diff reproduced outside the mercs2 tree, against mercs2's
+`config/abi_callers.csv` and `config/register_abi.csv` of 2026-11-18 14:43): same 56,099,
+differ 124, Java only 152, ghidra-rs only 800, so 1,076 diff rows. 200 of them were judged
+before, with the same statuses on both sides (none changed); 76 differ / Java-only rows and the
+800 ghidra-rs-only rows are new. 32 older rows no longer differ and stay as history. The
+columns are `address,site,java,ghidra_rs` (from the diff), `truth` (`ok`, `violation`,
+`unknown`, `not-a-caller`, `trivial`, or `unverified` for a row grouped but not checked by
+itself), `evidence` (the bytes or reasoning behind the truth, or `group:<cause>; checked
+<site>` naming a checked row of the group) and `cause` (a kebab-case group). `trivial` means
+the original's own code (through its entry JMP) writes every clobber, the rule both tools
+apply; it is not a path-by-path proof. mercs2's abi_test callee trace (`build/abi_callees.csv`)
+lists 19 contracts and their callees but no call sites, so it settles no row: every truth comes
+from the disassembly and the contracts. (Superseded: the first ledger, of the run at ghidra-rs
+bd56d2f09a against mercs2 395ba6b, had the 58 differ and 174 Java-only rows; same 55,362,
+ghidra-rs only 309, not in the ledger then.)
+
+Against the bar (no row where ghidra-rs is wrong on the unsafe side), as of that run:
+
+- No row has truth `violation` where ghidra-rs says `ok`, `trivial` or `(none)`.
+- 39 site rows are true callers ghidra-rs has no row for (`missed-code-undecoded` 16,
+  `data-pointer-missed` 19, `missed-ref-securom-section` 4; truth `ok` 19, `unknown` 8,
+  `unverified` 12). The bar counts a missing true caller as unsafe, so it is not met yet.
+- Not settled: 92 rows where ghidra-rs gives no finding or `ok` and the truth is `unknown` or
+  `unverified` (38 + 16 `output:`/`input:` rows, 10 "no references" rows, 5 + 23 `ok` sites).
+- The 52 `rs-body-lacks-jump-target` rows (0x407aa0, 0x430e40, 0x470be0, 0x4cc830: Java
+  `trivial`, ghidra-rs walks the callers) and the 16 `rs-body-has-callee-code` rows (0x470600:
+  ghidra-rs `trivial`, right in effect) come from function bodies that differ: ghidra-rs gives
+  the code behind an entry JMP (0x6b8f60, 0x4063c0, 0x403f00, 0x527020) to another function or
+  to none, where Ghidra gives it to the JMP's function. Safe in all 68 rows; a body that takes
+  a callee's code could make `trivial` too loose elsewhere.
+- The 703 `rs-only-stricter` rows (626 `unconcluded`, 72 `unknown`, 5 `violation`) are findings
+  Java does not make: the safe side whatever the truth, not checked one by one.
 
 Following pointers in data (`pointer_targets`, see the analysis section) gives 17 of the
 ledger's `(none)` rows their caller, each now with Java's status: the undecoded tails of
@@ -651,7 +689,8 @@ clear <first>-<last>               instructions overlapping the range are remove
 noreturn <addr> on|off             the no-return flag of a function (or import slot)
 switch <jump> <target>...          the targets of a computed jump
 code <addr>                        disassemble from here (flow is followed)
-override <addr> call_return|none   the flow override of an instruction
+override <addr> call_returnreflow <entry>                     fixupFunctionBody: the body is the flow from the entry again
+|none   the flow override of an instruction
 function <entry> create|remove     a function analysis lacks, or one it has
 body <entry> <first>-<last>...     a fixed body in place of the flow from the entry
 thunk <entry> off|<target>         the function is (not) a thunk
@@ -672,6 +711,16 @@ applied right after discovery and the constants pass of `--abi-callers` and `--f
 after it, on a program `edit` never proved the store on. Bodies are computed again from the
 flow at the end, so a function re-flows whenever a neighbour is created or removed or a flag
 changes; only a `body` record pins one, and `edit reflow <addr>` drops that record.
+Removing a function re-flows no other body, as Java's FunctionManagerDB.removeFunction (it
+deletes the function only); a script that fixes up a neighbour does so itself
+(`fold-slot-fragments` re-bodies the owners that jump into a fragment it removes:
+`fixupFunctionBody` or `setBody`). `edit reflow` and a script's fixup write a `reflow` record,
+so `Store::apply` re-flows the same bodies; `ghidra-rs/tests/store.rs`
+(`removing_a_function_leaves_what_falls_into_it`). Superseded (2026-11-20, review of `int8`):
+`Project::remove_function` re-flowed the bodies that jump or fall into the removed function and
+`Store::apply` copied it for every `function ... remove` record; before that only bodies holding
+a record's address were re-flowed, and `fold-slot-fragments` on mercs2 failed with "the store
+does not reproduce the edits ... 0x00416c5d".
 
 What fails instead of being skipped: a first line other than version 2's, a store made on
 another binary or seed set (`analyze --store` and `edit` both check; note that
@@ -751,7 +800,7 @@ Where a port cannot do what Java does:
   failed Unable to create function at ... due to overlap with range [...]", the old body
   kept), but only for the instructions the body gains: bodies the flow derives here may share
   instructions, where Java's never do. The range named is the first such instruction, which
-  may not be the one Java names. Bodies here re-flow as soon as a fragment goes, so "refit
+  may not be the one Java names. A disassembly here re-flows the bodies that flow into it, so "refit
   before->after" compares with the body at the start of the round (Java's body until
   `setBody`). An owner that its own walk removes ends the command with an error, as Java's
   next call on the deleted function throws. Superseded: `setBody` could not fail, and such an
@@ -776,7 +825,7 @@ are not ported.
 Java's three `switch` rows of the fold report have no counterpart: ghidra-rs's own switch
 recovery already has those jumps' targets. ghidra-rs flags far more functions no-return than
 Ghidra (every body without a return); 0x00401740, the one the Java script was written for, is
-not flagged here.
+not flagged here. Superseded (2026-11-20): the no-return rule is now FindNoReturnFunctionsAnalyzer's call-site evidence (see "No-return functions from call-site evidence"); the no-return flag of functions in both plain discovery and Java 12.2 differs in 14 where it did in 52.
 
 The function set in `.text` against the Java project's facts (37635 functions):
 
@@ -4108,7 +4157,8 @@ Readers of the symbols that changed with them:
   (Superseded: the reference, Ghidra 12.3, has no `handleSymbolConflict`; `linkSymbol` links any
   entry that is not a conflict, see "Integration `m3-int6`: review fixes".)
 - `RuleStringCopy` fails loudly on a character copied into a symbol of `restructure_varnode`
-  (`StringSequence` is not ported).
+  (`StringSequence` is not ported). (Superseded: `StringSequence` is ported up to its validity; a
+  valid sequence stays loud, see "Java-facts gap, continued".)
 - Fixed on the way: `subflow.rs` and `subfloat.rs` read the size of a locked varnode's type
   from the architecture's type factory instead of the function's (a panic once the stack
   pointer's space-base type was reached; `bars.sh` counted it as silent).
@@ -4207,7 +4257,8 @@ The check, `tools/ghidra-diff.sh <corpus>`: `tools/ghidra/DecompileRef.java` (th
 headless Ghidra on a copy of the mercs2 Ghidra project, opened `-readOnly`; the console side is
 `print C` with default options, from ghidra-rs or, with `ENGINE=ref`, from `decomp_dbg`. The
 Java output is kept under `rust/target/ghidra-ref/java/<corpus>/` (the installed Ghidra is 12.2,
-the sources of this repository 12.3). Summary line: `java finished F / N, identical I / F (loud
+the sources of this repository 12.3; superseded: the reference is now 12.3 built from this
+repository, see "The 12.3 reference" below). Summary line: `java finished F / N, identical I / F (loud
 L, silent S)`.
 
 Results:
@@ -4527,7 +4578,8 @@ The facts of slice 1 come from a Java Ghidra project. This slice writes the same
 ghidra-rs's own analysis of the binary, so `load facts` needs no project:
 
 ```sh
-ghidra-rs analyze <pe32> --facts <out> [--protos <file>] [--seeds <csv> | --functions-from <csv>]
+ghidra-rs analyze <pe32> --facts <out> [--protos <file> | --gdt <archive>] [--seeds <csv> | --functions-from <csv>]
+ghidra-rs gdt-protos <archive.gdt> <out>   # the same file as ghidra-protos.sh, from the archive
 tools/facts-own.sh            # mercs2: writes rust/target/facts/mercs2.facts and compares it
 tools/ghidra-protos.sh        # once per Ghidra version: $GHIDRA_REF/win32.protos
 ```
@@ -4575,6 +4627,52 @@ does (`ApplyFunctionSignatureCmd`, source IMPORTED) and records what
 `DecompileCallback.getExternalRef` answers: `$GHIDRA_REF/win32.protos`, 22,825 prototypes and
 17,957 data-types, 41 MB, for every 32-bit Windows program. It reads no program and no project
 of the user's. Without `--protos` every import is `underived`.
+Superseded (2026-11-20): "Not done here"; the archive is now read in place, see "The archive
+read in Rust (`--gdt`)" below. The export stays as the reference it is checked against.
+
+**The archive read in Rust (`--gdt`, `ghidra-rs/src/gdt/`).** `analyze --facts --gdt <archive>`
+takes the archive itself; `ghidra-rs gdt-protos <archive> <out>` writes the prototype file
+`ghidra-protos.sh` makes. Nothing is ever written to the archive.
+- `gdt/db.rs`, the database read-only: the packed file (`ItemDeserializer`: Java object-stream
+  header, zip entry `FOLDER_ITEM`, deflate), the buffer file (`LocalBufferFile`, version 1),
+  `DBParms`, the master table (`TableRecord`), schemas (`Schema`, sparse columns), long-key and
+  fixed-key B-tree nodes (`LongKeyInteriorNode`, `FixedRecNode`, `VarRecNode`, the `FixedKey*`
+  nodes), records and big records (`DBRecord`, `SparseRecord`, `ChainedBuffer`). Not ported, and
+  failing by name: variable-length keys (`VarKey*` nodes; the `DataTypeManager` options table),
+  index tables, XOR-obfuscated chained buffers, field types past `FIXED_10`.
+- `gdt/mod.rs`, the data types (`DataTypeManagerDB`'s adapters, by column name, versions checked):
+  built-ins V0, calling conventions V0, categories V0, composites V6 and components V0 (with
+  `BitFieldDBDataType` ids), typedefs V2, pointers V2, arrays V1, enums and values V1, function
+  definitions V2 and parameters V1. Another version, an unknown table, auto-named typedefs or
+  default settings fail by name. `windows_vs12_32.gdt` has 22,825 function definitions, 6,065
+  composites, 9,441 typedefs, 18,114 pointers, 379 arrays, 32,504 enums, 16 built-ins.
+- `gdt/protos.rs`, what `ExportArchiveProtos.java` writes, simulated: each definition applied as
+  `ApplyFunctionSignatureCmd` does (`settleCDataType`, unknown conventions left unknown, the
+  stack purge), the program's data-type keys in `DataTypeManagerDB.resolve`'s order (a typedef's
+  base first; a composite or function definition first, its pointers last through the
+  post-resolve queue, smallest key first), symbol ids (function, then each parameter), the
+  storage of `x86win.cspec`'s `__stdcall`, `__cdecl` and `__fastcall` (`ParamListStandard`
+  fallback, `ParamEntry.getAddrBySlot`, the hidden return pointer), the symbol order of
+  `LocalSymbolMap`'s `HashMap`, and `PcodeDataTypeManager`'s, `FunctionPrototype`'s and
+  `HighSymbol`'s encoders. Written into the code, not read: the registers and pentries of
+  `x86win.cspec` (a `ponytail:` note names the upgrade) and the ids of the built-ins `long`,
+  `uchar` and `ulong`, which `facts_coretypes.xml` lacks (the order of Java's class search).
+  The archive's `default` convention (id 1) is the cspec's default model: model `default`,
+  `modellock`, `__stdcall`'s storage (`getCallingConvention("default")`,
+  `FunctionPrototype.grabFromFunction`); `windows_vs12_32.gdt` has no definition with it, so
+  this is not checked against Java. `__thiscall` (which `x86win.cspec` has: `ECX`,
+  `thisbeforeretpointer`), a `__return_storage_ptr__` parameter and other built-in classes
+  fail by name. Superseded: before, a `__thiscall` definition silently got model `unknown`
+  and `__stdcall`'s storage, and `default` got `unknown`. A corrupt archive is an error, not a
+  crash: a B-tree with a cycle or deeper than 64, lengths and sizes past the file, block sizes
+  too small for a chained buffer, a data buffer of another node type, schema names that do not
+  match the columns. Duplication: `fid.rs` has its own small buffer-file and B-tree reader for
+  the `.fidbf` files; it is left as it is.
+  The archive's types are not put in `decomp/types.rs`: that store is the C++ decompiler's
+  type factory and is filled from this XML by `facts.rs` as before.
+- Result: `gdt-protos` of `windows_vs12_32.gdt` is byte-identical to the 12.3 Java export
+  (`rust/target/ref123/win32.protos`, 40,783 lines, 41 MB), in 1.4 s. The test `gdt::tests`
+  checks the table counts and a slice of the export.
 
 **Stack variables** (`Exporter::locals`, `Analysis::flow_walk`): a port of
 `NewFunctionStackAnalysisCmd` with its defaults (locals, no parameters) on the constant
@@ -4779,7 +4877,9 @@ mangled name the final list is the raw or the underscore-stripped names, whichev
 shorter, so the count can reach 1 only through the demangled sets, and those are dropped
 as soon as one name does not demangle. That holds while the Microsoft demangler demangles no
 name without `?` or `@` (the test `fid.rs` uses for "mangled"), which was not checked in the
-demangler's sources.
+demangler's sources. Superseded (2026-11-20): `fid.rs` demangles every name with the ported
+demangler and ports the demangled sets and "Multiple Matches With Same Base Name" ("The
+Microsoft demangler").
 
 **Against Java** (mercs2, `FUNCS=java`; equal records and their share of Java's; each row adds
 its piece to the rows above it):
@@ -4872,7 +4972,9 @@ What still differs, by cause:
 - data sizes where two accesses disagree (the last one in the order of the functions wins).
 
 Not ported: the demangler (names, namespaces, prototypes and comments of C++ functions: `ns`
-0 of 797, `underived function` and `comments`), switch-case labels, the loader's and RTTI
+0 of 797, `underived function` and `comments`; superseded 2026-11-20: the demangler and its
+comments are ported, the namespaces and prototypes it applies are not, "The Microsoft
+demangler"), switch-case labels, the loader's and RTTI
 structures, a `.gdt` reader, Ghidra's task queue (the order above; superseded 2026-11-18: the queue
 is ported with discovery and the purge in it, "Ghidra's task queue and the purge").
 
@@ -5127,6 +5229,10 @@ full pipeline against Java Ghidra with default options; inputs kept in `rust/tar
 | ghidra-rs's own, Java's function list (`analyze --functions-from`, 73 s) | identical 4 / 7 (loud 2, silent 1) | identical 328 / 499 (loud 31, silent 140) |
 | ghidra-rs's own, plain discovery (65 s) | identical 2 / 7 (loud 2, silent 3) | identical 177 / 499 (loud 122, silent 200) |
 
+Java-facts gap (2026-11-20, branch `gap-javafacts`, M500 identical of 499): 461 (loud 22, silent 16) -> 467 (loud 23, silent 9), M8 7 / 7, the 57 M8 bars as `analysis-queue`. Fixed: `void` is the size-0 TypeVoid (3 silent), a function symbol covers its facts size of 2 to 8 bytes (`FunctionSymbol::consumeSize`; 2 silent, 1 silent now loud), `isString` takes the empty string (1 silent). Of the 9 silent left, 8 are reference-version differences: `/opt/ghidra` is 12.3 and its decompiler lacks GP-7356 (`register0x00000010` for `register_ESP`) and GP-7474 (`_BinkPause_8`); the repo C++ replaying Java's debug XML (`DecompileRef.java` with `DECOMP_DEBUG_DIR`) prints what ghidra-rs prints. The ninth (0x47f890, variable numbering) is open. Superseded: the 461 / 16 counts above.
+
+Java-facts gap, continued (2026-11-20, branch `gap-javafacts2`, M500 identical of 499): 467 (loud 23, silent 9) -> 469 (loud 21, silent 9), M8 7 / 7. The deindirect restart is ported: `ActionDeindirect` records the call as an override (`Override::insertDeindirect`) and asks for a restart when the callee does not return, is inlined, or has a locked prototype the call cannot take; the `universal` group (`ActionRestartGroup`, at most 1 restart) clears the function (`clearAnalysis`) and runs again, and the flow makes the call direct (`Override::applyIndirect`). The restart starts from the prototype the decompile started with, where the C++ clears only the unlocked inputs and output of the one it has. Of the 9 functions that stopped there, 2 are identical; 7 stop at later not-ported paths: a call to a locked varargs prototype 4, a logical value in a join varnode (subflow) 2, a data-type needing resolution in `setcasts` 1. 0x47f890 is a reference-version difference too: decomp_dbg built from this repo's C++, on Java's debug XML with Java's options, prints `auStack_82 [2]` where Java prints `uStack_90` and `unaff_EDI`, as ghidra-rs does; so all 9 silent are reference-version differences. Correction: `/opt/ghidra` is 12.2 (its application.properties) and this repo's source is 12.3. Superseded: the 467 / 23 counts, "`/opt/ghidra` is 12.3" and "0x47f890 is open" above. Then a logical value in a join varnode (`SubvariableFlow::getReplacementAddress` with `renormalizeJoinAddress`, little-endian) is ported: 469 (loud 21, silent 9) -> 470 (loud 20, silent 9), M8 7 / 7; 0x5cee30 is identical, 0x5d8680 and 0x5d87c0 now stop at a call to a locked varargs prototype, which 7 functions stop at. 0x4098c0 stops at type propagation into a union. Superseded: the 469 / 21 counts. Then a call to a locked varargs prototype is ported (`funcLinkInput` with `initActiveInput` and the fixed position of each locked parameter, `sortFixedPosition` in `buildInputFromTrials`; `lateRestriction` refuses to give a varargs call a non-varargs prototype, as `isCompatible` does, and a varargs call taking a varargs prototype stays loud), and the name recommendations stay for a restart (the C++ keeps `nameRecommend`; the restart lost `local_80` of 0x6c3cb0): 470 (loud 20, silent 9) -> 473 (loud 16, silent 10), M8 7 / 7, the M8 bars unchanged (57 lines). 0x4b8e50, 0x5d84e0 and 0x5d87c0 are identical; 0x5d8680 stops at StringSequence, 0x5e66c0 at `getTypePartialStruct`, 0x74d520 at type propagation into a struct. 0x6c3cb0 is newly silent and no version difference (the repo C++ on Java's debug XML prints Java's C): in the pass after the restart the C++ gives the COPYs in the split return blocks the global's types (`char`, `float`) where ghidra-rs keeps `undefined1` / `undefined4`, so ghidra-rs prints `DAT_014e0432 = 1` for `'\x01'` three times; the first passes agree, and keeping the global scope's symbols over the restart did not change it. Superseded: the 470 / 20 counts. Then the global scope keeps its symbols over a restart (`Funcdata::clear` clears the local scope only) and a type-locked data symbol of an unknown data-type is size-locked (`Symbol::checkSizeTypeLock`), so `ActionNameVars` gives it the type of its high variable (`overrideSizeLockType`) and the varnodes of the pass after the restart take that type from the symbol (`setSymbolProperties`, the global scope before the facts): 473 (loud 16, silent 10) -> 474 (loud 16, silent 9), M8 7 / 7, the M8 bars unchanged (57 lines); 0x6c3cb0 is identical. Superseded: the 473 / 10 counts and "0x6c3cb0 is newly silent" above. Then `StringSequence` is ported up to its validity (the constructor: `collectCopyOps`, `checkInterference`, `formByteArray`); a COPY that roots no sequence of four characters in an array of the symbol is left alone, a valid one and a symbol of a struct or union stay loud (`StringSequence::transform` is not ported): 474 (loud 16, silent 9) -> 478 (loud 11, silent 10), M8 7 / 7, the M8 bars unchanged (57 lines). 0x5a9b80, 0x5bed50, 0x5d8680 and 0x740a90 are identical. 0x5d9a20 is newly silent and a reference-version difference: decomp_dbg built from this repo's C++, on Java's debug XML, prints what ghidra-rs prints (early returns where Java nests if / else); which 12.3 change it is was not traced (GP-7115, which splits out `BlockIfNoExit`, is a candidate). Superseded: the 474 / 16 counts. On the 12.3 reference (`rust/target/ref123/`, Ghidra 12.3 built from this repository, `GHIDRA` names the install) the row is 487 (loud 11, silent 1: 0x5c64a0), M8 7 / 7. Superseded: the 478 / 10 counts (12.2) as the measure. With Java's facts loaded, name tokens (function, variable, type, field and label names, not constants) print as Java's `PrettyPrinter` prints them through `IllegalCharCppTransformer` (`DecompileResults.getDecompiledFunction`; a namespace prefix, printed by `emitSymbolScope` as syntax, is kept): `_BinkPause@8` -> `_BinkPause_8`, 488 (loud 11, silent 0), M8 7 / 7; without facts names print as the C++ console prints them (M8 bars unchanged, 57 lines). A non-ASCII letter in a name fails loudly (`Character.isLetter` is not ported). `lateRestriction` is ported for every prototype a deindirected call takes, locked or not, with `FuncProto::isCompatible` (`ProtoModel::isCompatible`: the facts' `unknown` model is compatible with the default; both outputs locked compare storage and data-type; extrapop; varargs, where an unlocked call may take a varargs prototype; call fixup; no-return), so an unlocked callee that is not compatible restarts as in the C++, no longer copied; a varargs prototype onto a call still recovering its inputs fails loudly (`collectUnlockedTrials`), one onto a call not recovering them restarts. A call fixup no longer stands for `isInline` (no prototype is inline: the facts refuse the flag); a prototype with its own effect or likely-trash list is refused by the facts. Java-facts row on 12.3 unchanged: 488 (loud 11, silent 0), M8 7 / 7; M8 bars unchanged. A restart keeps the prototype as the pass before left it (model, extrapop, flags, as `Funcdata::clear` keeps `funcp`) and clears only its unlocked output and `returnBytesConsumed` (`FuncProto::clearUnlockedOutput`; a size-locked output back to an unknown data-type, `resetSizeLockType`). Superseded: "the restart starts from the prototype" above. Small fixes after a review: a restart keeps the join records (global in the C++, `AddrSpaceManager`); `renormalizeJoinAddress` in SubvariableFlow fails loudly on a constant piece (`!addr1.isConstant()`) and on a big-endian target; a function record's malformed `size` attribute is a facts error, no longer read as 0; a cached global symbol without a data-type fails loudly instead of skipping the facts. Not done: `findContainer`'s smallest container in `query_global` (functions are still checked before external references) and the split of `string_sequence_valid` (constseq.rs).
+
 The first attempt's own-facts counts were not valid: `ghidra-diff.sh` was given facts paths
 that did not resolve, fell back to the Java facts without a word and printed the Java row.
 `ghidra-diff.sh` now stops on a missing or empty `FACTS` file (see "Stage S10, slice 1").
@@ -5352,8 +5458,8 @@ Java's sites that set a body, and what is ported:
 |---|---|
 | CreateFunctionCmd.createFunction, subtractBodyFromExisting | ported (`create_function`, `subtract_existing`) |
 | CreateFunctionCmd.resolveThunk, CreateThunkFunctionCmd.applyTo | ported for a direct `JMP` at the entry (getSimpleFlow), `resolve_thunk` |
-| CreateFunctionCmd.fixupFunctionBody | ported (`fixup_body`); its thunk case only for a target that is a function already and a new body that overlaps no other, and not where the target's thunk chain leads back to the function (setThunkedFunction refuses a cycle). A thunk chain past 16 thunks and a no-return rule still finding functions after 4 rounds print a warning (`analyze`, `edit`); on mercs2 the 4-round warning shows with both function sets, the chain one does not |
-| FindNoReturnFunctionsAnalyzer.fixCallingFunctionBody | ported for this analysis's no-return rule (`find_noreturn`): callers of a new non-returning function are fixed up |
+| CreateFunctionCmd.fixupFunctionBody | ported (`fixup_body`); its thunk case only for a target that is a function already and a new body that overlaps no other, and not where the target's thunk chain leads back to the function (setThunkedFunction refuses a cycle). A thunk chain past 16 thunks prints a warning (`analyze`, `edit`); on mercs2 it does not show. Superseded (2026-11-20): the 4-round no-return warning went with the body rule |
+| FindNoReturnFunctionsAnalyzer (added, detectNoReturn, checkNonReturningIndicators, targetOnlyCallsNoReturn, setNoFallThru, fixCallingFunctionBody) | ported (`find_noreturn`), run after each batch of functions made where Java's instruction analyzer runs on instructions added; not ported: "Repair Flow Damage" (below), a function made at a target that is none, the call-fixup exception. Superseded (2026-11-20): only fixCallingFunctionBody, for a rule of this analysis on the bodies |
 | CreateFunctionCmd with findEntryPoint (setBody of a given body) | not ported: no ported analyzer makes functions that way |
 | CallFixupAnalyzer.fixCallingFunctionBody | not ported (no call-fixup analyzer here) |
 | EntryPointAnalyzer (recreate after the do-later set) | not ported (the do-later set is not modelled) |
@@ -5394,7 +5500,7 @@ decides from call-site evidence against a threshold, never from a body without a
 wrong mark here is never cleared. Since 2026-11-19 a conditional jump out of the body and a
 fallthrough out of it (into another function's body) count as returning too, so a function cut
 by one made inside it is not marked for falling into it; numbers in "Shared Return Calls per
-batch" below.
+batch" below. Superseded (2026-11-20): this body rule is gone; see "No-return functions from call-site evidence" below.
 
 Against Java 12.2 (`j12body.sh`, `rust/target/aq/` of this worktree; functions in both lists;
 "auto" = `functions-analysis.csv`):
@@ -5459,6 +5565,155 @@ and 218 (34) -> 54 (24); bodies differing 824 (677) -> 756 (674) and 2,358 (2,00
 (1,997); purges differing 846 (761) -> 824 (761) and 2,316 (1,568) -> 2,294 (1,568); M500 381
 and 208, M8 4 / 7 and 2 / 7 unchanged.
 
+#### Plain discovery's silents and the SecuROM slot thunks, branch `gap-plain` (2026-11-20)
+
+The 163 M500 silents of own facts with plain discovery (master f4881c73da: 208 / 499, loud 128,
+silent 163), by their outcome in the other rows: 85 are identical with Java's function list (a
+discovery cause), 64 silent with it and identical or loud with Java's facts (the facts' own
+causes, above), 13 silent in all three rows, 1 loud in both. The 85 by the C lines that differ,
+checked against Java 12.2's plain auto-analysis (`rust/target/aq-java/purges.txt`) and the
+mercs2 project's facts (table in `rust/target/gap-plain/causes.txt` of the branch):
+
+| cause | silents | example |
+|---|---|---|
+| mercs2's pipeline, no analyzer: a callee (or its JMP target) is a function in Java 12.2's plain analysis and here, not in the mercs2 project (fold-slot-fragments, RecoverFunctions and the audits) | 43 | 0x402d60 (0x407b60 -> 0x517180) |
+| mercs2's pipeline: a pointer in data to a function of the mercs2 project that Java 12.2's plain analysis does not make | 20 | 0x405c40 (0xba8958 -> 0x40b580) |
+| `JMP [slot]` thunks into `.securom` (below) | 18 | 0x417230 |
+| the slot typed a pointer here, undefined in Java (only an INDIRECTION reference) | 2 | 0x48cc40 |
+| a pointer in data to a Java 12.2 function | 1 | 0x495db0 |
+| not traced | 1 | 0x4919f0 |
+
+So 63 of the 85 cannot be closed by porting analyzers: Java's own plain analysis agrees with
+ghidra-rs there. They need mercs2's edits (`analyze --store`) or a reference made from Java's
+plain analysis.
+
+**Jumps through a pointer** (`Analysis::slot_jumps`, a Function analyzer at
+REFERENCE_ANALYSIS - 4 = 596, ConstantPropagationAnalyzer's place). A SecuROM slot in `Sdata`
+(executable, writable) holds the entry of a `.securom` stub: `0x4172e0 JMP [0x24d7e8c]` ->
+0x2562160. Java's propagation reads the slot (VarnodeContext; "trust writable memory" is on by
+default), makes a COMPUTED_JUMP reference and disassembles the target
+(ConstantPropagationContextEvaluator.evaluateReference); the Reference analyzer then makes a
+function whose entry is such a jump a thunk, and its target a function
+(OperandReferenceAnalyzer, CreateThunkFunctionCmd.getThunkedAddr: getSimpleFlow over the flow
+reference). Java 12.2's project has both references (INDIRECTION to the slot, COMPUTED_JUMP to
+the target). Here the task disassembles each such target of the batch's bodies and makes the
+thunks after the task's new functions. Not ported (`ponytail` note): the slot's value is the
+image's (Java's propagation would see a store to the slot earlier in the flow), only a direct
+slot, and the thunk step runs at 596 where Java's Reference analyzer runs at 600 on code added.
+`thunks disagree` now counts a one-instruction `JMP [slot]` body to a function as a one-jump body.
+
+| | before | after |
+|---|---|---|
+| plain: functions both / Java 12.2 only / here only | 28,742 / 1,906 / 271 | 29,431 / 1,217 / 284 |
+| own facts, plain discovery, M500 | 208 (loud 128, silent 163) | 226 (loud 128, silent 145) |
+| own facts, plain discovery, M8 | 2 / 7 (loud 2, silent 3) | unchanged |
+| own facts, Java's function list, M500 | 381 (loud 30, silent 88) | 381 (loud 30, silent 88): 0x5d9cb0 fixed, 0x5dc8f0 newly silent (the purge of `thunk_FUN_0256c420`, now its target's) |
+| own facts, Java's function list, M8 | 4 / 7 (loud 2, silent 1) | unchanged |
+
+The 18 fixed are the 18 of the table; none newly missing in the plain row. The Java-facts row
+reads no ghidra-rs analysis and was not rerun (461, loud 22, silent 16 on the base). The 13
+functions made here that Java 12.2 does not make were not traced. Not run: the full pass, the
+Mac, the shadow check.
+
+#### No-return functions from call-site evidence, branch `gap-plain2` (2026-11-20)
+
+0x5dc8f0, newly silent with Java's function list on `gap-plain` (above), calls
+`thunk_FUN_0256c420` (0x6a4870, `JMP [0x24d6f7c]`, made a thunk of 0x256c420 by the slot-jump
+port). 0x256c420 is `PUSH 0x256c42a; CALL 0x1b950a0` and then bytes that are no code; 0x1b950a0
+is `JMP [0x2299230]`, a thunk of 0x2ab0000 (`JMP 0x2ab0028`). In Java 12.2's plain analysis
+(`rust/target/aq-java/purges.txt`) all three are no-return, so 0x256c420's body ends at the
+call (0x256c420-0x256c429) and its purge is unknown. Here 0x2ab0028 (no RET, but a fallthrough
+out of its body) was not marked by the body rule, the body ran on to `RET 0x7b` at 0x256c456
+and the thunk took that purge of 123. Java marks 0x1b950a0 from its call sites (a function or
+no instruction right after the call, on at least 3 of them), and the mark goes to the thunked
+function.
+
+`find_noreturn` is now FindNoReturnFunctionsAnalyzer: the calls of the instructions it has not
+looked at; at each, checkNonReturningIndicators from the fallthrough on while instructions fall
+through (a function starts there or inside the instruction, no instruction, a read or write from
+earlier in the calling function or a call refers to it, an address table, an INT3); 3 call sites
+with such evidence (the default threshold) or a target that only calls non-returning functions
+(targetOnlyCallsNoReturn, SimpleBlockModel's walk) mark the target, a second pass if some stayed
+suspicious. A mark on a thunk is its thunked function's, and so every thunk of it (FunctionDB);
+callers' bodies are fixed up as before. Not ported (`ponytail` note): it runs after each batch of
+functions made, where Java's instruction analyzer runs at DISASSEMBLY + 2 on instructions added,
+so it may see other functions; Repair Flow Damage; a function made at a target that is none; the
+call-fixup exception.
+
+| | before | after |
+|---|---|---|
+| no-return flag, functions in plain discovery and Java 12.2: here only / Java only | 33 / 19 | 2 / 12 |
+| own facts, Java's function list, M500 | 381 (loud 30, silent 88) | 382 (loud 30, silent 87): 0x5dc8f0 fixed, nothing else moved |
+| own facts, Java's function list, M8 | 4 / 7 (loud 2, silent 1) | unchanged |
+| own facts, plain discovery, M500 | 226 (loud 128, silent 145) | unchanged, the same misses |
+| own facts, plain discovery, M8 | 2 / 7 (loud 2, silent 3) | unchanged |
+
+Superseded: "0x5dc8f0 newly silent" in the table above. The 12 Java-only no-return functions
+(0x401740 among them, the one ClearFalseNoReturn was written for) were not traced. Not run: the
+Java-facts row (reads no ghidra-rs analysis), the full pass, the Mac, the shadow check.
+
+#### The store row: plain discovery with mercs2's edits, branch `gap-plain2` (2026-11-20)
+
+A third own-facts row: plain discovery, then mercs2's `analysis_pipeline.sh` edit scripts
+replayed on a fresh store in its order (`edit --new-store export-bindings <csv> --recover`,
+`recover-functions`, `audit-recovered-functions --remove-empty`, `fold-slot-fragments` with
+`build/functions-original.csv` and `build/slot-rewrites.csv`, `add-relocated-entries
+config/securom_functions.csv`, `clear-false-noreturn`), then `analyze --store <store> --protos
+<win32.protos> --facts <out>` and `ghidra-diff.sh` with `FACTS=<out>`. The run scripts are
+`rust/target/gap-plain2/store.sh` and `rows.sh` (not kept in the repo). Store: 24,083 records
+(19,320 `function`, 2,468 `override`, 1,451 `body`, 810 `thunk`, 34 `code`), 44,772 functions;
+recover-functions 16,513 created, fold-slot-fragments 2,159 removed and 1,431 refit in 2 rounds,
+add-relocated-entries 43, clear-false-noreturn 0 cleared. Each `edit` takes 60 to 70 s, `analyze
+--store` 86 s. `fold-slot-fragments` needed the `Store::apply` fix above.
+
+| row (own facts) | M500 identical (loud, silent) | M8 |
+|---|---|---|
+| Java's function list | 382 (30, 87) | 4 / 7 (loud 2, silent 1) |
+| plain discovery | 226 (128, 145) | 2 / 7 (loud 2, silent 3) |
+| plain discovery with the store | 365 (33, 101) | 4 / 7 (loud 2, silent 1) |
+
+The store row's 101 silents: 82 are silent with Java's function list too (77 of those also
+with plain discovery); 17 are functions the store creates (all 17 have a `function ... create`
+record: RecoverFunctions, ExportBindings `--recover`), where the own facts give stack locals
+(`local_c`) and mercs2's project has none, since its scripts create those functions without
+analysis (Java prints `fStack_c`); 2 (0x40ad80, 0x442c90) are silent with plain discovery and
+identical or loud with Java's function list.
+
+#### Slots read only by a computed jump or call get no pointer, branch `gap-plain2` (2026-11-20)
+
+The 87 M500 silents with Java's function list, by the record kind that makes each identical when
+Java's records of that kind replace the own ones (`rust/target/gap-plain2/swap.sh`, run on those 87
+only): `data` 38, Java's whole facts only (no single kind) 12, `func` with the stack variables 8,
+`override` 5, `func` 4, stack variables 3, `func` with the purge 2; 15 stay silent with Java's
+facts. Of the 38 `data` cases, 15 were a pointer (`PTR_FUN_024dd2e4`) where Java has an undefined
+`DAT_` at a SecuROM slot that only `JMP [slot]` thunks read. Java 12.2's plain analysis (dumped from
+`gap-row3-java/proj`) has only INDIRECTION references to those slots. OperandReferenceAnalyzer
+skips such a reference before its string and pointer checks ("assume someone else will handle this
+correctly": a jump or call instruction, and the target has no read or write reference,
+`hasDataAccessReferences`). The slots Java makes pointers also have a DATA reference (`PUSH slot`
+in `.securom`). `Exporter::reference_data` now skips a target whose references are all the memory
+operand of a computed jump or call, unless an immediate refers to it as well. JMP-thunk slots in
+`.text`: Java makes 38 pointers, the own facts made 746 before this change.
+
+| row (own facts) | M500 before | M500 after | M8 |
+|---|---|---|---|
+| Java's function list | 382 (30, 87) | 395 (30, 74) | 4 / 7, unchanged |
+| plain discovery | 226 (128, 145) | 238 (128, 133) | 2 / 7, unchanged |
+| plain discovery with the store | 365 (33, 101) | 377 (33, 89) | 4 / 7, unchanged |
+
+No row has a new silent function. A first try without the immediate made 0x6ee4c0 silent (slot
+0x24db55c, which `PUSH 0x24db55c` at 0x25612bb also refers to). Superseded: the store row's 365 / 101
+in the section above.
+
+Causes left among the `data` cases, not fixed: 7 are SecuROM counters in `.securom`
+(0x256facf and others). Here they lie inside instructions decoded after a call of a no-return
+function (0x256f870 `PUSH; CALL 0x1b950a0`, then `ADD [EAX],AL` runs). Java clears those
+instructions with FindNoReturnFunctionsAnalyzer's Repair Flow Damage (ClearFlowAndRepairCmd, about
+1,000 lines, not ported), so they are data there. Others: a size Java gives (`undefined4` at
+0x198c758, here `undefined`), labels outside the image (`DAT_9fe1234a`, `DAT_00000004`: 5),
+`ThreadLocalStoragePointer` (1). Not run: the full pass, the Mac, the shadow check. Measured
+against Java 12.2's outputs, not 12.3.
+
 #### Full pass of `analysis-queue` (2026-11-19)
 
 `bars-queue.sh` on 83ee6a86e6 (the tip then; the same tree is 82b968548a since a merge message got its trailers), desktop and Mac, `TIMEOUT` 120; summary (with the rerun)
@@ -5482,6 +5737,270 @@ in every pair. Lines that moved:
 Every other line equals the baseline. Superseded: "Not run: the full pass, the Mac" in the
 sections of this branch above (the shadow check and the `--functions` / `--gaps` exports are
 still not run).
+
+### The 12.3 reference (2026-11-20)
+
+The Java reference is Ghidra 12.3 built from this repository's source (DESIGN.md, "Decided"
+2026-11-20), not the installed 12.2 (`/opt/ghidra`). The tools take the Ghidra install from
+`GHIDRA` (default `/opt/ghidra`, unchanged) and Java from `JAVA_HOME` or `PATH`; 12.3 needs
+Java 25. `ghidra-diff.sh` also takes the ghidra-rs binary from `GHIDRA_RS` (as `decomp-diff.sh`),
+so another branch's build can be checked without writing into its worktree. The reference
+(main checkout, `rust/target/`; Ghidra refuses a project path with a `.` component):
+
+```
+export GHIDRA=$PWD/rust/target/java123/ghidra_12.3_DEV JAVA_HOME=/usr/lib/jvm/java-25-openjdk
+export PATH=$JAVA_HOME/bin:$PATH GHIDRA_REF=$PWD/rust/target/ref123
+rust/tools/ghidra-facts.sh; rust/tools/ghidra-protos.sh   # proj/ (a copy of mercs2's project), mercs2.facts, win32.protos
+rust/tools/ghidra-diff.sh m8; rust/tools/ghidra-diff.sh m500   # java/m8, java/m500
+```
+
+`proj/` is a copy of `mercs2-decomp/build/ghidra`; 12.3 opens it `-readOnly`, upgrades the
+language (x86 4.9) in memory and discards it on each run, so the copy stays a 12.2 project and
+mercs2's own is never opened. `ref123/java-funcs.csv` is the `func` entries of the facts (Java's
+function list, equal to `gap7/java-funcs.csv`). The plain auto-analysis oracle is
+`ref123/aq/purges.txt` (`DumpPurges.java` on a fresh import of `orig/Mercenaries2.analysis.exe`,
+646 s; project `ref123/aq/proj`). Superseded: `rust/target/aq-java/purges.txt` (12.2) and
+`ghidra-ref/` (12.2) as the reference; both are kept for comparison.
+
+12.2 against 12.3, the Java outputs:
+
+- `mercs2.facts`: 671,558 -> 671,557 lines; 242 `label` names lose a library prefix
+  (`MSVCR80.DLL_malloc` -> `malloc`), the `type_info` namespace record goes, 3 records name
+  it by another id. `win32.protos` is the same file.
+- M8: the C of all 7 functions is the same. M500: 10 of 500 differ: 0x53d340, 0x5e1190,
+  0x63c040, 0x732ef0, 0x741460, 0x746320 (`register0x00000010` -> `register_ESP`, GP-7356);
+  0x47f890, 0x5d58c0 (locals and their types); 0x5d9a20 (an `if` block); 0x4c48d0 fails in
+  both (12.2 a timeout, 12.3 "Response buffer size exceeded").
+- plain auto-analysis: 30,648 -> 30,631 functions, 25 only in 12.2, 8 only in 12.3; of the
+  30,623 in both, 10 differ (purge 3, body size 8). The 12.2 run also had a `TraceCreators.java`
+  pre-script; not checked whether it changes anything.
+
+`ghidra-diff.sh`, M500 identical of 499 (loud, silent), M8 of 7, 12.2 -> 12.3:
+
+| build | row | M500 12.2 | M500 12.3 | M8 |
+|---|---|---|---|---|
+| master b6b02b2ca5 | Java facts | 461 (22, 16) | 469 (22, 8) | 7 / 7 both |
+| `gap-javafacts2` 3dfa4de4d6 | Java facts | 478 (11, 10) | 487 (11, 1) | 7 / 7 both |
+| `gap-plain2` 20fac3a4db | own facts, Java's list | 394 (30, 75) | 400 (30, 69) | 4 / 7 both |
+| `gap-plain2` 20fac3a4db | own facts, plain | 237 (128, 134) | 240 (128, 131) | 2 / 7 both |
+| `gap-plain2` 20fac3a4db | own facts, store | 376 (33, 90) | 382 (33, 84) | 4 / 7 both |
+
+(the `gap-plain2` 12.2 numbers are that worktree's `gap-plain2/r2.log`, the same binary.)
+Superseded: master's 461 (loud 22, silent 16) as the Java-facts row; with 12.3 the silents
+are 0x401890, 0x4173a0, 0x429b80, 0x494400, 0x4b6f5a, 0x4c0070, 0x5c64a0, 0x6b0260. On
+`gap-javafacts2` the one silent left is 0x5c64a0: ghidra-rs prints the call `_BinkPause@8`
+(the facts' name), Java `_BinkPause_8`; not traced. The nine 12.2 silents of that branch are
+gone, 0x5d9a20 with them (so not GP-7115 in the port: 12.3 prints what ghidra-rs prints).
+Superseded: the `gap-javafacts2` 3dfa4de4d6 and `gap-plain2` 20fac3a4db rows as the current
+numbers; see "Integration `int8`" below for the merged build against 12.3.
+
+### The Microsoft demangler, branch `demangler` (2026-11-20)
+
+`ghidra-rs/src/mdmang.rs` ports `Ghidra/Features/MicrosoftDmang` (`MDMang` and its object
+model: the parser over the mangled characters, with `MDContext`'s back references, and the
+`insert`/`append` printing of `MDParsableItem.toString()`) and the name parts of
+`MicrosoftDemangler` / `MicrosoftDemanglerUtil` (`microsoft_demangle`: the original demangled
+string, `DemangledObject`'s name, demangled name, namespace nodes and calling convention, with
+`MicrosoftDemanglerOptions`' defaults: error on remaining characters, only known patterns, the
+encoded anonymous namespace and no UDT tag for the conversion). Back references share one data
+type (`Rc`) and `MDFunctionType.setFromModifier`, which printing calls, sticks (`Cell`), as in
+Java. A Java runtime exception (a `null` type name, an empty context stack, a negative string
+length) fails the demangle. Data types and C++ objects nested deeper than 200 (`MAX_DEPTH`) fail
+the demangle, where Java recurses until its `StackOverflowError` (a depth set by the JVM stack;
+`AbstractDemanglerAnalyzer` catches it as a failed demangle). The VS2013/VS2015, parse-info
+and genericize variants of `MDMang` are not ported.
+
+**The oracle.** `tools/mdmang-vectors.sh` (awk) extracts the 1,696 calls of `demangleAndTest*`
+of `MDMangBaseTest.java` (mangled input, `mdTruth`, architecture, JUnit status) into
+`ghidra-rs/tests/data/mdmang-vectors.tsv`; `tests/mdmang.rs` runs them as
+`MDBaseTestConfiguration` does (the output against `mdTruth`, and a `.?A` name must give an
+`MDDataType`). Of the 1,665 tests JUnit runs: 1,665 pass. The 23 in
+`MDMangFailingTestCategory` (Ghidra fails them too) fail here; whether this port's output for
+them equals Java's actual output is not checked (Java was not run on them). Of the 8 methods
+JUnit does not run (`@Ignore`, no `@Test`) 5 pass, 3 fail (`testCatch_2`: `__catch$_main$0`
+does not parse; `testLLVMWeakPrefixDefaultXmmSuffix` and `testMangledTypeWithNamespaceSuffix`:
+characters remain, so no `MDDataType` for the latter), as Ghidra's would by the same code paths
+(not run in Java either). Superseded: "1,664 tests JUnit runs" and "9 methods JUnit does not
+run"; the extraction carried the "not run" status of `setUp()` (no `@Test`) into the next
+method, `testTripleQ0`, which JUnit runs.
+
+**Wired.**
+- Function ID (`fid.rs`): `NameVersions.generate` (the full demangled form, the name without
+  its first template arguments, `constructBaseName`) for every matched name, through
+  `DemanglerUtil.demangle(program, name)`'s context (architecture 0, not a function);
+  `MatchNameAnalysis`'s demangled sets, the most optimistic count and name (the threshold, and
+  "Multiple Matches With Same Base Name" with its single label); the plate comment shows each
+  name's demangled form; the `FID_conflict:` base is the demangled `getName()`. A name whose
+  conversion is not ported keeps the function's `underived comments`.
+- The Demangler analyzer's plate comment (`factsout.rs`, `plate_comment`): the original
+  demangled string of a function's export or Function ID name (a function of a 32-bit
+  program), appended to Function ID's comment on its own line unless the comment holds it
+  (`applyPlateCommentOnly`). So `@__security_check_cookie@4` gets `__fastcall
+  __security_check_cookie,4` and `_memset` gets nothing (`memset` is in the comment).
+- `scripts::demangle` (the `--functions` CSV's names) is the analyzer's applied name: the
+  namespaces' and the object's safe names. Where the small demangler had matched it is the
+  same; a `_name` Function ID name is now `name` (Java's `MDObjectC` with `__cdecl`), and a
+  name the port cannot demangle stays raw (the small one guessed a partial name). The CSV was
+  not compared with Ghidra's again.
+
+**Measured** (`facts-own.sh`, plain discovery, against the 12.3 facts; before is this branch's
+build without the wiring, the same analysis):
+
+| kind | before: equal / different / missing / extra | after |
+|---|---|---|
+| `comments` (Java 1,613) | 1,151 / 0 / 462 / 13 | 1,532 / 65 / 16 / 33 |
+| `func` (Java 44,990) | 22,682 / 3,978 / 18,330 / 2,353 | 22,692 / 3,968 / 18,330 / 2,353 |
+| `label` (Java 218,095) | 182,832 / 21,697 / 13,566 / 5,028 | 182,842 / 21,687 / 13,566 / 5,028 |
+| `underived` | 9,053 extra | 8,609 extra |
+
+Of the 65 different comments 59 equal Java's once Java's second comment (`user2`, the PE
+loader's `0x<rva>  <ordinal>  <name>` of an export, not ported) is left out; 5 differ in the
+kind of match and 1 in the matches (Function ID's scores). The 33 extra and 16 missing are
+functions Function ID matches on one side only. Of the 142 distinct demangled names in
+ghidra-rs's comments, 139 appear verbatim in Java's comments; the 3 others are names of matches
+Java does not make.
+
+Not ported (loud or listed): applying the demangled object (`DemangledFunction.applyTo`: the
+namespaces as Ghidra symbols, the signature, return and parameter types, calling convention;
+so a C++ name keeps `underived function` and `ns` stays 0 of 797), `processDataType` (a
+variable of a pointer to `std::nullptr_t` fails as "not ported"), the import names
+(`Func::named` keeps its rules for them), the RTTI class names (`scripts::vftables` keeps its
+own reader), `ensureNameLength`, and Java's `Character.isLetter`/`isDigit` outside ASCII
+(Rust's `is_alphabetic`/`is_numeric` are used). A mangled name with a character past U+FFFF
+fails as "not ported" (Java reads UTF-16 units, a surrogate pair is two; this port reads `char`s).
+A "not ported" failure is loud everywhere: Function ID's and the plate comment's `underived
+comments`, an error that stops `--functions` (`scripts::demangle`) and Function ID
+(`fid::apply`, the `FID_conflict:` base name); a genuine failure (Java's `null` or
+`MDException`) keeps the raw name, as Ghidra does.
+
+### Integration `int8` (2026-11-20)
+
+`int8` merges, from master b6b02b2ca5 and in this order, `ref123` (57d7ac31ac), `gap-javafacts2`
+(ba1b0c37cd), `gap-plain2` (f64489e2e1), `demangler` (7e4c3ea5c3), `gdt` (cd4945f9c8) and
+`abi-ledger2` (ae9e0d6f84). Conflicts: only in docs (this file and DESIGN.md: two new
+sections each side, both kept) and `lib.rs` (`pub mod gdt` and `pub mod mdmang`, both kept).
+`cargo fmt --check`, `cargo clippy --release --all-targets -- -D warnings` clean; `cargo test
+--release` 177 passed, 0 failed.
+
+Measured on the merged binary against the 12.3 reference (`GHIDRA_RS` the `int8` build,
+`GHIDRA_REF` the main checkout's `rust/target/ref123`, desktop, `JOBS` 10, `TIMEOUT` 120),
+M500 identical of 499 (loud, silent), M8 of 7:
+
+| row | `int8` M500 | `int8` M8 | the row's branch, M500 | M8 |
+|---|---|---|---|---|
+| Java facts | 488 (11, 0) | 7 (0, 0) | `gap-javafacts2` ba1b0c37cd, 12.3: 488 (11, 0) | 7 |
+| own facts, Java's list | 413 (18, 68) | 4 (1, 2) | `gap-plain2` f64489e2e1, 12.2: 395 (30, 74) | 4 (2, 1) |
+| own facts, plain | 246 (120, 133) | 2 (1, 4) | `gap-plain2` f64489e2e1, 12.2: 238 (128, 133) | 2 (2, 3) |
+| own facts, store | 391 (21, 87) | 4 (1, 2) | `gap-plain2` f64489e2e1, 12.2: 377 (33, 89) | 4 (2, 1) |
+
+(the `gap-plain2` f64489e2e1 numbers are against 12.2, its `gap-plain2/r3` outputs; that
+build was not measured against 12.3.) Every function silent on `int8` and not silent on the
+row's branch was loud there, none identical: the decompiler fixes of `gap-javafacts2` (the
+deindirect restart for a locked prototype, `StringSequence`, the join logical value in
+SubvariableFlow) and the demangler's plate comment take away the error that hid a difference
+in the own facts. With Java's facts all of them are identical.
+
+- Java's list: 0x4b8e50, 0x6c3cb0 (were deindirect restart), 0x5d9a20 (was `StringSequence`;
+  one of the 10 functions whose Java C changed from 12.2 to 12.3); M8 0x9eec5e.
+- plain: 0x4b8e50, 0x4c1230, 0x6c3cb0 (deindirect restart), 0x5a9b80, 0x5d9a20
+  (`StringSequence`); M8 0x9eec5e.
+- store: 0x4b8e50, 0x5d84e0, 0x5d8680, 0x5d87c0, 0x6c3cb0 (deindirect restart), 0x5cee30
+  (subflow join logical value), 0x5d9a20 (`StringSequence`); M8 0x9eec5e.
+- 0x9eec5e (`__security_check_cookie`, all three rows) was loud ("the comments are not
+  derived"); with the demangler's comment it prints, and differs in the flow: the own facts
+  do not make `___report_gsfailure` no-return. Not traced further.
+
+The archive: `gdt-protos` of `windows_vs12_32.gdt` is byte-identical to
+`ref123/win32.protos`; `analyze --facts` with `--gdt` that archive and with `--protos` that file
+(plain discovery) write byte-identical facts.
+
+M8 bars (`CORPORA=m8 bars.sh`, `JOBS` 10, a new prelude from the `int8` analysis: cksum
+3963700924, 29,768 functions): all 57 lines equal those of
+`baselines/analysis-queue-83ee6a86e6.summary` (the newest) and of `m3-int7-249c32cf94.summary`.
+Not run: M500 bars, the full 133-pair pass, the Mac. Superseded: see "Full pass of `int8`" below.
+
+### Review fixes on `int8` (2026-11-20)
+
+An independent review of the analysis commits of `int8` (814facc891, 22c02f4701, 20fac3a4db,
+f64489e2e1); each finding checked against the Java first. The rows rerun with
+`rust/target/int8/rows.sh` (12.3 reference; M500 identical of 499 (loud, silent), M8 of 7):
+
+| fix | Java facts | Java's list | plain | store |
+|---|---|---|---|---|
+| `int8` (before) | 488 (11, 0), M8 7 | 413 (18, 68), M8 4 | 246 (120, 133), M8 2 | 391 (21, 87), M8 4 |
+| targetOnlyCallsNoReturn follows computed jumps | unchanged | unchanged | unchanged | unchanged |
+
+- `only_calls_noreturn` (targetOnlyCallsNoReturn) now follows a computed jump's destinations,
+  its switch cases and a computed target: Java skips only a destination whose flow type is
+  INDIRECTION (`isIndirect`), and a COMPUTED_JUMP one is not. Before, a function with a switch
+  whose cases return could be marked non-returning when another path called a non-returning
+  function. No row moved; `only_calls_noreturn_follows_switch_cases` covers it.
+- `find_noreturn`: Java's setNoFallThru and fixCallingFunctionBody act on the calls of the
+  addresses the analyzer found (`noReturnSet`) only. The mark itself is the thunked function's
+  (FunctionDB), so every thunk of it reads as non-returning, and the disassembler overrides the
+  calls it makes afterwards (`Disassembler.isNoReturnCall`); but a call made before the mark to
+  another thunk of the function, or to the thunked function, keeps its fallthrough there
+  (CreateFunctionCmd's body walk goes by the override only). Here such calls are kept in
+  `Analysis::fallthru` and `call_return` lets them fall through; only the functions holding a
+  call of an address found get their bodies fixed up. Superseded: every thunk's callers lost
+  the fallthrough and were fixed up. No facts file of the three rows changed; the test
+  `noreturn_takes_three_call_sites_of_evidence` covers a call of a thunk made before the mark.
+- `Project::remove_function` and `Store::apply` no longer re-flow the bodies that jump or fall
+  into a removed function (FunctionManagerDB.removeFunction deletes the function only); mercs2's
+  `FoldSlotFragments.java` fixes up the jump sources itself, and that fixup (`Project::reflow`)
+  now writes a `reflow` record (3 in the store row) so the replay gives the same bodies. Store
+  row facts: 12 bodies changed, 11 of them now the reference's (0x406120, 0x416c5d, 0x4ea606,
+  ...), one no longer: 0x5442e9 (`MOV; JMP 0x7f57a5`) loses the `RET` at 0x7f57a5, which plain
+  discovery's body lacks too and the store's re-flow had added; 11 `data` lines and 1 `func`
+  line moved with them. No function outside M500's counts moved, no silent is new.
+- A run-time warning counts where Java's Repair Flow Damage (ClearFlowAndRepairCmd, on by
+  default, not ported) would clear flow: a call of a function the no-return analyzer found
+  (not an import's flag, not a call that keeps its fallthrough) whose fallthrough holds an
+  instruction no jump, call or switch case refers to; findRepairLocations' NOP skip and external
+  entries are not counted. mercs2: 308 such calls with plain discovery, 317 with Java's list.
+  Output unchanged (plain and Java-list facts byte-identical).
+- checkNonReturningIndicators of a call under a CALL_RETURN override is false (Java's
+  `getFallThrough` is null), where the walk went on from the call's end. The Reference
+  analyzer's thunk step for a jump through a slot (`slot_jumps`) also needs `memRefs.length <= 2`;
+  a jump past its function's entry, where Java asks CreateThunkFunctionCmd.isThunk of the holding
+  function, is not ported and counted in a warning (mercs2: 1 jump with plain discovery, 10 with
+  Java's list). The INDIRECTION skip of `reference_data` needs no more guards: its comment says why
+  Java's (subroutinesEnabled, isUndefinedStuff, doneSubTest) hold there. The empty stray file
+  `src/store.rs.new` (dbd27b429e) is gone. All three rows' facts byte-identical.
+- 0x9eec5e (`__security_check_cookie`, M8 silent) is not explained by these fixes: Java marks
+  `___report_gsfailure` (0x9ef1dc) non-returning from the archive's `__report_gsfailure`
+  prototype (ApplyFunctionDataTypesCmd.lookupSymbol also tries `_` + the name), and here a
+  prototype of the archive goes only to an import (`factsout.rs`); not fixed.
+
+#### Full pass of `int8` (2026-11-21)
+
+The pass ran on c730b2db7d with `TIMEOUT` 120. The summary is
+`rust/target/baselines/int8-c730b2db7d.summary` (133 lines), compared with
+`analysis-queue-83ee6a86e6.summary`. The inputs on both machines were the 12.3 `x86.sla`
+(cksum 114282992, 439,217 bytes, the `java123` build's; the Mac's earlier 444,359-byte file was
+replaced) and the `int8` prelude (cksum 3963700924, 851,045 bytes, 29,768 functions).
+
+- The queue started on both machines: the desktop at `JOBS` 6 under `taskset -c 0-7`, the Mac at 16. It was
+  stopped after 8 M500 pairs (5 desktop, 3 Mac) because the desktop ran low on memory.
+- The other 125 pairs ran on the Mac only, as two direct `bars.sh` runs (`JOBS` 16, about 9 h).
+- Match check: `s4-m500` was rerun on the Mac. Its reference-finished, identical, loud, silent and
+  timeout counts and its `.miss` (0x4c48d0 a reference timeout) equal the desktop's. "All outputs
+  identical" is 500 on the Mac against 499 on the desktop, a difference only on 0x4c48d0, which
+  the reference does not finish.
+
+Silent 0 in every pair. Lines that moved:
+
+- `r5s-m500`: reference finished 499 -> 498, identical 499 -> 498 (loud 0). The reference times
+  out on 0x6b21e0. It does not finish there alone on the Mac at `TIMEOUT` 400 (also with the
+  `analysis-queue` prelude, and with that prelude and the old `x86.sla`) or at 1500. It is the
+  known reference timeout of the `m3-int6` pass (0x6b21e0 of `r5s` not compared there either),
+  and the other eight R5 checks count it as not finished, as in the baseline.
+- `pcd-m500`: identical 493 -> 499 (loud 6 -> 0). `pmd-m500`: identical 496 -> 499 (loud 3 -> 0).
+- "all outputs identical" 499 -> 500 in `s6void`, `s6callee`, `r1`, `r4`, `s8`, `swsn-r` and
+  `swsn-t` (M500): all on 0x4c48d0, which the reference does not finish. `stack-m500` outputs with stack SSA 312 -> 313.
+
+Every other line equals the baseline. Superseded: "Not run: M500 bars, the full 133-pair pass,
+the Mac" under "Integration `int8`" above.
 
 ## Speed
 

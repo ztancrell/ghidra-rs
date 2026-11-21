@@ -522,7 +522,7 @@ pub fn fold_slot_fragments(p: &mut Project, original: &str, rewrites: &str, out:
         let mut flow: HashMap<u32, BTreeSet<u32>> = HashMap::new();
         let mut changed = 0;
         // Java's bodies stay as they are until setBody, so its "before" is the body at the start
-        // of the round; here a body re-flows as soon as a fragment goes
+        // of the round; here a disassembly re-flows the bodies that flow into it
         let sizes: HashMap<u32, u64> = s.p.an.funcs.iter().map(|&f| (f, s.p.body_bytes(f))).collect();
         for &(site, exit) in &sites {
             s.clear_override(site);

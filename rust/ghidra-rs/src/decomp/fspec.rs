@@ -425,6 +425,15 @@ impl Models {
             .map(|i| ModelId(i as u32))
             .ok_or_else(|| LowlevelError(format!("Missing prototype model: {name}")))
     }
+
+    /// Port of `ProtoModel::isCompatible`: the same model, or one is the copy of the other
+    /// (`compatModel`). The only copy here is the facts' `unknown` model
+    /// (`createUnknownModel`, an `UnknownProtoModel` of the default model); the x86 cspec has no
+    /// `<modelalias>`.
+    pub(crate) fn is_compatible(&self, a: ModelId, b: ModelId) -> bool {
+        let copy_of = |m: ModelId| (self.get(m).name == "unknown" && m != self.default).then_some(self.default);
+        a == b || copy_of(a) == Some(b) || copy_of(b) == Some(a)
+    }
 }
 
 /// Port of `FuncProto`, the fields the actions up to `heritage` read.
@@ -444,8 +453,7 @@ pub(crate) struct FuncProto {
     pub(crate) locked: Option<Box<super::locked::Locked>>,
     /// `returnBytesConsumed`: the bytes of the return value the callers are known to use, 0
     /// for all (a hint to dead code, from `RulePiecePathology`)
-    /// The C++ resets it in `clearUnlockedOutput` (a decompile restart); restarts are not
-    /// ported, and the reset must come with them.
+    /// A restart resets it ([`FuncProto::clear_unlocked_output`]).
     pub(crate) return_bytes_consumed: u32,
     /// the return value `ActionOutputPrototype` stores (`ProtoStoreSymbol::outparam`): storage and
     /// data-type; none is `void`. The inputs are the local scope's category-0 symbols.
@@ -463,6 +471,26 @@ impl FuncProto {
             self.return_bytes_consumed = val;
         }
         smaller
+    }
+
+    /// Port of `FuncProto::clearUnlockedOutput` (`Funcdata::clear`, a restart): a locked output
+    /// stays, a size-locked one back to an unknown data-type of its size (`resetSizeLockType`);
+    /// an unlocked output is forgotten (`store->clearOutput`); `returnBytesConsumed` is reset.
+    /// The model, extrapop and flags stay as the pass before set them.
+    pub(crate) fn clear_unlocked_output(&mut self, types: &mut super::types::TypeFactory) {
+        match &mut self.locked {
+            Some(l) => {
+                if l.output_size_locked && self.model.is_some() {
+                    let size = types.size(l.output.ty);
+                    l.output.ty = types.base(size, super::types::Meta::Unknown);
+                }
+            }
+            None => {
+                self.output = None;
+                self.out_param = None;
+            }
+        }
+        self.return_bytes_consumed = 0;
     }
 
     /// Port of `FuncProto::setModel`: the model and its extrapop, except that a model replacing
@@ -715,6 +743,8 @@ pub(crate) struct ParamTrial {
     /// the parameter entry it fits (index into the list) and its justified offset in it
     pub(crate) entry: Option<usize>,
     pub(crate) offset: i32,
+    /// the argument position of a fixed argument of a varargs call, else -1
+    pub(crate) fixed_position: i32,
 }
 
 impl ParamTrial {
@@ -820,7 +850,16 @@ impl ParamActive {
     /// calls.
     pub(crate) fn register_trial(&mut self, space: Space, off: u64, size: u32) {
         let flags = if space == Space::Stack { 0 } else { ParamTrial::KILLEDBYCALL };
-        self.trials.push(ParamTrial { space, off, size, slot: self.slotbase, flags, entry: None, offset: -1 });
+        self.trials.push(ParamTrial {
+            space,
+            off,
+            size,
+            slot: self.slotbase,
+            flags,
+            entry: None,
+            offset: -1,
+            fixed_position: -1,
+        });
         self.slotbase += 1;
     }
     /// `setPlaceholderSlot`.
@@ -850,16 +889,32 @@ impl ParamActive {
     /// address and size; trials without an entry last. (The C++ `std::sort` on these few
     /// trials is an insertion sort, which keeps ties in order, as this stable sort does.)
     pub(crate) fn sort_trials(&mut self, list: &ParamList) {
-        self.trials.sort_by(|a, b| match (a.entry, b.entry) {
-            (None, None) => std::cmp::Ordering::Equal,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (Some(ea), Some(eb)) => list
-                .group(ea)
-                .cmp(&list.group(eb))
-                .then((a.space.index(), a.off).cmp(&(b.space.index(), b.off)))
-                .then(a.size.cmp(&b.size)),
+        self.trials.sort_by(|a, b| trial_order(list, a, b));
+    }
+    /// Port of `ParamActive::sortFixedPosition` (`ParamTrial::fixedPositionCompare`): the fixed
+    /// arguments of a varargs call first, by position, then the rest by `ParamTrial::operator<`.
+    pub(crate) fn sort_fixed_position(&mut self, list: &ParamList) {
+        self.trials.sort_by(|a, b| match (a.fixed_position, b.fixed_position) {
+            (-1, -1) => trial_order(list, a, b),
+            (-1, _) => std::cmp::Ordering::Greater,
+            (_, -1) => std::cmp::Ordering::Less,
+            (pa, pb) => pa.cmp(&pb),
         });
+    }
+}
+
+/// `ParamTrial::operator<` as an ordering: by the entry's group, then address and size; trials
+/// without an entry last.
+fn trial_order(list: &ParamList, a: &ParamTrial, b: &ParamTrial) -> std::cmp::Ordering {
+    match (a.entry, b.entry) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (Some(ea), Some(eb)) => list
+            .group(ea)
+            .cmp(&list.group(eb))
+            .then((a.space.index(), a.off).cmp(&(b.space.index(), b.off)))
+            .then(a.size.cmp(&b.size)),
     }
 }
 
@@ -1494,13 +1549,14 @@ impl ParamActive {
                 other.slot += 1;
             }
         }
-        let first = ParamTrial { size: sz, entry: None, offset: -1, ..t.clone() };
+        let first = ParamTrial { size: sz, entry: None, offset: -1, fixed_position: -1, ..t.clone() };
         let second = ParamTrial {
             off: t.off.wrapping_add(u64::from(sz)),
             size: t.size - sz,
             slot: t.slot + 1,
             entry: None,
             offset: -1,
+            fixed_position: -1,
             ..t
         };
         self.trials.splice(i..=i, [first, second]);

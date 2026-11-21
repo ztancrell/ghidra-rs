@@ -1,4 +1,4 @@
-//! Function discovery, bodies                 Task::SharedReturns => an.shared_returns(&set),nd references for 32-bit x86 PE images, modelled on what
+//! Function discovery, bodies and references for 32-bit x86 PE images, modelled on what
 //! Ghidra's auto-analysis produces for the scripts in `main.rs` (ExportFunctions, ExportGaps).
 //! Every executable section is disassembled; results are reported for `.text`. See rust/README.md "Analysis" for what is and isn't covered.
 
@@ -217,7 +217,15 @@ pub struct Analysis {
     pub insns: BTreeMap<u32, Ins>,
     pub tables: HashMap<u32, Vec<u32>>, // switch jump -> case targets
     pub funcs: BTreeSet<u32>,
-    pub noreturn: HashSet<u32>,          // functions and IAT slots that do not return
+    pub noreturn: HashSet<u32>, // functions and IAT slots that do not return
+    /// Calls of a non-returning function that keep their fallthrough: Java's setNoFallThru
+    /// overrides only the calls of the address the no-return analyzer found, so the calls made
+    /// before the mark to another thunk of the same function, or to the thunked function, fall
+    /// through still (the disassembler overrides the calls it makes later: isNoReturnCall).
+    pub fallthru: HashSet<u32>,
+    /// Jumps through a slot past a function's entry, which Java's Reference analyzer may make
+    /// a thunk (CreateThunkFunctionCmd.isThunk on the holding function, not ported).
+    slot_jumps_inside: HashSet<u32>,
     pub bodies: BTreeMap<u32, Vec<u32>>, // function -> sorted instruction addresses
     pub table_slots: BTreeMap<u32, u32>, // Create Address Tables (`disassemble` with constants): slot -> pointer
     fpu_ip: Option<(u32, u64)>,          // FPUInstructionPointer, which x87 constructors set to inst_start
@@ -344,6 +352,8 @@ impl Analysis {
             tables: HashMap::new(),
             funcs: BTreeSet::new(),
             noreturn: HashSet::new(),
+            fallthru: HashSet::new(),
+            slot_jumps_inside: HashSet::new(),
             bodies: BTreeMap::new(),
             table_slots: BTreeMap::new(),
             fpu_ip: None,
@@ -413,6 +423,7 @@ impl Analysis {
             AddressTables,
             StartSearchAfterData,
             SharedReturns,
+            SlotJumps,
             Purge,
         }
         let analyzer = |name, kind, priority, id| Analyzer { name, kind, priority, id };
@@ -440,6 +451,9 @@ impl Analysis {
             // CODE_ANALYSIS.before().before(): on each batch of functions added or with a changed body
             analyzer("Shared Return Calls", Kind::Function, priority::CODE_ANALYSIS - 2, Task::SharedReturns),
             analyzer("X86 Function Callee Purge", Kind::Function, priority::FUNCTION_ANALYSIS, Task::Purge),
+            // ConstantPropagationAnalyzer (REFERENCE_ANALYSIS.before() x4) on each batch: only its
+            // jumps through a pointer, with the thunks the Reference analyzer makes of them
+            analyzer("Constant Reference Analyzer", Kind::Function, priority::REFERENCE_ANALYSIS - 4, Task::SlotJumps),
         ]);
         mgr.notify(Kind::Byte, &exec().map(|s| s.addr).collect());
         // with `exact`, only the given functions are made (CreateFunctionCmd)
@@ -447,8 +461,13 @@ impl Analysis {
         // the non-returning functions the bodies go by (FindNoReturnFunctionsAnalyzer's side);
         // discovery's disassembly goes by `an.noreturn`, the imports'
         let mut body_noreturn = an.noreturn.clone();
+        // the instructions the no-return analyzer looked at, and INT3 (checkNonReturningIndicators)
+        let mut noreturn_seen = HashSet::new();
+        let int3 = |a: u32| img.block_of(a).is_some_and(|s| s.data[(a - s.addr) as usize] == 0xcc);
         while let Some((task, set)) = mgr.next_task() {
             let mut data = BTreeSet::new();
+            // (thunk, target) of SlotJumps: the target is made with the task's new functions
+            let mut slot_thunks = Vec::new();
             match task {
                 Task::EntryPoints => {
                     for &s in &seeds {
@@ -475,6 +494,7 @@ impl Analysis {
                     an.start_search(img, sl, &mut p, &mut owner, &mut queue)
                 }
                 Task::SharedReturns => an.shared_returns(&set),
+                Task::SlotJumps => slot_thunks = an.slot_jumps(img, sl, &mut p, &mut owner, &set),
                 Task::Purge => an.callee_purge(img, &set, &body_noreturn),
             }
             mgr.notify(Kind::Data, &data);
@@ -489,7 +509,14 @@ impl Analysis {
                 for f in new {
                     an.create_function(f, allowed.as_ref(), &mut Vec::new(), &mut defined);
                 }
-                an.find_noreturn(&mut defined);
+                // CreateFunctionCmd again on the function, now a thunk (functionDefined)
+                for (f, t) in slot_thunks {
+                    if an.bodies.contains_key(&t) && an.thunked_end(t) != f {
+                        an.thunk_of.insert(f, t);
+                        defined.insert(f);
+                    }
+                }
+                an.find_noreturn(&mut defined, &mut noreturn_seen, &int3);
                 body_noreturn = std::mem::replace(&mut an.noreturn, known);
                 mgr.notify(Kind::Function, &defined);
             }
@@ -498,7 +525,41 @@ impl Analysis {
             an.funcs = extra.iter().copied().filter(|a| an.insns.contains_key(a)).collect();
             an.bodies.retain(|f, _| an.funcs.contains(f));
         }
-        an.noreturn = body_noreturn;
+        let known = std::mem::replace(&mut an.noreturn, body_noreturn);
+        // Repair Flow Damage (ClearFlowAndRepairCmd, on by default) is not ported: Java clears the
+        // flow from the fallthrough of a call of a function the no-return analyzer found, where
+        // an instruction is and no flow refers to it (findRepairLocations; its NOP skip and the
+        // external entry points not counted here)
+        let flows_to: HashSet<u32> = an
+            .insns
+            .values()
+            .filter(|i| matches!(i.flow, Flow::Jump | Flow::CondJump | Flow::Call))
+            .filter_map(|i| i.target)
+            .chain(an.tables.values().flatten().copied())
+            .collect();
+        let damaged = an
+            .insns
+            .iter()
+            .filter(|&(&a, i)| {
+                let fall = a + i.len as u32;
+                i.flow == Flow::Call
+                    && !an.fallthru.contains(&a)
+                    && i.target.is_some_and(|t| t != fall && an.noreturn.contains(&t) && !known.contains(&t))
+                    && an.insns.contains_key(&fall)
+                    && !flows_to.contains(&fall)
+            })
+            .count();
+        if !an.slot_jumps_inside.is_empty() {
+            an.warnings.push(format!(
+                "not ported: CreateThunkFunctionCmd.isThunk for a jump through a slot past the entry: {} such jumps, no thunk made here",
+                an.slot_jumps_inside.len()
+            ));
+        }
+        if damaged > 0 {
+            an.warnings.push(format!(
+                "not ported: Repair Flow Damage (ClearFlowAndRepairCmd): {damaged} calls of a function found non-returning fall into instructions no flow refers to, which Java clears"
+            ));
+        }
         an.body_owner = HashMap::new();
         // a thunk's purge is its thunked function's (FunctionDB.getStackPurgeSize)
         let thunked: Vec<(u32, u32)> = an.thunk_of.keys().map(|&f| (f, an.thunked_end(f))).collect();
@@ -514,9 +575,14 @@ impl Analysis {
         // two thunk definitions: the purges go by `thunk_of`, the facts' names and
         // `Project::thunked` by a body of one direct jump to a function
         let (only_made, only_one_jump) = an.bodies.iter().fold((0, 0), |(m, o), (&f, b)| {
-            let one_jump = b.len() == 1
-                && an.insns[&f].flow == Flow::Jump
-                && an.insns[&f].target.is_some_and(|t| t != f && an.funcs.contains(&t));
+            let i = &an.insns[&f];
+            let target = match (i.flow, i.slot) {
+                (Flow::Jump, _) => i.target,
+                // through a pointer that holds a function's entry (the facts' SecuROM slots)
+                (Flow::JumpInd, Some(s)) if !img.imports.contains_key(&s) => img.read_u32(s),
+                _ => None,
+            };
+            let one_jump = b.len() == 1 && target.is_some_and(|t| t != f && an.funcs.contains(&t));
             match (an.thunk_of.contains_key(&f), one_jump) {
                 (true, false) => (m + 1, o),
                 (false, true) => (m, o + 1),
@@ -726,6 +792,72 @@ impl Analysis {
         Some(thunk)
     }
 
+    /// The target of a jump through a pointer (`JMP [slot]`, SecuROM's slots) as
+    /// ConstantPropagationAnalyzer finds it: the slot's value (VarnodeContext reads writable
+    /// memory, as the analyzer's "trust writable memory" default; an import slot is external),
+    /// non-zero, in an executable block, not inside an instruction nor inside a function but at
+    /// its entry (evaluatePureDataRef).
+    fn slot_jump(&self, img: &Image, owner: &[u8], a: u32) -> Option<u32> {
+        let i = self.insns.get(&a).filter(|i| i.flow == Flow::JumpInd)?;
+        let s = i.slot.filter(|s| !img.imports.contains_key(s))?;
+        let t = img.read_u32(s).filter(|&t| t != 0 && self.is_code(img, t))?;
+        let inside = owner[(t - self.code_lo) as usize] >= 2 || self.body_owner.get(&t).is_some_and(|&g| g != t);
+        (!inside).then_some(t)
+    }
+
+    /// Constant propagation's computed jumps through a pointer on the functions of `set`: the
+    /// COMPUTED_JUMP reference's target is disassembled (evaluateReference), and a function
+    /// whose entry is such a jump becomes a thunk of it, its target made a function, as the
+    /// Reference analyzer does (OperandReferenceAnalyzer: a computed jump of a function that
+    /// is no thunk but CreateThunkFunctionCmd.isThunk, CreateFunctionCmd again). Returns
+    /// (thunk, target); the targets are in `funcs`, for CreateFunctionCmd after the task.
+    // ponytail: only jumps through a direct slot, with the slot's value as the image holds it
+    // (Java's propagation would see a store to the slot earlier in the flow); and the thunk
+    // step runs here, at 596, where Java's Reference analyzer (600) runs on code added.
+    fn slot_jumps(
+        &mut self,
+        img: &Image,
+        sl: &Sleigh,
+        p: &mut crate::sleigh::Parse,
+        owner: &mut [u8],
+        set: &BTreeSet<u32>,
+    ) -> Vec<(u32, u32)> {
+        let jumps: Vec<(u32, u32)> = set
+            .iter()
+            .filter_map(|f| self.bodies.get(f))
+            .flatten()
+            .filter_map(|&a| self.slot_jump(img, owner, a).map(|t| (a, t)))
+            .collect();
+        let mut queue: Vec<u32> =
+            jumps.iter().map(|&(_, t)| t).filter(|&t| owner[(t - self.code_lo) as usize] == 0).collect();
+        self.descend(img, sl, p, owner, &mut queue, &mut Vec::new());
+        let mut thunks = Vec::new();
+        for (a, t) in jumps {
+            // memRefs.length <= 2: the read of the slot and the COMPUTED_JUMP
+            if self.insns[&a].refs.len() > 1 {
+                continue;
+            }
+            // CreateThunkFunctionCmd.isThunk on the function holding a jump past its entry is
+            // not ported (counted, `slot_jumps_inside`)
+            if !set.contains(&a) {
+                self.slot_jumps_inside.insert(a);
+                continue;
+            }
+            if self.thunk_of.contains_key(&a) || t == a || !self.insns.contains_key(&t) {
+                continue;
+            }
+            // getReferencedFunction: a function at the target, or none containing it
+            if !self.bodies.contains_key(&t) {
+                if self.body_owner.contains_key(&t) {
+                    continue;
+                }
+                self.funcs.insert(t);
+            }
+            thunks.push((a, t));
+        }
+        thunks
+    }
+
     /// Function.setBody (FUNCTION_BODY_CHANGED; a new function's body with FUNCTION_ADDED).
     fn set_body(&mut self, f: u32, body: Vec<u32>, changed: &mut BTreeSet<u32>) {
         for a in self.bodies.get(&f).into_iter().flatten() {
@@ -770,59 +902,254 @@ impl Analysis {
         self.set_body(f, new, changed);
     }
 
-    /// Non-returning functions, this analysis's rule (FindNoReturnFunctionsAnalyzer's place):
-    /// no way out of the body: no RETURN, no jump (conditional or not) or fallthrough out of
-    /// it, unless to a non-returning function. An approximation: Java's analyzer decides from
-    /// the call sites (`FindNoReturnFunctionsAnalyzer`, its evidence threshold), never from a
-    /// body without a RET; a mark here is kept once made, so a wrong one stays. The functions that call a new one get their bodies
-    /// fixed up (`fixCallingFunctionBody`), and the rule runs again. Bodies set go to `changed`.
-    fn find_noreturn(&mut self, changed: &mut BTreeSet<u32>) {
-        for round in 0..4 {
-            let found: HashSet<u32> = self
-                .bodies
-                .iter()
-                .filter(|(f, b)| {
-                    !self.noreturn.contains(f)
-                        && !b.iter().any(|a| {
-                            let i = &self.insns[a];
-                            // a JMP [slot] thunk to a non-returning import does not return either
-                            i.flow == Flow::Return
-                                || i.flow == Flow::JumpInd
-                                    && !self.tables.contains_key(a)
-                                    && !i.slot.is_some_and(|s| self.noreturn.contains(&s))
-                                // a jump out of the body (to a function, made or not, or
-                                // to code the body does not hold) unless to a non-returning one
-                                || matches!(i.flow, Flow::Jump | Flow::CondJump)
-                                    && i.target.is_some_and(|t| {
-                                        !self.noreturn.contains(&t)
-                                            && b.binary_search(&t).is_err()
-                                    })
-                                // a fallthrough out of the body (into another function's)
-                                || i.falls_through()
-                                    && !(matches!(i.flow, Flow::Call | Flow::CallInd) && self.call_return(*a, i))
-                                    && b.binary_search(&(a + i.len as u32)).is_err()
-                        })
-                })
-                .map(|(&f, _)| f)
-                .collect();
-            if found.is_empty() {
-                break;
+    /// FindNoReturnFunctionsAnalyzer.added: the call sites of `seen`'s complement (the
+    /// instructions this analyzer has not looked at, its `set`) give evidence that a target does
+    /// not return (`checkNonReturningIndicators`); a target with 3 callers that do (the evidence
+    /// threshold) or that only calls non-returning functions (`targetOnlyCallsNoReturn`) is
+    /// marked, again once more if some stayed suspicious. A mark on a thunk is its thunked
+    /// function's (FunctionDB.setNoReturn), and so on every thunk of it. The calls of an address
+    /// found lose their fallthrough (`setNoFallThru`) and the functions holding them get their
+    /// bodies fixed up (`fixCallingFunctionBody`); the calls of the other addresses marked keep
+    /// theirs (`fallthru`). Bodies set go to `changed`. `int3`: the instruction at an address is
+    /// INT3.
+    // ponytail: run after each batch of functions made, where Java's instruction analyzer runs
+    // on instructions added (DISASSEMBLY + 2), so the functions it sees may differ;
+    // "Repair Flow Damage" (ClearFlowAndRepairCmd) is not ported, nor a function made at a
+    // target that is none (setFunctionNonReturning), nor the call-fixup exception
+    fn find_noreturn(&mut self, changed: &mut BTreeSet<u32>, seen: &mut HashSet<u32>, int3: &dyn Fn(u32) -> bool) {
+        // the references the analyzer reads: calls (with computed ones) and reads or writes
+        let mut calls_to: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut data_to: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (&a, i) in &self.insns {
+            if let Some(t) = self.call_flows(i) {
+                calls_to.entry(t).or_default().push(a);
             }
-            let cap = "the no-return rule stopped after 4 rounds with non-returning functions still found";
-            if round == 3 && !self.warnings.iter().any(|w| w == cap) {
-                self.warnings.push(cap.to_string());
-            }
-            self.noreturn.extend(&found);
-            let callers: BTreeSet<u32> = self
-                .insns
-                .iter()
-                .filter(|(_, i)| i.flow == Flow::Call && i.target.is_some_and(|t| found.contains(&t)))
-                .filter_map(|(a, _)| self.body_owner.get(a).copied())
-                .collect();
-            for g in callers {
-                self.fixup_body(g, changed);
+            for &t in i.refs.iter().filter(|&&t| self.insns.contains_key(&t)) {
+                data_to.entry(t).or_default().push(a);
             }
         }
+        let set: Vec<u32> = self.insns.keys().copied().filter(|a| !seen.contains(a)).collect();
+        seen.extend(&set);
+        let mut found = BTreeSet::new();
+        for _ in 0..2 {
+            if !self.detect_noreturn(&set, &calls_to, &data_to, &mut found, int3) {
+                break;
+            }
+        }
+        if found.is_empty() {
+            return;
+        }
+        let ends: HashSet<u32> = found.iter().map(|&t| self.thunked_end(t)).collect();
+        let marked: Vec<u32> =
+            self.bodies.keys().chain(&found).copied().filter(|&f| ends.contains(&self.thunked_end(f))).collect();
+        // setNoFallThru on the calls of the addresses found; the calls of the other addresses
+        // marked (FunctionDB's flag is the thunked function's) keep their fallthrough
+        for m in marked.iter().filter(|m| !found.contains(m) && !self.noreturn.contains(m)) {
+            self.fallthru.extend(calls_to.get(m).into_iter().flatten().filter(|c| self.insns[c].flow == Flow::Call));
+        }
+        for t in &found {
+            for c in calls_to.get(t).into_iter().flatten() {
+                self.fallthru.remove(c);
+            }
+        }
+        self.noreturn.extend(&marked);
+        // fixCallingFunctionBody: the functions holding a call of an address found
+        let callers: BTreeSet<u32> = found
+            .iter()
+            .flat_map(|t| calls_to.get(t).into_iter().flatten())
+            .filter_map(|a| self.body_owner.get(a).copied())
+            .collect();
+        for g in callers {
+            self.fixup_body(g, changed);
+        }
+    }
+
+    /// The call targets of an instruction (Instruction.getFlows, getAllFlows): the direct one,
+    /// or the computed one of an indirect call.
+    fn call_flows(&self, i: &Ins) -> Option<u32> {
+        match i.flow {
+            Flow::Call => i.target,
+            Flow::CallInd => i.computed,
+            _ => None,
+        }
+    }
+
+    /// A function that does not return: marked, or a thunk of one (Function.hasNoReturn).
+    fn is_noreturn(&self, f: u32) -> bool {
+        self.noreturn.contains(&f) || self.noreturn.contains(&self.thunked_end(f))
+    }
+
+    /// detectNoReturn: one pass over the calls of `set`; true if a suspicious target stayed
+    /// under the threshold.
+    fn detect_noreturn(
+        &self,
+        set: &[u32],
+        calls_to: &HashMap<u32, Vec<u32>>,
+        data_to: &HashMap<u32, Vec<u32>>,
+        found: &mut BTreeSet<u32>,
+        int3: &dyn Fn(u32) -> bool,
+    ) -> bool {
+        const THRESHOLD: usize = 3;
+        let mut checked = HashSet::new();
+        let mut suspicious = false;
+        for &a in set {
+            if !checked.insert(a) {
+                continue;
+            }
+            let i = &self.insns[&a];
+            // a call with a fallthrough (a CALL_RETURN override has none)
+            if !matches!(i.flow, Flow::Call | Flow::CallInd) || self.call_return(a, i) {
+                continue;
+            }
+            if !self.noreturn_indicators(a, data_to, calls_to, int3) {
+                continue;
+            }
+            let Some(t) = self.call_flows(i) else { continue };
+            let mut count = 1;
+            for &from in calls_to.get(&t).into_iter().flatten() {
+                if !checked.insert(from) || found.contains(&t) {
+                    continue;
+                }
+                if !self.noreturn_indicators(from, data_to, calls_to, int3) {
+                    continue;
+                }
+                count += 1;
+                if count >= THRESHOLD {
+                    found.insert(t);
+                    break;
+                }
+            }
+            if count < THRESHOLD {
+                if self.only_calls_noreturn(t, found) {
+                    found.insert(t);
+                    continue;
+                }
+                suspicious = true;
+            }
+        }
+        suspicious
+    }
+
+    /// checkNonReturningIndicators: from the call's fallthrough on, while instructions fall
+    /// through: a function starts there or inside the instruction, no instruction is there
+    /// (data), a read or write from earlier in the calling function (or from anywhere, outside
+    /// a function) or a call refers to it (hasInconsistentRefsTo), an address table is there,
+    /// or it is an INT3.
+    fn noreturn_indicators(
+        &self,
+        call: u32,
+        data_to: &HashMap<u32, Vec<u32>>,
+        calls_to: &HashMap<u32, Vec<u32>>,
+        int3: &dyn Fn(u32) -> bool,
+    ) -> bool {
+        // getFallThrough is null under a CALL_RETURN override: nothing to check
+        if self.call_return(call, &self.insns[&call]) {
+            return false;
+        }
+        let caller = self.body_owner.get(&call).copied();
+        let mut fall = call + self.insns[&call].len as u32;
+        let next = self.bodies.range(fall..).next().map(|(&f, _)| f);
+        loop {
+            if next == Some(fall) {
+                return true;
+            }
+            let Some(i) = self.insns.get(&fall) else { return true };
+            if next.is_some_and(|n| n < fall + i.len as u32) {
+                return true;
+            }
+            let data = data_to.get(&fall).into_iter().flatten().any(|&from| match caller {
+                Some(g) => from < fall && self.body_owner.get(&from) == Some(&g),
+                None => true,
+            });
+            if data || calls_to.contains_key(&fall) || self.table_slots.contains_key(&fall) || int3(fall) {
+                return true;
+            }
+            if i.flow != Flow::Fall {
+                return false;
+            }
+            fall += i.len as u32;
+        }
+    }
+
+    /// targetOnlyCallsNoReturn: every path from `t` (SimpleBlockModel's blocks, calls not
+    /// followed, computed jumps followed as their COMPUTED_JUMP destinations: switch cases and a
+    /// computed target) ends in a call or jump to a non-returning function.
+    fn only_calls_noreturn(&self, t: u32, found: &BTreeSet<u32>) -> bool {
+        let nr = |d: u32| found.contains(&d) || self.is_noreturn(d);
+        let mut todo = vec![t];
+        let mut visited = HashSet::new();
+        let mut hit = false;
+        while let Some(mut a) = todo.pop() {
+            if !visited.insert(a) {
+                continue;
+            }
+            // the block from `a`: to its first instruction that is not a plain fallthrough
+            let i = loop {
+                let Some(i) = self.insns.get(&a) else { return false };
+                if i.flow != Flow::Fall {
+                    break i;
+                }
+                a += i.len as u32;
+            };
+            let ret = self.call_return(a, i);
+            let fall = a + i.len as u32;
+            match i.flow {
+                Flow::Return => return false,
+                Flow::Call | Flow::Jump => {
+                    let Some(d) = i.target else { return false };
+                    if nr(d) {
+                        hit = true;
+                    } else if ret {
+                        // CALL_TERMINATOR: a call or a jump to a function that returns
+                        return false;
+                    } else if i.flow == Flow::Jump {
+                        todo.push(d);
+                    }
+                    if i.flow == Flow::Call && !ret {
+                        todo.push(fall);
+                    }
+                }
+                Flow::CondJump => {
+                    let d = i.target.unwrap_or(fall);
+                    if nr(d) {
+                        hit = true;
+                    } else {
+                        todo.push(d);
+                    }
+                    todo.push(fall);
+                }
+                Flow::CallInd | Flow::JumpInd => {
+                    let slot = i.slot.is_some_and(|s| self.noreturn.contains(&s));
+                    let cases = self.tables.get(&a).map_or(&[][..], Vec::as_slice);
+                    let dests = slot || i.computed.is_some() || !cases.is_empty();
+                    if !dests && (ret || i.flow == Flow::JumpInd) {
+                        return false;
+                    }
+                    if slot || i.computed.is_some_and(nr) {
+                        hit = true;
+                    } else if ret {
+                        return false;
+                    }
+                    if i.flow == Flow::CallInd {
+                        if !ret {
+                            todo.push(fall);
+                        }
+                    } else {
+                        // COMPUTED_JUMP destinations (switch cases, a computed target) are
+                        // followed: only an INDIRECTION one (isIndirect) is not
+                        for &d in cases.iter().chain(i.computed.iter().filter(|&&d| !nr(d))) {
+                            if nr(d) {
+                                hit = true;
+                            } else {
+                                todo.push(d);
+                            }
+                        }
+                    }
+                }
+                Flow::Fall => unreachable!(),
+            }
+        }
+        hit
     }
 
     /// Function Start Search: functions at prologue patterns in bytes no code covers yet, each
@@ -1754,7 +2081,7 @@ impl Analysis {
             return o;
         }
         match i.flow {
-            Flow::Call => i.target.is_some_and(|t| self.noreturn.contains(&t)),
+            Flow::Call => i.target.is_some_and(|t| self.noreturn.contains(&t)) && !self.fallthru.contains(&a),
             Flow::CallInd => i.slot.is_some_and(|s| self.noreturn.contains(&s)),
             Flow::Jump => i.target.is_some_and(|t| self.funcs.contains(&t) && self.insns.contains_key(&t)),
             _ => false,
@@ -2111,6 +2438,8 @@ mod tests {
             tables: HashMap::new(),
             funcs: BTreeSet::new(),
             noreturn: HashSet::new(),
+            fallthru: HashSet::new(),
+            slot_jumps_inside: HashSet::new(),
             bodies: BTreeMap::new(),
             table_slots: BTreeMap::new(),
             fpu_ip: None,
@@ -2132,18 +2461,54 @@ mod tests {
     }
 
     #[test]
-    fn noreturn_counts_a_fallthrough_into_another_body_as_returning() {
-        // 0x10 falls into 0x11, made first; 0x20 only loops
-        let (mut an, mut changed) = bare(
-            &[(0x10, Flow::Fall, None), (0x11, Flow::Return, None), (0x20, Flow::Jump, Some(0x20))],
-            &[0x11, 0x10, 0x20],
-        );
-        assert_eq!(an.bodies[&0x10], [0x10]);
-        an.find_noreturn(&mut changed);
-        assert!(!an.noreturn.contains(&0x10));
-        assert!(an.noreturn.contains(&0x20));
+    fn noreturn_takes_three_call_sites_of_evidence() {
+        // calls of 0x40 followed by a function (0x11, 0x21) and by no instruction (0x31);
+        // 0x50 is a thunk of 0x40
+        let calls = |n: u32| {
+            // 0x60 calls the thunk 0x50 before the mark: it keeps its fallthrough (setNoFallThru
+            // overrides only the calls of 0x40)
+            let mut v = vec![
+                (0x40, Flow::Return, None),
+                (0x50, Flow::Jump, Some(0x40)),
+                (0x60, Flow::Call, Some(0x50)),
+                (0x61, Flow::Return, None),
+            ];
+            for k in 1..=n {
+                v.push((0x10 * k, Flow::Call, Some(0x40)));
+                if k < 3 {
+                    v.push((0x10 * k + 1, Flow::Return, None));
+                }
+            }
+            v
+        };
+        for (n, nr) in [(2, false), (3, true)] {
+            let (mut an, mut changed) = bare(&calls(n), &[0x40, 0x50, 0x10, 0x11, 0x20, 0x21, 0x30]);
+            an.find_noreturn(&mut changed, &mut HashSet::new(), &|_| false);
+            assert_eq!(an.noreturn.contains(&0x40), nr);
+            assert_eq!(an.noreturn.contains(&0x50), nr);
+            assert!(!an.call_return(0x60, &an.insns[&0x60]));
+            assert_eq!(an.call_return(0x10, &an.insns[&0x10]), nr);
+        }
     }
 
+    #[test]
+    fn only_calls_noreturn_follows_switch_cases() {
+        // 0x60: a switch whose case 0x62 returns and case 0x63 calls 0x40, which does not return
+        let (mut an, _) = bare(
+            &[
+                (0x40, Flow::Return, None),
+                (0x60, Flow::JumpInd, None),
+                (0x62, Flow::Return, None),
+                (0x63, Flow::Call, Some(0x40)),
+            ],
+            &[0x40, 0x60],
+        );
+        an.noreturn.insert(0x40);
+        an.tables.insert(0x60, vec![0x63]);
+        assert!(an.only_calls_noreturn(0x60, &BTreeSet::new()));
+        an.tables.insert(0x60, vec![0x62, 0x63]);
+        assert!(!an.only_calls_noreturn(0x60, &BTreeSet::new()));
+    }
     #[test]
     fn thunk_body_never_takes_a_third_functions_code() {
         // 0x10 JMP 0x12; 0x12 JMP 0x11 makes 0x11 first: 0x10's first body less 0x12's would

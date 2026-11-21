@@ -61,6 +61,9 @@ pub enum Step {
     Switch(u32, Vec<u32>),
     /// true: CALL_RETURN, false: none
     Override(u32, bool),
+    /// `CreateFunctionCmd.fixupFunctionBody` (`edit reflow`, a script's fixup): the body is
+    /// computed again from the flow
+    Reflow(u32),
 }
 
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
@@ -91,6 +94,7 @@ impl std::fmt::Display for Store {
                 Step::Override(a, on) => {
                     writeln!(f, "override 0x{a:08x} {}", if *on { "call_return" } else { "none" })?
                 }
+                Step::Reflow(a) => writeln!(f, "reflow 0x{a:08x}")?,
             }
         }
         for (a, create) in &self.functions {
@@ -152,6 +156,7 @@ impl Store {
                 }
                 ["code", a] => Some(Step::Code(addr(a)?)),
                 ["override", a, v @ ("call_return" | "none")] => Some(Step::Override(addr(a)?, *v == "call_return")),
+                ["reflow", a] => Some(Step::Reflow(addr(a)?)),
                 _ => None,
             };
             if let Some(step) = step {
@@ -200,8 +205,9 @@ impl Store {
 
     /// Lays the edits over a fresh analysis, in the order of the file, and computes again the
     /// bodies the edits touch: of the functions the file makes, removes, gives a body or a thunk
-    /// mark, and of the functions whose body holds an address it clears, overrides, gives a
-    /// switch or makes a function entry. The other bodies stay as analysis set them.
+    /// mark or fixes up (`reflow`), and of the functions whose body holds an address it clears,
+    /// overrides, gives a switch or makes a function entry. The other bodies stay as analysis
+    /// set them.
     // ponytail: a touched body is the flow from its entry (`body_of`), not Java's
     // CreateFunctionCmd / fixupFunctionBody on the edited program A record that cannot hold when its turn comes (no instruction decodes at a
     /// `code`, `switch`, `override` or `function` address, a `body` or `thunk` of no function)
@@ -212,6 +218,7 @@ impl Store {
             false => Err(format!("store: {kind} 0x{a:08x}: no instruction there")),
         };
         let mut touched: BTreeSet<u32> = BTreeSet::new();
+        let mut reflowed: BTreeSet<u32> = BTreeSet::new();
         for step in &self.steps {
             match *step {
                 Step::Clear(lo, hi) => touched.extend(clear_insns(an, lo, hi)),
@@ -231,6 +238,7 @@ impl Store {
                     touched.insert(a);
                     an.overrides.insert(a, on);
                 }
+                Step::Reflow(f) => drop(reflowed.insert(f)),
             }
         }
         for (&f, &create) in &self.functions {
@@ -249,8 +257,16 @@ impl Store {
         an.fixed_bodies = self.bodies.clone();
         an.thunks = self.thunks.iter().map(|(&f, &t)| (f, t)).collect();
         touched.extend(self.functions.keys());
-        let mut redo: BTreeSet<u32> =
-            self.functions.keys().chain(self.bodies.keys()).chain(self.thunks.keys()).copied().collect();
+        // the records' functions, the ones a script fixed up (`reflow`) and the ones holding a
+        // touched address; removing a function re-flows no other body (FunctionManagerDB)
+        let mut redo: BTreeSet<u32> = self
+            .functions
+            .keys()
+            .chain(self.bodies.keys())
+            .chain(self.thunks.keys())
+            .chain(&reflowed)
+            .copied()
+            .collect();
         redo.extend(
             an.bodies.iter().filter(|(_, b)| touched.iter().any(|a| b.binary_search(a).is_ok())).map(|(&f, _)| f),
         );
@@ -540,9 +556,9 @@ impl<'a> Project<'a> {
         self.store.thunks.remove(&f);
         self.an.fixed_bodies.remove(&f);
         self.an.thunks.remove(&f);
-        // jumps to it are no tail calls now: their owners flow on
-        let into = self.flowing_into(f);
-        self.rebody(into.into_iter().chain([f]));
+        // FunctionManagerDB.removeFunction deletes the function only: the bodies that jump or
+        // fall into it stay as they are until a script fixes them up (`reflow`, `set_body`)
+        self.rebody([f]);
     }
 
     /// `Function.setNoReturn`.
@@ -600,6 +616,7 @@ impl<'a> Project<'a> {
     pub fn reflow(&mut self, f: u32) {
         self.an.fixed_bodies.remove(&f);
         self.store.bodies.remove(&f);
+        self.store.steps.push(Step::Reflow(f));
         self.rebody([f]);
     }
 

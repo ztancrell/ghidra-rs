@@ -465,19 +465,18 @@ impl Flow<'_> {
                     self.end_instruction_at(op, i, maxtime);
                     *startbasic = true;
                 }
-                Opcode::Call => {
+                Opcode::Call | Opcode::Callind => {
                     // checkForFlowModification: a callee that does not return is followed by
                     // an artificial halt, which the walk picks up next
-                    if self.setup_call_specs(op)? {
+                    let no_return =
+                        if opc == Opcode::Call { self.setup_call_specs(op)? } else { self.setup_callind_specs(op)?.1 };
+                    if no_return {
                         let addr = self.fd.op(op).seq.addr;
                         self.artificial_halt(addr, Some(Halt::NoReturn))?;
                         if let Some(halt) = self.fd.dead.pop() {
                             self.fd.dead.insert(i, halt);
                         }
                     }
-                }
-                Opcode::Callind => {
-                    self.setup_callind_specs(op);
                 }
                 _ => {}
             }
@@ -589,6 +588,11 @@ impl Flow<'_> {
     /// warning.
     fn setup_call_specs(&mut self, op: OpId) -> Result<bool> {
         let entry = self.fd.vn(self.fd.input(op, 0)?).offset;
+        Ok(self.direct_call_specs(op, entry)?.1)
+    }
+
+    /// The call at `op` to `entry`, as [`Self::setup_call_specs`] sets it up.
+    fn direct_call_specs(&mut self, op: OpId, entry: u64) -> Result<(CallId, bool)> {
         let callee = self.arch.callee_proto(&mut self.fd.types, entry)?;
         let mut spec = CallSpec::new(op, Some(entry), callee.is_some());
         if let Some(p) = &callee {
@@ -603,12 +607,19 @@ impl Flow<'_> {
         } else if no_return {
             self.fd.warning("Subroutine does not return", self.fd.op(op).seq.addr);
         }
-        Ok(no_return)
+        Ok((call, no_return))
     }
 
-    /// Port of `FlowInfo::setupCallindSpecs` (without overrides, an indirect call stays one).
-    fn setup_callind_specs(&mut self, op: OpId) -> CallId {
-        self.new_call(CallSpec::new(op, None, false))
+    /// Port of `FlowInfo::setupCallindSpecs`: an indirect call stays one, unless a deindirect
+    /// override (`Override::applyIndirect`) names its target, which makes it a direct call.
+    /// Returns the call and whether the callee does not return.
+    fn setup_callind_specs(&mut self, op: OpId) -> Result<(CallId, bool)> {
+        let addr = self.fd.op(op).seq.addr;
+        let Some(&entry) = self.fd.deindirect.get(&addr) else {
+            return Ok((self.new_call(CallSpec::new(op, None, false)), false));
+        };
+        self.fd.op_set_opcode(op, Opcode::Call);
+        self.direct_call_specs(op, entry)
     }
 
     fn new_call(&mut self, spec: CallSpec) -> CallId {
@@ -876,7 +887,7 @@ impl Flow<'_> {
     /// the call as a bad jump table (`setBadJumpTable`).
     fn truncate_indirect_jump(&mut self, op: OpId, bad: bool) -> Result<()> {
         self.fd.op_set_opcode(op, Opcode::Callind);
-        let call = self.setup_callind_specs(op);
+        let (call, _) = self.setup_callind_specs(op)?;
         if bad {
             self.fd.call_mut(call).bad_jump_table = true;
             let addr = self.fd.op(op).seq.addr;

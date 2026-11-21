@@ -202,7 +202,7 @@ impl TypeDecoder<'_> {
             _ => Err(format!("<{}> {name}: expected one data-type", el.name)),
         };
         match (el.name.as_str(), el.attr("metatype")) {
-            ("void", _) => Ok(types.base(1, Meta::Void)),
+            ("void", _) => Ok(types.base(0, Meta::Void)),
             ("def", _) => {
                 if el.attr("format").is_some() {
                     return Err(format!("typedef {name}: a display format is not ported"));
@@ -385,6 +385,16 @@ impl Facts {
                     let entry = hex(a)?;
                     f.funcs.insert(entry, at(x));
                     arch.add_function(entry, function_name(x).ok_or_else(|| bad(line))?);
+                    // FunctionSymbol::decode: the function's size from 2 to 8 bytes is its symbol's
+                    if let Some(f) = arch.functions.get_mut(&entry) {
+                        let size = match attr_of(x, "<function", "size") {
+                            None => 0,
+                            Some(s) => s.parse::<u32>().map_err(|_| bad(line))?,
+                        };
+                        if (2..=8).contains(&size) {
+                            f.consume = size;
+                        }
+                    }
                     scoped.push((entry, scope_id(x)?));
                 }
                 ("body", Some(a), ..) => {
@@ -705,6 +715,11 @@ impl Facts {
         if p.kid("internallist").is_some() {
             return Err(unported("an <internallist>"));
         }
+        // FuncProto::decodeEffect / decodeLikelyTrash: a prototype's own lists (isCompatible
+        // compares them)
+        if ["unaffected", "killedbycall", "returnaddress", "likelytrash"].iter().any(|k| p.kid(k).is_some()) {
+            return Err(unported("a prototype with its own effect or likely-trash list"));
+        }
         if input_locked != output_locked {
             return Err(unported("a prototype with only its inputs or only its output locked"));
         }
@@ -718,6 +733,7 @@ impl Facts {
                 inputs: params.into_iter().map(|p| p.1).collect(),
                 output: Param { name: String::new(), storage: storage.filter(|_| types.meta(ty) != Meta::Void), ty },
                 dotdotdot: p.flag("dotdotdot"),
+                output_size_locked: types.meta(ty) == Meta::Unknown,
             }));
         } else if p.flag("dotdotdot") {
             return Err(unported("an unlocked varargs prototype"));
@@ -840,7 +856,7 @@ pub(crate) fn query_symbol(fd: &mut Funcdata, arch: &Arch, space: Space, addr: u
         piece: None,
     };
     let sym = fd.symtab.add_symbol(GLOBAL, &d.name, Some(d.ty), None, Some(entry))?;
-    fd.symtab.lock_symbol(sym, d.type_locked, true);
+    fd.symtab.lock_symbol(&fd.types, sym, d.type_locked, true);
     Ok(())
 }
 
@@ -863,14 +879,31 @@ pub(crate) fn symbol_types(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
         if locked {
             continue;
         }
-        let Some(d) = facts.data_symbol(&mut fd.types, off)? else { continue };
-        let base = fd.types.strip_typedefs(d.ty);
+        // ScopeGhidra::findContainer: the cache (the global scope) first, which keeps what
+        // ActionNameVars gave a size-locked symbol over a restart; then Ghidra
+        let cached = fd.symtab.find_container(GLOBAL, Space::Sleigh(ram), off, size, None)?;
+        let (name, ty, type_locked, addr, sz) = match cached {
+            Some((sym, ei)) => {
+                let s = fd.symtab.symbol(sym);
+                // a C++ symbol always has a data-type
+                let Some(ty) = s.ty else {
+                    return err(format!("facts: the cached global symbol {} has no data-type", s.name));
+                };
+                let e = &s.entries[ei];
+                (s.name.clone(), ty, s.flags.type_locked, e.offset, e.size)
+            }
+            None => {
+                let Some(d) = facts.data_symbol(&mut fd.types, off)? else { continue };
+                (d.name, d.ty, d.type_locked, d.addr, d.size)
+            }
+        };
+        let base = fd.types.strip_typedefs(ty);
         if matches!(fd.types.meta(base), Meta::Struct | Meta::Union | Meta::Array) || fd.types.is_enum(base) {
-            return err(format!("facts: a variable in {}, a symbol of a composite data-type, is not ported", d.name));
+            return err(format!("facts: a variable in {name}, a symbol of a composite data-type, is not ported"));
         }
         // Symbol::getSizedType: the symbol's type for the whole symbol; a primitive has no pieces
-        if d.type_locked && off == d.addr && size == d.size && fd.types.meta(d.ty) != Meta::Unknown {
-            update_type(fd, vn, d.ty, true, true);
+        if type_locked && off == addr && size == sz && fd.types.meta(ty) != Meta::Unknown {
+            update_type(fd, vn, ty, true, true);
         }
     }
     Ok(())

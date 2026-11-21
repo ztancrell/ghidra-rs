@@ -420,23 +420,92 @@ fn java_hashset_order(names: &[String]) -> Vec<String> {
 pub struct Applied {
     pub name: String, // raw (mangled) name, or "FID_conflict:<demangled base name>"
     pub conflict: bool,
-    /// the plate comment (`ApplyFidEntriesCommand.generateComment`); `None` where a name is
-    /// mangled, since the comment shows the demangler's full form of it
+    /// the plate comment (`ApplyFidEntriesCommand.generateComment`); `None` where a name's
+    /// demangled form is not ported (`mdmang::microsoft_demangle` refuses it)
     pub comment: Option<String>,
 }
 
-/// `ApplyFidEntriesCommand.generateComment` for matches whose names are not mangled: the kind
-/// of match, up to four of `names` (`MatchNameAnalysis`'s final list), and the libraries of
-/// the matches (`analyzeLibraries`: each as family, version and variant; without the variant,
-/// then the family alone, once there are `MAGIC_MULTIPLE_LIBRARY_LIMIT` of them).
-fn plate_comment(names: &[String], ms: &[Match]) -> String {
+/// `NameVersions`: the demangled forms of a raw name (`None` each where Java's is `null`).
+#[derive(Debug, Clone, Default)]
+struct Versions {
+    full: Option<String>,
+    no_template: Option<String>,
+    base: Option<String>,
+}
+
+/// `NameVersions.demangle(program, name)`: `DemanglerUtil.demangle` without a program or an
+/// address (architecture 0, not a function); a failure is `null`. `Err` where the port does not
+/// convert the name.
+pub(crate) fn fid_demangle(name: &str) -> Result<Option<crate::mdmang::GhidraDemangled>, ()> {
+    match crate::mdmang::microsoft_demangle(name, crate::mdmang::Context { arch: 0, is_function: false }) {
+        Ok(d) => Ok(d),
+        Err(e) if e.is_not_ported() => Err(()),
+        Err(_) => Ok(None),
+    }
+}
+
+/// `NameVersions.generate` (the demangled forms; the similar name is the caller's).
+fn name_versions(raw: &str) -> Result<Versions, ()> {
+    let Some(d) = fid_demangle(raw)? else { return Ok(Versions::default()) };
+    // a DemangledUnknown without a name: Java's removeTemplateParams throws
+    let (Some(demangled), Some(name)) = (&d.demangled_name, &d.name) else { return Err(()) };
+    Ok(Versions {
+        full: Some(d.original.clone()),
+        no_template: remove_template_params(demangled),
+        base: base_name(&d, name),
+    })
+}
+
+/// `NameVersions.removeTemplateParams`.
+fn remove_template_params(name: &str) -> Option<String> {
+    let pos1 = name.find('<')?;
+    let mut nesting = 1;
+    for (i, c) in name[pos1 + 1..].char_indices() {
+        match c {
+            '<' => nesting += 1,
+            '>' => {
+                nesting -= 1;
+                if nesting == 0 {
+                    let pos2 = pos1 + 1 + i;
+                    return Some(format!("{}{}", &name[..=pos1], &name[pos2..]));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `NameVersions.constructBaseName` (with `getBaseClass`).
+fn base_name(d: &crate::mdmang::GhidraDemangled, orig: &str) -> Option<String> {
+    let name = orig.trim_start_matches('_');
+    let Some(first) = d.namespace.first() else { return Some(name.to_string()) };
+    let full = d.namespace_string().unwrap_or_default();
+    if name.ends_with("destructor'") || name.starts_with("operator") || name.starts_with("dtor$") {
+        let mut cs = first.name.chars();
+        let anonymous =
+            first.name.chars().count() > 1 && cs.next() == Some('`') && cs.next().is_some_and(|c| c.is_ascii_digit());
+        let base = if anonymous { full } else { first.name.clone() };
+        return Some(format!("{base}::{orig}"));
+    }
+    let containers = ["std::vector", "std::list", "std::map", "std::set", "std::basic_string"];
+    if containers.iter().any(|c| full.starts_with(c)) {
+        return Some(format!("{full}::{orig}"));
+    }
+    Some(name.to_string())
+}
+
+/// `ApplyFidEntriesCommand.generateComment`: the kind of match, up to four of `names`
+/// (`MatchNameAnalysis`'s final list, each shown as the demangler's full form where it has
+/// one), and the libraries of the matches (`analyzeLibraries`: each as family, version and
+/// variant; without the variant, then the family alone, once there are
+/// `MAGIC_MULTIPLE_LIBRARY_LIMIT` of them).
+fn plate_comment(kind: &str, names: &[String], versions: &HashMap<&str, Versions>, ms: &[Match]) -> String {
     const MAGIC_MULTIPLE_LIBRARY_LIMIT: usize = 5;
-    // without demangled names the most optimistic count is that of `names`, so "Multiple Matches
-    // With Same Base Name" (a count of 1 with several names) cannot occur here
-    let kind = if names.len() == 1 { "Single Match" } else { "Multiple Matches With Different Base Names" };
     let mut s = format!("Library Function - {kind}\n");
     for n in names.iter().take(4) {
-        s += &format!(" {n}\n");
+        let display = versions.get(n.as_str()).and_then(|v| v.full.as_deref()).unwrap_or(n);
+        s += &format!(" {display}\n");
     }
     if names.len() > 4 {
         s += &format!("  {} names - too many to list\n", names.len());
@@ -472,13 +541,8 @@ fn plate_comment(names: &[String], ms: &[Match]) -> String {
 /// Run Function ID over every function of `an` (FidAnalyzer with default options) and
 /// return the functions it marks, with the name it gives them. Exported functions keep their
 /// names (hasUserOrImportedSymbols) and are not marked.
-pub fn apply(
-    img: &Image,
-    an: &Analysis,
-    sl: &Sleigh,
-    dbs: &[FidDb],
-    demangle: &dyn Fn(&str) -> String,
-) -> BTreeMap<u32, Applied> {
+/// `Err` where the demangled base of a `FID_conflict:` name is not ported.
+pub fn apply(img: &Image, an: &Analysis, sl: &Sleigh, dbs: &[FidDb]) -> Result<BTreeMap<u32, Applied>, String> {
     let quads = hashes(img, an, sl);
     let mut owner = HashMap::new();
     for (&f, body) in &an.bodies {
@@ -520,30 +584,43 @@ pub fn apply(
         ms.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap()); // stable, like Collections.sort
         let best = ms[0].score;
         ms.retain(|m| m.score >= best);
-        // MatchNameAnalysis.analyzeNames, without the demangled variants
+        // MatchNameAnalysis.analyzeNames with NameVersions.generate
         let raw: BTreeSet<String> = ms.iter().filter_map(|m| m.db.strings.get(&m.f.name).cloned()).collect();
-        if raw.is_empty() {
-            continue;
-        }
+        let Some(first) = raw.first().cloned() else { continue };
         let similar: BTreeSet<String> = raw.iter().map(|n| n.trim_start_matches('_').to_string()).collect();
-        if raw.len().min(similar.len()) > 1 && best < MULTINAME_SCORE_THRESHOLD {
+        let versions: Result<HashMap<&str, Versions>, ()> =
+            raw.iter().map(|n| Ok((n.as_str(), name_versions(n)?))).collect();
+        let ported = versions.is_ok();
+        let versions = versions.unwrap_or_default();
+        // a set is dropped as soon as one name has no such form
+        let no_template: Option<BTreeSet<String>> = versions.values().map(|v| v.no_template.clone()).collect();
+        let bases: Option<BTreeSet<String>> = versions.values().map(|v| v.base.clone()).collect();
+        let sets = [Some(&raw), Some(&similar), no_template.as_ref(), bases.as_ref()];
+        // getMostOptimisticCount, getMostOptimisticName
+        let optimistic = sets.iter().flatten().map(|s| s.len()).min().unwrap_or(0);
+        let optimistic_name = sets.iter().flatten().find(|s| s.len() == 1).and_then(|s| s.first().cloned());
+        if optimistic > 1 && best < MULTINAME_SCORE_THRESHOLD {
             continue;
         }
         if exports.contains(&f) {
             continue;
         }
-        let mangled = raw.iter().any(|n| n.starts_with('?') || n.contains('@'));
         let names: Vec<String> = if raw.len() == 1 || similar.len() == 1 {
-            vec![raw.first().unwrap().clone()]
+            vec![first]
         } else if raw.len() > similar.len() {
             similar.into_iter().collect()
         } else {
-            raw.into_iter().collect()
+            raw.iter().cloned().collect()
         };
-        let comment = (!mangled).then(|| plate_comment(&names, &ms));
-        if names.len() == 1 {
-            primary.insert(names[0].clone());
-            out.insert(f, Applied { name: names[0].clone(), conflict: false, comment });
+        let (kind, single) = match (names.len(), optimistic) {
+            (1, _) => ("Single Match", names.first().cloned()),
+            (_, 1) => ("Multiple Matches With Same Base Name", optimistic_name),
+            _ => ("Multiple Matches With Different Base Names", None),
+        };
+        let comment = ported.then(|| plate_comment(kind, &names, &versions, &ms));
+        if let Some(name) = single {
+            primary.insert(name.clone());
+            out.insert(f, Applied { name, conflict: false, comment });
             continue;
         }
         // addFunctionLabelMultipleMatches: names no other function holds, as labels
@@ -565,13 +642,16 @@ pub fn apply(
             1 => out.insert(f, Applied { name: unused[0].clone(), conflict: false, comment }),
             _ => {
                 // applyConflictLabels: the first label is the primary symbol
-                let d = demangle(&unused[0]);
-                let base = d.rsplit("::").next().unwrap_or(&d).to_string();
+                // NameVersions.demangle(...).getName(), else the label's own name
+                let d = fid_demangle(&unused[0])
+                    .map_err(|()| format!("not ported: the demangled FID_conflict base of {}", unused[0]))?
+                    .and_then(|d| d.name);
+                let base = d.unwrap_or_else(|| unused[0].clone());
                 out.insert(f, Applied { name: format!("FID_conflict:{base}"), conflict: true, comment })
             }
         };
     }
-    out
+    Ok(out)
 }
 
 /// The FID hash of every function (None for those under 4 code units).

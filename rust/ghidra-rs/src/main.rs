@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 const USAGE: &str = "usage: ghidra-rs disasm <binary> [--func <symbol>|--addr <hex>] [--count N] [--pcode] [--sla <file>]
        ghidra-rs analyze <pe32> [--functions <csv>] [--gaps <csv>] [--abi-callers <register_abi.csv> <out.csv> [--data-pointers]]
-                         [--decomp-prelude <out>] [--facts <out> [--protos <file>]] [--seeds <csv> | --functions-from <csv>]... [--store <file>] [--sla <file>]
+                         [--decomp-prelude <out>] [--facts <out> [--protos <file> | --gdt <archive>]] [--seeds <csv> | --functions-from <csv>]... [--store <file>] [--sla <file>]
        ghidra-rs edit <pe32> --store <file> [--new-store] [--seeds <csv> | --functions-from <csv>]... [--sla <file>] <command>
            commands: add-relocated-entries <securom_functions.csv>
                      define-table-functions <start> <end> [<start> <end>]...
@@ -24,6 +24,7 @@ const USAGE: &str = "usage: ghidra-rs disasm <binary> [--func <symbol>|--addr <h
                      library-evidence <markers.csv> <out.csv>      (needs --facts)
                      bindings <out.csv>
                      abi-candidates <out.csv> <out.txt> [<verified-c-dir>]   (needs --facts)
+       ghidra-rs gdt-protos <archive.gdt> <out>     (the prototype file of tools/ghidra-protos.sh, from the archive)
        ghidra-rs decompile -i <script>
        ghidra-rs datatest [--ref <decomp_dbg>] <test.xml|dir>...";
 
@@ -41,6 +42,11 @@ fn run() -> Result<(), String> {
     }
     if args.len() >= 2 && (args[0] == "edit" || args[0] == "export") {
         return edit(&args[1], &args[2..], args[0] == "edit");
+    }
+    if args.len() == 3 && args[0] == "gdt-protos" {
+        let ar = ghidra_rs::gdt::Archive::open(std::path::Path::new(&args[1]))?;
+        let text = ghidra_rs::gdt::protos::export(&ar)?;
+        return std::fs::write(&args[2], text).map_err(|e| format!("{}: {e}", args[2]));
     }
     if args.len() == 3 && args[0] == "decompile" && args[1] == "-i" {
         let stdout = std::io::stdout();
@@ -363,7 +369,7 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     let mut store = None;
     let mut abi: Option<(String, String)> = None;
     let mut prelude = None;
-    let (mut facts, mut protos) = (None, None);
+    let (mut facts, mut protos, mut gdt) = (None, None, None);
     let mut sla = std::env::var_os("GHIDRA_RS_SLA").map(PathBuf::from).unwrap_or_else(|| Sleigh::sla_path("x86"));
     let mut it = args.iter();
     while let Some(flag) = it.next() {
@@ -378,6 +384,7 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
             "--decomp-prelude" => prelude = Some(val),
             "--facts" => facts = Some(val),
             "--protos" => protos = Some(val),
+            "--gdt" => gdt = Some(val),
             "--store" => store = Some(val),
             "--sla" => sla = PathBuf::from(val),
             "--abi-callers" => {
@@ -471,7 +478,7 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
         let t = std::time::Instant::now();
         let files = ghidra_rs::fid::default_files();
         let dbs = files.iter().map(|f| ghidra_rs::fid::FidDb::open(f)).collect::<Result<Vec<_>, _>>()?;
-        let fid = ghidra_rs::fid::apply(&img, &an, &sl, &dbs, &scripts::demangle);
+        let fid = ghidra_rs::fid::apply(&img, &an, &sl, &dbs)?;
         eprintln!(
             "function id: {} functions named from {} databases in {:.1}s",
             fid.len(),
@@ -488,11 +495,17 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
         }
         if let Some(p) = facts {
             let t = std::time::Instant::now();
-            let protos = match &protos {
-                Some(f) => {
-                    let text = std::fs::read_to_string(f).map_err(|e| format!("{f}: {e}"))?;
-                    Some(ghidra_rs::factsout::Protos::parse(&text).map_err(|e| format!("{f}: {e}"))?)
+            let text = match (&protos, &gdt) {
+                (Some(_), Some(_)) => return Err("--protos and --gdt: give one".into()),
+                (Some(f), None) => Some((f, std::fs::read_to_string(f).map_err(|e| format!("{f}: {e}"))?)),
+                // the archive read in place gives the same prototype file
+                (None, Some(f)) => {
+                    Some((f, ghidra_rs::gdt::protos::export(&ghidra_rs::gdt::Archive::open(f.as_ref())?)?))
                 }
+                (None, None) => None,
+            };
+            let protos = match text {
+                Some((f, text)) => Some(ghidra_rs::factsout::Protos::parse(&text).map_err(|e| format!("{f}: {e}"))?),
                 None => None,
             };
             let cspec_path = sla.with_file_name("x86win.cspec");
