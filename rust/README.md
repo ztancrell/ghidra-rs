@@ -1,3 +1,4 @@
+| setNoFallThru only on the calls of the addresses found | unchanged | unchanged | unchanged | unchanged |
 # ghidra-rs
 
 A headless Rust reverse-engineering core that decodes machine code with Ghidra's compiled
@@ -5926,6 +5927,16 @@ f64489e2e1); each finding checked against the Java first. The rows rerun with
   INDIRECTION (`isIndirect`), and a COMPUTED_JUMP one is not. Before, a function with a switch
   whose cases return could be marked non-returning when another path called a non-returning
   function. No row moved; `only_calls_noreturn_follows_switch_cases` covers it.
+- `find_noreturn`: Java's setNoFallThru and fixCallingFunctionBody act on the calls of the
+  addresses the analyzer found (`noReturnSet`) only. The mark itself is the thunked function's
+  (FunctionDB), so every thunk of it reads as non-returning, and the disassembler overrides the
+  calls it makes afterwards (`Disassembler.isNoReturnCall`); but a call made before the mark to
+  another thunk of the function, or to the thunked function, keeps its fallthrough there
+  (CreateFunctionCmd's body walk goes by the override only). Here such calls are kept in
+  `Analysis::fallthru` and `call_return` lets them fall through; only the functions holding a
+  call of an address found get their bodies fixed up. Superseded: every thunk's callers lost
+  the fallthrough and were fixed up. No facts file of the three rows changed; the test
+  `noreturn_takes_three_call_sites_of_evidence` covers a call of a thunk made before the mark.
 
 ## Speed
 

@@ -217,7 +217,12 @@ pub struct Analysis {
     pub insns: BTreeMap<u32, Ins>,
     pub tables: HashMap<u32, Vec<u32>>, // switch jump -> case targets
     pub funcs: BTreeSet<u32>,
-    pub noreturn: HashSet<u32>,          // functions and IAT slots that do not return
+    pub noreturn: HashSet<u32>, // functions and IAT slots that do not return
+    /// Calls of a non-returning function that keep their fallthrough: Java's setNoFallThru
+    /// overrides only the calls of the address the no-return analyzer found, so the calls made
+    /// before the mark to another thunk of the same function, or to the thunked function, fall
+    /// through still (the disassembler overrides the calls it makes later: isNoReturnCall).
+    pub fallthru: HashSet<u32>,
     pub bodies: BTreeMap<u32, Vec<u32>>, // function -> sorted instruction addresses
     pub table_slots: BTreeMap<u32, u32>, // Create Address Tables (`disassemble` with constants): slot -> pointer
     fpu_ip: Option<(u32, u64)>,          // FPUInstructionPointer, which x87 constructors set to inst_start
@@ -344,6 +349,7 @@ impl Analysis {
             tables: HashMap::new(),
             funcs: BTreeSet::new(),
             noreturn: HashSet::new(),
+            fallthru: HashSet::new(),
             bodies: BTreeMap::new(),
             table_slots: BTreeMap::new(),
             fpu_ip: None,
@@ -853,9 +859,11 @@ impl Analysis {
     /// not return (`checkNonReturningIndicators`); a target with 3 callers that do (the evidence
     /// threshold) or that only calls non-returning functions (`targetOnlyCallsNoReturn`) is
     /// marked, again once more if some stayed suspicious. A mark on a thunk is its thunked
-    /// function's (FunctionDB.setNoReturn), and so on every thunk of it. The functions that call
-    /// a new one get their bodies fixed up (`setNoFallThru`, `fixCallingFunctionBody`). Bodies
-    /// set go to `changed`. `int3`: the instruction at an address is INT3.
+    /// function's (FunctionDB.setNoReturn), and so on every thunk of it. The calls of an address
+    /// found lose their fallthrough (`setNoFallThru`) and the functions holding them get their
+    /// bodies fixed up (`fixCallingFunctionBody`); the calls of the other addresses marked keep
+    /// theirs (`fallthru`). Bodies set go to `changed`. `int3`: the instruction at an address is
+    /// INT3.
     // ponytail: run after each batch of functions made, where Java's instruction analyzer runs
     // on instructions added (DISASSEMBLY + 2), so the functions it sees may differ;
     // "Repair Flow Damage" (ClearFlowAndRepairCmd) is not ported, nor a function made at a
@@ -886,8 +894,19 @@ impl Analysis {
         let ends: HashSet<u32> = found.iter().map(|&t| self.thunked_end(t)).collect();
         let marked: Vec<u32> =
             self.bodies.keys().chain(&found).copied().filter(|&f| ends.contains(&self.thunked_end(f))).collect();
+        // setNoFallThru on the calls of the addresses found; the calls of the other addresses
+        // marked (FunctionDB's flag is the thunked function's) keep their fallthrough
+        for m in marked.iter().filter(|m| !found.contains(m) && !self.noreturn.contains(m)) {
+            self.fallthru.extend(calls_to.get(m).into_iter().flatten().filter(|c| self.insns[c].flow == Flow::Call));
+        }
+        for t in &found {
+            for c in calls_to.get(t).into_iter().flatten() {
+                self.fallthru.remove(c);
+            }
+        }
         self.noreturn.extend(&marked);
-        let callers: BTreeSet<u32> = marked
+        // fixCallingFunctionBody: the functions holding a call of an address found
+        let callers: BTreeSet<u32> = found
             .iter()
             .flat_map(|t| calls_to.get(t).into_iter().flatten())
             .filter_map(|a| self.body_owner.get(a).copied())
@@ -2010,7 +2029,7 @@ impl Analysis {
             return o;
         }
         match i.flow {
-            Flow::Call => i.target.is_some_and(|t| self.noreturn.contains(&t)),
+            Flow::Call => i.target.is_some_and(|t| self.noreturn.contains(&t)) && !self.fallthru.contains(&a),
             Flow::CallInd => i.slot.is_some_and(|s| self.noreturn.contains(&s)),
             Flow::Jump => i.target.is_some_and(|t| self.funcs.contains(&t) && self.insns.contains_key(&t)),
             _ => false,
@@ -2367,6 +2386,7 @@ mod tests {
             tables: HashMap::new(),
             funcs: BTreeSet::new(),
             noreturn: HashSet::new(),
+            fallthru: HashSet::new(),
             bodies: BTreeMap::new(),
             table_slots: BTreeMap::new(),
             fpu_ip: None,
@@ -2392,7 +2412,14 @@ mod tests {
         // calls of 0x40 followed by a function (0x11, 0x21) and by no instruction (0x31);
         // 0x50 is a thunk of 0x40
         let calls = |n: u32| {
-            let mut v = vec![(0x40, Flow::Return, None), (0x50, Flow::Jump, Some(0x40))];
+            // 0x60 calls the thunk 0x50 before the mark: it keeps its fallthrough (setNoFallThru
+            // overrides only the calls of 0x40)
+            let mut v = vec![
+                (0x40, Flow::Return, None),
+                (0x50, Flow::Jump, Some(0x40)),
+                (0x60, Flow::Call, Some(0x50)),
+                (0x61, Flow::Return, None),
+            ];
             for k in 1..=n {
                 v.push((0x10 * k, Flow::Call, Some(0x40)));
                 if k < 3 {
@@ -2406,6 +2433,8 @@ mod tests {
             an.find_noreturn(&mut changed, &mut HashSet::new(), &|_| false);
             assert_eq!(an.noreturn.contains(&0x40), nr);
             assert_eq!(an.noreturn.contains(&0x50), nr);
+            assert!(!an.call_return(0x60, &an.insns[&0x60]));
+            assert_eq!(an.call_return(0x10, &an.insns[&0x10]), nr);
         }
     }
 

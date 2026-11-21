@@ -542,7 +542,9 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    the per-branch 12.3 numbers above as the current measure. See `rust/README.md`, "Integration
    `int8`".
    Review fixes on `int8` (2026-11-20): targetOnlyCallsNoReturn follows a computed jump's switch
-   cases and computed target (Java skips only INDIRECTION); rows unchanged. See `rust/README.md`,
+   cases and computed target (Java skips only INDIRECTION); setNoFallThru and the body
+   fixup act on the calls of the addresses found only, other thunks' earlier calls keep their
+   fallthrough; rows unchanged. See `rust/README.md`,
    "Review fixes on `int8`".
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
