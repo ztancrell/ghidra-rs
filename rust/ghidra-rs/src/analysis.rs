@@ -223,6 +223,9 @@ pub struct Analysis {
     /// before the mark to another thunk of the same function, or to the thunked function, fall
     /// through still (the disassembler overrides the calls it makes later: isNoReturnCall).
     pub fallthru: HashSet<u32>,
+    /// Jumps through a slot past a function's entry, which Java's Reference analyzer may make
+    /// a thunk (CreateThunkFunctionCmd.isThunk on the holding function, not ported).
+    slot_jumps_inside: HashSet<u32>,
     pub bodies: BTreeMap<u32, Vec<u32>>, // function -> sorted instruction addresses
     pub table_slots: BTreeMap<u32, u32>, // Create Address Tables (`disassemble` with constants): slot -> pointer
     fpu_ip: Option<(u32, u64)>,          // FPUInstructionPointer, which x87 constructors set to inst_start
@@ -350,6 +353,7 @@ impl Analysis {
             funcs: BTreeSet::new(),
             noreturn: HashSet::new(),
             fallthru: HashSet::new(),
+            slot_jumps_inside: HashSet::new(),
             bodies: BTreeMap::new(),
             table_slots: BTreeMap::new(),
             fpu_ip: None,
@@ -545,6 +549,12 @@ impl Analysis {
                     && !flows_to.contains(&fall)
             })
             .count();
+        if !an.slot_jumps_inside.is_empty() {
+            an.warnings.push(format!(
+                "not ported: CreateThunkFunctionCmd.isThunk for a jump through a slot past the entry: {} such jumps, no thunk made here",
+                an.slot_jumps_inside.len()
+            ));
+        }
         if damaged > 0 {
             an.warnings.push(format!(
                 "not ported: Repair Flow Damage (ClearFlowAndRepairCmd): {damaged} calls of a function found non-returning fall into instructions no flow refers to, which Java clears"
@@ -823,7 +833,17 @@ impl Analysis {
         self.descend(img, sl, p, owner, &mut queue, &mut Vec::new());
         let mut thunks = Vec::new();
         for (a, t) in jumps {
-            if !set.contains(&a) || self.thunk_of.contains_key(&a) || t == a || !self.insns.contains_key(&t) {
+            // memRefs.length <= 2: the read of the slot and the COMPUTED_JUMP
+            if self.insns[&a].refs.len() > 1 {
+                continue;
+            }
+            // CreateThunkFunctionCmd.isThunk on the function holding a jump past its entry is
+            // not ported (counted, `slot_jumps_inside`)
+            if !set.contains(&a) {
+                self.slot_jumps_inside.insert(a);
+                continue;
+            }
+            if self.thunk_of.contains_key(&a) || t == a || !self.insns.contains_key(&t) {
                 continue;
             }
             // getReferencedFunction: a function at the target, or none containing it
@@ -1022,6 +1042,10 @@ impl Analysis {
         calls_to: &HashMap<u32, Vec<u32>>,
         int3: &dyn Fn(u32) -> bool,
     ) -> bool {
+        // getFallThrough is null under a CALL_RETURN override: nothing to check
+        if self.call_return(call, &self.insns[&call]) {
+            return false;
+        }
         let caller = self.body_owner.get(&call).copied();
         let mut fall = call + self.insns[&call].len as u32;
         let next = self.bodies.range(fall..).next().map(|(&f, _)| f);
@@ -2415,6 +2439,7 @@ mod tests {
             funcs: BTreeSet::new(),
             noreturn: HashSet::new(),
             fallthru: HashSet::new(),
+            slot_jumps_inside: HashSet::new(),
             bodies: BTreeMap::new(),
             table_slots: BTreeMap::new(),
             fpu_ip: None,

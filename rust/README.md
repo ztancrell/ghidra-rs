@@ -1,4 +1,5 @@
-| Repair Flow Damage warning | unchanged | unchanged | unchanged | (in the next row's run) |
+| Repair Flow Damage warning | unchanged | unchanged | unchanged | unchanged (run with the next fix) |
+| the low findings (below) | unchanged | unchanged | unchanged | unchanged |
 | removing a function re-flows no other body | unchanged | unchanged | unchanged | unchanged |
 | setNoFallThru only on the calls of the addresses found | unchanged | unchanged | unchanged | unchanged |
 # ghidra-rs
@@ -5958,6 +5959,18 @@ f64489e2e1); each finding checked against the Java first. The rows rerun with
   instruction no jump, call or switch case refers to; findRepairLocations' NOP skip and external
   entries are not counted. mercs2: 308 such calls with plain discovery, 317 with Java's list.
   Output unchanged (plain and Java-list facts byte-identical).
+- checkNonReturningIndicators of a call under a CALL_RETURN override is false (Java's
+  `getFallThrough` is null), where the walk went on from the call's end. The Reference
+  analyzer's thunk step for a jump through a slot (`slot_jumps`) also needs `memRefs.length <= 2`;
+  a jump past its function's entry, where Java asks CreateThunkFunctionCmd.isThunk of the holding
+  function, is not ported and counted in a warning (mercs2: 1 jump with plain discovery, 10 with
+  Java's list). The INDIRECTION skip of `reference_data` needs no more guards: its comment says why
+  Java's (subroutinesEnabled, isUndefinedStuff, doneSubTest) hold there. The empty stray file
+  `src/store.rs.new` (dbd27b429e) is gone. All three rows' facts byte-identical.
+- 0x9eec5e (`__security_check_cookie`, M8 silent) is not explained by these fixes: Java marks
+  `___report_gsfailure` (0x9ef1dc) non-returning from the archive's `__report_gsfailure`
+  prototype (ApplyFunctionDataTypesCmd.lookupSymbol also tries `_` + the name), and here a
+  prototype of the archive goes only to an import (`factsout.rs`); not fixed.
 
 ## Speed
 

@@ -392,7 +392,11 @@ impl Exporter<'_> {
             }
             // a computed jump or call through it and no other reference (a read, a write, an
             // immediate such as `PUSH slot`): "assume someone else will handle this correctly"
-            // (`hasDataAccessReferences`)
+            // (`hasDataAccessReferences`). Java's guards hold here: subroutinesEnabled is on by
+            // default; isUndefinedStuff needs undefined data at the target, and the only data here
+            // are pointers and strings, a target inside one skipped above; doneSubTest holds a
+            // target inside an instruction (skipped above, `insn_at`) or one tested before, and
+            // `checked` visits a target once
             // ponytail: Java skips at the first reference it comes to, so an immediate it looks
             // at after the jump would not count there; here any other reference does
             if targets.get(&t).is_some_and(|x| x.indirect > 0 && x.indirect == x.refs) && !code_refs.contains(&t) {
