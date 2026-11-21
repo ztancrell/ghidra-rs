@@ -1,4 +1,4 @@
-//! Function discovery, bodies                 Task::SharedReturns => an.shared_returns(&set),nd references for 32-bit x86 PE images, modelled on what
+//! Function discovery, bodies and references for 32-bit x86 PE images, modelled on what
 //! Ghidra's auto-analysis produces for the scripts in `main.rs` (ExportFunctions, ExportGaps).
 //! Every executable section is disassembled; results are reported for `.text`. See rust/README.md "Analysis" for what is and isn't covered.
 
