@@ -554,8 +554,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    (`analysis/repair.rs`), one of the body-change points of the 2026-11-19 decision; data
    clearing stays counted in a warning. Superseded: the warning that counted the calls (308
    plain). Rows against 12.3: Java's list 413 -> 419 (M8 4 -> 5), store 391 -> 397 (M8 4 -> 5),
-   plain and Java facts unchanged, no newly silent function. See `rust/README.md`, "Repair Flow
-   Damage, branch `repairflow`".
+   plain and Java facts unchanged, no newly silent function. Review fixes (2026-11-21): repairFunctions
+   makes the new functions in Java's HashSet order, data references READ/WRITE vs DATA, the data
+   count only at pointer data, skipNOPS fails loudly, unmodelled data pointers counted; rows
+   unchanged. See `rust/README.md`, "Repair Flow Damage, branch `repairflow`".
    Full pass 2026-11-21 (c730b2db7d, the 12.3 `x86.sla`, 8 pairs on the desktop and Mac, 125 on the Mac only):
    133 / 133 pairs, silent 0 in every pair. Against `analysis-queue`: `r5s-m500` 499 -> 498 (the
    known reference timeout on 0x6b21e0; it does not finish in 1500 s), `pcd-m500` 493 -> 499 and

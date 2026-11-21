@@ -1,7 +1,3 @@
-| Repair Flow Damage warning | unchanged | unchanged | unchanged | unchanged (run with the next fix) |
-| the low findings (below) | unchanged | unchanged | unchanged | unchanged |
-| removing a function re-flows no other body | unchanged | unchanged | unchanged | unchanged |
-| setNoFallThru only on the calls of the addresses found | unchanged | unchanged | unchanged | unchanged |
 # ghidra-rs
 
 A headless Rust reverse-engineering core that decodes machine code with Ghidra's compiled
@@ -5931,6 +5927,10 @@ f64489e2e1); each finding checked against the Java first. The rows rerun with
 |---|---|---|---|---|
 | `int8` (before) | 488 (11, 0), M8 7 | 413 (18, 68), M8 4 | 246 (120, 133), M8 2 | 391 (21, 87), M8 4 |
 | targetOnlyCallsNoReturn follows computed jumps | unchanged | unchanged | unchanged | unchanged |
+| setNoFallThru only on the calls of the addresses found | unchanged | unchanged | unchanged | unchanged |
+| removing a function re-flows no other body | unchanged | unchanged | unchanged | unchanged |
+| Repair Flow Damage warning | unchanged | unchanged | unchanged | unchanged (run with the next fix) |
+| the low findings (below) | unchanged | unchanged | unchanged | unchanged |
 
 - `only_calls_noreturn` (targetOnlyCallsNoReturn) now follows a computed jump's destinations,
   its switch cases and a computed target: Java skips only a destination whose flow type is
@@ -6024,9 +6024,10 @@ the entry, the other entries become functions). After a repair the run loop make
 its disassembly found and runs the no-return analyzer on the new instructions. The offcut checks
 of the command never fire here (the listing holds no overlapping instructions).
 
-Counted in warnings, not ported: clearing data (this model has no data code units where cleared
-code refers: mercs2 plain 273 addresses, Java's list 287, where Java clears a pointer or
-undefined data); a body that keeps the cleared bytes in Java (here a body holds instructions
+Counted in warnings, not ported: clearing data (pointer data only cleared code refers to, where
+Java clears it: here the pointer data of `table_slots` and the switch tables; 0 on mercs2. Superseded:
+"mercs2 plain 273 addresses, Java's list 287" counted every referenced address without an
+instruction, where Java goes on only at defined pointer or Undefined data); a body that keeps the cleared bytes in Java (here a body holds instructions
 only; 0 on mercs2); a repaired body that overlaps another function (0). Not modelled: names of
 USER_DEFINED source (the flow stops at a function of IMPORTED or higher name: here the exports
 and the entry only); the vertex order of the prune (address order where Java walks a Hashtable;
@@ -6055,6 +6056,31 @@ only 1,198 -> 1,198, here only 286 -> 288 (0x250d37f, 0x25600d0, 0x256cae0 new i
 Superseded: "Repair Flow Damage ... not ported" in the ported-analyzers table, under "No-return
 functions from call-site evidence", in "Causes left among the `data` cases" and the warning
 bullet of "Review fixes on `int8`".
+
+Review fixes on `repairflow` (an independent review; each finding checked against the Java first):
+
+- repairFunctions makes the entries left in a subroutine in the order Java's
+  `HashSet<Address>` walks them (`java_hash_set_order`: GenericAddress.hashCode over `ram`,
+  HashMap's spread, table size and resize), where it went in address order; CreateFunctionCmd
+  stops at entries that exist, so the order can change bodies. The test checks orders printed by
+  OpenJDK 25's HashSet. A treeified bucket (9 or more entries in one bucket of a 64-entry table)
+  is counted in a warning, not reproduced.
+- Data references from code pointers in data are not modelled here outside Create Address Tables'
+  runs (`table_slots`). Where Java may have one (an aligned code pointer in a data section) and it
+  would change a prune, a dereferenced start or a block start, the address is counted in a
+  warning (0 on mercs2, all three rows).
+- The data count follows addDereferencedInstructionStarts: only pointer data (above).
+- An instruction's data references are READ or WRITE where a memory operand makes them
+  (`Ins::rw`), DATA for immediates; repairFlowsInto skips a DATA reference at `ignoreStart` only.
+- skipNOPS returns an error where an instruction of the listing does not decode or has no
+  p-code, where it counted as a NOP.
+- `Repair` groups what the command works with; findInstructionFlow and repairFlowsInto are split
+  into smaller functions; tests for the prune, the protected split and repairFunctions.
+
+Rows unchanged (Java facts 488 (11, 0) M8 7; Java's list 419 (18, 62) M8 5; plain 246 (120,
+133) M8 2; store 397 (21, 81) M8 5), no function newly silent in any row; the Repair Flow Damage
+run counts unchanged (plain 10 runs, 6,858 cleared, 6 removed, 16 disassembled again; Java's list
+7,349, 14, 11).
 
 ## Speed
 

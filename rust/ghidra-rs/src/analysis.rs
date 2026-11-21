@@ -151,6 +151,7 @@ pub struct Ins {
     pub slot: Option<u32>,     // memory operand of an indirect call/jump through a constant address
     pub computed: Option<u32>, // code target of another indirect call/jump, from the local fold
     pub refs: Vec<u32>,        // data references: constant addresses inside the image
+    pub rw: Vec<u32>,          // the `refs` a memory operand makes (READ or WRITE; the others are DATA)
     pub code_imms: Vec<u32>,   // immediates that point into an executable section
 }
 
@@ -523,18 +524,11 @@ impl Analysis {
                 // Repair Flow Damage, then what its disassembly feeds: Subroutine References'
                 // functions at the new calls, the no-return analyzer on the instructions
                 // cleared, re-disassembled or handed to codeDefined
+                let mut cx =
+                    repair::Repair::new(img, sl, &mut p, &mut owner, allowed.as_ref(), &mut defined, &mut repair);
                 while !found.is_empty() {
                     let before = an.funcs.clone();
-                    let again = an.repair_flow_damage(
-                        img,
-                        sl,
-                        &mut p,
-                        &mut owner,
-                        &found,
-                        allowed.as_ref(),
-                        &mut defined,
-                        &mut repair,
-                    );
+                    let again = an.repair_flow_damage(&mut cx, &found)?;
                     if again.is_empty() {
                         break;
                     }
@@ -542,9 +536,9 @@ impl Analysis {
                     let new: Vec<u32> =
                         an.funcs.difference(&before).copied().filter(|f| !an.bodies.contains_key(f)).collect();
                     for f in new {
-                        an.create_function(f, allowed.as_ref(), &mut Vec::new(), &mut defined);
+                        an.create_function(f, allowed.as_ref(), &mut Vec::new(), cx.changed);
                     }
-                    found = an.find_noreturn(&mut defined, &mut noreturn_seen, &int3);
+                    found = an.find_noreturn(cx.changed, &mut noreturn_seen, &int3);
                 }
                 body_noreturn = std::mem::replace(&mut an.noreturn, known);
                 mgr.notify(Kind::Function, &defined);
@@ -563,8 +557,20 @@ impl Analysis {
         }
         if !repair.data.is_empty() {
             an.warnings.push(format!(
-                "not ported: Repair Flow Damage clearing data (addDereferencedInstructionStarts): {} addresses only cleared code refers to, which Java clears where a pointer or undefined data is",
+                "not ported: Repair Flow Damage clearing data (addDereferencedInstructionStarts): {} pointer data addresses (Create Address Tables, switch tables) only cleared code refers to, which Java clears",
                 repair.data.len()
+            ));
+        }
+        if !repair.data_refs.is_empty() {
+            an.warnings.push(format!(
+                "not modelled: Repair Flow Damage: {} addresses where a reference from a code pointer in data (outside Create Address Tables' runs; Java has it where it made pointer data) would change a prune, a dereferenced start or a block start",
+                repair.data_refs.len()
+            ));
+        }
+        if repair.unordered > 0 {
+            an.warnings.push(format!(
+                "not ported: Repair Flow Damage: {} subroutines whose new functions Java makes in a treeified HashSet bucket's order (address order here)",
+                repair.unordered
             ));
         }
         if !repair.stale.is_empty() {
@@ -1227,7 +1233,7 @@ impl Analysis {
         let code = sl.code_space();
         let next = a as u64 + len as u64;
         let (mut flow, mut target, mut slot) = (Flow::Fall, None, None);
-        let (mut refs, mut code_imms) = (Vec::new(), Vec::new());
+        let (mut refs, mut code_imms, mut rw) = (Vec::new(), Vec::new(), Vec::new());
         // Local constant fold (a stand-in for Ghidra's constant propagation): 4-byte register
         // and temporary values from immediates, initialised memory, ADD/SUB/XOR/AND/OR. A
         // computed value (not a plain immediate) stored to memory that is code is a code
@@ -1318,6 +1324,9 @@ impl Analysis {
                         if in_image(x) && !refs.contains(&x) {
                             refs.push(x); // WRITE reference through a folded address
                         }
+                        if in_image(x) && !rw.contains(&x) {
+                            rw.push(x);
+                        }
                     }
                     fold.mem.retain(|m| m.0 != p);
                     let size4 = op.ins.get(2).is_some_and(|v| v.size == 4);
@@ -1340,6 +1349,9 @@ impl Analysis {
                         if let Val::C(x) = p {
                             if in_image(x) && !refs.contains(&x) {
                                 refs.push(x); // READ reference through a folded address
+                            }
+                            if in_image(x) && !rw.contains(&x) {
+                                rw.push(x);
                             }
                         }
                         load(p, fold).map(|(v, _)| (v, true))
@@ -1471,10 +1483,14 @@ impl Analysis {
                 if is_ref && !refs.contains(&(v.offset as u32)) {
                     refs.push(v.offset as u32);
                 }
+                // a memory operand (not an immediate): READ or WRITE
+                if is_ref && v.space != 0 && !rw.contains(&(v.offset as u32)) {
+                    rw.push(v.offset as u32);
+                }
             }
         }
         let computed = computed.filter(|_| slot.is_none());
-        Some(Ins { len: len as u8, flow, target, slot, computed, refs, code_imms })
+        Some(Ins { len: len as u8, flow, target, slot, computed, refs, rw, code_imms })
     }
 
     /// Ghidra's `disassemble(addr)` after analysis: recursive descent from `addrs` into bytes no
@@ -2222,6 +2238,7 @@ impl Analysis {
             for (a, d) in &found[i % n][i / n] {
                 let m = merged.entry(*a).or_insert_with(|| Ins {
                     refs: Vec::new(),
+                    rw: Vec::new(),
                     code_imms: Vec::new(),
                     computed: None,
                     ..d.clone()
@@ -2229,6 +2246,11 @@ impl Analysis {
                 for &r in &d.refs {
                     if !m.refs.contains(&r) {
                         m.refs.push(r);
+                    }
+                }
+                for &r in &d.rw {
+                    if !m.rw.contains(&r) {
+                        m.rw.push(r);
                     }
                 }
                 for &c in &d.code_imms {
@@ -2241,7 +2263,7 @@ impl Analysis {
         }
         for (a, d) in merged {
             let i = self.insns.get_mut(&a).unwrap();
-            (i.refs, i.code_imms, i.computed) = (d.refs, d.code_imms, d.computed);
+            (i.refs, i.rw, i.code_imms, i.computed) = (d.refs, d.rw, d.code_imms, d.computed);
         }
     }
 
@@ -2460,9 +2482,10 @@ mod tests {
 
     /// An analysis of `insns` alone (no image), with a function at each of `funcs` made in
     /// order as CreateFunctionCmd makes it.
-    fn bare(insns: &[(u32, Flow, Option<u32>)], funcs: &[u32]) -> (Analysis, BTreeSet<u32>) {
+    pub(super) fn bare(insns: &[(u32, Flow, Option<u32>)], funcs: &[u32]) -> (Analysis, BTreeSet<u32>) {
         let ins = |&(a, flow, target): &(u32, Flow, Option<u32>)| {
-            let i = Ins { len: 1, flow, target, slot: None, computed: None, refs: vec![], code_imms: vec![] };
+            let i =
+                Ins { len: 1, flow, target, slot: None, computed: None, refs: vec![], rw: vec![], code_imms: vec![] };
             (a, i)
         };
         let mut an = Analysis {
@@ -2592,8 +2615,9 @@ mod tests {
         let sl = crate::sleigh::Sleigh::load(&crate::sleigh::Sleigh::sla_path("x86")).unwrap();
         let mut counts = repair::RepairCounts::default();
         let found = BTreeSet::from([0x40]);
-        let again =
-            an.repair_flow_damage(&img, &sl, &mut sl.new_parse(), &mut owner, &found, None, &mut changed, &mut counts);
+        let mut p = sl.new_parse();
+        let mut cx = repair::Repair::new(&img, &sl, &mut p, &mut owner, None, &mut changed, &mut counts);
+        let again = an.repair_flow_damage(&mut cx, &found).unwrap();
         assert_eq!(again, BTreeSet::from([0x11, 0x12, 0x60]));
         assert!(an.insns.contains_key(&0x21) && !an.insns.contains_key(&0x11));
         // 0x60 was called from the cleared code only: its function goes (ClearCmd)
