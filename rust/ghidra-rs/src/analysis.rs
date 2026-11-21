@@ -1001,7 +1001,8 @@ impl Analysis {
     }
 
     /// targetOnlyCallsNoReturn: every path from `t` (SimpleBlockModel's blocks, calls not
-    /// followed, computed flow not followed) ends in a call or jump to a non-returning function.
+    /// followed, computed jumps followed as their COMPUTED_JUMP destinations: switch cases and a
+    /// computed target) ends in a call or jump to a non-returning function.
     fn only_calls_noreturn(&self, t: u32, found: &BTreeSet<u32>) -> bool {
         let nr = |d: u32| found.contains(&d) || self.is_noreturn(d);
         let mut todo = vec![t];
@@ -1048,7 +1049,8 @@ impl Analysis {
                 }
                 Flow::CallInd | Flow::JumpInd => {
                     let slot = i.slot.is_some_and(|s| self.noreturn.contains(&s));
-                    let dests = slot || i.computed.is_some() || self.tables.contains_key(&a);
+                    let cases = self.tables.get(&a).map_or(&[][..], Vec::as_slice);
+                    let dests = slot || i.computed.is_some() || !cases.is_empty();
                     if !dests && (ret || i.flow == Flow::JumpInd) {
                         return false;
                     }
@@ -1057,8 +1059,20 @@ impl Analysis {
                     } else if ret {
                         return false;
                     }
-                    if i.flow == Flow::CallInd && !ret {
-                        todo.push(fall);
+                    if i.flow == Flow::CallInd {
+                        if !ret {
+                            todo.push(fall);
+                        }
+                    } else {
+                        // COMPUTED_JUMP destinations (switch cases, a computed target) are
+                        // followed: only an INDIRECTION one (isIndirect) is not
+                        for &d in cases.iter().chain(i.computed.iter().filter(|&&d| !nr(d))) {
+                            if nr(d) {
+                                hit = true;
+                            } else {
+                                todo.push(d);
+                            }
+                        }
                     }
                 }
                 Flow::Fall => unreachable!(),
@@ -2395,6 +2409,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn only_calls_noreturn_follows_switch_cases() {
+        // 0x60: a switch whose case 0x62 returns and case 0x63 calls 0x40, which does not return
+        let (mut an, _) = bare(
+            &[
+                (0x40, Flow::Return, None),
+                (0x60, Flow::JumpInd, None),
+                (0x62, Flow::Return, None),
+                (0x63, Flow::Call, Some(0x40)),
+            ],
+            &[0x40, 0x60],
+        );
+        an.noreturn.insert(0x40);
+        an.tables.insert(0x60, vec![0x63]);
+        assert!(an.only_calls_noreturn(0x60, &BTreeSet::new()));
+        an.tables.insert(0x60, vec![0x62, 0x63]);
+        assert!(!an.only_calls_noreturn(0x60, &BTreeSet::new()));
+    }
     #[test]
     fn thunk_body_never_takes_a_third_functions_code() {
         // 0x10 JMP 0x12; 0x12 JMP 0x11 makes 0x11 first: 0x10's first body less 0x12's would

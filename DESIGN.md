@@ -541,6 +541,9 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `analysis-queue` on a new prelude (29,768 functions; `analysis-queue` 30,084). Superseded:
    the per-branch 12.3 numbers above as the current measure. See `rust/README.md`, "Integration
    `int8`".
+   Review fixes on `int8` (2026-11-20): targetOnlyCallsNoReturn follows a computed jump's switch
+   cases and computed target (Java skips only INDIRECTION); rows unchanged. See `rust/README.md`,
+   "Review fixes on `int8`".
    S7 (merging into high variables) in part on branch `m3-s7`: the merge actions `assignhigh`
    .. `copymarker` (`merge.rs`, `variable.rs`, `cover.rs`); `print raw` with high variables at
    `break start inputprototype`: M8 8 / 8, M500 492 / 499 (rules on) and 492 / 499 (types on), also with create indices.

@@ -5910,6 +5910,23 @@ M8 bars (`CORPORA=m8 bars.sh`, `JOBS` 10, a new prelude from the `int8` analysis
 `baselines/analysis-queue-83ee6a86e6.summary` (the newest) and of `m3-int7-249c32cf94.summary`.
 Not run: M500 bars, the full 133-pair pass, the Mac.
 
+### Review fixes on `int8` (2026-11-20)
+
+An independent review of the analysis commits of `int8` (814facc891, 22c02f4701, 20fac3a4db,
+f64489e2e1); each finding checked against the Java first. The rows rerun with
+`rust/target/int8/rows.sh` (12.3 reference; M500 identical of 499 (loud, silent), M8 of 7):
+
+| fix | Java facts | Java's list | plain | store |
+|---|---|---|---|---|
+| `int8` (before) | 488 (11, 0), M8 7 | 413 (18, 68), M8 4 | 246 (120, 133), M8 2 | 391 (21, 87), M8 4 |
+| targetOnlyCallsNoReturn follows computed jumps | unchanged | unchanged | unchanged | unchanged |
+
+- `only_calls_noreturn` (targetOnlyCallsNoReturn) now follows a computed jump's destinations,
+  its switch cases and a computed target: Java skips only a destination whose flow type is
+  INDIRECTION (`isIndirect`), and a COMPUTED_JUMP one is not. Before, a function with a switch
+  whose cases return could be marked non-returning when another path called a non-returning
+  function. No row moved; `only_calls_noreturn_follows_switch_cases` covers it.
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The
