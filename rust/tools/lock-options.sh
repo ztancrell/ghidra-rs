@@ -21,13 +21,18 @@ d=${1:-$rust/target/locks}
 export PRELUDE=${PRELUDE:-$rust/target/decomp-check/mercs2.prelude}
 "$rust/tools/decomp-diff.sh" --prelude
 mkdir -p "$d"
+# built in a private directory and renamed into $d, so parallel bars.sh runs (each calls this)
+# never write the same file at once nor read half of one
+f=$(mktemp -d "$d.tmp.XXXXXX")
+trap 'rm -rf "$f"' EXIT
 sv() { grep -v 'decompile stackvars off' "$1" > "$2"; }
-"$rust/tools/decomp-locked-options.sh" void "$d/lock-void.txt"
-"$rust/tools/decomp-locked-options.sh" int4 "$d/lock-int4.txt"
-"$rust/tools/decomp-locked-options.sh" void "$d/lock-stk.txt" "int4 a"
-"$rust/tools/decomp-locked-options.sh" void "$d/stack-lock.txt" "int4 a, int4 b"
-sv "$d/stack-lock.txt" "$d/lock-sv.txt"
-sv "$c/s6-options.txt" "$d/s6-sv.txt"
-{ cat "$c/r5s-options.txt"; grep '^parse line' "$d/stack-lock.txt"; } > "$d/r5s-lock.txt"
-{ cat "$c/r5dt-options.txt"; grep '^parse line' "$d/stack-lock.txt"; } > "$d/r5dt-lock.txt"
-sv "$d/r5dt-lock.txt" "$d/r5dt-lock-sv.txt"
+"$rust/tools/decomp-locked-options.sh" void "$f/lock-void.txt"
+"$rust/tools/decomp-locked-options.sh" int4 "$f/lock-int4.txt"
+"$rust/tools/decomp-locked-options.sh" void "$f/lock-stk.txt" "int4 a"
+"$rust/tools/decomp-locked-options.sh" void "$f/stack-lock.txt" "int4 a, int4 b"
+sv "$f/stack-lock.txt" "$f/lock-sv.txt"
+sv "$c/s6-options.txt" "$f/s6-sv.txt"
+{ cat "$c/r5s-options.txt"; grep '^parse line' "$f/stack-lock.txt"; } > "$f/r5s-lock.txt"
+{ cat "$c/r5dt-options.txt"; grep '^parse line' "$f/stack-lock.txt"; } > "$f/r5dt-lock.txt"
+sv "$f/r5dt-lock.txt" "$f/r5dt-lock-sv.txt"
+mv "$f"/* "$d"/

@@ -1328,7 +1328,11 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
   `stack-lock`, and the `stackvars` and R5 variants built on them) hold one `parse line extern`
   per mercs2 function, so they are not committed: `tools/lock-options.sh` writes them to
   `rust/target/locks/` from the prelude (`decomp-locked-options.sh`) and the committed options
-  files, and `bars.sh` runs it first. Superseded: the hand-made `rust/target/stack-lock.txt`,
+  files, and `bars.sh` runs it first. It builds them in a private directory and renames them
+  into place, so parallel `bars.sh` runs sharing `rust/target/locks/` never write one file at
+  once (they did: interleaved `parse` lines that stopped every script before `load function`,
+  so r5slock, r5dtlock, r5dtlocksv and svlock had reference finished 0 / 500 on the Mac).
+  Superseded: the hand-made `rust/target/stack-lock.txt`,
   `lock-sv.txt`, `s6-sv.txt`, `r5s-lock.txt`, `r5dt-lock.txt`, `r5dt-lock-sv.txt` of the
   sections below are these files.
 - The switch corpus is `tools/corpus/switch.txt` (2,050 functions with a jump table; superseded:
