@@ -251,3 +251,26 @@ pub fn export_gaps(img: &Image, an: &Analysis, out: &mut dyn Write) -> std::io::
     let n = covered.iter().filter(|&&c| c).count() as u64;
     Ok((n, total as u64))
 }
+
+/// tools/ghidra/DumpPurges.java: one line per function, in address order: entry, purge
+/// (2147483647 unknown), thunked entry (`-`; `EXTERNAL` for a jump through an import slot,
+/// whose thunked function Ghidra keeps in its EXTERNAL block), body min, body max, address
+/// count, no-return.
+pub fn dump_purges(img: &Image, an: &Analysis, out: &mut dyn Write) -> std::io::Result<usize> {
+    use crate::analysis::Flow;
+    for (&f, body) in &an.bodies {
+        let i = &an.insns[&f];
+        let slot = i.slot.filter(|s| body.len() == 1 && i.flow == Flow::JumpInd && img.imports.contains_key(s));
+        let thunk = match (an.thunk_of.get(&f), slot) {
+            (Some(t), _) => format!("{t:08x}"),
+            (None, Some(_)) => "EXTERNAL".into(),
+            (None, None) => "-".into(),
+        };
+        let noreturn = an.is_noreturn(f) || slot.is_some_and(|s| an.noreturn.contains(&s));
+        let min = body.first().copied().unwrap_or(f);
+        let max = body.last().map_or(f, |a| a + an.insns[a].len as u32 - 1);
+        let purge = an.callee_purges.get(&f).map_or(i64::from(i32::MAX), |&p| i64::from(p));
+        writeln!(out, "{f:08x} {purge} {thunk} {min:08x} {max:08x} {} {noreturn}", an.body_size(f))?;
+    }
+    Ok(an.bodies.len())
+}

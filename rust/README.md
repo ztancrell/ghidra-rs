@@ -170,7 +170,7 @@ Varnodes print as a register name when one matches exactly, `0x5:4` for constant
 ## Analysis (Milestone 2): the mercs2 Ghidra scripts
 
 ```sh
-ghidra-rs analyze <pe32> [--functions <csv>] [--gaps <csv>] [--abi-callers <register_abi.csv> <out.csv> [--data-pointers]]
+ghidra-rs analyze <pe32|elf64> [--functions <csv>] [--gaps <csv>] [--purges <txt>] [--abi-callers <register_abi.csv> <out.csv> [--data-pointers]]
                          [--decomp-prelude <out>] [--facts <out> [--protos <file>]] [--seeds <csv> | --functions-from <csv>]... [--store <file>] [--sla <file>]
 ```
 
@@ -6002,6 +6002,89 @@ Silent 0 in every pair. Lines that moved:
 Every other line equals the baseline. Superseded: "Not run: M500 bars, the full 133-pair pass,
 the Mac" under "Integration `int8`" above.
 
+## ELF64 analysis: Hatred's Linux build (branch `elf64`, 2026-11-21)
+
+`analyze` takes an ELF x86-64 file (DESIGN.md, 2026-11-21) with language x86:LE:64:default
+and its gcc compiler spec: `x86-64.sla` (the `--sla` or `GHIDRA_RS_SLA` given, else the one
+next to `x86.sla`) with `x86-64.pspec`, and `x86-64-gcc.cspec` read as data at build time.
+`--functions`, `--gaps` and `--purges` work; `--facts`, `--decomp-prelude`, `--abi-callers`
+and `--store` fail loudly on ELF (the facts encode x86:LE:32's core types and the decompiler
+reads x86:LE:32:default:windows only). `--purges <txt>` writes what `tools/ghidra/DumpPurges.java`
+writes (entry, purge, thunked function, body min, max, address count, no-return), on PE and ELF.
+
+The loader, `Image::from_elf` (ElfProgramBuilder.load, the parts analysis reads):
+
+- a memory block per allocated section, execute and write from the section flags, `.bss`
+  zero-filled and unmapped for the decompiler, `.tbss` left out (it overlaps the next section),
+  the `.got` blocks read-only (processGOTSections); image base 0x100000 for a shared object or
+  PIE linked at 0 (ElfLoaderOptionsFactory.IMAGE64_BASE_DEFAULT); addresses must fit in 32
+  bits (`Analysis` keeps `u32` addresses), else the load fails;
+- the dynamic relocations of X86_64_ElfRelocationHandler: RELATIVE and the packed RELR form
+  (image base plus addend), R_X86_64_64, GLOB_DAT and JUMP_SLOT to a defined symbol (its address
+  plus the addend); GLOB_DAT and JUMP_SLOT to an undefined symbol make the GOT slot an import
+  of `<EXTERNAL>`, as an IAT slot of a PE. The rest are counted in a warning (Hatred: 10, the
+  COPY relocations, which Java does not apply either);
+- one-byte functions at every STT_FUNC symbol of `.symtab` and `.dynsym` (evaluateElfSymbol;
+  `.cold` parts are none), at the entry point and at DT_INIT, DT_FINI and the init, preinit and
+  fini array entries (processEntryPoints); global and weak ones are the exports;
+- `.plt` past its first 16 bytes disassembled at load, following flows (processPLTSection).
+
+Not made: Ghidra's artificial EXTERNAL block and its functions (a PLT entry's thunk is written
+`EXTERNAL` in `--purges`), the GOT/PLT pointer markup, the ELF Scalar Operand References.
+
+Analysis on x86-64 (`Analysis::run` with `Image::elf64`):
+
+- no-return names from `Features/Base/data/ElfFunctionsThatDoNotReturn` (NoReturnFunctionAnalyzer:
+  leading `_` stripped, a `*` suffix a prefix), on import slots and symbol functions; a function
+  of one `JMP [slot]` through such a slot is no-return (a thunk takes its external's flag);
+  a `CALL [GOT slot]` of a non-returning import does not end the flow (measured on libtcl,
+  where it brought 743 body sizes to Java's; why Java goes on was not traced);
+- the local fold works on 8-byte registers; a call kills the `<killedbycall>` registers of
+  x86-64-gcc.cspec's default prototype (RAX, RDX) and moves RSP by its `stackshift` (8), as
+  SymbolicPropogator.getDefaultStackDepthChange does for a model with a known extrapop;
+  values stay 32-bit (an 8-byte constant is cut to its low half; 8-byte right shifts are not
+  folded);
+- switch tables `JMP qword ptr [reg*8 + table]` (with REX prefixes); Create Address Tables
+  steps by 8-byte pointers;
+- not run: Function Start Search (`x86-64gcc_patterns.xml` is not ported), the RTTI analyzer
+  (MSVC's), X86 Function Callee Purge (Java's `canAnalyze` refuses 64-bit), Function ID (the
+  databases are x86:LE:32's). Not ported: PIC switch tables (`MOVSXD` of 4-byte offsets plus a
+  base; Java's DecompilerSwitchAnalyzer), getThunkedAddr past a no-p-code entry instruction
+  (`ENDBR64; JMP`, `NOP; JMP`), purges from data-type archives, DWARF.
+
+Check: `tools/elf64-ref.sh [extra binaries]` builds `tools/corpus/elf64/*.c` with gcc -O2
+(non-PIE and PIE, no `-g`: Java takes no-return flags from DWARF, which ghidra-rs does not read
+yet), runs Java 12.3's plain auto-analysis with `DumpPurges.java` once (kept in
+`rust/target/elf64/`) and `analyze --purges`, and compares the lines (Java's EXTERNAL-block
+functions left out). Against Java 12.3 (gcc 15, the desktop):
+
+| binary | Java | ghidra-rs | entries in both | identical lines | identical but the purge |
+|---|---|---|---|---|---|
+| t1 | 22 | 22 | 22 | 11 | 18 |
+| t1-pie | 20 | 19 | 19 | 8 | 14 |
+| t2 | 24 | 24 | 24 | 15 | 22 |
+| t2-pie | 22 | 22 | 22 | 13 | 20 |
+| `/usr/lib/libtcl8.6.so` | 2,535 | 2,533 | 2,533 | 2,438 | 2,442 |
+
+The causes: purges (Java's 0 on PLT thunks and `_init`, from data-type archives); PIC switch
+tables (t1-pie's `sw`, so its tail call makes no `puts` thunk; most of libtcl's 57 body
+counts); `NOP; JMP` and `ENDBR64; JMP [slot]` thunks (`frame_dummy` in each; 34 thunk
+columns of libtcl); Java's no-return on `_start` (its `hlt` after `__libc_start_main`) and
+on t1-pie's `die`, not traced; libtcl's 2 functions Java has more (0x1bf2cd, 0x1c4cca, odd
+addresses not traced).
+
+Hatred (`Hatred-Linux-Shipping`, 508 MB, ELF x86-64 EXEC, 45 MB `.text`, the desktop, one
+thread): 10,488,140 instructions, 180,033 functions (407 imports), analysis 54.5 s, 87 s with
+`--functions`, `--gaps` and `--purges`; every one of its 179,630 defined STT_FUNC symbols is a
+function, 403 functions are at no symbol; `.text` coverage 43,002,764 / 45,177,887 bytes.
+Warnings: 10 relocations not applied, 22 slot jumps past an entry, 566 Repair Flow Damage
+calls. Java was not run on it (14 GB of RAM for a 508 MB binary; not tried).
+
+The PE path: `cargo test --release` 178 passed, 0 failed; `cargo fmt --check` and `cargo clippy
+--release --all-targets -- -D warnings` clean; M8 bars (`CORPORA=m8 bars.sh`, the 12.3 `x86.sla`,
+a new prelude: cksum 3963700924, 29,768 functions, as `int8`'s) all 57 lines equal those of
+`baselines/int8-c730b2db7d.summary`. Not run: M500 bars, the Mac.
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The
@@ -6017,7 +6100,9 @@ with output sent to `/dev/null`:
 ## Limits
 
 - One processor family: x86 (`x86-64.sla` and the 32-bit `x86.sla`). `analyze` takes 32-bit
-  PE files only.
+  PE files and ELF x86-64 files (functions, bodies, gaps; see "ELF64 analysis"); `--facts`,
+  `--decomp-prelude`, `--abi-callers`, `--store`, `edit`, `export` and the decompiler take
+  32-bit PE files only. Superseded (2026-11-21): "`analyze` takes 32-bit PE files only".
 - Context starts from the `.pspec` defaults. Context commits (`globalset`) are recorded per
   address in the `Parse` and apply to later decodes there (flowing ones from that address on);
   the x86 specs do not use them. Delay slots, `crossbuild`, `inst_next2` and flowref/flowdest
