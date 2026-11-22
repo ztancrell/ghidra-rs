@@ -6392,7 +6392,13 @@ ported (review findings left open, 2026-11-22): the STORAGE commit mode
 names `this` / `param_<n>` from `PrototypeModel` / `VariableSymbolDB` / `ParameterDB` source
 (still from the 12.3 output); a removal from a conflict map or a treeified bucket in the HashMap
 order (`java_hashmap_order`); a `long double` member's 16-byte component and packing in a union
-(`cpp4`'s union `U`, below).
+(`cpp4`'s union `U`, below). Low review findings left as they are (2026-11-22): zero-width
+bitfields are not skipped in `composite_part` (Java skips them, `BitFieldDataType.isZeroLength`);
+an enum with an unnamed enumerator keeps the others (Java's `add(null, ..)` throws and drops the
+enum); a negative array bound gives one element (Java's `ArrayDataType` throws); DWARF 5 type,
+partial and skeleton units are skipped or read (Java throws, `DWARFUnitHeader.java:61-72`);
+`line_strp` and `strp_sup` read as empty strings; abbreviation tag and attribute codes are cut
+to 16 bits.
 
 Rerun after the merge into master (2026-11-22, with `int9`'s ELF64 and demangler and Repair Flow
 Damage): `cargo test --release` 195 passed, 0 failed; fmt and clippy clean; `dwarf-diff.sh rust
