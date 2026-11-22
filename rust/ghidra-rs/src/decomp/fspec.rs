@@ -214,6 +214,107 @@ pub(crate) struct ParamList {
     pub(crate) entries: Vec<ParamEntry>,
     /// `killedbycall="true"`: a possible output is killed by the call (`autoKilledByCall`)
     pub(crate) killed_by_call: bool,
+    /// the `<rule>`s after the entries (`modelRules`), in order
+    pub(crate) rules: Vec<ModelRule>,
+}
+
+/// Port of `ModelRule` (modelrules.cc) as far as the specs read here need it: a
+/// `<datatype name="any">` filter (`SizeRestrictedFilter`, `minsize`/`maxsize`) and one action.
+/// Other filters, qualifiers, preconditions and side effects fail to decode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModelRule {
+    pub(crate) minsize: u32,
+    /// 0: no size filtering (`SizeRestrictedFilter::filterOnSize`)
+    pub(crate) maxsize: u32,
+    pub(crate) action: AssignAction,
+}
+
+/// The `AssignAction`s of a rule (`AssignAction::decodeAction`, modelrules.cc:651-687).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AssignAction {
+    /// `<goto_stack/>` (`GotoStack`)
+    GotoStack,
+    /// `<convert_to_ptr/>` (`ConvertToPointer`)
+    ConvertToPointer,
+    /// `<hidden_return/>` (`HiddenReturnAssign`); `voidlock` is `hiddenret_specialreg_void`
+    HiddenReturn { voidlock: bool },
+    /// `<join_dual_class/>` (`MultiSlotDualAssign`, little endian): tiles from `base` registers,
+    /// floating-point parts from `alt` ones
+    JoinDualClass { base: TypeClass, alt: TypeClass, consume_from_stack: bool },
+}
+
+impl AssignAction {
+    /// `canAffectFillinOutput` (`fillinOutputActive`, set by the constructors of GotoStack,
+    /// MultiSlotDualAssign and the others with a `fillinOutputMap`, modelrules.cc:765-776, 1288-1292)
+    fn affects_fillin_output(self) -> bool {
+        matches!(self, AssignAction::GotoStack | AssignAction::JoinDualClass { .. })
+    }
+}
+
+impl ModelRule {
+    /// Port of `ModelRule::decode` (modelrules.cc:1820-1853) for the forms above.
+    fn decode(el: &Element, list: &ParamList) -> Result<ModelRule> {
+        let [filter, action] = &el.kids[..] else {
+            return err("<rule>: qualifiers, preconditions and side effects are not supported");
+        };
+        if filter.name != "datatype" || filter.attr("name") != Some("any") {
+            return err(format!("<rule>: the data-type filter {:?} is not supported", filter.attr("name")));
+        }
+        if filter.attr("sizes").is_some() {
+            return err("<rule>: <datatype sizes=...> is not supported");
+        }
+        let size = |n: &str| -> Result<u32> {
+            filter.attr(n).map_or(Ok(0), |_| {
+                u32::try_from(filter.int(n)?).map_err(|_| LowlevelError(format!("<datatype>: {n} out of range")))
+            })
+        };
+        let (minsize, maxsize) = (size("minsize")?, size("maxsize")?);
+        let action = match action.name.as_str() {
+            // GotoStack::initializeEntry (modelrules.cc:755-761)
+            "goto_stack" if list.has_stack() => AssignAction::GotoStack,
+            "goto_stack" => return err("Cannot find matching <pentry> for action: goto_stack"),
+            "convert_to_ptr" => AssignAction::ConvertToPointer,
+            "hidden_return" => {
+                if action.attr("strategy").is_some() {
+                    return err("<hidden_return strategy=...> is not supported");
+                }
+                AssignAction::HiddenReturn { voidlock: action.attr("voidlock").is_some() }
+            }
+            "join_dual_class" => {
+                // MultiSlotDualAssign::decode (modelrules.cc:1444-1471), little endian
+                let mut a = AssignAction::JoinDualClass {
+                    base: TypeClass::General,
+                    alt: TypeClass::Float,
+                    consume_from_stack: false,
+                };
+                if let AssignAction::JoinDualClass { base, alt, consume_from_stack } = &mut a {
+                    for n in action.attr_names() {
+                        match n {
+                            "reversesignif" | "reversejustify" if !action.flag(n) => {}
+                            "storage" | "a" => *base = TypeClass::parse(action.attr(n).unwrap_or_default())?,
+                            "b" => *alt = TypeClass::parse(action.attr(n).unwrap_or_default())?,
+                            "stackspill" => *consume_from_stack = action.flag(n),
+                            _ => return err(format!("<join_dual_class {n}=...> is not supported")),
+                        }
+                    }
+                    // initializeEntries (modelrules.cc:1213-1227)
+                    let (bt, at) = (list.tiles(*base), list.tiles(*alt));
+                    if bt.is_empty() || at.is_empty() {
+                        return err("Could not find matching resources for action: join_dual_class");
+                    }
+                    if list.entries[bt[0]].size != list.entries[at[0]].size {
+                        return err("Storage class register sizes do not match for action: join_dual_class");
+                    }
+                    if *consume_from_stack && !list.has_stack() {
+                        return err("Cannot find matching stack resource for action: join_dual_class");
+                    }
+                }
+                a
+            }
+            n => return err(format!("<rule>: the action <{n}> is not supported")),
+        };
+        Ok(ModelRule { minsize, maxsize, action })
+    }
 }
 
 impl ParamList {
@@ -224,14 +325,21 @@ impl ParamList {
         if el.attr("separatefloat").is_some() && !el.flag("separatefloat") {
             return err(format!("<{}>: separatefloat=\"false\" is not supported", el.name));
         }
-        let entries = el
-            .kids
+        // the `<rule>`s come after every `<pentry>` (fspec.cc:1470-1494)
+        let n = el.kids.iter().position(|k| k.name == "rule").unwrap_or(el.kids.len());
+        let entries = el.kids[..n]
             .iter()
             .map(|k| match k.name.as_str() {
                 "pentry" => ParamEntry::decode(k, regs),
                 n => err(format!("<{}>: <{n}> is not supported", el.name)),
             })
             .collect::<Result<Vec<_>>>()?;
+        if el.kids[n..].iter().any(|k| k.name != "rule") {
+            return err("<pentry> and <group> elements must come before any <modelrule>");
+        }
+        if el.attr("pointermax").is_some() {
+            return err(format!("<{}>: pointermax is not supported", el.name));
+        }
         // parsePentry: the storage classes only go down, each change starting a resource section
         let mut last = TypeClass::Class(4);
         for e in &entries {
@@ -244,7 +352,26 @@ impl ParamList {
             effects
                 .extend(entries.iter().map(|e| Effect { storage: e.storage.clone(), kind: EffectKind::KilledByCall }));
         }
-        Ok(ParamList { entries, killed_by_call: el.flag("killedbycall") })
+        let mut list = ParamList { entries, killed_by_call: el.flag("killedbycall"), rules: Vec::new() };
+        for k in &el.kids[n..] {
+            let rule = ModelRule::decode(k, &list)?;
+            list.rules.push(rule);
+        }
+        Ok(list)
+    }
+
+    /// Port of `ParamListStandard::extractTiles`: the single-group entries of class `class`
+    /// (no `<group>` in the lists read here, so every non-join entry is an exclusion).
+    fn tiles(&self, class: TypeClass) -> Vec<usize> {
+        (0..self.entries.len())
+            .filter(|&i| self.entries[i].class == class && !matches!(self.entries[i].storage, Storage::Join(_)))
+            .collect()
+    }
+
+    /// `ParamEntry::isFirstInClass` (`resolveFirst`, fspec.cc:77-90): the first entry, or one of
+    /// another class than the entry before it.
+    fn first_in_class(&self, i: usize) -> bool {
+        i == 0 || self.entries[i - 1].class != self.entries[i].class
     }
 
     /// Port of `ParamListStandard::getSpacebase` (`getStackEntry`): whether the last entry is
@@ -410,6 +537,8 @@ pub(crate) struct Models {
     pub(crate) eval_current: Option<ModelId>,
     /// `evalfp_called`: `<eval_called_prototype>`, for the functions it calls
     pub(crate) eval_called: Option<ModelId>,
+    /// the models whose decode needs what is not ported: name, error
+    pub(crate) unported: Vec<(String, String)>,
 }
 
 impl Models {
@@ -419,11 +548,12 @@ impl Models {
 
     /// Port of `Architecture::getModel`.
     pub(crate) fn find(&self, name: &str) -> Result<ModelId> {
-        self.list
-            .iter()
-            .position(|m| m.name == name)
-            .map(|i| ModelId(i as u32))
-            .ok_or_else(|| LowlevelError(format!("Missing prototype model: {name}")))
+        self.list.iter().position(|m| m.name == name).map(|i| ModelId(i as u32)).ok_or_else(|| {
+            match self.unported.iter().find(|u| u.0 == name) {
+                Some((_, e)) => LowlevelError(format!("prototype model {name}: {e}")),
+                None => LowlevelError(format!("Missing prototype model: {name}")),
+            }
+        })
     }
 
     /// Port of `ProtoModel::isCompatible`: the same model, or one is the copy of the other
@@ -982,16 +1112,119 @@ impl ParamList {
         }
     }
 
-    /// Port of `ParamListStandardOut::fillinMapFallback` with `firstOnly` false (x86 declares no
-    /// model rules, so `fillinMap` falls back): the entry best covered by the active trials
-    /// decides which trials are used.
+    /// Port of `ParamListStandardOut::fillinMap` (fspec.cc:1711-1750): without a rule that can
+    /// affect it (`useFillinFallback`, x86win.cspec) the fallback decides; else each trial gets
+    /// the entry it starts in, and the first rule whose `fillinOutputMap` accepts the trials
+    /// decides, the fallback with `firstOnly` when none does.
     pub(crate) fn fillin_map_output(&self, active: &mut ParamActive) {
         if active.trials.is_empty() {
             return;
         }
+        if !self.rules.iter().any(|r| r.action.affects_fillin_output()) {
+            return self.fillin_map_fallback(active, false);
+        }
+        for t in &mut active.trials {
+            t.entry = None;
+            t.offset = 0;
+            if !t.is_active() {
+                continue;
+            }
+            // findEntry with `just` false: the first entry (list order, as the resolver sorts
+            // them) whose range holds the trial's start and whose minimum size it meets
+            let found = (0..self.entries.len()).find(|&i| {
+                let e = &self.entries[i];
+                e.minsize <= t.size as i32
+                    && self
+                        .base_in(i, t.space)
+                        .is_some_and(|b| t.off >= b && t.off <= b.wrapping_add(e.size as u64).wrapping_sub(1))
+            });
+            let Some(e) = found else {
+                t.mark_no_use();
+                continue;
+            };
+            let res = self.justified_contain(e, t.space, t.off, t.size);
+            if (t.has(ParamTrial::REM_FORMED) || t.has(ParamTrial::INDCREATE_FORMED)) && !self.first_in_class(e) {
+                t.mark_no_use();
+                continue;
+            }
+            // setEntry(entry, res): justifiedContain's -1 when the trial overruns the entry
+            t.entry = Some(e);
+            t.offset = res.unwrap_or(-1);
+        }
+        active.sort_trials(self);
+        if self.rules.iter().any(|r| self.rule_fillin_output(r.action, active)) {
+            for t in &mut active.trials {
+                if t.is_active() {
+                    t.set(ParamTrial::USED);
+                } else {
+                    t.mark_no_use();
+                    t.entry = None;
+                    t.offset = 0;
+                }
+            }
+            return;
+        }
+        self.fillin_map_fallback(active, true);
+    }
+
+    /// `AssignAction::fillinOutputMap` of a rule's action: GotoStack (modelrules.cc:790-805),
+    /// MultiSlotDualAssign little endian (modelrules.cc:1386-1442), else none (`false`).
+    fn rule_fillin_output(&self, action: AssignAction, active: &ParamActive) -> bool {
+        let entries = active.trials.iter().map_while(|t| t.entry.map(|e| (t, e)));
+        match action {
+            AssignAction::GotoStack => {
+                let mut count = 0;
+                for (_, e) in entries {
+                    if !self.entries[e].is_stack_spill() || count == 1 {
+                        return false;
+                    }
+                    count += 1;
+                }
+                count == 1
+            }
+            AssignAction::JoinDualClass { base, alt, .. } => {
+                let (mut count, mut cur_group, mut partial) = (0, -1i64, None);
+                let mut resource = TypeClass::General;
+                for (i, (t, e)) in entries.enumerate() {
+                    let class = self.entries[e].class;
+                    if count == 0 {
+                        resource = class;
+                        if (resource != base && resource != alt) || !self.first_in_class(e) {
+                            return false;
+                        }
+                    } else if class != resource || self.group(e) as i64 != cur_group + 1 {
+                        return false;
+                    }
+                    cur_group = self.group(e) as i64;
+                    if t.size as i32 != self.entries[e].size {
+                        if partial.is_some() {
+                            return false;
+                        }
+                        partial = Some(i);
+                    }
+                    count += 1;
+                }
+                // justifyRight and consumeMostSig false (little endian, no `reverse*` attribute):
+                // a partial trial is the last one and holds the least significant bytes
+                if partial.is_some_and(|p| p != count - 1 || active.trials[p].offset != 0) {
+                    return false;
+                }
+                count != 0
+            }
+            AssignAction::ConvertToPointer | AssignAction::HiddenReturn { .. } => false,
+        }
+    }
+
+    /// Port of `ParamListStandardOut::fillinMapFallback`: the entry best covered by the active
+    /// trials decides which trials are used.
+    fn fillin_map_fallback(&self, active: &mut ParamActive, first_only: bool) {
         let mut best: Option<usize> = None;
         let (mut bestcover, mut bestclass) = (0, TypeClass::Ptr.rank());
         for e in 0..self.entries.len() {
+            // not the first entry of its storage class (exclusion, one group)
+            if first_only && !self.first_in_class(e) && !matches!(self.entries[e].storage, Storage::Join(_)) {
+                continue;
+            }
             let mut putative = false;
             for t in &mut active.trials {
                 t.entry = None;
@@ -1612,7 +1845,7 @@ mod tests {
         }
     }
     fn list(entries: Vec<ParamEntry>) -> ParamList {
-        ParamList { entries, killed_by_call: false }
+        ParamList { entries, killed_by_call: false, rules: Vec::new() }
     }
     fn trials(active: &[(Space, u64)]) -> ParamActive {
         let mut a = ParamActive::new(0);

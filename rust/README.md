@@ -1328,7 +1328,11 @@ CHECKS="r1 swfs-r" CORPORA="m500 switch" JOBS=3 rust/tools/bars.sh
   `stack-lock`, and the `stackvars` and R5 variants built on them) hold one `parse line extern`
   per mercs2 function, so they are not committed: `tools/lock-options.sh` writes them to
   `rust/target/locks/` from the prelude (`decomp-locked-options.sh`) and the committed options
-  files, and `bars.sh` runs it first. Superseded: the hand-made `rust/target/stack-lock.txt`,
+  files, and `bars.sh` runs it first. It builds them in a private directory and renames them
+  into place, so parallel `bars.sh` runs sharing `rust/target/locks/` never write one file at
+  once (they did: interleaved `parse` lines that stopped every script before `load function`,
+  so r5slock, r5dtlock, r5dtlocksv and svlock had reference finished 0 / 500 on the Mac).
+  Superseded: the hand-made `rust/target/stack-lock.txt`,
   `lock-sv.txt`, `s6-sv.txt`, `r5s-lock.txt`, `r5dt-lock.txt`, `r5dt-lock-sv.txt` of the
   sections below are these files.
 - The switch corpus is `tools/corpus/switch.txt` (2,050 functions with a jump table; superseded:
@@ -6181,9 +6185,10 @@ run counts unchanged (plain 10 runs, 6,858 cleared, 6 removed, 16 disassembled a
 `analyze` takes an ELF x86-64 file (DESIGN.md, 2026-11-21) with language x86:LE:64:default
 and its gcc compiler spec: `x86-64.sla` (the `--sla` or `GHIDRA_RS_SLA` given, else the one
 next to `x86.sla`) with `x86-64.pspec`, and `x86-64-gcc.cspec` read as data at build time.
-`--functions`, `--gaps` and `--purges` work; `--facts`, `--decomp-prelude`, `--abi-callers`
-and `--store` fail loudly on ELF (the facts encode x86:LE:32's core types and the decompiler
-reads x86:LE:32:default:windows only). `--purges <txt>` writes what `tools/ghidra/DumpPurges.java`
+`--functions`, `--gaps`, `--purges`, `--decomp-prelude` and `--facts` work; `--abi-callers`
+and `--store` fail loudly on ELF. Superseded (2026-11-22, branch `m3-x64`): "`--decomp-prelude`
+and `--facts` fail on ELF; the decompiler reads x86:LE:32:default:windows only"; see "The
+decompiler on x86-64" and "Facts on ELF x86-64" below. `--purges <txt>` writes what `tools/ghidra/DumpPurges.java`
 writes (entry, purge, thunked function, body min, max, address count, no-return), on PE and ELF.
 
 The loader, `Image::from_elf` (ElfProgramBuilder.load, the parts analysis reads):
@@ -6426,6 +6431,131 @@ leaves a hole). Hatred is still not compared with Java, so these 43 are unverifi
 tests in `dwarf/tests.rs`); fmt and clippy clean; `CORPORA=m8 tools/bars.sh` 57 of 57 lines equal
 to the int9 baseline.
 
+### The decompiler on x86-64 (branch `m3-x64`, 2026-11-22)
+
+The console's `load file` takes an ELF x86-64 file as x86:LE:64:default:gcc, as the reference's
+`BfdArchitecture::resolveArchitecture` picks it (bfd_arch.cc:88-110): `x86-64.sla` next to the
+`GHIDRA_RS_SLA` given, `x86-64.pspec`, `x86-64-gcc.cspec`. `analyze <elf64> --decomp-prelude`
+writes the prelude: `adjust vma 0x100000` for a PIE linked at 0 (where Ghidra loads it; the
+read-only sections then marked again), `.got`/`.got.plt` read-only, the GOT import slots and
+every function. What it needed:
+
+- the compiler spec's model rules (modelrules.cc): `<rule>` with `<datatype name="any">` and
+  `goto_stack`, `join_dual_class`, `hidden_return`, `convert_to_ptr`; return recovery goes
+  through `ParamListStandardOut::fillinMap`'s rule path. Storage assigned by a rule
+  (`ModelRule::assignAddress`, so locked prototypes) fails loudly; a model using what is not
+  ported (MSABI: `<group>`, `pointermax`) fails when chosen;
+- `goto [..]`, `call [..]`, `return [..]` in p-code snippets (the `x86_*_thunk` callfixups);
+- `print raw` and heritage's SUBPIECE offsets sized by the address size (8), not 4.
+
+`tools/elf64-decomp.sh` builds `tools/corpus/elf64/*.c` (non-PIE, PIE, `-cet`) and
+`tools/dwarf/cpp*.cpp` (clang++ and g++ -O2) and runs `decomp-diff.sh` on every function. Against
+decomp_dbg: 815 functions, the reference ran 805, identical 670; 105 loud (85 heritage output
+overlap guard, 10 `RulePieceStructure`'s CONCAT tree, 8 overlapping return value guard, 1
+overlapping parameter guard, 1 jump table through a CALLOTHER), 36 silent. The silent ones: 26
+where the ops a heritage pass makes for persistent globals are numbered one lower (the reference
+makes and deletes one op more first; not found yet), 9 where the reference casts `AL` before the
+`return`, 1 other. Hatred, 50 of its own camera and view functions
+(`tools/corpus/hatred-camera.txt`, prelude in 68 s): the reference ran 50, identical 31, loud 15
+(11 output overlap guard, 2 joined contiguous pieces, 2 overlapping parameter guard), silent 4
+(ghidra-rs guards `.bss` globals at calls the reference does not, and one numbering shift). Not
+compared with Java: see "Facts on ELF x86-64" below. Superseded: "`--facts` on ELF is not
+ported" (it is, in part, below). The 32-bit path is unchanged:
+`CORPORA=m8 tools/bars.sh` 57 of 57 lines equal to the int9 baseline; `cargo test --release`
+201 passed; fmt and clippy clean.
+
+Neither console takes a file path with whitespace: `IfcLoadFile` reads `load file` word by word
+(consolemain.cc:53-57; two words are a target and the file), and so does ghidra-rs's. Hatred's
+path (`.../Extra Storage/...`) gave both engines no output, which `decomp-diff.sh` counted as
+identical (50 / 50). Now `decomp-diff.sh` reaches such a `BIN` through a link in its output
+directory, and an output that is empty from the load line on is written as `decomp-diff.sh:
+error: no output ...`: the reference counts as failed, ghidra-rs as loud (bars.sh), never
+identical. On Hatred's real path the camera corpus gives the same 31 / 15 / 4.
+
+The three silent causes, found by tracing the reference (a copy of decomp_dbg with an op-creation
+backtrace):
+- the shifted op numbers came from a restart only ghidra-rs made. A function mapped by `map
+  function` had no model, so its extrapop was unknown, and resolving `CALL RAX` to it failed
+  `isCompatible` against the call's 8. The C++ Funcdata gives its prototype the default model
+  (`FuncProto::setScope`, fspec.cc:3874-3880), and now `add_function` does too.
+- the `AL` cast: `TypeOpReturn::getInputLocal` takes the function's output type, locked or not
+  (typeop.cc:915-921); ghidra-rs took a locked one only.
+- the `.bss` guards: bfd makes the non-loaded `.comment` and `.debug_*` sections sections at 0, and
+  `LoadImageBfd::getReadonly` marks them read-only. Hatred's `.debug_info` (182 MB) so covers
+  `.bss`, which bfd reads as zeros (`loadFill`). The console's image now has those ranges
+  (`Image::bfd_readonly`) and reads `.bss` as zeros. This is the reference's loader, not Java's,
+  which does not map them.
+
+After the three: small ELF corpus identical 700 / 815 (was 670), loud 105, silent 0 (the reference
+ran 805; 10 it did not finish, 5 of them timed out at 120 s); Hatred camera identical 35 / 50 (was
+31), loud 15, silent 0 (was 4). `CORPORA=m8 tools/bars.sh` stays 57 of 57 equal to int9.
+
+### Facts on ELF x86-64 (branch `m3-x64`, 2026-11-22)
+
+`analyze <elf64> --facts <out>` writes the facts file of 32-bit PE, with x86:LE:64's parts:
+- the core types record of x86:LE:64 with the gcc compiler spec (`facts_coretypes64.xml`, copied
+  from a Java export, as the 32-bit one is);
+- 8-byte pointers;
+- no TEB block and no `FS_OFFSET`;
+- `x86-64-gcc.cspec` read for the call fixups;
+- extrapop 8 where a function has no purge, the default model's (the callee purge analyzer does
+  not run on x86-64);
+- names from the symbol tables, local ones too.
+
+Not ported, written as `underived ... function`, which the loader fails on:
+- a GNU-mangled name (`gnudemangle::gnu_demangle`, picked by the program format as
+  `DemanglerAnalyzer` does): Java puts the function in its namespaces and gives it the
+  mangling's signature; its plate comment is `underived ... comments`;
+- a function the DWARF importer (`src/dwarf/`) gives a signature: Java's DWARF analyzer applies
+  its types and parameters.
+
+Prototypes from the 64-bit data-type archives (Java gives `_init` `int _init(EVP_PKEY_CTX *)`)
+are not read.
+
+`tools/elf64-facts.sh` runs Java 12.3's plain auto-analysis with ExportFacts.java on the 14
+binaries of the small corpus (the cpp ones with `-g -gdwarf-3`) and compares with
+`facts-diff.sh`. `PROJ` puts the Java projects elsewhere, since Ghidra refuses this worktree's
+`.claude` path. ExportFacts.java now writes blocks, data and labels of the default address
+space only. ELF's non-loaded sections (`.comment`, `.debug_*`, in OTHER) collided with ram's
+offsets, and their undefined bytes made the script fail on every binary with DWARF; PE programs
+have no such blocks.
+
+Totals of the 14 against Java (equal / Java's records):
+
+| record | equal / Java | rate |
+|---|---|---|
+| coretypes | 14 / 14 | 100% |
+| block | 326 / 417 | 78.2% |
+| undef | 1,034 / 1,407 | 73.5% |
+| tracked | 815 / 1,112 | 73.3% |
+| body | 771 / 1,112 | 69.3% |
+| string | 499 / 751 | 66.4% |
+| label | 4,558 / 7,315 | 62.3% |
+| override | 770 / 1,259 | 61.2% |
+| func | 113 / 1,112 | 10.2% |
+| data | 530 / 12,072 | 4.4% |
+| type | 14 / 1,107 | 1.3% |
+| comments | 0 / 646 | 0% |
+| ns | 0 / 295 | 0% |
+
+ghidra-rs writes 1,501 `underived` and 286 `extref` records, which Java does not have. The
+causes:
+- Java's EXTERNAL block functions: 297 func, body and tracked records ghidra-rs has as `extref`
+  of GOT slots;
+- ELF markup and DWARF data types, most of the missing `data` and `type`;
+- archive and DWARF prototypes, and GNU namespaces: `func`, `ns`, `comments`.
+
+On Hatred, `analyze --facts` was killed twice (out of memory, about 7 GB free on the desktop)
+after the analysis, 76 s and 107 s in; no Hatred facts were written. The prelude run (no
+address tables) fits. Superseded (2026-11-22): on the MacBook (32 GB) it completes. Peak RSS
+there: `--decomp-prelude` 4.6 GB; `--functions` 10.85 GB before, 9.42 GB after constant
+propagation merges a chunk of functions at a time (the output is byte-identical); `--facts`
+11.17 GB before, 10.01 GB after, 354 s (the writer 187 s). The rest is the analysis itself
+(7.9 GB while it runs), so the desktop still lacks the memory. Hatred's facts: 180,026 func
+and body records, 636,140 data, 859,434 label, 197,543 string, 475,155 undef, 35,328
+override, 407 extref. 343,951 are `underived`: 171,714 function, 166,125 comments, 6,112
+label. There is no Java comparison: Java was not run on Hatred.
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The
@@ -6441,9 +6571,11 @@ with output sent to `/dev/null`:
 ## Limits
 
 - One processor family: x86 (`x86-64.sla` and the 32-bit `x86.sla`). `analyze` takes 32-bit
-  PE files and ELF x86-64 files (functions, bodies, gaps; see "ELF64 analysis"); `--facts`,
-  `--decomp-prelude`, `--abi-callers`, `--store`, `edit`, `export` and the decompiler take
-  32-bit PE files only. Superseded (2026-11-21): "`analyze` takes 32-bit PE files only".
+  PE files and ELF x86-64 files (functions, bodies, gaps; see "ELF64 analysis"); `--decomp-prelude`
+  and the decompiler take both (see "The decompiler on x86-64"); `--abi-callers`, `--store`,
+  `edit` and `export` take 32-bit PE files only. Superseded (2026-11-21): "`analyze` takes 32-bit
+  PE files only". Superseded (2026-11-22, branch `m3-x64`): "`--decomp-prelude` and the
+  decompiler take 32-bit PE files only".
 - Context starts from the `.pspec` defaults. Context commits (`globalset`) are recorded per
   address in the `Parse` and apply to later decodes there (flowing ones from that address on);
   the x86 specs do not use them. Delay slots, `crossbuild`, `inst_next2` and flowref/flowdest

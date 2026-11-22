@@ -137,6 +137,7 @@ impl CompilerSpec {
         let mut injects = InjectLibrary::new(sleigh);
         let mut align_map = None;
         let mut global = Vec::new();
+        let mut unported = Vec::new();
         for el in &root.kids {
             match el.name.as_str() {
                 "stackpointer" => {
@@ -151,7 +152,13 @@ impl CompilerSpec {
                     default = Some(ModelId(list.len() as u32));
                     list.push(ProtoModel::decode(proto, names, retaddr.as_ref())?);
                 }
-                "prototype" => list.push(ProtoModel::decode(el, names, retaddr.as_ref())?),
+                // a model using what is not ported (x86-64-gcc.cspec's MSABI: <group>, pointermax)
+                // fails when it is chosen, not when the spec is read
+                "prototype" => match ProtoModel::decode(el, names, retaddr.as_ref()) {
+                    Ok(m) => list.push(m),
+                    Err(e) if e.is_unported() => unported.push((el.req("name")?.to_string(), e.0)),
+                    Err(e) => return Err(e),
+                },
                 "resolveprototype" => {
                     let merged = resolve_prototype(el, &list)?;
                     list.push(merged);
@@ -208,7 +215,7 @@ impl CompilerSpec {
             }
         }
         let default = default.ok_or_else(|| LowlevelError("No default prototype specified".into()))?;
-        let mut models = Models { list, default, eval_current: None, eval_called: None };
+        let mut models = Models { list, default, eval_current: None, eval_called: None, unported };
         models.eval_current = eval_current.map(|n| models.find(&n)).transpose()?;
         models.eval_called = eval_called.map(|n| models.find(&n)).transpose()?;
         let (stack_pointer, stack_container) =

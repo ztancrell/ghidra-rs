@@ -1,0 +1,53 @@
+# Hatred's own camera and view functions: the text symbols (nm -C) of AHatredPlayerCameraManager,
+# UHatredMainCameraComponent, UHatredCharacterMovementComponent and UHatredGameViewportClient, the
+# first 50 of 73 by address
+0x016e1920 # UHatredCharacterMovementComponent::UHatredCharacterMovementComponent(FObjectInitializer const&)
+0x016e1a00 # UHatredCharacterMovementComponent::CanStopPathFollowing() const
+0x016e1a90 # UHatredCharacterMovementComponent::GetMaxSpeed() const
+0x016e1bf0 # UHatredCharacterMovementComponent::CheckIfCanJumpOverObstacle(AActor*, UPrimitiveComponent*) const
+0x016e1d20 # UHatredCharacterMovementComponent::CheckIfCanJumpOnObstacle(AActor*, UPrimitiveComponent*) const
+0x016e1d70 # UHatredCharacterMovementComponent::ModifyFirstSweepHeight(float, AActor*, UPrimitiveComponent*)
+0x016e1e30 # UHatredCharacterMovementComponent::HandleImpact(FHitResult const&, float, FVector const&)
+0x016e38e0 # UHatredCharacterMovementComponent::OnMovementUpdated(float, FVector const&, FVector const&)
+0x016e38f0 # UHatredCharacterMovementComponent::CalcVelocity(float, float, bool, float)
+0x016e4360 # UHatredCharacterMovementComponent::ApplyImpactPhysicsForces(FHitResult const&, FVector const&, FVector const&)
+0x016e43e0 # UHatredCharacterMovementComponent::SetUpdatedComponent(USceneComponent*)
+0x016e44a0 # UHatredCharacterMovementComponent::HatredCapsuleTouched(AActor*, UPrimitiveComponent*, int, bool, FHitResult const&)
+0x016e46a0 # UHatredCharacterMovementComponent::HatredCapsuleUnTouched(AActor*, UPrimitiveComponent*, int)
+0x016e46b0 # UHatredCharacterMovementComponent::PhysicsVolumeChanged(APhysicsVolume*)
+0x01704b20 # UHatredGameViewportClient::UHatredGameViewportClient(FObjectInitializer const&)
+0x01704b50 # UHatredGameViewportClient::DrawTransition(UCanvas*)
+0x01704b70 # UHatredGameViewportClient::NotifyPlayerAdded(int, ULocalPlayer*)
+0x01704bb0 # UHatredGameViewportClient::LostFocus(FViewport*)
+0x017254e0 # UHatredMainCameraComponent::UHatredMainCameraComponent(FObjectInitializer const&)
+0x01725600 # UHatredMainCameraComponent::OnRegister()
+0x017258d0 # UHatredMainCameraComponent::SetWorldLocRot(FVector, FRotator)
+0x017258f0 # UHatredMainCameraComponent::Reset()
+0x01725b20 # UHatredMainCameraComponent::TickComponent(float, ELevelTick, FActorComponentTickFunction*)
+0x01726130 # UHatredMainCameraComponent::OnEnterOrExitVehicle(bool)
+0x01726190 # UHatredMainCameraComponent::StopCutsceneCamera(float, float, float, float, float)
+0x017261d0 # UHatredMainCameraComponent::ForceUpdatePosition()
+0x017263f0 # AHatredPlayerCameraManager::SetCameraPosRot(FVector, FRotator)
+0x017282e0 # AHatredPlayerCameraManager::AHatredPlayerCameraManager(FObjectInitializer const&)
+0x017283c0 # AHatredPlayerCameraManager::InitializeFor(APlayerController*)
+0x01728420 # AHatredPlayerCameraManager::FindPlayerPawn() const
+0x01728510 # AHatredPlayerCameraManager::ResetCamera()
+0x01728580 # AHatredPlayerCameraManager::UpdateCamera(float)
+0x01728ee0 # AHatredPlayerCameraManager::UpdateHidingMeshes()
+0x01729030 # AHatredPlayerCameraManager::HideMeshes(AHatredHideVolume*)
+0x01729270 # AHatredPlayerCameraManager::UpdateShowingMeshes(float)
+0x017293d0 # AHatredPlayerCameraManager::ClearHiddenCharacters()
+0x017294b0 # AHatredPlayerCameraManager::ClearHiddenMeshes(float)
+0x01729720 # AHatredPlayerCameraManager::UpdateVisibilityAgainstCamera(float)
+0x0172a2e0 # AHatredPlayerCameraManager::GetAimOffset() const
+0x0172a530 # AHatredPlayerCameraManager::UpdateCameraAimRotation(FVector)
+0x0172a6c0 # AHatredPlayerCameraManager::SpringDamp(FVector, FVector, float, float, float, float)
+0x0172aa30 # AHatredPlayerCameraManager::ResetHidingSystem()
+0x0172abb0 # AHatredPlayerCameraManager::SetExternalHidingTracePoint(FVector&)
+0x0172abd0 # AHatredPlayerCameraManager::CheckVolumes(AHatredHideVolume*, FVector const&)
+0x0172ad80 # AHatredPlayerCameraManager::HideCharacters(AHatredHideVolume*)
+0x0172b1d0 # AHatredPlayerCameraManager::CompareVolumesLists() const
+0x0172b2d0 # AHatredPlayerCameraManager::GatherMeshesToHide(AHatredHideVolume*)
+0x0172b420 # AHatredPlayerCameraManager::GatherMeshesToFilter(AHatredHideVolume*)
+0x0172b490 # AHatredPlayerCameraManager::StartRevertingMeshes()
+0x0172b680 # AHatredPlayerCameraManager::StartShowingMeshes()

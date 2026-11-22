@@ -19,6 +19,10 @@ use std::io::{self, Write};
 /// built-in data-types of Ghidra, which do not depend on the program (copied from an export).
 const CORE_TYPES: &str = include_str!("facts_coretypes.xml");
 
+/// The same for x86:LE:64 with the gcc compiler spec (ELF x86-64), copied from an export of
+/// `tools/ghidra/ExportFacts.java` on `tools/corpus/elf64/t1.c`.
+const CORE_TYPES64: &str = include_str!("facts_coretypes64.xml");
+
 /// `undefined`, the data-type of a byte without one: built into Ghidra, but no core type, so
 /// Java sends it as a `type` record (its id and text).
 const UNDEFINED: (&str, &str) =
@@ -100,6 +104,24 @@ struct Func {
 }
 
 impl Func {
+    /// Take the name of a symbol through the demangler Ghidra picks by the program's format
+    /// (`DemanglerAnalyzer`: GnuDemangler for ELF, MicrosoftDemangler for PE).
+    fn name_from(&mut self, raw: &str, elf64: bool) {
+        if !elf64 {
+            return self.named(raw);
+        }
+        // a GNU name: Java takes the demangled name, puts it in its namespaces and gives the
+        // function the signature of its mangling (DemangledFunction.applyTo); the namespaces
+        // and that signature are not written here, so the function is not derived
+        self.name = raw.to_string();
+        if let Ok(Some(d)) = crate::gnudemangle::gnu_demangle(raw) {
+            if let Some(n) = d.name {
+                self.name = n;
+            }
+            self.underived = true;
+        }
+    }
+
     /// Take the name of a symbol as Ghidra's demangler leaves it: `@name@4` is `name` with
     /// `__fastcall` locked, `_name` is `name` with `__cdecl` locked, `_name@12` and `__name`
     /// stay; a C++ name is not derived (Java has its namespace and the prototype of its
@@ -191,12 +213,14 @@ struct Exporter<'a> {
     /// ids of the `type` records the written records refer to
     types: BTreeSet<String>,
     core: HashMap<String, String>,
+    /// the size of a pointer: 4, or 8 on ELF x86-64
+    ptr: u32,
 }
 
 /// `name="..." ... id="0x..."` of every type in the core types.
-fn core_ids() -> HashMap<String, String> {
+fn core_ids(core: &str) -> HashMap<String, String> {
     let mut m = HashMap::from([("undefined".to_string(), format!("0x{}", UNDEFINED.0))]);
-    for t in CORE_TYPES.split("<type ").skip(1) {
+    for t in core.split("<type ").skip(1) {
         let attr = |a: &str| t.split(&format!("{a}=\"")).nth(1).and_then(|x| x.split('"').next());
         if let (Some(n), Some(id)) = (attr("name"), attr("id")) {
             m.insert(n.to_string(), id.to_string());
@@ -222,7 +246,7 @@ pub fn callfixups(cspec: &str) -> HashMap<String, String> {
 
 impl Exporter<'_> {
     fn writable(&self, a: u32) -> bool {
-        a >= TEB.0 || self.img.block_of(a).is_some_and(|s| !s.readonly && s.name != "Headers")
+        (!self.img.elf64 && a >= TEB.0) || self.img.block_of(a).is_some_and(|s| !s.readonly && s.name != "Headers")
     }
 
     /// The body range holding `a`: (first, last, entry).
@@ -271,7 +295,13 @@ impl Exporter<'_> {
         }
         let name = esc(&f.name);
         let nr = if noreturn { " noreturn=\"true\"" } else { "" };
-        let extrapop = purge.map_or("unknown".to_string(), |p| (p + 4).to_string());
+        // without a purge, the default model's extrapop: x86win.cspec's "unknown", x86-64-gcc.cspec's
+        // 8 (FunctionPrototype; the callee purge analyzer does not run on x86-64)
+        let extrapop = match purge {
+            Some(p) => (p + self.ptr).to_string(),
+            None if self.img.elf64 => "8".to_string(),
+            None => "unknown".to_string(),
+        };
         let (model, lock) = f.model.map_or(("unknown", ""), |m| (m, " modellock=\"true\""));
         let symbols =
             if locals.is_empty() { "<symbollist/>".into() } else { format!("<symbollist>{locals}</symbollist>") };
@@ -655,13 +685,16 @@ fn plate_comment(fid: Option<&Option<String>>, raw: Option<&str>) -> Result<Opti
 
 /// The names of the functions: an export's, Function ID's, a thunk's, or `FUN_<address>`.
 fn name_functions(img: &Image, an: &Analysis, fid: &BTreeMap<u32, Applied>, protos: &Protos) -> BTreeMap<u32, Func> {
-    let exports: HashMap<u32, &str> = img.exports.iter().map(|(a, n)| (*a, n.as_str())).collect();
+    let mut exports: HashMap<u32, &str> = img.exports.iter().map(|(a, n)| (*a, n.as_str())).collect();
+    // ELF: the symbol tables name every function, local ones too (ElfProgramBuilder), ahead of
+    // the names of the entries
+    exports.extend(img.elf_funcs.iter().map(|(a, n)| (*a, n.as_str())));
     let mut funcs: BTreeMap<u32, Func> = BTreeMap::new();
     for &f in &an.funcs {
         let mut func = Func { name: format!("FUN_{f:08x}"), ..Func::default() };
         let raw = exports.get(&f).copied().or_else(|| fid.get(&f).map(|a| a.name.as_str()));
         if let Some(raw) = raw {
-            func.named(raw);
+            func.name_from(raw, img.elf64);
         } else if let Some(i) = an.bodies.get(&f).filter(|b| b.len() == 1).and_then(|_| an.insns.get(&f)) {
             // a thunk: one jump to a function or through an import slot
             match (i.flow, i.target, i.slot) {
@@ -700,7 +733,7 @@ fn name_functions(img: &Image, an: &Analysis, fid: &BTreeMap<u32, Applied>, prot
             me.name = raw.clone();
             // a name the archive has stays as it is (`_cexit`); the demangler has the others
             if !protos.by_name.contains_key(raw) {
-                me.named(raw);
+                me.name_from(raw, img.elf64);
             }
         }
     }
@@ -723,6 +756,8 @@ pub struct Inputs<'a> {
     pub cspec: &'a str,
     /// the trigram model of Ghidra's ASCII Strings analyzer; without it that analyzer does not run
     pub strings: Option<&'a crate::strings::Model>,
+    /// ELF: the entries of the functions the DWARF importer (`crate::dwarf`) gives a signature
+    pub dwarf: &'a BTreeSet<u32>,
 }
 
 /// The bytes a call pops besides the return address, as Ghidra's stack analysis has them at a
@@ -762,7 +797,7 @@ pub fn call_purges(img: &Image, an: &Analysis, inputs: &Inputs) -> HashMap<u32, 
 
 /// Write the facts of `an` to `out`.
 pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mut dyn Write) -> io::Result<()> {
-    let Inputs { fid, protos, analyzed, purges, cspec, strings } = *inputs;
+    let Inputs { fid, protos, analyzed, purges, cspec, strings, dwarf } = *inputs;
     let none = Protos::default();
     let mut ex = Exporter {
         img,
@@ -774,7 +809,8 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         fixups: callfixups(cspec),
         underived: BTreeSet::new(),
         types: BTreeSet::new(),
-        core: core_ids(),
+        core: core_ids(if img.elf64 { CORE_TYPES64 } else { CORE_TYPES }),
+        ptr: if img.elf64 { 8 } else { 4 },
     };
     // bodies as ranges; where bodies overlap the lowest entry keeps the bytes
     let mut body_ranges: BTreeMap<u32, Vec<(u32, u32)>> = BTreeMap::new();
@@ -794,7 +830,7 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
     }
 
     writeln!(out, "ghidra-rs-facts 2")?;
-    writeln!(out, "coretypes\t{}", CORE_TYPES.trim_end())?;
+    writeln!(out, "coretypes\t{}", (if img.elf64 { CORE_TYPES64 } else { CORE_TYPES }).trim_end())?;
 
     // every address something refers to, in the order of the functions and their instructions
     let mut targets: BTreeMap<u32, Target> = BTreeMap::new();
@@ -859,7 +895,10 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         let last = s.addr + s.data.len() as u32 - 1;
         writeln!(out, "block\t{:x}\t{last:x}\t{}", s.addr, if ex.writable(s.addr) { "w" } else { "r" })?;
     }
-    writeln!(out, "block\t{:x}\t{:x}\tw", TEB.0, TEB.0 + (TEB.1 - 1))?;
+    // the TEB block is the Windows x86 Thread Environment Block analyzer's (PE only)
+    if !img.elf64 {
+        writeln!(out, "block\t{:x}\t{:x}\tw", TEB.0, TEB.0 + (TEB.1 - 1))?;
+    }
     for (&a, t) in &targets {
         if t.write && !ex.writable(a) && img.block_of(a).is_some() {
             writeln!(out, "wref\t{a:x}")?;
@@ -869,7 +908,12 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
     // functions
     let (_, regs) = sl.registers();
     let mut sets: Vec<(u64, u32, u64)> = Vec::new();
-    for (name, val) in sl.tracked.iter().map(|(n, v)| (n.as_str(), *v as u64)).chain([("FS_OFFSET", TEB.0 as u64)]) {
+    for (name, val) in sl
+        .tracked
+        .iter()
+        .map(|(n, v)| (n.as_str(), *v as u64))
+        .chain((!img.elf64).then_some(("FS_OFFSET", TEB.0 as u64)))
+    {
         if let Some(r) = regs.iter().find(|r| r.0 == name) {
             sets.push((r.1, r.2, val));
         }
@@ -904,14 +948,23 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
             writeln!(out, "tracked\t{f:x}\t{x}</tracked_pointset>")?;
         }
         let cdecl = func.model == Some("__cdecl");
-        if func.underived || (func.import.is_some() && !cdecl && !ex.protos.by_name.contains_key(&func.name)) {
+        // a function the DWARF importer gives a signature: Java's DWARF analyzer applies its types
+        // and parameters, which are not written here
+        let dwarf = dwarf.contains(&f);
+        if dwarf || func.underived || (func.import.is_some() && !cdecl && !ex.protos.by_name.contains_key(&func.name)) {
             ex.underived.insert((f, Underived::Function));
         }
-        // Function ID's plate comment, then the Demangler analyzer's
-        match plate_comment(
-            fid.get(&f).map(|a| &a.comment),
-            exports.get(&f).copied().or(fid.get(&f).map(|a| a.name.as_str())),
-        ) {
+        // Function ID's plate comment, then the Demangler analyzer's; on ELF the GNU names'
+        // plate comments are not written (their functions are not derived)
+        let plate = match img.elf64 {
+            true if func.underived => Err(()),
+            true => Ok(None),
+            false => plate_comment(
+                fid.get(&f).map(|a| &a.comment),
+                exports.get(&f).copied().or(fid.get(&f).map(|a| a.name.as_str())),
+            ),
+        };
+        match plate {
             Ok(Some(text)) => writeln!(
                 out,
                 "comments\t{f:x}\t<commentdb><comment type=\"header\"><addr space=\"ram\" offset=\"0x{f:x}\"/>\
@@ -931,7 +984,7 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
     for (&slot, (_, raw)) in slots {
         let mut func = Func { name: raw.clone(), import: Some(slot), ..Func::default() };
         if !ex.protos.by_name.contains_key(raw) {
-            func.named(raw);
+            func.name_from(raw, img.elf64);
         }
         let name = &func.name;
         let sym = format!(
@@ -939,7 +992,7 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
              </externrefsymbol><addr space=\"ram\" offset=\"0x{slot:x}\" size=\"1\"/><rangelist/></mapsym></doc>",
             esc(name)
         );
-        writeln!(out, "data\t{slot:x}\t4\t{sym}")?;
+        writeln!(out, "data\t{slot:x}\t{}\t{sym}", ex.ptr)?;
         // a `__cdecl` function pops nothing: its extrapop is known without a prototype
         let cdecl = func.model == Some("__cdecl");
         let xml = ex.function_xml(&func, slot, 2, cdecl.then_some(0), an.noreturn.contains(&slot), "");
@@ -979,7 +1032,7 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
 
     // data symbols: what the references define, and a plain symbol at every other reference
     let undefined = ex.typeref("undefined");
-    let pointer = format!("<type name=\"\" metatype=\"ptr\" size=\"4\">{undefined}</type>");
+    let pointer = format!("<type name=\"\" metatype=\"ptr\" size=\"{}\">{undefined}</type>", ex.ptr);
     let mut covered = 0u32; // the end of the data symbol before
     let mut defined: Vec<(u32, u32)> = Vec::new(); // instructions and data with a data-type
     let addrs: BTreeSet<u32> = targets.keys().chain(defs.keys()).copied().collect();
@@ -1022,7 +1075,7 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
     // the undefined bytes of the blocks that are not writable: Java gives each one without a
     // symbol a read-only `UNK_` symbol of one byte
     defined.extend(an.insns.iter().map(|(&a, i)| (a, a + i.len as u32)));
-    defined.extend(img.imports.keys().map(|&s| (s, s + 4)));
+    defined.extend(img.imports.keys().map(|&s| (s, s + ex.ptr)));
     defined.sort_unstable();
     for s in img.sections.iter().filter(|s| !ex.writable(s.addr)) {
         let end = s.addr + s.data.len() as u32;

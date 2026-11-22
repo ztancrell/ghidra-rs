@@ -707,7 +707,7 @@ fn guard(fd: &mut Funcdata, arch: &Arch, range: &MemRange, c: &mut Collected) ->
             return err("Free varnode with multiple reads");
         }
         if fd.vn(vn).size < range.size {
-            *r = normalize_read_size(fd, vn, op, range)?;
+            *r = normalize_read_size(fd, arch, vn, op, range)?;
         }
         fd.vn_set(*r, VnFlags::ACTIVE_HERITAGE);
     }
@@ -735,11 +735,12 @@ fn guard(fd: &mut Funcdata, arch: &Arch, range: &MemRange, c: &mut Collected) ->
 
 /// Port of `Heritage::normalizeReadSize`: a read smaller than the range becomes a SUBPIECE of
 /// a new free read of the whole range, which is returned.
-fn normalize_read_size(fd: &mut Funcdata, vn: VarnodeId, op: OpId, range: &MemRange) -> Result<VarnodeId> {
+fn normalize_read_size(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, op: OpId, range: &MemRange) -> Result<VarnodeId> {
     let newop = fd.new_op(Opcode::Subpiece, fd.op(op).seq.addr);
     let vn1 = fd.new_varnode(range.size, range.space, range.off);
     let over = fd.vn(vn).overlap(range.space, range.off, range.size, range.mask).unwrap_or(0);
-    let vn2 = fd.new_constant(4, u64::from(over));
+    // the offset constant has the address size of the range's space (heritage.cc:393, 445, 466)
+    let vn2 = fd.new_constant(super::scope::space_info(arch, range.space)?.1, u64::from(over));
     fd.op_set_input(newop, vn1, 0)?;
     fd.op_set_input(newop, vn2, 1)?;
     fd.op_set_output(newop, vn)?;
@@ -779,7 +780,7 @@ fn write_piece(
     let big = fd.new_varnode(range.size, range.space, range.off);
     fd.vn_set(big, VnFlags::ACTIVE_HERITAGE);
     fd.op_set_input(newop, big, 0)?;
-    let c = fd.new_constant(4, cut);
+    let c = fd.new_constant(super::scope::space_info(arch, range.space)?.1, cut);
     fd.op_set_input(newop, c, 1)?;
     fd.op_insert_before(newop, op)?;
     Ok(piece)

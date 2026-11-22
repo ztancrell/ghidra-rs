@@ -489,15 +489,23 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
         if abi.is_some() || store.is_some() {
             return Err(format!("{path}: --abi-callers and --store take a 32-bit PE only"));
         }
-        // the facts and the prelude are the decompiler's, which reads x86:LE:32:default:windows
-        if facts.is_some() || prelude.is_some() {
-            return Err(format!(
-                "{path}: not ported: --facts and --decomp-prelude for x86:LE:64 (the core types, pointer size and x86-64-gcc.cspec prototypes of the facts; the decompiler is x86:LE:32 only)"
-            ));
-        }
         img
     } else {
         analysis::Image::from_pe(&data).map_err(|e| format!("{path}: {e}"))?
+    };
+    // ELF with --facts: the functions the DWARF importer gives a signature (Java's DWARF
+    // analyzer; DWARFAnalyzer.canAnalyze: a program with DWARF sections), at the image base
+    // Ghidra gives a PIE linked at 0. Imported before the analysis, so its memory is freed
+    // first: on Hatred both at once did not fit in the desktop's memory.
+    let has_dwarf = facts.is_some() && img.elf64 && {
+        use object::Object;
+        object::File::parse(&*data).is_ok_and(|f| f.section_by_name(".debug_info").is_some())
+    };
+    let dwarf: std::collections::BTreeSet<u32> = if has_dwarf {
+        let imp = ghidra_rs::dwarf::import(&data).map_err(|e| format!("{path}: DWARF: {e}"))?;
+        imp.funcs.iter().filter_map(|f| u32::try_from(f.addr + u64::from(img.elf_adjust)).ok()).collect()
+    } else {
+        Default::default()
     };
     let sl = Sleigh::load(&sla)?;
     let t = std::time::Instant::now();
@@ -592,7 +600,7 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
                 Some((f, text)) => Some(ghidra_rs::factsout::Protos::parse(&text).map_err(|e| format!("{f}: {e}"))?),
                 None => None,
             };
-            let cspec_path = sla.with_file_name("x86win.cspec");
+            let cspec_path = sla.with_file_name(if img.elf64 { "x86-64-gcc.cspec" } else { "x86win.cspec" });
             let cspec = std::fs::read_to_string(&cspec_path).map_err(|e| format!("{}: {e}", cspec_path.display()))?;
             // the model of the ASCII Strings analyzer, in the Ghidra tree the .sla file is in
             let model_path =
@@ -612,6 +620,7 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
                 purges: &callee_purges,
                 cspec: &cspec,
                 strings: Some(&strings),
+                dwarf: &dwarf,
             };
             // the stack analysis goes by the purges Ghidra has at a call site
             let purges = ghidra_rs::factsout::call_purges(&img, &an, &inputs);

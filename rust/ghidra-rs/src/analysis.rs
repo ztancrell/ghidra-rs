@@ -38,6 +38,12 @@ pub struct Image {
     pub elf_funcs: Vec<(u32, String)>,
     /// ELF: dynamic relocations `from_elf` does not apply (Ghidra applies them)
     pub unapplied_relocs: usize,
+    /// ELF: what the image base was moved by (ElfHeader.findImageBase: 0x100000 for a PIE linked
+    /// at 0); bfd loads the file where it is linked, so the prelude moves it (`adjust vma`)
+    pub elf_adjust: u32,
+    /// ELF: the non-loaded sections bfd marks read-only, (address, size): the console's
+    /// read-only ranges have them, as the reference's (not Java's, which does not load them)
+    pub bfd_readonly: Vec<(u64, u64)>,
 }
 
 impl Image {
@@ -154,11 +160,21 @@ impl Image {
                 .and_then(|a| u32::try_from(a).ok())
                 .ok_or(format!("address {a:#x} + {adj:#x} is past 32 bits"))
         };
-        let mut img = Image { elf64: true, ..Image::default() };
+        let mut img = Image { elf64: true, elf_adjust: adj as u32, ..Image::default() };
         let sections = hdr.sections(e, bytes).map_err(|e| e.to_string())?;
         for s in sections.iter() {
             let flags = s.sh_flags(e);
             let name = String::from_utf8_lossy(sections.section_name(e, s).unwrap_or_default()).into_owned();
+            // bfd makes the non-loaded sections with contents (`.comment`, `.debug_*`) sections too,
+            // at their address (0) and read-only without SHF_WRITE, and the reference's
+            // LoadImageBfd::getReadonly (loadimage_bfd.cc:286-301) marks them; Java does not map them
+            if flags & u64::from(elf::SHF_ALLOC) == 0
+                && flags & u64::from(elf::SHF_WRITE) == 0
+                && matches!(s.sh_type(e), elf::SHT_PROGBITS | elf::SHT_NOTE)
+                && s.sh_size(e) != 0
+            {
+                img.bfd_readonly.push((s.sh_addr(e), s.sh_size(e)));
+            }
             if flags & u64::from(elf::SHF_ALLOC) == 0 || s.sh_size(e) == 0 || name == ".tbss" {
                 continue;
             }
@@ -2661,50 +2677,53 @@ impl Analysis {
             .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
             .max(1);
         let this = &*self;
-        let found: Vec<Vec<Vec<(u32, Ins)>>> = std::thread::scope(|s| {
-            let hs: Vec<_> = (0..n)
-                .map(|t| {
-                    let funcs = &funcs;
-                    s.spawn(move || {
-                        let mut p = sl.new_parse();
-                        funcs
-                            .iter()
-                            .skip(t)
-                            .step_by(n)
-                            .map(|&f| this.flow_constants(img, sl, &mut p, f))
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .collect();
-            hs.into_iter().map(|h| h.join().unwrap()).collect()
-        });
-        // merged in function order, so the result does not depend on the thread count
+        // merged in function order, so the result does not depend on the thread count. The
+        // walks run a chunk of functions at a time and each chunk is merged before the next, so
+        // the decodes of all functions are never held at once (on Hatred they were about 6 GB)
         let mut merged: HashMap<u32, Ins> = HashMap::new();
-        for i in 0..funcs.len() {
-            for (a, d) in &found[i % n][i / n] {
-                let m = merged.entry(*a).or_insert_with(|| Ins {
-                    refs: Vec::new(),
-                    rw: Vec::new(),
-                    code_imms: Vec::new(),
-                    computed: None,
-                    ..d.clone()
-                });
-                for &r in &d.refs {
-                    if !m.refs.contains(&r) {
-                        m.refs.push(r);
+        for funcs in funcs.chunks(1 << 14) {
+            let found: Vec<Vec<Vec<(u32, Ins)>>> = std::thread::scope(|s| {
+                let hs: Vec<_> = (0..n)
+                    .map(|t| {
+                        s.spawn(move || {
+                            let mut p = sl.new_parse();
+                            funcs
+                                .iter()
+                                .skip(t)
+                                .step_by(n)
+                                .map(|&f| this.flow_constants(img, sl, &mut p, f))
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect();
+                hs.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            for i in 0..funcs.len() {
+                for (a, d) in &found[i % n][i / n] {
+                    let m = merged.entry(*a).or_insert_with(|| Ins {
+                        refs: Vec::new(),
+                        rw: Vec::new(),
+                        code_imms: Vec::new(),
+                        computed: None,
+                        ..d.clone()
+                    });
+                    for &r in &d.refs {
+                        if !m.refs.contains(&r) {
+                            m.refs.push(r);
+                        }
                     }
-                }
-                for &r in &d.rw {
-                    if !m.rw.contains(&r) {
-                        m.rw.push(r);
+                    for &r in &d.rw {
+                        if !m.rw.contains(&r) {
+                            m.rw.push(r);
+                        }
                     }
-                }
-                for &c in &d.code_imms {
-                    if !m.code_imms.contains(&c) {
-                        m.code_imms.push(c);
+                    for &c in &d.code_imms {
+                        if !m.code_imms.contains(&c) {
+                            m.code_imms.push(c);
+                        }
                     }
+                    m.computed = m.computed.or(d.computed);
                 }
-                m.computed = m.computed.or(d.computed);
             }
         }
         for (a, d) in merged {

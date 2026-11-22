@@ -262,6 +262,7 @@ impl Arch {
             .iter()
             .filter(|s| s.readonly)
             .map(|s| (u64::from(s.addr), u64::from(s.addr) + loaded_len(s) as u64))
+            .chain(image.bfd_readonly.iter().map(|&(a, n)| (a, a + n)))
             .collect();
         Ok(Arch {
             sleigh,
@@ -338,7 +339,12 @@ impl Arch {
     }
 
     pub(crate) fn add_function(&mut self, entry: u64, name: String) {
-        self.functions.insert(entry, Function { name, proto: FuncProto::default(), consume: 1 });
+        // Funcdata's constructor gives its prototype the default model (`FuncProto::setScope`,
+        // fspec.cc:3874-3880), and with it the model's extrapop (x86-64-gcc.cspec's 8), which
+        // `isCompatible` compares when an indirect call is resolved to this function
+        let mut proto = FuncProto::default();
+        proto.set_model(&self.spec.models, self.spec.models.default);
+        self.functions.insert(entry, Function { name, proto, consume: 1 });
     }
 
     /// `map externalref <slot> ...`
@@ -420,7 +426,9 @@ impl Arch {
     pub(crate) fn fill_bytes(&self, addr: u64, buf: &mut [u8]) -> Option<()> {
         let byte = |a: u64| {
             let a = u32::try_from(a).ok()?;
-            let s = self.image.sections.iter().find(|s| s.addr <= a && ((a - s.addr) as usize) < loaded_len(s))?;
+            // ELF: bfd reads a section without contents (`.bss`) as zeros (LoadImageBfd::loadFill)
+            let len = |s: &crate::analysis::Section| if self.image.elf64 { s.data.len() } else { loaded_len(s) };
+            let s = self.image.sections.iter().find(|s| s.addr <= a && ((a - s.addr) as usize) < len(s))?;
             s.data.get((a - s.addr) as usize).copied()
         };
         buf[0] = byte(addr)?;

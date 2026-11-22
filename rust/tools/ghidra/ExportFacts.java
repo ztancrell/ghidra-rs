@@ -120,6 +120,12 @@ public class ExportFacts extends GhidraScript {
         record("coretypes", core);
 
         for (MemoryBlock b : currentProgram.getMemory().getBlocks()) {
+            // the decompiler reads the default space only: a block of another space (ELF's
+            // non-loaded sections, `.comment` and `.debug_*`, in OTHER) has no record, as its
+            // offsets would collide with ram's
+            if (!ram(b.getStart())) {
+                continue;
+            }
             out.write("block\t" + hex(b.getStart()) + "\t" + hex(b.getEnd()) + "\t" + (b.isWrite() ? "w" : "r") +
                 (b.isVolatile() ? "v" : "") + "\n");
             if (b.isWrite()) {
@@ -187,6 +193,9 @@ public class ExportFacts extends GhidraScript {
         HashSet<Address> seen = new HashSet<>();
         for (Data d : listing.getDefinedData(true)) {
             monitor.checkCancelled();
+            if (!ram(d.getMinAddress())) {
+                continue; // as the blocks above
+            }
             StringDataInstance sdi = StringDataInstance.getStringDataInstance(d);
             if (sdi != StringDataInstance.NULL_INSTANCE) {
                 out.write("string\t" + hex(d.getMinAddress()) + "\t" + d.getLength() + "\t" + plain(d, sdi) + "\n");
@@ -196,7 +205,7 @@ public class ExportFacts extends GhidraScript {
         for (Symbol s : currentProgram.getSymbolTable().getAllSymbols(true)) {
             monitor.checkCancelled();
             Address a = s.getAddress();
-            if (!s.isPrimary() || !a.isMemoryAddress()) {
+            if (!s.isPrimary() || !a.isMemoryAddress() || !ram(a)) {
                 continue;
             }
             if (listing.getInstructionAt(a) != null) {
@@ -285,6 +294,11 @@ public class ExportFacts extends GhidraScript {
     // read-only symbol of one byte, named by SymbolUtilities.getDynamicName. One record per range;
     // ghidra-rs writes the symbol's XML itself (decomp/facts.rs, `undef_symbol`), so the first such
     // byte of each range is checked here against the same text.
+    // the default address space, the one the decompiler reads
+    private boolean ram(Address a) {
+        return a.getAddressSpace().equals(currentProgram.getAddressFactory().getDefaultAddressSpace());
+    }
+
     private void undefined(DecompileCallback cb, MemoryBlock b) throws Exception {
         Listing listing = currentProgram.getListing();
         AddressSetView ranges =

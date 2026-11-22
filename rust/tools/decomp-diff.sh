@@ -23,7 +23,10 @@
 #   TIMEOUT    seconds each engine may take per function (default 120). A killed run (timeout's
 #              status 124 or 137) keeps only the line `decomp-diff.sh: timed out after N s`, so a
 #              reference cut off mid-print counts as failed, never as finished
-#   BIN        the game binary (default ~/projects/mercs/mercs2-decomp/orig/Mercenaries2.analysis.exe)
+#   BIN        the game binary (default ~/projects/mercs/mercs2-decomp/orig/Mercenaries2.analysis.exe);
+#              a path with whitespace is reached through OUT/bin (`load file` reads words)
+# An engine output empty from the load line on becomes `decomp-diff.sh: error: no output ...` and
+# never counts as identical.
 #   REFCACHE=0 run the reference for every function; otherwise its output is reused from
 #              rust/target/ref-cache/ when the content hash of all its inputs matches a stored run:
 #              decomp_dbg, BIN, the prelude, the .sla/.ldefs/.pspec/.cspec files under SLEIGHHOME,
@@ -84,6 +87,10 @@ fi
 export out=${OUT:-$rust/target/decomp-check/$name}
 rm -rf "$out"
 mkdir -p "$out"/scripts "$out"/ref "$out"/rust
+# both consoles read `load file` word by word (IfcLoadFile, consolemain.cc:53-57: two words are
+# a target and the file), so neither can open a path with whitespace: such a BIN is reached
+# through a link in the output directory
+case $BIN in *[[:space:]]*) ln -sfn "$BIN" "$out/bin" && export BIN=$out/bin ;; esac
 
 one() {
     a=$1
@@ -133,10 +140,15 @@ refeng() {
 # output with the one timed-out line
 eng() {
     local o=$1; shift
-    timeout "$TIMEOUT" "$@" </dev/null 2>&1 | sed -n -e '/^init> load \(function\|addr\)/,$p' \
-        -e '/^init> load \(function\|addr\)/,$!{/panicked at\|has overflowed its stack/p}' > "$o"
-    st=${PIPESTATUS[0]}
+    timeout "$TIMEOUT" "$@" </dev/null > "$o.raw" 2>&1
+    st=$?
+    sed -n -e '/^init> load \(function\|addr\)/,$p' \
+        -e '/^init> load \(function\|addr\)/,$!{/panicked at\|has overflowed its stack/p}' "$o.raw" > "$o"
     case $st in 124|137) echo "decomp-diff.sh: timed out after $TIMEOUT s" > "$o" ;; esac
+    # nothing from the load line on (the program or prelude did not load): an error, never an
+    # output to compare; the first line the engine printed after the script's own echoes says why
+    [ -s "$o" ] || echo "decomp-diff.sh: error: no output from the load line on: $(grep -v -m1 '^init> ' "$o.raw" | cut -c1-200)" > "$o"
+    rm -f "$o.raw"
 }
 # the reference failed: an error, or no decompile result (a timed-out run has none)
 refbad() {
@@ -175,7 +187,10 @@ for f in "$out"/ref/*; do
     else
         refok=$((refok + 1))
     fi
-    if cmp -s "$f" "$out/rust/$a"; then
+    if [ ! -s "$out/rust/$a" ] || grep -q '^decomp-diff.sh: error: no output' "$f" "$out/rust/$a"; then
+        # a missing or empty output on either side is never identical
+        echo "no output $a: ref: $(head -1 "$f") | rust: $(head -1 "$out/rust/$a" 2>/dev/null)"
+    elif cmp -s "$f" "$out/rust/$a"; then
         same=$((same + 1))
     else
         # first differing line: cmp's line number (at EOF, the line after the shorter file's last)

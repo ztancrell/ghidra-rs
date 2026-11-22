@@ -1285,7 +1285,7 @@ fn locked_output_type(fd: &Funcdata, op: OpId) -> Option<TypeId> {
 }
 
 /// The locked-prototype cases of `TypeOpCall`/`TypeOpCallind`/`TypeOpReturn::getInputLocal`:
-/// a call's locked parameter type, the function's locked output type on a RETURN.
+/// a call's locked parameter type, the function's output type on a RETURN.
 fn locked_input_type(fd: &Funcdata, op: OpId, slot: usize) -> Option<TypeId> {
     let o = fd.op(op);
     let size = fd.vn(*o.ins.get(slot)?).size;
@@ -1298,7 +1298,12 @@ fn locked_input_type(fd: &Funcdata, op: OpId, slot: usize) -> Option<TypeId> {
             t
         }
         Opcode::Return if slot == 1 => {
-            let t = fd.proto.locked.as_ref()?.output.ty;
+            // `fp->getOutputType()`, locked or not (typeop.cc:915-921: the lock test is
+            // commented out there): an unlocked output has the type ActionOutputPrototype gave it
+            let t = match &fd.proto.locked {
+                Some(l) => l.output.ty,
+                None => fd.proto.out_param?.2,
+            };
             if fd.types.size(t) != size {
                 return None;
             }
