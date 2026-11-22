@@ -2942,8 +2942,17 @@ mod tests {
     /// order as CreateFunctionCmd makes it.
     pub(super) fn bare(insns: &[(u32, Flow, Option<u32>)], funcs: &[u32]) -> (Analysis, BTreeSet<u32>) {
         let ins = |&(a, flow, target): &(u32, Flow, Option<u32>)| {
-            let i =
-                Ins { len: 1, flow, target, slot: None, computed: None, refs: vec![], rw: vec![], code_imms: vec![], nop: false };
+            let i = Ins {
+                len: 1,
+                flow,
+                target,
+                slot: None,
+                computed: None,
+                refs: vec![],
+                rw: vec![],
+                code_imms: vec![],
+                nop: false,
+            };
             (a, i)
         };
         let mut an = Analysis {
