@@ -6512,6 +6512,30 @@ Not ported, written as `underived ... function`, which the loader fails on:
 Prototypes from the 64-bit data-type archives (Java gives `_init` `int _init(EVP_PKEY_CTX *)`)
 are not read.
 
+The EXTERNAL block and the GOT (branch `x64-facts`, 2026-11-22), in the facts only (the
+analysis and the decompiler still see 0 in the import slots and no block there):
+- Java's EXTERNAL block: an 8-byte entry per undefined symbol in symbol-table order (a sized
+  object its size), from the first 0x1000 boundary past the highest block; a versioned name
+  (`puts@GLIBC_2.2.5`) of an entry made before is that entry's PRE comment (`comments`,
+  `user2`), another name made before is that entry (ElfProgramBuilder.java:1511-1568,
+  1685-1713, 1945-2041). The block record is writable. It matched Java's on all 14 binaries;
+- a one-byte function at each STT_FUNC entry (ElfProgramBuilder.java:2140-2152), with the
+  default model's extrapop and the no-return analyzers' mark: its prototype comes from the
+  archives, so each is `underived ... function`;
+- GLOB_DAT and JUMP_SLOT slots of an undefined symbol hold its entry plus the addend
+  (X86_64_ElfRelocationHandler.java:168-171), and every word of a `.got*` block is a pointer
+  (ElfDefaultGotPltMarkup.java:78-93, 360-415), named `PTR_<pointee>_<address>`, or
+  `PTR_<address>` where the value is no memory address (isValidPointer); a symbol of the symbol
+  tables at the slot (`_GLOBAL_OFFSET_TABLE_`) or a pointer into the middle of an entry is
+  `underived ... label`. ELF has no `extref` records any more (Java has none: the slots point
+  into memory);
+- a pointer's data record is 8 bytes on x86-64 (it was 4).
+
+Not ported: the functions Java has at the EXTERNAL entries of STT_NOTYPE symbols
+(`__gmon_start__`, `_ITM_registerTMCloneTable`, `_ITM_deregisterTMCloneTable`: 84 records of
+the 14 binaries; which analysis makes them was not traced), data at object entries, and the
+PLT thunks of PIE binaries (`puts` at the PLT).
+
 `tools/elf64-facts.sh` runs Java 12.3's plain auto-analysis with ExportFacts.java on the 14
 binaries of the small corpus (the cpp ones with `-g -gdwarf-3`) and compares with
 `facts-diff.sh`. `PROJ` puts the Java projects elsewhere, since Ghidra refuses this worktree's
@@ -6520,26 +6544,37 @@ space only. ELF's non-loaded sections (`.comment`, `.debug_*`, in OTHER) collide
 offsets, and their undefined bytes made the script fail on every binary with DWARF; PE programs
 have no such blocks.
 
-Totals of the 14 against Java (equal / Java's records):
+On the MacBook (2026-11-22) the script runs in an Arch Linux container (colima): the
+binaries are built there (gcc 16.2.1, clang 23.1.5, the desktop's versions) and Java is the
+Linux 12.3 DEV build (`build/dist/ghidra_12.3_DEV_20261120.zip`) on OpenJDK 25.0.5.1;
+ghidra-rs and `facts-diff.sh` run on macOS with the Java facts it left. The 14 binaries took
+Java 6 min 42 s.
 
-| record | equal / Java | rate |
-|---|---|---|
-| coretypes | 14 / 14 | 100% |
-| block | 326 / 417 | 78.2% |
-| undef | 1,034 / 1,407 | 73.5% |
-| tracked | 815 / 1,112 | 73.3% |
-| body | 771 / 1,112 | 69.3% |
-| string | 499 / 751 | 66.4% |
-| label | 4,558 / 7,315 | 62.3% |
-| override | 770 / 1,259 | 61.2% |
-| func | 113 / 1,112 | 10.2% |
-| data | 530 / 12,072 | 4.4% |
-| type | 14 / 1,107 | 1.3% |
-| comments | 0 / 646 | 0% |
-| ns | 0 / 295 | 0% |
+Totals of the 14 against Java (equal / Java's records), master 13b1dffecf and branch
+`x64-facts` on the same binaries and Java facts:
 
-ghidra-rs writes 1,501 `underived` and 286 `extref` records, which Java does not have. The
-causes:
+| record | master | x64-facts | rate |
+|---|---|---|---|
+| coretypes | 14 / 14 | 14 / 14 | 100% |
+| tracked | 815 / 1,112 | 1,057 / 1,112 | 95.1% |
+| body | 771 / 1,112 | 1,013 / 1,112 | 91.1% |
+| block | 326 / 417 | 340 / 417 | 81.5% |
+| undef | 1,034 / 1,407 | 1,034 / 1,407 | 73.5% |
+| string | 500 / 751 | 500 / 751 | 66.6% |
+| label | 4,645 / 7,315 | 4,645 / 7,315 | 63.5% |
+| override | 770 / 1,259 | 770 / 1,259 | 61.2% |
+| comments | 0 / 646 | 242 / 646 | 37.5% |
+| func | 113 / 1,112 | 177 / 1,112 | 15.9% |
+| data | 531 / 12,072 | 724 / 12,072 | 6.0% |
+| type | 14 / 1,107 | 14 / 1,107 | 1.3% |
+| ns | 0 / 295 | 0 / 295 | 0% |
+
+Superseded (2026-11-22): the desktop run's master figures (string 499, label 4,558, data 530;
+the binaries were rebuilt since).
+
+ghidra-rs writes 1,488 `underived` records (master: 1,501, and 286 `extref`), which Java
+does not have. Superseded: the causes below were master's; the EXTERNAL block's are ported
+above. The causes:
 - Java's EXTERNAL block functions: 297 func, body and tracked records ghidra-rs has as `extref`
   of GOT slots;
 - ELF markup and DWARF data types, most of the missing `data` and `type`;

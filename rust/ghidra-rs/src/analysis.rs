@@ -44,6 +44,30 @@ pub struct Image {
     /// ELF: the non-loaded sections bfd marks read-only, (address, size): the console's
     /// read-only ranges have them, as the reference's (not Java's, which does not load them)
     pub bfd_readonly: Vec<(u64, u64)>,
+    /// ELF: Java's EXTERNAL block, first and last address (ElfProgramBuilder.createExternalBlock,
+    /// ElfProgramBuilder.java:1546-1568: uninitialized, writable). Not a section here: only the
+    /// facts writer reads it, the analysis and the decompiler see no block there
+    pub external_block: Option<(u32, u32)>,
+    /// ELF: the entries of the EXTERNAL block, in allocation order
+    pub externals: Vec<External>,
+    /// ELF: GOT slots a GLOB_DAT or JUMP_SLOT relocation binds to an EXTERNAL entry, and the
+    /// value Java writes there (X86_64_ElfRelocationHandler.java:168-171: the entry plus the
+    /// addend); the slot itself holds 0 here
+    pub got_external: HashMap<u32, u32>,
+    /// ELF: the addresses of the named symbols the symbol tables define (Java's labels there)
+    pub elf_named: HashSet<u32>,
+}
+
+/// An entry of Java's EXTERNAL block (ElfProgramBuilder.allocateExternalSymbol).
+pub struct External {
+    pub addr: u32,
+    pub name: String,
+    /// an STT_FUNC symbol: Java makes a one-byte thunk to the external function there
+    /// (evaluateElfSymbol, ElfProgramBuilder.java:2140-2152)
+    pub func: bool,
+    /// the versioned names (`puts@GLIBC_2.2.5`) that make its PRE comment
+    /// (processVersionedExternal, ElfProgramBuilder.java:2031-2041)
+    pub versions: Vec<String>,
 }
 
 impl Image {
@@ -135,7 +159,8 @@ impl Image {
     /// point and at DT_INIT, DT_FINI and the entries of the init, preinit and fini arrays
     /// (processEntryPoints). GOT slots the dynamic relocations bind to an undefined symbol are
     /// imports of `<EXTERNAL>` (Library.UNKNOWN), as the IAT slots of a PE: Ghidra points them
-    /// at its EXTERNAL block, which is not made here. Addresses must fit in 32 bits.
+    /// at its EXTERNAL block, which only the facts writer has (`external_block`, `externals`,
+    /// `got_external`): the slots hold 0 here. Addresses must fit in 32 bits.
     pub fn from_elf(bytes: &[u8]) -> Result<Image, String> {
         use object::elf;
         use object::read::elf::{Dyn, ElfFile64, FileHeader, ProgramHeader, Rela, SectionHeader, Sym};
@@ -201,6 +226,15 @@ impl Image {
         let mut undefined = HashMap::new(); // (table, index) -> name, for the relocations
         let mut defined = HashMap::new(); // (table, index) -> address
         let mut made = HashSet::new(); // the entries of `elf_funcs`
+
+        // Java's EXTERNAL block (ElfProgramBuilder.getNextExternalBlockEntryAddress,
+        // ElfProgramBuilder.java:1511-1540): allocateLinkageBlock (1401-1498) with alignment
+        // 0x1000 (ElfLoadAdapter.getLinkageBlockAlignment) takes the last free range of at least
+        // 0x20000 bytes (getPreferredExternalBlockSize), the one past the highest block
+        let ext_base = img.sections.iter().map(|s| u64::from(s.addr) + s.data.len() as u64).max().unwrap_or(0);
+        let mut next_ext = ext_base.next_multiple_of(0x1000);
+        let mut ext_of = HashMap::new(); // (table, index) -> EXTERNAL entry, for the relocations
+        let mut ext_by_name: HashMap<String, usize> = HashMap::new();
         for (ti, table) in sections.iter().enumerate() {
             if !matches!(table.sh_type(e), elf::SHT_SYMTAB | elf::SHT_DYNSYM) {
                 continue;
@@ -212,11 +246,57 @@ impl Image {
             for (i, s) in syms.iter().enumerate() {
                 let name = String::from_utf8_lossy(s.name(e, syms.strings()).unwrap_or_default()).into_owned();
                 if s.st_shndx(e) == elf::SHN_UNDEF {
+                    // ElfProgramBuilder.processSymbols (1685-1713) with calculateSymbolAddress
+                    // (1731-1900): NO_ADDRESS for an undefined symbol but the first, a TLS or
+                    // a file one; not the GOT symbol nor a blank name
+                    let external = i != 0
+                        && !matches!(s.st_type(), elf::STT_TLS | elf::STT_FILE)
+                        && !name.trim().is_empty()
+                        && name != "_GLOBAL_OFFSET_TABLE_"
+                        && (s.st_bind() != elf::STB_LOCAL || s.st_value(e) == 0 || s.st_value(e) == 1);
+                    if external {
+                        // a versioned name of an entry made before is its comment (processVersionedExternal);
+                        // a name made before is that entry (processDuplicateExternal)
+                        let real = name.find("@@").filter(|&i| i > 0).or(name.find('@')).map(|i| &name[..i]);
+                        if let Some(&x) = real.and_then(|r| ext_by_name.get(r)) {
+                            img.externals[x].versions.push(name.clone());
+                            ext_of.insert((ti, i), x);
+                        } else if let Some(&x) = ext_by_name.get(&name) {
+                            ext_of.insert((ti, i), x);
+                        } else {
+                            // allocateExternalSymbol (1945-1960): a sized object its size aligned
+                            // to 8 (getDefaultAlignment of a 64-bit file), anything else 8 bytes
+                            let size = s.st_size(e);
+                            let size = if s.st_type() == elf::STT_OBJECT && size > 0 && size < i32::MAX as u64 {
+                                size.next_multiple_of(8)
+                            } else {
+                                8
+                            };
+                            let addr = u32::try_from(next_ext)
+                                .ok()
+                                .filter(|a| u64::from(*a) + size <= 1 << 32)
+                                .ok_or(format!("EXTERNAL block entry {name} at {next_ext:#x} is past 32 bits"))?;
+                            next_ext += size;
+                            ext_by_name.insert(name.clone(), img.externals.len());
+                            ext_of.insert((ti, i), img.externals.len());
+                            img.externals.push(External {
+                                addr,
+                                name: name.clone(),
+                                func: s.st_type() == elf::STT_FUNC,
+                                versions: Vec::new(),
+                            });
+                        }
+                    }
                     undefined.insert((ti, i), name);
                     continue;
                 }
                 if s.st_shndx(e) < elf::SHN_LORESERVE {
                     defined.insert((ti, i), s.st_value(e) + adj);
+                    if !name.is_empty() && !matches!(s.st_type(), elf::STT_SECTION | elf::STT_FILE) {
+                        if let Ok(a) = addr32(s.st_value(e)) {
+                            img.elf_named.insert(a);
+                        }
+                    }
                 }
                 if s.st_type() != elf::STT_FUNC
                     || name.is_empty()
@@ -233,6 +313,9 @@ impl Image {
                     img.exports.push((a, name));
                 }
             }
+        }
+        if let (Some(first), Some(last)) = (img.externals.first(), u32::try_from(next_ext - 1).ok()) {
+            img.external_block = Some((first.addr, last));
         }
         img.entry = (hdr.e_entry(e) != 0).then(|| addr32(hdr.e_entry(e))).transpose()?;
         // the dynamic relocations (X86_64_ElfRelocationHandler): GOT slots bound to undefined
@@ -298,6 +381,14 @@ impl Image {
                                 false
                             } else {
                                 img.imports.insert(at, ("<EXTERNAL>".to_string(), name.clone()));
+                                if let Some(x) = ext_of.get(&(link, sym)) {
+                                    let v = u64::from(img.externals[*x].addr).wrapping_add(addend as u64);
+                                    img.got_external.insert(
+                                        at,
+                                        u32::try_from(v)
+                                            .map_err(|_| format!("GOT slot {at:#x}: {v:#x} is past 32 bits"))?,
+                                    );
+                                }
                                 put(&mut img, at, &|_| 0)
                             }
                         } else {
@@ -703,7 +794,7 @@ impl Analysis {
             let named = img.imports.iter().map(|(&s, (_, n))| (s, n)).chain(img.elf_funcs.iter().map(|(a, n)| (*a, n)));
             an.noreturn.extend(named.filter(|(_, n)| listed(n)).map(|(a, _)| a).collect::<Vec<_>>());
             an.warnings.push(
-                "not ported for x86-64: Function Start Search (x86-64gcc_patterns.xml), Function ID, the GOT/PLT markup and EXTERNAL block, DWARF; the X86 Function Callee Purge analyzer does not run on 64-bit (Java's canAnalyze)"
+                "not ported for x86-64: Function Start Search (x86-64gcc_patterns.xml), Function ID, the PLT markup, the EXTERNAL block (in the facts only), DWARF; the X86 Function Callee Purge analyzer does not run on 64-bit (Java's canAnalyze)"
                     .into(),
             );
             if img.unapplied_relocs > 0 {

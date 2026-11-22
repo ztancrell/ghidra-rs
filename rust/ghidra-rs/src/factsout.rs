@@ -163,9 +163,10 @@ enum Def {
 }
 
 impl Def {
-    fn len(&self) -> u32 {
+    /// its bytes: a pointer is `ptr` bytes (4, or 8 on x86-64)
+    fn len(&self, ptr: u32) -> u32 {
         match self {
-            Def::Ptr(_) => 4,
+            Def::Ptr(_) => ptr,
             Def::Str { len, .. } => *len,
         }
     }
@@ -410,7 +411,7 @@ impl Exporter<'_> {
         let mut checked = HashSet::new();
         // the defined data holding `a`: its first address
         let holding = |defs: &BTreeMap<u32, Def>, a: u32| {
-            defs.range(..=a).next_back().filter(|(&s, d)| a < s + d.len()).map(|(&s, _)| s)
+            defs.range(..=a).next_back().filter(|(&s, d)| a < s + d.len(self.ptr)).map(|(&s, _)| s)
         };
         while let Some(t) = queue.pop_front() {
             let Some(sec) = img.block_of(t) else { continue };
@@ -507,7 +508,7 @@ impl Exporter<'_> {
         // the first instruction or defined data that overlaps `first..=last`
         let defined = |defs: &BTreeMap<u32, Def>, first: u32, last: u32| -> Option<u32> {
             let ins = an.insns.range(..=last).next_back().filter(|(&a, i)| a + i.len as u32 > first).map(|(&a, _)| a);
-            let def = defs.range(..=last).next_back().filter(|(&a, d)| a + d.len() > first).map(|(&a, _)| a);
+            let def = defs.range(..=last).next_back().filter(|(&a, d)| a + d.len(self.ptr) > first).map(|(&a, _)| a);
             let slot = slots.range(..=last).next_back().filter(|&&a| a + 4 > first).copied();
             ins.or(def).or(slot)
         };
@@ -540,7 +541,7 @@ impl Exporter<'_> {
                     let Some((&at, Def::Str { wide: w, .. })) = defs.range(..=end).next_back() else { continue };
                     if *w != wide
                         || at <= start
-                        || at + defs[&at].len() <= end
+                        || at + defs[&at].len(self.ptr) <= end
                         || defined(defs, start, at - 1).is_some()
                     {
                         continue;
@@ -899,6 +900,10 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
     if !img.elf64 {
         writeln!(out, "block\t{:x}\t{:x}\tw", TEB.0, TEB.0 + (TEB.1 - 1))?;
     }
+    // ELF: the EXTERNAL block, writable (ElfProgramBuilder.java:1553-1557)
+    if let Some((first, last)) = img.external_block {
+        writeln!(out, "block\t{first:x}\t{last:x}\tw")?;
+    }
     for (&a, t) in &targets {
         if t.write && !ex.writable(a) && img.block_of(a).is_some() {
             writeln!(out, "wref\t{a:x}")?;
@@ -982,6 +987,11 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
     let mut slots: Vec<(&u32, &(String, String))> = img.imports.iter().collect();
     slots.sort();
     for (&slot, (_, raw)) in slots {
+        if img.elf64 {
+            // the GOT markup below defines the slot: a pointer to the EXTERNAL block, no external reference
+            targets.remove(&slot);
+            continue;
+        }
         let mut func = Func { name: raw.clone(), import: Some(slot), ..Func::default() };
         if !ex.protos.by_name.contains_key(raw) {
             func.name_from(raw, img.elf64);
@@ -1003,7 +1013,44 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         targets.remove(&slot);
     }
 
+    // ELF: the EXTERNAL block's functions, one-byte thunks of the external functions
+    // (ElfProgramBuilder.java:2140-2152), with the default model's extrapop and a PRE comment of
+    // the versioned names (ElfProgramBuilder.java:2031-2041; DecompileCallback.java:583, `user2`).
+    // Their prototypes come from the data-type archives, which are not read
+    let mut ext_noreturn = HashSet::new();
+    for (slot, to) in &img.got_external {
+        if an.noreturn.contains(slot) {
+            ext_noreturn.insert(*to);
+        }
+    }
+    for x in img.externals.iter().filter(|x| x.func) {
+        let a = x.addr;
+        let func = Func { name: x.name.clone(), ..Func::default() };
+        let xml = ex.function_xml(&func, a, 1, None, ext_noreturn.contains(&a), "");
+        writeln!(out, "func\t{a:x}\t{xml}\nbody\t{a:x}\t{a:x}-{a:x}")?;
+        ex.underived.insert((a, Underived::Function));
+        if !x.versions.is_empty() {
+            writeln!(
+                out,
+                "comments\t{a:x}\t<commentdb><comment type=\"user2\"><addr space=\"ram\" offset=\"0x{a:x}\"/>\
+                 <addr space=\"ram\" offset=\"0x{a:x}\"/><text>{}</text></comment></commentdb>",
+                esc(&x.versions.join("\n")).replace('\n', "&#10;")
+            )?;
+        }
+    }
+
     let mut defs = ex.reference_data(&mut targets, &code_refs);
+    // ELF: the GOT markup (ElfDefaultGotPltMarkup.processGOTSections and processGOT,
+    // ElfDefaultGotPltMarkup.java:78-93, 360-415): a pointer at every word of an initialized
+    // `.got*` block, holding what the relocations wrote (an EXTERNAL entry for an import)
+    if img.elf64 {
+        for s in img.sections.iter().filter(|s| s.name.starts_with(".got") && s.zero_tail == 0) {
+            for a in (s.addr..s.addr + s.data.len() as u32 / 8 * 8).step_by(8) {
+                let v = img.got_external.get(&a).copied().or_else(|| img.read_ptr(a)).unwrap_or(0);
+                defs.insert(a, Def::Ptr(v));
+            }
+        }
+    }
     if let Some(model) = strings {
         ex.ascii_strings(&mut defs, model);
     }
@@ -1037,7 +1084,7 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
     let mut defined: Vec<(u32, u32)> = Vec::new(); // instructions and data with a data-type
     let addrs: BTreeSet<u32> = targets.keys().chain(defs.keys()).copied().collect();
     for &a in &addrs {
-        let skip = a < covered || img.block_of(a).is_none() || img.imports.contains_key(&a);
+        let skip = a < covered || img.block_of(a).is_none() || (!img.elf64 && img.imports.contains_key(&a));
         if skip || ex.range_at(a).is_some() || ex.insn_at(a).is_some() {
             continue; // code: its label is written above
         }
@@ -1045,6 +1092,25 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         let next = addrs.range(a + 1..).next().copied().unwrap_or(u32::MAX);
         let sized = targets.get(&a).map_or(0, |t| t.size);
         let (name, size, ty) = match defs.get(&a) {
+            Some(Def::Ptr(to)) if img.elf64 => {
+                // SymbolUtilities.getDynamicName: `PTR_<pointee>_<address>`; `PTR_<address>` where the
+                // value is no memory address, as the GOT markup removes its reference
+                // (ElfDefaultGotPltMarkup.isValidPointer, java:603-615); a symbol of the symbol
+                // tables there (`_GLOBAL_OFFSET_TABLE_`) or a pointer into an EXTERNAL entry: data
+                // labels and offcut names are not ported
+                let ext = img.external_block.filter(|(f, l)| (*f..=*l).contains(to));
+                let name = match ext.map(|_| img.externals.iter().find(|x| x.addr == *to)) {
+                    _ if img.elf_named.contains(&a) => None,
+                    Some(x) => x.map(|x| format!("PTR_{}_{a:08x}", x.name)),
+                    None if img.block_of(*to).is_none() => Some(format!("PTR_{a:08x}")),
+                    None => Some(format!("PTR_{}_{a:08x}", pointee_name(&ex, &defs, *to))),
+                };
+                let Some(name) = name else {
+                    ex.underived.insert((a, Underived::Label));
+                    continue;
+                };
+                (name, ex.ptr, pointer.clone())
+            }
             Some(Def::Ptr(to)) => (format!("PTR_{}_{a:08x}", pointee_name(&ex, &defs, *to)), 4, pointer.clone()),
             Some(Def::Str { len, wide, label }) => {
                 let (elem, n) = if *wide { ("wchar_t", len / 2) } else { ("char", *len) };
