@@ -6468,6 +6468,24 @@ directory, and an output that is empty from the load line on is written as `deco
 error: no output ...`: the reference counts as failed, ghidra-rs as loud (bars.sh), never
 identical. On Hatred's real path the camera corpus gives the same 31 / 15 / 4.
 
+The three silent causes, found by tracing the reference (a copy of decomp_dbg with an op-creation
+backtrace):
+- the shifted op numbers came from a restart only ghidra-rs made. A function mapped by `map
+  function` had no model, so its extrapop was unknown, and resolving `CALL RAX` to it failed
+  `isCompatible` against the call's 8. The C++ Funcdata gives its prototype the default model
+  (`FuncProto::setScope`, fspec.cc:3874-3880), and now `add_function` does too.
+- the `AL` cast: `TypeOpReturn::getInputLocal` takes the function's output type, locked or not
+  (typeop.cc:915-921); ghidra-rs took a locked one only.
+- the `.bss` guards: bfd makes the non-loaded `.comment` and `.debug_*` sections sections at 0, and
+  `LoadImageBfd::getReadonly` marks them read-only. Hatred's `.debug_info` (182 MB) so covers
+  `.bss`, which bfd reads as zeros (`loadFill`). The console's image now has those ranges
+  (`Image::bfd_readonly`) and reads `.bss` as zeros. This is the reference's loader, not Java's,
+  which does not map them.
+
+After the three: small ELF corpus identical 700 / 815 (was 670), loud 105, silent 0 (the reference
+ran 805; 10 it did not finish, 5 of them timed out at 120 s); Hatred camera identical 35 / 50 (was
+31), loud 15, silent 0 (was 4). `CORPORA=m8 tools/bars.sh` stays 57 of 57 equal to int9.
+
 ### Facts on ELF x86-64 (branch `m3-x64`, 2026-11-22)
 
 `analyze <elf64> --facts <out>` writes the facts file of 32-bit PE, with x86:LE:64's parts:
