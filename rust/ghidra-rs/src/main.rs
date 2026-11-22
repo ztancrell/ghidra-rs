@@ -55,14 +55,18 @@ fn run() -> Result<(), String> {
         let data = std::fs::read(&args[1]).map_err(|e| format!("{}: {e}", args[1]))?;
         let t = std::time::Instant::now();
         let imp = ghidra_rs::dwarf::import(&data).map_err(|e| e.to_string())?;
+        for w in imp.warnings.iter().take(20) {
+            eprintln!("warning: {w}");
+        }
         let text = ghidra_rs::dwarf::dump(&imp);
         let types = text.lines().filter(|l| l.starts_with("T ")).count();
         eprintln!(
-            "{} units, {} DIEs, {} types, {} functions, {:.1} s",
+            "{} units, {} DIEs, {} types, {} functions, {} warnings, {:.1} s",
             imp.units,
             imp.dies,
             types,
             imp.funcs.len(),
+            imp.warnings.len(),
             t.elapsed().as_secs_f64()
         );
         return std::fs::write(&args[2], text).map_err(|e| format!("{}: {e}", args[2]));

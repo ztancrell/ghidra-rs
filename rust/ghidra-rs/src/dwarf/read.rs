@@ -179,10 +179,15 @@ pub struct Dwarf<'a> {
     pub parents: Vec<i32>,
     pub siblings: Vec<u32>,
     pub tags: Vec<u16>,
-    /// index of the last DIE of each unit, ascending (`compUnitDieIndex`)
-    cu_last: Vec<u32>,
+    /// `compUnitDieIndex`: (index of the last DIE of a unit, the unit), ascending; -1 for a unit
+    /// without DIEs before any DIE; a later unit with the same key replaces the earlier
+    /// (`TreeMap.put`, DIEContainer.java:295)
+    cu_last: Vec<(i64, usize)>,
     /// DIEs that are the target of an `abstract_origin` / `specification` (`indexHasRef`)
     pub has_ref: Vec<bool>,
+    /// what Java logs (`Msg.error`) and skips: the unreadable rest of a unit, a type or a
+    /// function that failed
+    pub warnings: Vec<String>,
 }
 
 pub struct Cursor<'a> {
@@ -275,6 +280,7 @@ impl<'a> Dwarf<'a> {
             tags: Vec::new(),
             cu_last: Vec::new(),
             has_ref: Vec::new(),
+            warnings: Vec::new(),
         };
         let mut abbrev_at: HashMap<u64, usize> = HashMap::new();
         let mut c = Cursor::new(info, 0);
@@ -285,11 +291,19 @@ impl<'a> Dwarf<'a> {
             if len == 0xffff_ffff {
                 len = c.uint(8)?;
                 int_size = 8;
+            } else if len >= 0xffff_fff0 {
+                // DWARFLengthValue.java:53-57
+                return Err(Error::Dwarf(format!("Reserved DWARF length value: {len:x}. Unknown extension.")));
             }
             if len == 0 {
                 break;
             }
-            let end = c.p as u64 + len;
+            // DWARFUnitHeader.java:49: `getPointerIndex() + length` in a Java long. Past the end
+            // of .debug_info the unit's DIEs are read until a read fails (and the rest of the
+            // unit is skipped), and no unit follows; a negative end leaves the unit empty.
+            let end = (c.p as i64).wrapping_add(len as i64);
+            let last = end < c.p as i64 || end as u64 >= info.len() as u64;
+            let end = if end < c.p as i64 { c.p as u64 } else { (end as u64).min(info.len() as u64) };
             let version = c.uint(2)? as u16;
             let (unit_type, addr_size, abbrev_off) = if version >= 5 {
                 let ut = c.u8()?;
@@ -305,7 +319,7 @@ impl<'a> Dwarf<'a> {
                 c.uint(8)?; // dwo id
             }
             let first_die = c.p as u64;
-            c.p = end as usize;
+            c.p = if last { info.len() } else { end as usize };
             if !(unit_type == 1 || unit_type == 3 || unit_type == 4 || unit_type == 5) {
                 continue; // type units: DWARFUnitHeader that is not a compilation unit
             }
@@ -335,7 +349,11 @@ impl<'a> Dwarf<'a> {
         let mut targets = Vec::new();
         for cu in 0..dw.cus.len() {
             dw.index_cu(cu, &mut targets)?;
-            dw.cu_last.push(dw.offsets.len() as u32 - 1);
+            let key = dw.offsets.len() as i64 - 1;
+            match dw.cu_last.last_mut() {
+                Some(l) if l.0 == key => l.1 = cu,
+                _ => dw.cu_last.push((key, cu)),
+            }
         }
         dw.has_ref = vec![false; dw.offsets.len()];
         for t in targets {
@@ -347,47 +365,83 @@ impl<'a> Dwarf<'a> {
         }
         Ok(dw)
     }
+}
 
+/// A DIE as `read_die` reads it: tag, has children, (attribute, form, value) of its references
+type RawDie<'a> = (u16, bool, Vec<(u16, u16, Val<'a>)>);
+
+impl<'a> Dwarf<'a> {
+    /// `DebugInfoEntry.read`: one whole DIE at the cursor (`None` = a terminator): its abbreviation
+    /// and the attribute values its references need.
+    fn read_die(&self, cu: usize, c: &mut Cursor<'a>) -> Result<Option<RawDie<'a>>> {
+        let start = c.p;
+        let code = c.uleb()?;
+        if code == 0 {
+            return Ok(None);
+        }
+        let cuh = &self.cus[cu];
+        let ab = self.abbrev_tables[cuh.abbrevs]
+            .get(&code)
+            .ok_or(Error::Dwarf(format!("Abbreviation code {code} not found in compunit {cu} at 0x{start:x}")))?;
+        let mut vals = Vec::new();
+        for &(at, form, ic) in &ab.attrs {
+            let (form, val) = read_form(c, form, ic, cuh, self.strs)?;
+            if at == DW_AT_ABSTRACT_ORIGIN || at == DW_AT_SPECIFICATION {
+                vals.push((at, form, val));
+            }
+        }
+        Ok(Some((ab.tag, ab.children, vals)))
+    }
+
+    /// `DIEContainer.indexDIEsForCU`: a DIE that cannot be read ends the unit (the rest is
+    /// skipped with a warning, DIEContainer.java:402-409); misplaced root DIEs and terminators
+    /// fail the import (`DWARFException`).
     fn index_cu(&mut self, cu: usize, targets: &mut Vec<u64>) -> Result<()> {
         let (end, first) = (self.cus[cu].end, self.cus[cu].first_die);
         let mut c = Cursor::new(self.info, first as usize);
         let mut parent: i32 = -1;
         let mut count = 0;
+        let mut unexpected_term: Option<u64> = None;
         while (c.p as u64) < end {
             let start = c.p as u64;
-            let code = c.uleb()?;
-            if code == 0 {
-                if parent != -1 {
+            let die = match self.read_die(cu, &mut c) {
+                Ok(d) => d,
+                Err(e) => {
+                    self.warnings.push(format!(
+                        "Failed to read DIE at offset 0x{start:x} in compunit {cu} (at 0x{:x}), skipping remainder of compilation unit: {e}",
+                        self.cus[cu].start
+                    ));
+                    break;
+                }
+            };
+            let Some((tag, children, vals)) = die else {
+                if parent == -1 {
+                    unexpected_term = Some(start);
+                } else {
                     parent = self.parents[parent as usize];
                 }
                 continue;
+            };
+            if let Some(t) = unexpected_term {
+                return Err(Error::Dwarf(format!("Unexpected terminator entry at 0x{t:x}")));
             }
             if parent == -1 && count != 0 {
                 return Err(Error::Dwarf(format!("Unexpected root level DIE at 0x{start:x}")));
             }
-            let ab = self.abbrev_tables[self.cus[cu].abbrevs]
-                .get(&code)
-                .ok_or(Error::Dwarf(format!("unknown abbreviation {code} at 0x{start:x}")))?;
             let index = self.offsets.len() as u32;
             self.offsets.push(start);
             self.parents.push(parent);
             self.siblings.push(index + 1);
-            self.tags.push(ab.tag);
+            self.tags.push(tag);
             count += 1;
             let mut p = index as i32;
             while p != -1 {
                 self.siblings[p as usize] = index + 1;
                 p = self.parents[p as usize];
             }
-            let children = ab.children;
-            let cuh = &self.cus[cu];
-            let attrs: Vec<(u16, u16, i64)> = ab.attrs.clone();
-            for (at, form, ic) in attrs {
-                let (form, val) = read_form(&mut c, form, ic, cuh, self.strs)?;
-                if at == DW_AT_ABSTRACT_ORIGIN || at == DW_AT_SPECIFICATION {
-                    if let Val::Num { .. } = val {
-                        targets.push(local_ref(form, val.unsigned().unwrap_or(0), cuh.start)?);
-                    }
+            for (_, form, val) in vals {
+                if let Val::Num { .. } = val {
+                    targets.push(local_ref(form, val.unsigned().unwrap_or(0), self.cus[cu].start)?);
                 }
             }
             if children {
@@ -420,7 +474,7 @@ impl<'a> Dwarf<'a> {
 
     /// The unit a DIE index belongs to (`getCompilationUnitForDIE`).
     pub fn cu_of(&self, die: u32) -> usize {
-        self.cu_last.partition_point(|&last| last < die)
+        self.cu_last[self.cu_last.partition_point(|&(last, _)| last < die as i64)].1
     }
 
     /// The attribute `at` of one DIE, if it has it (`DebugInfoEntry.findAttribute`).
@@ -479,7 +533,8 @@ impl<'a> Dwarf<'a> {
         let asz = cuh.addr_size as usize;
         let mut c = Cursor::new(self.ranges, usize::try_from(off).unwrap_or(usize::MAX));
         let mut base = cuh.low_pc;
-        let max = if asz == 8 { u64::MAX } else { (1u64 << (asz * 8)) - 1 };
+        // DWARFRangeList.java:49
+        let max = if asz == 4 { 0xffff_ffff } else { u64::MAX };
         let mut out = Vec::new();
         loop {
             let (a, b) = (c.uint(asz)?, c.uint(asz)?);
@@ -522,7 +577,7 @@ fn read_abbrevs(d: &[u8], off: u64) -> Result<HashMap<u64, Abbrev>> {
 /// `DIEContainer.getLocalDIEOffset`
 fn local_ref(form: u16, raw: u64, cu_start: u64) -> Result<u64> {
     match form {
-        0x11..=0x15 => Ok(raw + cu_start),
+        0x11..=0x15 => Ok(raw.wrapping_add(cu_start)),
         0x1f20 => Err(Error::Dwarf("Unsupported DIE reference form: DW_FORM_gnu_ref_alt".into())),
         _ => Ok(raw),
     }
@@ -533,7 +588,7 @@ fn read_form<'a>(c: &mut Cursor<'a>, form: u16, ic: i64, cu: &Cu, strs: &'a [u8]
     let num = |raw: u64, bits: u8, signed: bool| Val::Num { raw, bits, signed, ambiguous: false };
     let is = cu.int_size as usize;
     let v = match form {
-        0x01 => num(c.uint(cu.addr_size as usize)?, cu.addr_size * 8, false),
+        0x01 => num(c.uint(cu.addr_size as usize)?, cu.addr_size.saturating_mul(8), false),
         0x03 => {
             let n = c.uint(2)? as usize;
             Val::Blob(c.bytes(n)?)
@@ -575,7 +630,11 @@ fn read_form<'a>(c: &mut Cursor<'a>, form: u16, ic: i64, cu: &Cu, strs: &'a [u8]
         0x14 | 0x20 | 0x24 => num(c.uint(8)?, 64, false),
         0x15 | 0x1a | 0x1b | 0x22 | 0x23 => num(c.uleb()?, 64, false),
         0x16 => {
-            let f = c.uleb()? as u16;
+            // DWARFForm.java:161-168, iterated: a chain of indirect forms cannot exhaust the stack
+            let mut f = c.uleb()? as u16;
+            while f == 0x16 {
+                f = c.uleb()? as u16;
+            }
             return read_form(c, f, ic, cu, strs);
         }
         0x19 => Val::Bool(true),
@@ -585,6 +644,13 @@ fn read_form<'a>(c: &mut Cursor<'a>, form: u16, ic: i64, cu: &Cu, strs: &'a [u8]
         0x26 | 0x2a => num(c.uint(2)?, 16, false),
         0x27 | 0x2b => num(c.uint(3)?, 24, false),
         0x28 | 0x2c => num(c.uint(4)?, 32, false),
+        // the GNU forms (DWARFForm.java:243-246), read as their DWARF 5 counterparts above
+        0x1f01 | 0x1f02 => num(c.uleb()?, 64, false),
+        0x1f20 => num(c.uint(is)?, (is * 8) as u8, false),
+        0x1f21 => {
+            c.uint(is)?;
+            Val::Str(&[])
+        }
         _ => return Err(Error::Dwarf(format!("unsupported form 0x{form:x}"))),
     };
     Ok((form, v))

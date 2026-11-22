@@ -97,6 +97,8 @@ pub struct Import {
     pub funcs: Vec<Func>,
     pub dies: usize,
     pub units: usize,
+    /// what Java logs and skips (`Msg.error`): unit rests, types and functions that failed
+    pub warnings: Vec<String>,
 }
 
 /// The aggregate of a DIE (`DIEAggregate.createFromHead`): fragments, head first.
@@ -117,7 +119,12 @@ struct Prog<'a> {
     uncat: u32,
     exec: Vec<(u64, u64)>,
     fixup: u64,
+    /// the depth of `dwarf_name` calls
+    name_depth: u32,
 }
+
+/// The bound of `dwarf_name`'s recursion (far above real nesting)
+const NAME_DEPTH: u32 = 256;
 
 const CONTAINER_NAMES: [(u16, &str); 8] = [
     (DW_TAG_STRUCTURE, "struct"),
@@ -475,13 +482,13 @@ impl<'a> Prog<'a> {
         DName { ns: self.ns_child(parent, new, sym), orig }
     }
 
-    fn get_name(&mut self, g: &Agg) -> DName {
+    fn get_name(&mut self, g: &Agg) -> Result<DName> {
         if let Some(d) = self.dni_cache.get(&g[0]) {
-            return d.clone();
+            return Ok(d.clone());
         }
-        let d = self.dwarf_name(g);
+        let d = self.dwarf_name(g)?;
         self.dni_cache.insert(g[0], d.clone());
-        d
+        Ok(d)
     }
 
     fn entry_name(&self, g: &Agg) -> Option<String> {
@@ -491,7 +498,20 @@ impl<'a> Prog<'a> {
     }
 
     /// `DWARFProgram.getDWARFName` with the `_UNCATEGORIZED_` root
-    fn dwarf_name(&mut self, g: &Agg) -> DName {
+    /// `getDWARFName` recurses through declaration parents, nameless typedefs and member parents.
+    /// A cycle (a nameless typedef of itself, or two of each other) overflows Java's stack, and
+    /// the `catch (Throwable)` of the type or function import (DWARFDataTypeManager.java:592,
+    /// DWARFFunctionImporter.java:138) fails that one: here a depth bound fails it.
+    fn dwarf_name(&mut self, g: &Agg) -> Result<DName> {
+        if self.name_depth >= NAME_DEPTH {
+            return Err(Error::Dwarf(format!("name of DIE 0x{:x}: recursion too deep (a cycle)", self.off(g[0]))));
+        }
+        self.name_depth += 1;
+        let r = self.dwarf_name_inner(g);
+        self.name_depth -= 1;
+        r
+    }
+    fn dwarf_name_inner(&mut self, g: &Agg) -> Result<DName> {
         let mut parent = 0u32;
         let decl_parent = self.decl_parent(g);
         if let Some(dp) = &decl_parent {
@@ -499,7 +519,7 @@ impl<'a> Prog<'a> {
                 parent = match self.dni_cache.get(&dp[0]) {
                     Some(d) => d.ns,
                     None => {
-                        let d = self.dwarf_name(dp);
+                        let d = self.dwarf_name(dp)?;
                         self.dni_cache.insert(dp[0], d.clone());
                         d.ns
                     }
@@ -537,14 +557,18 @@ impl<'a> Prog<'a> {
         if name.is_none() && is_structure(tag) {
             let fp = self.struct_fingerprint(g);
             let members = self.referers(g, DW_TAG_MEMBER);
-            let mut names = self.referring_member_names(&members);
+            let mut names = self.referring_member_names(&members)?;
             if !names.is_empty() {
-                let p = self.parent_agg(&self.agg(members[0])).expect("member has a parent");
-                parent = self.get_name(&p).ns;
+                // a member at a unit's root has no parent: Java's NullPointerException, caught
+                // by the same `catch (Throwable)`
+                let p = self
+                    .parent_agg(&self.agg(members[0]))
+                    .ok_or_else(|| Error::Dwarf(format!("member 0x{:x} has no parent", self.off(members[0]))))?;
+                parent = self.get_name(&p)?.ns;
                 names = format!("_for_{names}");
             }
             let n = format!("anon_{}_{fp}{names}", container_name(tag));
-            return DName { ns: self.ns_child(parent, &n, sym_type(tag)), orig: None };
+            return Ok(DName { ns: self.ns_child(parent, &n, sym_type(tag)), orig: None });
         }
         let mut anon = false;
         if name.is_none() {
@@ -596,7 +620,7 @@ impl<'a> Prog<'a> {
         let name = name.unwrap();
         let orig = if anon { None } else { Some(name.clone()) };
         let working = ensure_safe_name_length(&name);
-        DName { ns: self.ns_child(parent, &working, sym_type(tag)), orig }
+        Ok(DName { ns: self.ns_child(parent, &working, sym_type(tag)), orig })
     }
 
     fn referers(&self, g: &Agg, tag: u16) -> Vec<u32> {
@@ -620,16 +644,17 @@ impl<'a> Prog<'a> {
         -1
     }
 
+    /// `DWARFUtil.getLexicalBlockName`: "_<position>" for each enclosing lexical block or inlined
+    /// subroutine, outermost first (Java recurses per level; iterated here)
     fn lexical_block_name(&self, die: u32) -> String {
-        let t = self.dw.tags[die as usize];
-        if t == DW_TAG_LEXICAL_BLOCK || t == DW_TAG_INLINED_SUBROUTINE {
-            let p = self.dw.parent(die).map(|p| self.lexical_block_name(p)).unwrap_or_default();
-            return format!(
-                "{p}_{}",
-                self.position_in_parent(die, |t| t == DW_TAG_LEXICAL_BLOCK || t == DW_TAG_INLINED_SUBROUTINE)
-            );
+        let is_block = |t: u16| t == DW_TAG_LEXICAL_BLOCK || t == DW_TAG_INLINED_SUBROUTINE;
+        let mut parts = Vec::new();
+        let mut d = Some(die);
+        while let Some(x) = d.filter(|&x| is_block(self.dw.tags[x as usize])) {
+            parts.push(self.position_in_parent(x, is_block));
+            d = self.dw.parent(x);
         }
-        String::new()
+        parts.iter().rev().map(|p| format!("_{p}")).collect()
     }
 
     /// `DWARFUtil.findLinkageNameInChildren` (the nestings without the last)
@@ -672,15 +697,15 @@ impl<'a> Prog<'a> {
         format!("{size}_{count}_{:08x}", h as u32)
     }
 
-    fn referring_member_names(&mut self, members: &[u32]) -> String {
+    fn referring_member_names(&mut self, members: &[u32]) -> Result<String> {
         if members.is_empty() {
-            return String::new();
+            return Ok(String::new());
         }
         let common = self.dw.parent(members[0]);
         let mut out = String::new();
         for &m in members {
             if self.dw.parent(m) != common {
-                return String::new();
+                return Ok(String::new());
             }
             let mg = self.agg(m);
             let name = match self.name_of(&mg) {
@@ -691,7 +716,7 @@ impl<'a> Prog<'a> {
                         continue;
                     }
                     let cp = self.agg(common.unwrap());
-                    let pd = self.get_name(&cp);
+                    let pd = self.get_name(&cp)?;
                     format!("{}_{pos}", self.dni_name(&pd))
                 }
             };
@@ -700,7 +725,7 @@ impl<'a> Prog<'a> {
             }
             out.push_str(&name);
         }
-        out
+        Ok(out)
     }
 
     /// `DWARFUtil.getAnonNameForMeFromParentContext2`
@@ -999,7 +1024,7 @@ impl<'a> Prog<'a> {
             imp.by_die.insert(o, k);
         }
     }
-    fn push(&self, imp: &mut Imp, dt: Id, _dni: Option<DName>, die: u32) -> usize {
+    fn push(&self, imp: &mut Imp, dt: Id, die: u32) -> usize {
         imp.ddts.push(Ddt { dt, dsi: None, offsets: vec![die] });
         imp.ddts.len() - 1
     }
@@ -1013,7 +1038,7 @@ impl<'a> Prog<'a> {
         }
         if let Some(&d) = self.offset_to_dt.get(&die) {
             if !self.dtm.not_yet_defined(d) {
-                return Ok(Some(self.push(imp, d, None, die)));
+                return Ok(Some(self.push(imp, d, die)));
             }
         }
         let c = imp.rec.entry(die).or_insert(0);
@@ -1024,16 +1049,16 @@ impl<'a> Prog<'a> {
         }
         let r = match self.tag(g) {
             DW_TAG_POINTER | DW_TAG_REFERENCE | DW_TAG_RVALUE_REFERENCE => self.make_pointer(imp, g)?,
-            DW_TAG_PTR_TO_MEMBER => self.make_ptr_to_member(g)?.map(|(dt, dni)| self.push(imp, dt, Some(dni), die)),
+            DW_TAG_PTR_TO_MEMBER => self.make_ptr_to_member(g)?.map(|(dt, _)| self.push(imp, dt, die)),
             DW_TAG_BASE_TYPE => {
-                let dni = self.get_name(g);
+                let dni = self.get_name(g)?;
                 Some(self.make_named_base(imp, dni, g, g)?)
             }
             DW_TAG_TYPEDEF => Some(self.make_typedef(imp, g)?),
             DW_TAG_UNSPECIFIED_TYPE => {
-                let dni = self.get_name(g);
+                let dni = self.get_name(g)?;
                 Some(match dni.orig.as_ref().and_then(|n| self.base.get(n)).copied() {
-                    Some(dt) => self.push(imp, dt, Some(dni), die),
+                    Some(dt) => self.push(imp, dt, die),
                     None => VOID_DDT,
                 })
             }
@@ -1043,10 +1068,10 @@ impl<'a> Prog<'a> {
                 imp.ddts[k].offsets.push(die);
                 Some(k)
             }
-            DW_TAG_ENUMERATION => Some(self.make_enum(imp, g)),
+            DW_TAG_ENUMERATION => Some(self.make_enum(imp, g)?),
             DW_TAG_ARRAY => Some(self.make_array(imp, g)?),
             DW_TAG_STRUCTURE | DW_TAG_CLASS | DW_TAG_UNION => {
-                let k = self.make_struct(imp, g);
+                let k = self.make_struct(imp, g)?;
                 self.record(imp, k);
                 self.finish_struct(imp, g, k)?;
                 Some(k)
@@ -1080,7 +1105,7 @@ impl<'a> Prog<'a> {
         let size = self.parse_int(g, DW_AT_BYTE_SIZE, 0)?;
         let enc = self.get_unsigned(g, DW_AT_ENCODING, -1) as i32;
         let dt = self.base_type(dni.orig.as_deref(), size, enc);
-        Ok(self.push(imp, dt, Some(dni), name_src[0]))
+        Ok(self.push(imp, dt, name_src[0]))
     }
 
     fn make_pointer(&mut self, imp: &mut Imp, g: &Agg) -> Result<Option<usize>> {
@@ -1101,11 +1126,11 @@ impl<'a> Prog<'a> {
             }
             Id::Db(_) => self.dtm.db_pointer(to, size),
         };
-        Ok(Some(self.push(imp, p, None, g[0])))
+        Ok(Some(self.push(imp, p, g[0])))
     }
 
     fn make_ptr_to_member(&mut self, g: &Agg) -> Result<Option<(Id, DName)>> {
-        let dni = self.get_name(g);
+        let dni = self.get_name(g)?;
         let (Some(t), Some(ct)) = (self.type_ref(g), self.ref_agg(g, DW_AT_CONTAINING_TYPE)) else { return Ok(None) };
         let size = self.parse_int(g, DW_AT_BYTE_SIZE, self.addr_size(g) as i32)?;
         let Some(off_t) = self.untyped(size) else {
@@ -1114,7 +1139,7 @@ impl<'a> Prog<'a> {
         let target = self.name_of(&t).unwrap_or_else(|| container_name(self.tag(&t)).to_string());
         let x = format!("offset_in_{}_to_{target}", self.name_of(&ct).unwrap_or_else(|| "null".into()));
         let pcp = self.parent_cp(&dni);
-        let mut dt = self.dtm.new_pre(replace_name_chars(&x), pcp, Kind::Typedef { base: off_t });
+        let mut dt = self.dtm.new_pre(x.clone(), pcp, Kind::Typedef { base: off_t });
         if dni.orig.is_some() {
             dt = self.dtm.new_pre(self.dni_name(&dni).to_string(), pcp, Kind::Typedef { base: dt });
         }
@@ -1122,7 +1147,7 @@ impl<'a> Prog<'a> {
     }
 
     fn make_typedef(&mut self, imp: &mut Imp, g: &Agg) -> Result<usize> {
-        let dni = self.get_name(g);
+        let dni = self.get_name(g)?;
         let refd = self.type_ref(g);
         if let Some(r) = &refd {
             if self.tag(r) == DW_TAG_BASE_TYPE {
@@ -1154,14 +1179,18 @@ impl<'a> Prog<'a> {
         let pcp = self.parent_cp(&dni);
         let td = self.dtm.new_pre(self.dni_name(&dni).to_string(), pcp, Kind::Typedef { base: refd_dt });
         let r = self.typedef_replacement(td);
-        Ok(self.push(imp, r, Some(dni), g[0]))
+        Ok(self.push(imp, r, g[0]))
     }
 
-    fn make_enum(&mut self, imp: &mut Imp, g: &Agg) -> usize {
-        let dni = self.get_name(g);
+    fn make_enum(&mut self, imp: &mut Imp, g: &Agg) -> Result<usize> {
+        let dni = self.get_name(g)?;
         let mut size = self.get_unsigned(g, DW_AT_BYTE_SIZE, -1) as i32;
         if size == 0 || size == -1 {
             size = 1;
+        }
+        // EnumDataType.java:57-59: IllegalArgumentException, the type fails
+        if !(1..=8).contains(&size) {
+            return Err(Error::Dwarf(format!("unsupported enum length: {size}")));
         }
         let mut vals: Vec<(String, i64)> = Vec::new();
         for c in self.children(g, DW_TAG_ENUMERATOR) {
@@ -1203,14 +1232,14 @@ impl<'a> Prog<'a> {
             if let Kind::Enum { vals: dv, .. } = &mut self.dtm.dt_mut(prev).kind {
                 *dv = merged;
             }
-            return self.push(imp, prev, Some(dni), g[0]);
+            return Ok(self.push(imp, prev, g[0]));
         }
         let r = self.dtm.add(name, pcp, Kind::Enum { len: size, vals }, Handler::Dwarf);
-        self.push(imp, r, Some(dni), g[0])
+        Ok(self.push(imp, r, g[0]))
     }
 
-    fn make_struct(&mut self, imp: &mut Imp, g: &Agg) -> usize {
-        let dni = self.get_name(g);
+    fn make_struct(&mut self, imp: &mut Imp, g: &Agg) -> Result<usize> {
+        let dni = self.get_name(g)?;
         let size = self.get_unsigned(g, DW_AT_BYTE_SIZE, 0);
         let orig = size;
         let size = if !(0..=i32::MAX as i64).contains(&size) { 0 } else { size as i32 };
@@ -1229,9 +1258,9 @@ impl<'a> Prog<'a> {
         if !decl && orig == 0 {
             self.dtm.pack(s);
         }
-        let k = self.push(imp, s, Some(dni), g[0]);
+        let k = self.push(imp, s, g[0]);
         imp.ddts[k].dsi = self.source_info(g);
-        k
+        Ok(k)
     }
 
     fn finish_struct(&mut self, imp: &mut Imp, g: &Agg, k: usize) -> Result<()> {
@@ -1372,13 +1401,14 @@ impl<'a> Prog<'a> {
                 } else {
                     slen
                 };
-                let cbits = container * 8;
+                // int arithmetic, which wraps in Java (DWARFDataTypeImporter.populateStubStruct)
+                let cbits = container.wrapping_mul(8);
                 let mut bo = self.parse_int(&cg, DW_AT_DATA_BIT_OFFSET, -1)?;
                 let gbo = if bo == -1 {
                     bo = self.parse_int(&cg, DW_AT_BIT_OFFSET, -1)?;
-                    cbits - bo - bits
+                    cbits.wrapping_sub(bo).wrapping_sub(bits)
                 } else {
-                    bo - off * 8
+                    bo.wrapping_sub(off.wrapping_mul(8))
                 };
                 if bo < 0 || gbo < 0 || gbo >= cbits {
                     continue;
@@ -1386,7 +1416,7 @@ impl<'a> Prog<'a> {
                 self.dtm.struct_insert_bitfield(s, off, container, gbo, dt, bits, Some(name));
             } else {
                 let clen = self.unpadded_len(dt);
-                if off + clen > slen {
+                if off.wrapping_add(clen) > slen {
                     continue;
                 }
                 // DataTypeComponent.usesZeroLengthComponent: not a not-yet-defined composite
@@ -1459,7 +1489,7 @@ impl<'a> Prog<'a> {
         }
         if ek == VOID_DDT {
             let u = self.unknown_array();
-            return Ok(self.push(imp, u, None, g[0]));
+            return Ok(self.push(imp, u, g[0]));
         }
         let elem = self.fixup(imp, Some(ek)).unwrap();
         let explicit = self.get_unsigned(g, DW_AT_BYTE_SIZE, -1);
@@ -1467,7 +1497,7 @@ impl<'a> Prog<'a> {
         if self.zero_byte(edt) || explicit == 0 {
             let el = self.elem_len(elem);
             let a = self.dtm.new_pre(String::new(), 0, Kind::Array { elem, count: 0, elem_len: el });
-            return Ok(self.push(imp, a, None, g[0]));
+            return Ok(self.push(imp, a, g[0]));
         }
         let mut dims = Vec::new();
         for sr in self.children(g, DW_TAG_SUBRANGE) {
@@ -1494,7 +1524,7 @@ impl<'a> Prog<'a> {
             let el = self.elem_len(dt);
             dt = self.dtm.new_pre(String::new(), 0, Kind::Array { elem: dt, count: n, elem_len: el });
         }
-        Ok(self.push(imp, dt, None, g[0]))
+        Ok(self.push(imp, dt, g[0]))
     }
 
     fn elem_len(&self, dt: Id) -> i32 {
@@ -1532,7 +1562,7 @@ impl<'a> Prog<'a> {
     }
 
     fn make_funcdef(&mut self, imp: &mut Imp, g: &Agg) -> Result<Option<usize>> {
-        let dni = self.get_name(g);
+        let dni = self.get_name(g)?;
         let pcp = self.parent_cp(&dni);
         let void = self.dtm.builtin(B::Void);
         let f = self.dtm.new_pre(
@@ -1540,7 +1570,7 @@ impl<'a> Prog<'a> {
             pcp,
             Kind::FuncDef { ret: void, params: Vec::new(), varargs: false, noreturn: false, cc: None },
         );
-        let k = self.push(imp, f, Some(dni.clone()), g[0]);
+        let k = self.push(imp, f, g[0]);
         self.record(imp, k);
         let t = self.type_ref(g);
         let rk = self.get_dt(imp, t.as_ref(), Some(VOID_DDT))?.unwrap_or(VOID_DDT);
@@ -1658,10 +1688,14 @@ impl<'a> Prog<'a> {
         self.exec.iter().any(|&(s, e)| s <= a && a < e)
     }
 
+    /// `markAllChildrenAsProcessed` (recursive in Java; iterated here)
     fn mark_children(&self, die: u32, done: &mut HashSet<u32>) {
-        for c in self.dw.children(die) {
-            done.insert(c);
-            self.mark_children(c, done);
+        let mut stack = vec![die];
+        while let Some(d) = stack.pop() {
+            for c in self.dw.children(d) {
+                done.insert(c);
+                stack.push(c);
+            }
         }
     }
 
@@ -1684,8 +1718,14 @@ impl<'a> Prog<'a> {
                 }
                 _ => continue,
             };
-            if let Ok(Some(f)) = self.process_subprogram(&g, &mut done, &mut addrs) {
-                funcs.push(f);
+            // DWARFFunctionImporter.java:109-143: a function that fails is logged and skipped
+            match self.process_subprogram(&g, &mut done, &mut addrs) {
+                Ok(Some(f)) => funcs.push(f),
+                Ok(None) => {}
+                Err(e) => self
+                    .dw
+                    .warnings
+                    .push(format!("Error when processing DWARF information for DIE {:x}: {e}", self.off(g[0]))),
             }
         }
         funcs
@@ -1711,13 +1751,13 @@ impl<'a> Prog<'a> {
             return Ok(None);
         };
         let addr = first.wrapping_add(self.fixup);
-        let dni = self.get_name(g);
+        let dni = self.get_name(g)?;
         let noreturn = self.get_bool(g, DW_AT_NORETURN);
         let t = self.type_ref(g);
         let ret = self.data_type_for_variable(t.as_ref())?;
         let mut params = Vec::new();
         for (i, p) in self.param_list(g).into_iter().enumerate() {
-            let pd = self.get_name(&p);
+            let pd = self.get_name(&p)?;
             let t = self.type_ref(&p);
             let ty = self.data_type_for_variable(t.as_ref())?;
             let this = i == 0 && self.is_this_param(&p);
@@ -1729,7 +1769,7 @@ impl<'a> Prog<'a> {
             return Ok(None);
         }
         // processFuncChildren: only call sites start other functions; locals are not ported
-        self.func_children(g[0], done, addrs);
+        self.func_children(g[0], done, addrs)?;
         if !self.is_exec(addr) {
             return Ok(None);
         }
@@ -1740,9 +1780,8 @@ impl<'a> Prog<'a> {
             params[0].0 = self.replace_name(&pd, "this", Some("this".into()), Sym::Parameter);
             cc = Some("__thiscall".to_string());
         }
-        let mut reserved: HashSet<String> =
+        let reserved: HashSet<String> =
             params.iter().filter(|p| p.0.orig.is_some()).map(|p| self.dni_name(&p.0).to_string()).collect();
-        reserved.extend(std::iter::empty());
         let mut used: HashSet<String> = HashSet::new();
         let mut names = Vec::new();
         for (pd, ..) in &params {
@@ -1789,12 +1828,15 @@ impl<'a> Prog<'a> {
         qual.push(self.dni_name(&dni).to_string());
         let mut fparams: Vec<(String, Id)> = names.into_iter().zip(params).map(|(n, (_, t, _))| (n, t)).collect();
         // The return's storage is always dynamic (DWARF gives none, `updateFunctionSignature`):
-        // x86-64-gcc.cspec's default prototype (`__thiscall` is not in it) returns over 16 bytes
-        // through a hidden pointer (`hidden_return`, `__return_storage_ptr__` first).
-        // ponytail: join_dual_class failures (x87, mixed classes) not checked; the parameters'
-        // `convert_to_ptr` needs the FORMAL commit mode, which needs storage (not ported)
+        // x86-64-gcc.cspec's default prototype (`__thiscall` is not in it) has two output rules
+        // (x86-64-gcc.cspec:105-112): up to 16 bytes `join_dual_class`, else `hidden_return`
+        // (`__return_storage_ptr__` first).
+        // ponytail: the parameters' `convert_to_ptr` needs the FORMAL commit mode, which needs
+        // storage (not ported)
         let mut ret = ret;
-        if self.dtm.len(ret) > 16 {
+        let rl = self.dtm.len(ret);
+        let void = matches!(self.dtm.dt(self.dtm.base_of(ret)).kind, Kind::Builtin(B::Void));
+        if rl > 16 || (!void && !self.join_dual_class(ret)) {
             ret = self.dtm.db_pointer(ret, -1);
             fparams.insert(0, ("__return_storage_ptr__".into(), ret));
         }
@@ -1809,24 +1851,153 @@ impl<'a> Prog<'a> {
         Ok(Some(Func { addr, name: qual.join("::"), cc, ret, params: fparams, varargs, noreturn }))
     }
 
-    fn func_children(&mut self, die: u32, done: &mut HashSet<u32>, addrs: &mut HashSet<u64>) {
-        for c in self.dw.children(die).collect::<Vec<_>>() {
+    /// `MultiSlotDualAssign.assignAddress` for x86-64-gcc.cspec's output (MultiSlotDualAssign.java:236-304:
+    /// tiles of 8 bytes, RAX/RDX and XMM0_Qa/XMM1_Qa, no stack, not `fillalternate`): whether a
+    /// return of up to 16 bytes binds to registers. With two registers of each class and at most
+    /// two tiles, it fails only on the primitives: invalid, none, holes, or a tile no primitive
+    /// fits (`getTileClass`).
+    fn join_dual_class(&self, dt: Id) -> bool {
+        let Some(prims) = self.primitives(dt, 0, 1024) else { return false };
+        if prims.p.is_empty() || prims.holes {
+            return false;
+        }
+        let (size, tile) = (self.dtm.len(dt), 8);
+        let (mut left, mut i) = (size, 0);
+        while left > 0 {
+            // getTileClass (MultiSlotDualAssign.java:181-216)
+            let (off, mut count) = (size - left, 0);
+            while let Some(e) = prims.p.get(i) {
+                if e.off < off {
+                    return false;
+                }
+                if e.off >= off + tile {
+                    break;
+                }
+                if e.off + e.len > off + tile {
+                    return false;
+                }
+                count += 1;
+                i += 1;
+            }
+            if count == 0 {
+                return false;
+            }
+            left -= tile;
+        }
+        true
+    }
+
+    /// `PrimitiveExtractor(dt, false, false, offset, max)` (PrimitiveExtractor.java): `None` =
+    /// not valid.
+    fn primitives(&self, dt: Id, offset: i32, max: usize) -> Option<Prims> {
+        let mut r = Prims { p: Vec::new(), holes: false };
+        self.extract(dt, max, offset, &mut r).then_some(r)
+    }
+    fn extract(&self, dt: Id, max: usize, mut offset: i32, r: &mut Prims) -> bool {
+        // TypeDef.getBaseDataType follows the chain of typedefs
+        let dt = self.dtm.base_of(dt);
+        let prim = |r: &mut Prims, off: i32, len: i32, alen: i32, float: bool| {
+            if r.p.len() >= max {
+                return false;
+            }
+            r.p.push(Prim { off, len, alen, float });
+            true
+        };
+        match &self.dtm.dt(dt).kind {
+            Kind::Builtin(_)
+            | Kind::Pointer { .. }
+            | Kind::Enum { .. }
+            | Kind::FuncDef { .. }
+            | Kind::Typedef { .. } => {
+                let float = matches!(self.dtm.dt(dt).kind, Kind::Builtin(B::Float(..)));
+                prim(r, offset, self.dtm.len(dt), self.dtm.aligned_len(dt), float)
+            }
+            Kind::Array { elem, count, .. } => {
+                for _ in 0..*count {
+                    if !self.extract(*elem, max, offset, r) {
+                        return false;
+                    }
+                    offset = offset.wrapping_add(self.dtm.aligned_len(*elem));
+                }
+                true
+            }
+            Kind::Composite(c) if c.union => {
+                // handleUnion
+                let Some(first) = c.comps.first() else { return false };
+                let Some(mut common) = self.primitives(first.ty, offset + first.offset, max) else { return false };
+                for f in &c.comps[1..] {
+                    let Some(next) = self.primitives(f.ty, offset + f.offset, max) else { return false };
+                    match common_refinement(&common.p, &next.p) {
+                        Some(p) => common.p = p,
+                        None => return false,
+                    }
+                }
+                if r.p.len() + common.p.len() > max {
+                    return false;
+                }
+                r.p.extend(common.p);
+                true
+            }
+            Kind::Composite(c) => {
+                let mut expected = offset;
+                for comp in &c.comps {
+                    let cur = comp.offset + offset;
+                    // a bitfield's BitFieldDataType: TYPE_UNKNOWN, its storage size, its base's alignment
+                    let (alen, align) = match comp.bf {
+                        Some(_) => (comp.len, self.dtm.alignment(comp.ty)),
+                        None => (self.dtm.aligned_len(comp.ty), self.dtm.alignment(comp.ty)),
+                    };
+                    if !c.packed {
+                        let rem = expected % align;
+                        if rem != 0 {
+                            expected += align - rem;
+                        }
+                        if expected != cur {
+                            r.holes = true;
+                        }
+                    }
+                    let ok = match comp.bf {
+                        Some(_) => prim(r, cur, comp.len, comp.len, false),
+                        None => self.extract(comp.ty, max, cur, r),
+                    };
+                    if !ok {
+                        return false;
+                    }
+                    expected = cur + alen;
+                }
+                true
+            }
+        }
+    }
+
+    /// `processFuncChildren` with `processLexicalBlock` / `processInlinedSubroutine`, in Java's
+    /// order (Java recurses per nesting level; iterated here). A call site's failure fails the
+    /// enclosing function, as Java's exception does.
+    fn func_children(&mut self, die: u32, done: &mut HashSet<u32>, addrs: &mut HashSet<u64>) -> Result<()> {
+        let mut stack = vec![(die, self.dw.children(die).collect::<Vec<_>>().into_iter())];
+        while let Some((parent, it)) = stack.last_mut() {
+            let parent = *parent;
+            let Some(c) = it.next() else {
+                stack.pop();
+                continue;
+            };
             match self.dw.tags[c as usize] {
                 DW_TAG_LEXICAL_BLOCK | DW_TAG_INLINED_SUBROUTINE => {
                     if done.insert(c) {
-                        self.func_children(c, done, addrs);
+                        stack.push((c, self.dw.children(c).collect::<Vec<_>>().into_iter()));
                     }
                 }
                 DW_TAG_CALL_SITE | DW_TAG_GNU_CALL_SITE => {
                     // Java passes the enclosing function's aggregate without its head here
-                    let g = self.agg(die);
+                    let g = self.agg(parent);
                     if g.len() > 1 {
-                        let _ = self.process_subprogram(&g[1..].to_vec(), done, addrs);
+                        self.process_subprogram(&g[1..].to_vec(), done, addrs)?;
                     }
                 }
                 _ => {}
             }
         }
+        Ok(())
     }
 
     // ---- DWARFImporter.moveTypesIntoSourceFolders
@@ -1886,11 +2057,6 @@ impl<'a> Prog<'a> {
     }
 }
 
-/// `NamespacePath.create`'s name cleanup for a name built here
-fn replace_name_chars(s: &str) -> String {
-    s.to_string()
-}
-
 /// `EnumDataType.add`: a new name, and a value the enum's size holds
 fn enum_add_ok(vals: &[(String, i64)], name: &str, v: i64, len: i32) -> bool {
     if vals.iter().any(|(n, _)| n == name) {
@@ -1945,10 +2111,16 @@ pub fn import(data: &[u8]) -> Result<Import> {
     for s in file.sections() {
         if let object::SectionFlags::Elf { sh_flags } = s.flags() {
             if sh_flags & 0x2 != 0 && sh_flags & 0x4 != 0 && s.size() > 0 {
-                exec.push((s.address() + fixup, s.address() + fixup + s.size()));
+                exec.push((s.address().wrapping_add(fixup), s.address().wrapping_add(fixup).wrapping_add(s.size())));
             }
         }
     }
+    Ok(run(dw, fixup, exec))
+}
+
+/// The import over read sections: `fixup` = `programBaseAddressFixup`, `exec` = the executable
+/// memory ranges (after the fixup).
+fn run(dw: Dwarf<'_>, fixup: u64, exec: Vec<(u64, u64)>) -> Import {
     let mut dtm = Dtm::new();
     let dwarf_cat = dtm.cat(0, "DWARF");
     let uncat = dtm.cat(dwarf_cat, "_UNCATEGORIZED_");
@@ -1967,6 +2139,7 @@ pub fn import(data: &[u8]) -> Result<Import> {
         uncat,
         exec,
         fixup,
+        name_depth: 0,
     };
     p.init_base_types();
     // indexDIEATypeRefs
@@ -1985,11 +2158,15 @@ pub fn import(data: &[u8]) -> Result<Import> {
             continue;
         }
         let g = p.agg(i);
-        let _ = p.do_get_data_type(&g);
+        // DWARFDataTypeManager.java:578-598: a type that fails is logged and skipped
+        if let Err(e) = p.do_get_data_type(&g) {
+            p.dw.warnings.push(format!("Error when processing DWARF information for DIE {:x}: {e}", p.off(i)));
+        }
     }
     let funcs = p.import_functions();
     p.move_types();
-    Ok(Import { dies: p.dw.offsets.len(), units: p.dw.cus.len(), dtm: p.dtm, funcs })
+    let warnings = std::mem::take(&mut p.dw.warnings);
+    Import { dies: p.dw.offsets.len(), units: p.dw.cus.len(), dtm: p.dtm, funcs, warnings }
 }
 
 /// The dump `DumpDwarf.java` writes: one line per data type under `/DWARF` (not pointers or
@@ -2069,3 +2246,64 @@ fn sig(d: &Dtm, cc: Option<&str>, ret: Id, varargs: bool, noreturn: bool) -> Str
 
 #[cfg(test)]
 mod tests;
+
+/// `PrimitiveExtractor.Primitive`: offset, length, aligned length, `TYPE_FLOAT`
+#[derive(Clone, Copy)]
+struct Prim {
+    off: i32,
+    len: i32,
+    alen: i32,
+    float: bool,
+}
+/// `PrimitiveExtractor`'s list and `containsHoles`
+struct Prims {
+    p: Vec<Prim>,
+    holes: bool,
+}
+
+/// `PrimitiveExtractor.checkOverlap`
+fn check_overlap(res: &mut Vec<Prim>, small: &[Prim], mut point: usize, big: Prim) -> Option<usize> {
+    let end = big.off + big.alen;
+    let use_small = big.float;
+    while let Some(s) = small.get(point) {
+        if s.off >= end {
+            break;
+        }
+        if s.off + s.alen > end {
+            return None;
+        }
+        if use_small {
+            res.push(*s);
+        }
+        point += 1;
+    }
+    if !use_small {
+        res.push(big);
+    }
+    Some(point)
+}
+
+/// `PrimitiveExtractor.commonRefinement`: the refinement that replaces `first`
+fn common_refinement(first: &[Prim], second: &[Prim]) -> Option<Vec<Prim>> {
+    let (mut i, mut j) = (0, 0);
+    let mut common = Vec::new();
+    while i < first.len() && j < second.len() {
+        let (a, b) = (first[i], second[j]);
+        if a.off < b.off && a.off + a.alen <= b.off {
+            common.push(a);
+            i += 1;
+        } else if b.off < a.off && b.off + b.alen <= a.off {
+            common.push(b);
+            j += 1;
+        } else if a.alen >= b.alen {
+            j = check_overlap(&mut common, second, j, a)?;
+            i += 1;
+        } else {
+            i = check_overlap(&mut common, first, i, b)?;
+            j += 1;
+        }
+    }
+    common.extend_from_slice(&first[i..]);
+    common.extend_from_slice(&second[j..]);
+    Some(common)
+}

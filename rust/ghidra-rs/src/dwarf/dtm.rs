@@ -458,6 +458,24 @@ impl Dtm {
             format!("{}/{n}", self.cat_path(c))
         }
     }
+    /// `BitFieldDataType.getPrimitiveBaseDataType` (BitFieldDataType.java:241-253): typedefs
+    /// stripped, an enum as the unsigned integer of its length; then `isEquivalent`
+    /// (DWARFDataTypeConflictHandler.java:316-323)
+    fn prim_equivalent(&self, a: Id, b: Id) -> bool {
+        let prim = |mut x: Id| loop {
+            match self.dt(x).kind {
+                Kind::Typedef { base } => x = base,
+                Kind::Enum { len, .. } => return Err(int_type(len, false, true)),
+                Kind::Builtin(b) => return Err(Some(b)),
+                _ => return Ok(x),
+            }
+        };
+        match (prim(a), prim(b)) {
+            (Err(x), Err(y)) => x == y,
+            (Ok(x), Ok(y)) => self.equivalent(x, y, None, &mut HashSet::new()),
+            _ => false,
+        }
+    }
     /// `getLength` (1 for a zero-length composite, -1 for a function definition)
     pub fn len(&self, id: Id) -> i32 {
         match &self.dt(id).kind {
@@ -469,7 +487,8 @@ impl Dtm {
                     *len
                 }
             }
-            Kind::Array { count, elem_len, .. } => count * elem_len,
+            // ArrayDataType.getLength: an int product, which wraps
+            Kind::Array { count, elem_len, .. } => count.wrapping_mul(*elem_len),
             Kind::Typedef { base } => self.len(*base),
             Kind::Composite(c) => c.len.max(1),
             Kind::Enum { len, .. } => *len,
@@ -569,18 +588,23 @@ impl Dtm {
     pub fn lookup(&self, cat: u32, name: &str) -> Option<Id> {
         self.by_name.get(&(cat, name.to_string())).map(|&i| Id::Db(i))
     }
-    /// `Category.getDataTypesByBaseName`: the name and its `.conflict<n>` variants
+    /// `CategoryDB.getDataTypesByBaseName` (CategoryDB.java:575-588): the base name's type, then
+    /// the `.conflict<n>` types in the order of the conflict map's `HashMap<String, DataType>`
+    /// (`java_hashmap_order`; filled as they are added, CategoryDB.java:636-646).
     pub fn by_base_name(&self, cat: u32, name: &str) -> Vec<Id> {
         let base = strip_conflict(name);
-        let mut v: Vec<(String, u32)> = self
+        let mut out: Vec<Id> = self.lookup(cat, base).into_iter().collect();
+        let conflicts: Vec<u32> = self
             .by_base
             .get(&(cat, base.to_string()))
             .into_iter()
             .flatten()
-            .map(|&i| (self.db[i as usize].name.clone(), i))
+            .copied()
+            .filter(|&i| self.db[i as usize].name != base)
             .collect();
-        v.sort();
-        v.into_iter().map(|(_, i)| Id::Db(i)).collect()
+        let names: Vec<&str> = conflicts.iter().map(|&i| self.db[i as usize].name.as_str()).collect();
+        out.extend(java_hashmap_order(&names).into_iter().map(|k| Id::Db(conflicts[k])));
+        out
     }
     fn unused_conflict_name(&self, cat: u32, name: &str) -> String {
         let base = strip_conflict(name);
@@ -1008,7 +1032,7 @@ impl Dtm {
             }
             let r = match (pc.bf, fc.bf) {
                 (Some(a), Some(b)) => {
-                    if a.bit_size != b.bit_size || !self.equivalent(b.base, a.base, None, &mut HashSet::new()) {
+                    if a.bit_size != b.bit_size || !self.prim_equivalent(b.base, a.base) {
                         Conflict::RenameAndAdd
                     } else {
                         Conflict::UseExisting
@@ -1389,4 +1413,35 @@ impl Packer {
         }
         off
     }
+}
+
+/// The iteration order of a `java.util.HashMap<String, V>` filled by `put` in the order of
+/// `keys` (distinct): buckets of `HashMap.hash(String.hashCode)` over the table the puts grew
+/// (16, doubled past 3/4 full or, below 64, when a bucket passes TREEIFY_THRESHOLD), each bucket
+/// in put order. Returns indexes into `keys`.
+/// ponytail: removals (a type moved out) do not shrink Java's table, and a bucket turned into a
+/// tree (64 buckets or more) is walked in put order here; both need far more conflicts of one
+/// name than seen.
+fn java_hashmap_order(keys: &[&str]) -> Vec<usize> {
+    let hash = |s: &str| {
+        let h = super::java_hash(s);
+        (h ^ ((h as u32) >> 16) as i32) as u32 as usize
+    };
+    let mut n = 16usize;
+    let mut count: HashMap<usize, usize> = HashMap::new();
+    for (k, key) in keys.iter().enumerate() {
+        let c = count.entry(hash(key) & (n - 1)).or_default();
+        *c += 1;
+        let grow = (*c > 8 && n < 64) || k + 1 > n * 3 / 4;
+        if grow {
+            n *= 2;
+            count.clear();
+            for b in &keys[..=k] {
+                *count.entry(hash(b) & (n - 1)).or_default() += 1;
+            }
+        }
+    }
+    let mut out: Vec<usize> = (0..keys.len()).collect();
+    out.sort_by_key(|&k| hash(keys[k]) & (n - 1));
+    out
 }
