@@ -6017,15 +6017,21 @@ The loader, `Image::from_elf` (ElfProgramBuilder.load, the parts analysis reads)
 - a memory block per allocated section, execute and write from the section flags, `.bss`
   zero-filled and unmapped for the decompiler, `.tbss` left out (it overlaps the next section),
   the `.got` blocks read-only (processGOTSections); image base 0x100000 for a shared object or
-  PIE linked at 0 (ElfLoaderOptionsFactory.IMAGE64_BASE_DEFAULT); addresses must fit in 32
-  bits (`Analysis` keeps `u32` addresses), else the load fails;
-- the dynamic relocations of X86_64_ElfRelocationHandler: RELATIVE and the packed RELR form
-  (image base plus addend), R_X86_64_64, GLOB_DAT and JUMP_SLOT to a defined symbol (its address
-  plus the addend); GLOB_DAT and JUMP_SLOT to an undefined symbol make the GOT slot an import
-  of `<EXTERNAL>`, as an IAT slot of a PE. The rest are counted in a warning (Hatred: 10, the
+  PIE whose lowest PT_LOAD of the first 20 program headers is at 0 (ElfHeader.findImageBase,
+  ElfLoaderOptionsFactory.IMAGE64_BASE_DEFAULT); every section must end below 4 GiB
+  (`Analysis` keeps `u32` addresses), checked before a `.bss` is allocated, else the load
+  fails; a relocatable object (ET_REL, `.o`) fails as not ported (Java packs its sections,
+  ElfProgramBuilder.java:3490-3500);
+- the dynamic relocations of X86_64_ElfRelocationHandler: RELATIVE, RELATIVE64, IRELATIVE and
+  the packed RELR form (image base adjustment plus addend; a prelinked RELATIVE adds it to the
+  word in place, ElfHeader.isPreLinked), R_X86_64_64, GLOB_DAT and JUMP_SLOT to a defined symbol
+  (its address plus the addend); GLOB_DAT and JUMP_SLOT to an undefined symbol make the GOT slot
+  an import of `<EXTERNAL>`, as an IAT slot of a PE, and write 0 there where Java writes the
+  address of its EXTERNAL block (no block here; so no code pointer is read from it). The rest,
+  and those at no 8 bytes of a section, are counted in a warning (Hatred: 10, the
   COPY relocations, which Java does not apply either);
 - one-byte functions at every STT_FUNC symbol of `.symtab` and `.dynsym` (evaluateElfSymbol;
-  `.cold` parts are none), at the entry point and at DT_INIT, DT_FINI and the init, preinit and
+  `.cold` parts, names matching ElfSymbol's `.+\.cold((\.[0-9]+)?)`, are none), at the entry point and at DT_INIT, DT_FINI and the init, preinit and
   fini array entries (processEntryPoints); global and weak ones are the exports;
 - `.plt` past its first 16 bytes disassembled at load, following flows (processPLTSection).
 
@@ -6036,24 +6042,46 @@ Analysis on x86-64 (`Analysis::run` with `Image::elf64`):
 
 - no-return names from `Features/Base/data/ElfFunctionsThatDoNotReturn` (NoReturnFunctionAnalyzer:
   leading `_` stripped, a `*` suffix a prefix), on import slots and symbol functions; a function
-  of one `JMP [slot]` through such a slot is no-return (a thunk takes its external's flag);
+  of one `JMP [slot]` through such a slot, or of `ENDBR64; BND JMP [slot]` (`.plt.sec` of
+  `-fcf-protection`: getThunkedAddr steps over an entry instruction without p-code,
+  CreateThunkFunctionCmd.java:568-572; the no-return flag and the `EXTERNAL` column of
+  `--purges` only, `resolve_thunk` still does not), is no-return (a thunk takes its external's flag);
   a `CALL [GOT slot]` of a non-returning import does not end the flow (measured on libtcl,
-  where it brought 743 body sizes to Java's; why Java goes on was not traced);
+  where it brought 743 body sizes to Java's). Traced on libtcl with Java 12.3 (a probe script
+  over the analyzed program): Java ends the flow at 4 such calls (`abort`, `exit`, `_exit`,
+  `pthread_exit`, one call each, override CALL_RETURN) and goes on at all 904 calls of
+  `__stack_chk_fail`, though that external's flag is set too. Every one of the 908 calls has
+  operand reference type READ, not INDIRECTION, so Disassembler.checkForIndirectCallFlow
+  (Disassembler.java:1321-1337, `isIndirect()`) never fires on them; what overrides the 4 was not
+  found. The rule stays (DESIGN.md, 2026-11-21): right for 904 of the 908 calls;
 - the local fold works on 8-byte registers; a call kills the `<killedbycall>` registers of
   x86-64-gcc.cspec's default prototype (RAX, RDX) and moves RSP by its `stackshift` (8), as
   SymbolicPropogator.getDefaultStackDepthChange does for a model with a known extrapop;
-  values stay 32-bit (an 8-byte constant is cut to its low half; 8-byte right shifts are not
-  folded);
-- switch tables `JMP qword ptr [reg*8 + table]` (with REX prefixes); Create Address Tables
-  steps by 8-byte pointers;
+  constants are 64-bit; offsets from a register's start value stay 32-bit (modulo 2^32); a
+  value past 32 bits, a sign-extended disp32 like 0xffffffff80401000 among them, is in no
+  block, so it makes no reference, slot, code constant or table (Java makes none outside
+  memory); a direct flow past 32 bits makes no target and is counted in a warning (8-byte
+  right shifts are not folded). Superseded: "values stay 32-bit (an 8-byte constant is cut to
+  its low half)", the code before this fix;
+- switch tables `JMP qword ptr [reg*8 + table]` (with REX prefixes; a negative disp32 is no
+  table); Create Address Tables, the pointer check of the Reference analyzer
+  (OperandReferenceAnalyzer.checkForPointer), the jumps and calls through a slot read
+  8-byte pointers (getDefaultPointerSize; AddressTable.java:1074-1100), the tables start
+  4-aligned and checkTable tests `top + 4 * i` as Java does (AddressTableAnalyzer.java:401-407).
+  Superseded: before this fix only the switch tables and the scan for runs of code pointers
+  read 8 bytes, the rest 4;
 - not run: Function Start Search (`x86-64gcc_patterns.xml` is not ported), the RTTI analyzer
   (MSVC's), X86 Function Callee Purge (Java's `canAnalyze` refuses 64-bit), Function ID (the
   databases are x86:LE:32's). Not ported: PIC switch tables (`MOVSXD` of 4-byte offsets plus a
   base; Java's DecompilerSwitchAnalyzer), getThunkedAddr past a no-p-code entry instruction
-  (`ENDBR64; JMP`, `NOP; JMP`), purges from data-type archives, DWARF.
+  in `resolve_thunk` (`ENDBR64; JMP`, `NOP; JMP`), purges from data-type archives, DWARF, the
+  relocation guide of Create Address Tables (AddressTable.getEntry takes only relocated words
+  where the program has relocations), the Disassembler's thunk-aware no-return test
+  (isNoReturnCall reads Function.hasNoReturn, which follows a thunk, FunctionDB.java:1217-1222;
+  `descend` reads the no-return set alone, before bodies and thunks exist).
 
 Check: `tools/elf64-ref.sh [extra binaries]` builds `tools/corpus/elf64/*.c` with gcc -O2
-(non-PIE and PIE, no `-g`: Java takes no-return flags from DWARF, which ghidra-rs does not read
+(non-PIE, PIE, and PIE with `-fcf-protection=full` as `-cet`, no `-g`: Java takes no-return flags from DWARF, which ghidra-rs does not read
 yet), runs Java 12.3's plain auto-analysis with `DumpPurges.java` once (kept in
 `rust/target/elf64/`) and `analyze --purges`, and compares the lines (Java's EXTERNAL-block
 functions left out). Against Java 12.3 (gcc 15, the desktop):
@@ -6062,9 +6090,11 @@ functions left out). Against Java 12.3 (gcc 15, the desktop):
 |---|---|---|---|---|---|
 | t1 | 22 | 22 | 22 | 11 | 18 |
 | t1-pie | 20 | 19 | 19 | 8 | 14 |
+| t1-cet | 19 | 18 | 18 | 7 | 13 |
 | t2 | 24 | 24 | 24 | 15 | 22 |
 | t2-pie | 22 | 22 | 22 | 13 | 20 |
-| `/usr/lib/libtcl8.6.so` | 2,535 | 2,533 | 2,533 | 2,438 | 2,442 |
+| t2-cet | 21 | 21 | 21 | 12 | 19 |
+| `/usr/lib/libtcl8.6.so` | 2,535 | 2,533 | 2,533 | 2,438 | 2,444 |
 
 The causes: purges (Java's 0 on PLT thunks and `_init`, from data-type archives); PIC switch
 tables (t1-pie's `sw`, so its tail call makes no `puts` thunk; most of libtcl's 57 body
@@ -6073,17 +6103,29 @@ columns of libtcl); Java's no-return on `_start` (its `hlt` after `__libc_start_
 on t1-pie's `die`, not traced; libtcl's 2 functions Java has more (0x1bf2cd, 0x1c4cca, odd
 addresses not traced).
 
+After the review fixes (2026-11-21: pointer size, values past 32 bits, ET_REL, ENDBR64 PLT
+thunks, EXTERNAL slots, IRELATIVE and RELATIVE64, section bounds): t1, t1-pie, t2 and t2-pie
+unchanged; libtcl 2,442 -> 2,444 identical but the purge (2,438 identical lines, unchanged),
+17 relocations counted not applied (the count before was not recorded). In the new `-cet`
+binaries the `ENDBR64; BND JMP [slot]` thunks of `abort` and `exit` are `EXTERNAL` and
+no-return as in Java; t1-cet's other differences are the causes above (`puts` thunk from the
+PIC switch's tail call, an `ENDBR64; JMP` thunk `resolve_thunk` does not make) and two body
+sizes and one no-return flag, not traced.
+
 Hatred (`Hatred-Linux-Shipping`, 508 MB, ELF x86-64 EXEC, 45 MB `.text`, the desktop, one
 thread): 10,488,140 instructions, 180,033 functions (407 imports), analysis 54.5 s, 87 s with
 `--functions`, `--gaps` and `--purges`; every one of its 179,630 defined STT_FUNC symbols is a
 function, 403 functions are at no symbol; `.text` coverage 43,002,764 / 45,177,887 bytes.
 Warnings: 10 relocations not applied, 22 slot jumps past an entry, 566 Repair Flow Damage
-calls. Java was not run on it (14 GB of RAM for a 508 MB binary; not tried).
+calls. Java was not run on it (14 GB of RAM for a 508 MB binary; not tried). Not rerun after
+the review fixes (2026-11-21): the run waited in the heavy-run queue behind another job; the
+numbers above are from before them.
 
 The PE path: `cargo test --release` 178 passed, 0 failed; `cargo fmt --check` and `cargo clippy
 --release --all-targets -- -D warnings` clean; M8 bars (`CORPORA=m8 bars.sh`, the 12.3 `x86.sla`,
 a new prelude: cksum 3963700924, 29,768 functions, as `int8`'s) all 57 lines equal those of
-`baselines/int8-c730b2db7d.summary`. Not run: M500 bars, the Mac.
+`baselines/int8-c730b2db7d.summary`. Not run: M500 bars, the Mac. After the review fixes: `cargo test
+--release` 178 passed, 0 failed; fmt and clippy clean; M8 bars 57 / 57 lines equal to the baseline.
 
 ## Speed
 

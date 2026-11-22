@@ -257,10 +257,8 @@ pub fn export_gaps(img: &Image, an: &Analysis, out: &mut dyn Write) -> std::io::
 /// whose thunked function Ghidra keeps in its EXTERNAL block), body min, body max, address
 /// count, no-return.
 pub fn dump_purges(img: &Image, an: &Analysis, out: &mut dyn Write) -> std::io::Result<usize> {
-    use crate::analysis::Flow;
     for (&f, body) in &an.bodies {
-        let i = &an.insns[&f];
-        let slot = i.slot.filter(|s| body.len() == 1 && i.flow == Flow::JumpInd && img.imports.contains_key(s));
+        let slot = an.slot_thunk(f).filter(|s| img.imports.contains_key(s));
         let thunk = match (an.thunk_of.get(&f), slot) {
             (Some(t), _) => format!("{t:08x}"),
             (None, Some(_)) => "EXTERNAL".into(),

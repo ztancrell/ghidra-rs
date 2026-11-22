@@ -1,6 +1,7 @@
 #!/bin/sh
 # The ELF64 analysis check (rust/README.md, "ELF64 analysis"): builds the GCC x86-64 test
-# programs of tools/corpus/elf64 under rust/target/elf64/ (non-PIE and PIE, without -g: DWARF
+# programs of tools/corpus/elf64 under rust/target/elf64/ (non-PIE, PIE, and PIE with
+# -fcf-protection=full, whose .plt.sec thunks start ENDBR64; without -g: DWARF
 # is not read by ghidra-rs yet, and Java takes no-return flags from it), runs Java's plain
 # auto-analysis on each (DumpPurges.java; once, the output is kept) and ghidra-rs
 # `analyze --purges`, and compares the function lists.
@@ -22,7 +23,8 @@ for c in "$here"/corpus/elf64/*.c; do
     t=$(basename "$c" .c)
     gcc -O2 -fno-pie -no-pie -fcf-protection=none -o "$out/$t" "$c"
     gcc -O2 -fcf-protection=none -o "$out/$t-pie" "$c"
-    bins="$bins $out/$t $out/$t-pie"
+    gcc -O2 -fcf-protection=full -o "$out/$t-cet" "$c"
+    bins="$bins $out/$t $out/$t-pie $out/$t-cet"
 done
 for b in $bins "$@"; do
     t=$(basename "$b")
