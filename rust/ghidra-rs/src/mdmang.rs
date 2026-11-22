@@ -120,7 +120,7 @@ fn clean(b: &mut String) {
 }
 
 /// Java's `String.trim()`: strips characters up to U+0020.
-fn java_trim(s: &str) -> &str {
+pub(crate) fn java_trim(s: &str) -> &str {
     s.trim_matches(|c: char| c <= ' ')
 }
 
@@ -3404,7 +3404,7 @@ impl GhidraDemangled {
 }
 
 /// `DemanglerUtil.stripSuperfluousSignatureSpaces`.
-fn strip_superfluous_spaces(s: &str) -> String {
+pub(crate) fn strip_superfluous_spaces(s: &str) -> String {
     let mut a = String::new();
     let cs: Vec<char> = s.chars().collect();
     let mut i = 0;
@@ -3428,7 +3428,7 @@ fn strip_superfluous_spaces(s: &str) -> String {
 }
 
 /// `DemangledObject.setName`'s safe name.
-fn safe_name(name: &str) -> String {
+pub(crate) fn safe_name(name: &str) -> String {
     java_trim(&strip_superfluous_spaces(name)).replace(' ', "_")
 }
 
