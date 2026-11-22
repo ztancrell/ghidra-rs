@@ -350,6 +350,29 @@ impl<'a> Compiler<'a> {
             self.expect(";")?;
             return self.create_store(ops, space, size, ptr, val);
         }
+        // GOTO_KEY / CALL_KEY / RETURN '[' expr ']' ';' (pcodeparse.y:119-121 and RETURN:
+        // `createOpNoOut` of BRANCHIND, CALLIND, RETURN), as in x86-64-gcc.cspec's thunks
+        let indirect = match self.peek() {
+            Some(Tok::Ident(n)) if self.toks.get(self.pos + 1).is_some_and(|t| matches!(t, Tok::P(p) if *p == "[")) => {
+                match n.as_str() {
+                    "goto" => Some(Opcode::Branchind),
+                    "call" => Some(Opcode::Callind),
+                    "return" => Some(Opcode::Return),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(opc) = indirect {
+            self.pos += 1;
+            self.expect("[")?;
+            let target = self.expr(0)?;
+            self.expect("]")?;
+            self.expect(";")?;
+            ops.extend(target.ops);
+            ops.push(Op { opc, out: None, ins: vec![target.out] });
+            return Ok(());
+        }
         let local = matches!(self.peek(), Some(Tok::Ident(n)) if n == "local");
         if local {
             self.pos += 1;

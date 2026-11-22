@@ -166,7 +166,7 @@ impl<'a> Printer<'a> {
             Space::Iop => {
                 self.out.str("i");
                 self.out.seq(self.fd().op(OpId(v.offset as u32)).seq);
-                4
+                self.arch.pointer_size()
             }
             Space::Fspec => {
                 let call = &self.fd().calls[v.offset as usize];
@@ -179,7 +179,7 @@ impl<'a> Printer<'a> {
                         self.out.addr(entry.unwrap_or_default());
                     }
                 }
-                4
+                self.arch.pointer_size()
             }
             Space::Sleigh(sp) => self.address(sp, v.offset, v.size),
             // JoinSpace::printRaw: the pieces' names
@@ -190,7 +190,7 @@ impl<'a> Printer<'a> {
             }
             Space::Stack => {
                 self.out.str(&format!("s0x{:08x}", v.offset));
-                4
+                self.arch.pointer_size()
             }
         };
         if expect != v.size {
@@ -245,11 +245,11 @@ impl<'a> Printer<'a> {
             self.out.str("#");
             self.out.hex = true;
             let _ = write!(self.out.s, "0x{off:x}");
-            return 4;
+            return self.arch.pointer_size();
         }
         self.out.s.push(shortcut(&sp.name));
         self.out.addr(off);
-        4
+        self.arch.pointer_size()
     }
 
     fn space_name(&self, vn: VarnodeId) -> &'a str {

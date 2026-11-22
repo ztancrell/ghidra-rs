@@ -489,10 +489,9 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
         if abi.is_some() || store.is_some() {
             return Err(format!("{path}: --abi-callers and --store take a 32-bit PE only"));
         }
-        // the facts and the prelude are the decompiler's, which reads x86:LE:32:default:windows
-        if facts.is_some() || prelude.is_some() {
+        if facts.is_some() {
             return Err(format!(
-                "{path}: not ported: --facts and --decomp-prelude for x86:LE:64 (the core types, pointer size and x86-64-gcc.cspec prototypes of the facts; the decompiler is x86:LE:32 only)"
+                "{path}: not ported: --facts for x86:LE:64 (the core types, pointer size and x86-64-gcc.cspec prototypes)"
             ));
         }
         img

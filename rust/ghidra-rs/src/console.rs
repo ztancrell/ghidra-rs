@@ -32,7 +32,10 @@ fn token(name: &str) -> String {
 /// - `map function` for every function, with its FID name or export name when it has one.
 pub fn prelude(img: &Image, an: &Analysis, fid: &BTreeMap<u32, crate::fid::Applied>) -> String {
     let mut s = String::from("option readonly on\n");
-    for sec in img.sections.iter().filter(|s| s.name == ".rdata") {
+    // ELF: bfd marks the sections without SHF_WRITE read-only itself (LoadImageBfd::getReadonly,
+    // loadimage_bfd.cc:286-301); `.got` and `.got.plt` are read-only in ghidra-rs's image too
+    let marked = |n: &str| if img.elf64 { n.starts_with(".got") } else { n == ".rdata" };
+    for sec in img.sections.iter().filter(|s| marked(&s.name)) {
         let _ = writeln!(s, "readonly 0x{:08x}:{}", sec.addr, sec.data.len());
     }
     let mut imports: Vec<_> = img.imports.iter().collect();
@@ -72,16 +75,23 @@ pub struct Console {
     facts: bool,
 }
 
-/// The `.sla` for a 32-bit PE (`GHIDRA_RS_SLA`, else x86.sla built by `build-sla.sh`) and the
-/// text of the Windows compiler spec `x86win.cspec` next to it, as the console's
-/// `x86:LE:32:default:windows` language reads them.
-fn x86_windows() -> Result<(Sleigh, String), String> {
+/// The language `load file` gives a program, as `BfdArchitecture::resolveArchitecture`
+/// (bfd_arch.cc:88-110) picks it from the bfd target: a 32-bit PE is x86:LE:32:default:windows,
+/// an ELF64 x86:LE:64:default:gcc. Returns the `.sla` (`GHIDRA_RS_SLA`, else the one built by
+/// `build-sla.sh`; for x86-64, `x86-64.sla` next to it, whose `.pspec` `Sleigh::load` reads), the
+/// text of the compiler spec next to it and the language description of x86.ldefs.
+fn language(elf64: bool) -> Result<(Sleigh, String, &'static str), String> {
     let path =
         std::env::var_os("GHIDRA_RS_SLA").map(std::path::PathBuf::from).unwrap_or_else(|| Sleigh::sla_path("x86"));
-    let cspec_path = path.with_file_name("x86win.cspec");
+    let (path, cspec, desc) = if elf64 {
+        (path.with_file_name("x86-64.sla"), "x86-64-gcc.cspec", "Intel/AMD 64-bit x86")
+    } else {
+        (path, "x86win.cspec", "Intel/AMD 32-bit x86")
+    };
+    let cspec_path = path.with_file_name(cspec);
     let cspec = std::fs::read_to_string(&cspec_path).map_err(|e| format!("{}: {e}", cspec_path.display()))?;
     Sleigh::refuse_truncated(&path)?;
-    Ok((Sleigh::load(&path)?, cspec))
+    Ok((Sleigh::load(&path)?, cspec, desc))
 }
 
 impl Console {
@@ -145,10 +155,11 @@ impl Console {
             ["source", file] => return self.run_file(file, out),
             ["load", "file", path] => {
                 let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-                let image = Image::from_pe(&data).map_err(|e| format!("{path}: {e}"))?;
-                let (sleigh, cspec) = x86_windows()?;
+                let image = if data.starts_with(b"\x7fELF") { Image::from_elf(&data) } else { Image::from_pe(&data) };
+                let image = image.map_err(|e| format!("{path}: {e}"))?;
+                let (sleigh, cspec, desc) = language(image.elf64)?;
                 self.arch = Some(Arch::new(sleigh, image, &cspec).map_err(|e| e.to_string())?);
-                writeln!(out, "{path} successfully loaded: Intel/AMD 32-bit x86").map_err(io)?;
+                writeln!(out, "{path} successfully loaded: {desc}").map_err(io)?;
             }
             // `load facts <file>` (stage S10, no console command of Ghidra's): the facts of a
             // Ghidra program replace the prelude; from here on names, data-types, prototypes

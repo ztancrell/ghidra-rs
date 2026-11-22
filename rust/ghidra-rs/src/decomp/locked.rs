@@ -111,6 +111,13 @@ pub(crate) fn lock_prototype(
         None => models.default,
     };
     let m = models.get(id);
+    // ParamListStandard::assignAddress tries the model rules first (fspec.cc:778-782)
+    if !m.input.rules.is_empty() || !m.output.rules.is_empty() {
+        return err(format!(
+            "prototype model {}: storage assigned by <rule> (ModelRule::assignAddress) is not ported",
+            m.name
+        ));
+    }
     let types = &arch.types;
     let out_storage = if types.meta(output.1) == Meta::Void {
         None
