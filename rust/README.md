@@ -54,6 +54,9 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   `MicrosoftDemangler` ("The Microsoft demangler").
 - `ghidra-rs/tests/mdmang.rs`, `tests/data/mdmang-vectors.tsv`: MDMangBaseTest's vectors,
   extracted by `tools/mdmang-vectors.sh`.
+- `ghidra-rs/src/gnudemangle.rs`, `ghidra-rs/src/gnuparse.rs`: Ghidra's GNU (Itanium C++ ABI)
+  demangler, its native half (libiberty's `cp-demangle.c` 2.41) and `GnuDemanglerParser` ("The
+  GNU demangler"); `tools/gnu-syms.sh` and `tools/ghidra/GnuParseDump.java` check them.
 - `ghidra-rs/tests/abi.rs`: register reads and writes (sub-registers as base-register bytes)
   of a few fixed instructions.
 - `build-sla.sh`: builds Ghidra's SLEIGH compiler and compiles `x86-64.sla` and `x86.sla`.
@@ -5872,6 +5875,78 @@ A "not ported" failure is loud everywhere: Function ID's and the plate comment's
 comments`, an error that stops `--functions` (`scripts::demangle`) and Function ID
 (`fid::apply`, the `FID_conflict:` base name); a genuine failure (Java's `null` or
 `MDException`) keeps the raw name, as Ghidra does.
+
+### The GNU demangler, branch `gnudemangle` (2026-11-21)
+
+For Hatred's Linux build (DESIGN.md, 2026-11-21). Ghidra's GNU demangler is two parts, both ported:
+
+- `ghidra-rs/src/gnudemangle.rs`: the native program `demangler_gnu_v2_41`
+  (`GPL/DemanglerGnu/src/demangler_gnu_v2_41`): libiberty's `cp-demangle.c` (binutils 2.41) as
+  its `cxxfilt.c` drives it without options (`GnuDemanglerNativeProcess` passes none): one line
+  in, one line out, `cplus_demangle` in the auto style with `DMGL_PARAMS | DMGL_ANSI |
+  DMGL_VERBOSE`. The parse keeps the C's fixed component array (`2 * strlen` components, `strlen`
+  substitutions, slots reused after a backtrack) and its in-place edits; the printer keeps the
+  modifier and template lists as indices. Its limits are the C's: a name longer than 1,024
+  characters fails (`2 * strlen > DEMANGLE_RECURSION_LIMIT`), as do the printer's recursion
+  counts. Not ported: the Rust demangler that the auto style tries first (`rust-demangle.c`; a
+  name it would take, v0 `_R` or legacy `_ZN...17h<hash>E`, fails as "not ported"), and the
+  options `cxxfilt` never sets here (`DMGL_JAVA`, `DMGL_TYPES`, the return postfix).
+- `ghidra-rs/src/gnuparse.rs`: `GnuDemanglerParser` with the standard replacements
+  (`default.gnu.demangler.replacements.txt`, read in place), the `Demangled*` objects it builds
+  (kind, names, namespace nodes, signature, return type, parameters, calling convention, const,
+  virtual, static, thunk, template) and `GnuDemangler.demangle`'s wrapping (skip rules,
+  `_GLOBAL_` / `__Z` / `._Z` / `DW.ref.` prefixes, the failure checks), with the analyzer's
+  options. Not ported (each fails loudly, none met in the corpora): non-ASCII text, a
+  `DemangledVariable` without a name, an object as a namespace inside a `DemangledType`, an
+  unclosed `[` (Java loops forever there). A function pointer's `FuncDef<counter>` name is
+  `FuncDef` (never printed).
+- `gnudemangle::gnu_demangle(name)` is both together (`GnuDemangler.demangle`). Nothing in
+  `analyze` calls it yet: the Demangler analyzer picks the GNU demangler for ELF and Mach-O
+  programs (`GnuDemangler.canDemangle`), and `analyze` loads only PE32 until the ELF64 loader
+  lands; the PE path keeps `mdmang::microsoft_demangle`.
+- CLI: `ghidra-rs gnu-demangle <names.txt>` (the native half, one line per name) and `ghidra-rs
+  gnu-parse <tsv>` (`mangled<TAB>native text`, the line format of `GnuParseDump.java`).
+
+**The oracle.** The native demangler of the 12.3 reference
+(`ghidra_12.3_DEV/GPL/DemanglerGnu/os/linux_x86_64/demangler_gnu_v2_41`) for the text, and
+`tools/ghidra/GnuParseDump.java` (Ghidra 12.3's `GnuDemanglerParser` from its jars, with
+`GnuDemangler`'s private wrapping copied) for the parse. Names: `tools/gnu-syms.sh <binary>...`
+(the unique `_Z` names of `nm -a` and `nm -D`), into `rust/target/gnudem/`, never committed.
+Running the Java harness (from `rust/`):
+
+```
+export JAVA_HOME=/usr/lib/jvm/java-25-openjdk PATH=$JAVA_HOME/bin:$PATH
+G=<the 12.3 install>; D=target/gnudem; CP="$(find $G/Ghidra -name '*.jar' | tr '\n' :)"
+javac -nowarn -cp "$CP" -d $D/classes tools/ghidra/GnuParseDump.java
+paste $D/hatred.syms $D/hatred.ref > $D/hatred.tsv
+java -cp "$CP$D/classes" GnuParseDump < $D/hatred.tsv | grep -v '^INFO ' > $D/hatred.java
+target/release/ghidra-rs gnu-parse $D/hatred.tsv | cmp - $D/hatred.java
+```
+
+**Measured** (2026-11-21):
+
+| corpus | names | text identical | parse identical | failed |
+|---|---|---|---|---|
+| Hatred `Hatred-Linux-Shipping` (GCC 4.4.7, UE4) | 217,716 | 217,716 | 217,716 | 0 |
+| libstdc++.so.6 and libLLVM.so | 52,312 | 52,312 | 52,312 | 0 |
+| libQt6Core, libQt6Widgets, libboost_* (text only) | 70,358 | 70,358 | not run | 0 |
+| every prefix (3 characters on) of every 50th name above (text only) | 501,011 | 501,011 | not run | 0 |
+
+"Identical" is the whole output file (`cmp`). Of Hatred's names the native demangler leaves 192
+unchanged; the parse gives 217,519 objects, 195 `null`s and 2 Java exceptions
+(`IllegalArgumentException`, two `physx::Sq::AABBTree::walk` local names), which the port
+gives as the same errors. libstdc++ and libLLVM: 52,297 objects, 8 `null`s, 2
+`IllegalArgumentException` and 5 `StringIndexOutOfBoundsException` (`llvm::make_filter_range`
+names with `decltype`), the same in the port. The prefix corpus exercises the failure paths:
+484,186 of its lines do not demangle, on both sides. GCC 4.4 makes no lambdas (they came with
+GCC 4.5); the lambda grammar is checked by the LLVM, Qt and boost names and a unit test.
+
+Checks: `cargo fmt --check`, `cargo clippy --release --all-targets -- -D warnings` clean;
+`cargo test --release` 187 passed, 0 failed (unit tests of the grammar: substitutions,
+template arguments, ctor/dtor, operators, function pointers, lambdas, local names, the length
+limit; and of the parser: templated `operator>>`, `operator<<` with a function-pointer
+parameter, conversion operators). `bars.sh` with `CORPORA=m8`: 57 lines, each equal to
+`int8-c730b2db7d.summary`'s (the PE path is unchanged).
 
 ### Integration `int8` (2026-11-20)
 

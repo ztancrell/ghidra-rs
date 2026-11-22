@@ -8,6 +8,8 @@ pub mod exports;
 pub mod factsout;
 pub mod fid;
 pub mod gdt;
+pub mod gnudemangle;
+pub mod gnuparse;
 pub mod mdmang;
 pub mod queue;
 pub mod scripts;

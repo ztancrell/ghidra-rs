@@ -26,7 +26,9 @@ const USAGE: &str = "usage: ghidra-rs disasm <binary> [--func <symbol>|--addr <h
                      abi-candidates <out.csv> <out.txt> [<verified-c-dir>]   (needs --facts)
        ghidra-rs gdt-protos <archive.gdt> <out>     (the prototype file of tools/ghidra-protos.sh, from the archive)
        ghidra-rs decompile -i <script>
-       ghidra-rs datatest [--ref <decomp_dbg>] <test.xml|dir>...";
+       ghidra-rs datatest [--ref <decomp_dbg>] <test.xml|dir>...
+       ghidra-rs gnu-demangle <names.txt>   (one name per line; the line demangler_gnu_v2_41 prints for each)
+       ghidra-rs gnu-parse <tsv>     (mangled<TAB>native demangler text per line; the line format of tools/ghidra/GnuParseDump.java)";
 
 fn main() {
     if let Err(e) = run() {
@@ -55,8 +57,14 @@ fn run() -> Result<(), String> {
         out.flush().map_err(|e| e.to_string())?;
         return r.map(|_| ());
     }
+    if args.len() == 2 && args[0] == "gnu-demangle" {
+        return gnu_demangle(&args[1]);
+    }
     if args.len() >= 2 && args[0] == "datatest" {
         return datatest(&args[1..]);
+    }
+    if args.len() == 2 && args[0] == "gnu-parse" {
+        return gnu_parse(&args[1]);
     }
     if args.len() < 2 || args[0] != "disasm" {
         return Err(USAGE.into());
@@ -158,6 +166,39 @@ fn run() -> Result<(), String> {
         n += 1;
     }
     Ok(())
+}
+
+/// `gnu-demangle`: each line of the file through the GNU demangler's native half
+/// (`gnudemangle::native_demangle`, what Ghidra's `demangler_gnu_v2_41` prints for it), one line
+/// out per line in; a case not ported prints `ERR <reason>`. Runs on a thread with a large stack
+/// (the demangler recurses as deep as the C does).
+fn gnu_demangle(path: &str) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    let job = std::thread::Builder::new().stack_size(1 << 30).spawn(move || {
+        let mut out = String::new();
+        for line in text.lines() {
+            match ghidra_rs::gnudemangle::native_demangle(line) {
+                Ok(s) => out.push_str(&s),
+                Err(e) => out.push_str(&format!("ERR {e}")),
+            }
+            out.push('\n');
+        }
+        out
+    });
+    let out = job.map_err(|e| e.to_string())?.join().map_err(|_| "the demangler thread panicked".to_string())?;
+    std::io::stdout().write_all(out.as_bytes()).map_err(|e| e.to_string())
+}
+
+/// `gnu-parse`: [`ghidra_rs::gnuparse::dump_line`] of each `mangled<TAB>text` line.
+fn gnu_parse(path: &str) -> Result<(), String> {
+    let tsv = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::new(stdout.lock());
+    for line in tsv.lines() {
+        let (mangled, text) = line.split_once('\t').unwrap_or((line, ""));
+        writeln!(out, "{}", ghidra_rs::gnuparse::dump_line(mangled, text)).map_err(|e| e.to_string())?;
+    }
+    out.flush().map_err(|e| e.to_string())
 }
 
 /// `datatest`: run upstream decompiler datatests (`console::datatest`) on the Rust console, or
