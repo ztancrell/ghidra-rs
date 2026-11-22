@@ -6460,6 +6460,14 @@ System V prototypes, GNU names and the DWARF types and signatures. The 32-bit pa
 `CORPORA=m8 tools/bars.sh` 57 of 57 lines equal to the int9 baseline; `cargo test --release`
 201 passed; fmt and clippy clean.
 
+Neither console takes a file path with whitespace: `IfcLoadFile` reads `load file` word by word
+(consolemain.cc:53-57; two words are a target and the file), and so does ghidra-rs's. Hatred's
+path (`.../Extra Storage/...`) gave both engines no output, which `decomp-diff.sh` counted as
+identical (50 / 50). Now `decomp-diff.sh` reaches such a `BIN` through a link in its output
+directory, and an output that is empty from the load line on is written as `decomp-diff.sh:
+error: no output ...`: the reference counts as failed, ghidra-rs as loud (bars.sh), never
+identical. On Hatred's real path the camera corpus gives the same 31 / 15 / 4.
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The
@@ -6475,9 +6483,11 @@ with output sent to `/dev/null`:
 ## Limits
 
 - One processor family: x86 (`x86-64.sla` and the 32-bit `x86.sla`). `analyze` takes 32-bit
-  PE files and ELF x86-64 files (functions, bodies, gaps; see "ELF64 analysis"); `--facts`,
-  `--decomp-prelude`, `--abi-callers`, `--store`, `edit`, `export` and the decompiler take
-  32-bit PE files only. Superseded (2026-11-21): "`analyze` takes 32-bit PE files only".
+  PE files and ELF x86-64 files (functions, bodies, gaps; see "ELF64 analysis"); `--decomp-prelude`
+  and the decompiler take both (see "The decompiler on x86-64"); `--abi-callers`, `--store`,
+  `edit` and `export` take 32-bit PE files only. Superseded (2026-11-21): "`analyze` takes 32-bit
+  PE files only". Superseded (2026-11-22, branch `m3-x64`): "`--decomp-prelude` and the
+  decompiler take 32-bit PE files only".
 - Context starts from the `.pspec` defaults. Context commits (`globalset`) are recorded per
   address in the `Parse` and apply to later decodes there (flowing ones from that address on);
   the x86 specs do not use them. Delay slots, `crossbuild`, `inst_next2` and flowref/flowdest
