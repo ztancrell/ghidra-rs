@@ -6543,7 +6543,14 @@ causes:
 
 On Hatred, `analyze --facts` was killed twice (out of memory, about 7 GB free on the desktop)
 after the analysis, 76 s and 107 s in; no Hatred facts were written. The prelude run (no
-address tables) fits.
+address tables) fits. Superseded (2026-11-22): on the MacBook (32 GB) it completes. Peak RSS
+there: `--decomp-prelude` 4.6 GB; `--functions` 10.85 GB before, 9.42 GB after constant
+propagation merges a chunk of functions at a time (the output is byte-identical); `--facts`
+11.17 GB before, 10.01 GB after, 354 s (the writer 187 s). The rest is the analysis itself
+(7.9 GB while it runs), so the desktop still lacks the memory. Hatred's facts: 180,026 func
+and body records, 636,140 data, 859,434 label, 197,543 string, 475,155 undef, 35,328
+override, 407 extref. 343,951 are `underived`: 171,714 function, 166,125 comments, 6,112
+label. There is no Java comparison: Java was not run on Hatred.
 
 ## Speed
 
