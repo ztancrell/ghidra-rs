@@ -161,6 +161,15 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   a DWARF types reader. Each is a port of Ghidra's own code, checked against the 12.3
   reference, as before. mercs2 stays a test bed. The rewrite project itself lives in
   `~/projects/hatred-decomp`.
+- 2026-11-21: Two ELF-only rules of branch `elf64` stay, although they were measured, not
+  traced in Java: a PLT function of one `JMP [slot]` takes its import's no-return flag, and a
+  `CALL [GOT slot]` to a no-return import does not end the flow (on libtcl it brought 743 body
+  sizes to Java's). User's decision ("Keep"); an exception to the 2026-11-17 "faithful ports,
+  not approximations" rule, marked as such in the code and `rust/README.md`.
+- 2026-11-21: Next for Hatred: the decompiler on x86-64 Linux (facts writer, core types,
+  System V prototypes, decompiler language x86:LE:64:default:gcc), checked against Java 12.3.
+  User's decision. Addresses stay 32-bit for now (Hatred's highest is about 0x5300000; past
+  4 GiB fails loudly); widening to 64-bit waits for a binary that needs it.
 
 ## Milestones
 
