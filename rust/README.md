@@ -6181,10 +6181,10 @@ run counts unchanged (plain 10 runs, 6,858 cleared, 6 removed, 16 disassembled a
 `analyze` takes an ELF x86-64 file (DESIGN.md, 2026-11-21) with language x86:LE:64:default
 and its gcc compiler spec: `x86-64.sla` (the `--sla` or `GHIDRA_RS_SLA` given, else the one
 next to `x86.sla`) with `x86-64.pspec`, and `x86-64-gcc.cspec` read as data at build time.
-`--functions`, `--gaps`, `--purges` and `--decomp-prelude` work; `--facts`, `--abi-callers`
-and `--store` fail loudly on ELF (the facts encode x86:LE:32's core types). Superseded
-(2026-11-22, branch `m3-x64`): "`--decomp-prelude` fails on ELF; the decompiler reads
-x86:LE:32:default:windows only"; see "The decompiler on x86-64" below. `--purges <txt>` writes what `tools/ghidra/DumpPurges.java`
+`--functions`, `--gaps`, `--purges`, `--decomp-prelude` and `--facts` work; `--abi-callers`
+and `--store` fail loudly on ELF. Superseded (2026-11-22, branch `m3-x64`): "`--decomp-prelude`
+and `--facts` fail on ELF; the decompiler reads x86:LE:32:default:windows only"; see "The
+decompiler on x86-64" and "Facts on ELF x86-64" below. `--purges <txt>` writes what `tools/ghidra/DumpPurges.java`
 writes (entry, purge, thunked function, body min, max, address count, no-return), on PE and ELF.
 
 The loader, `Image::from_elf` (ElfProgramBuilder.load, the parts analysis reads):
@@ -6455,8 +6455,8 @@ makes and deletes one op more first; not found yet), 9 where the reference casts
 (`tools/corpus/hatred-camera.txt`, prelude in 68 s): the reference ran 50, identical 31, loud 15
 (11 output overlap guard, 2 joined contiguous pieces, 2 overlapping parameter guard), silent 4
 (ghidra-rs guards `.bss` globals at calls the reference does not, and one numbering shift). Not
-compared with Java (no facts on ELF yet). `--facts` on ELF is not ported: the 64-bit core types,
-System V prototypes, GNU names and the DWARF types and signatures. The 32-bit path is unchanged:
+compared with Java: see "Facts on ELF x86-64" below. Superseded: "`--facts` on ELF is not
+ported" (it is, in part, below). The 32-bit path is unchanged:
 `CORPORA=m8 tools/bars.sh` 57 of 57 lines equal to the int9 baseline; `cargo test --release`
 201 passed; fmt and clippy clean.
 
@@ -6467,6 +6467,65 @@ identical (50 / 50). Now `decomp-diff.sh` reaches such a `BIN` through a link in
 directory, and an output that is empty from the load line on is written as `decomp-diff.sh:
 error: no output ...`: the reference counts as failed, ghidra-rs as loud (bars.sh), never
 identical. On Hatred's real path the camera corpus gives the same 31 / 15 / 4.
+
+### Facts on ELF x86-64 (branch `m3-x64`, 2026-11-22)
+
+`analyze <elf64> --facts <out>` writes the facts file of 32-bit PE, with x86:LE:64's parts:
+- the core types record of x86:LE:64 with the gcc compiler spec (`facts_coretypes64.xml`, copied
+  from a Java export, as the 32-bit one is);
+- 8-byte pointers;
+- no TEB block and no `FS_OFFSET`;
+- `x86-64-gcc.cspec` read for the call fixups;
+- extrapop 8 where a function has no purge, the default model's (the callee purge analyzer does
+  not run on x86-64);
+- names from the symbol tables, local ones too.
+
+Not ported, written as `underived ... function`, which the loader fails on:
+- a GNU-mangled name (`gnudemangle::gnu_demangle`, picked by the program format as
+  `DemanglerAnalyzer` does): Java puts the function in its namespaces and gives it the
+  mangling's signature; its plate comment is `underived ... comments`;
+- a function the DWARF importer (`src/dwarf/`) gives a signature: Java's DWARF analyzer applies
+  its types and parameters.
+
+Prototypes from the 64-bit data-type archives (Java gives `_init` `int _init(EVP_PKEY_CTX *)`)
+are not read.
+
+`tools/elf64-facts.sh` runs Java 12.3's plain auto-analysis with ExportFacts.java on the 14
+binaries of the small corpus (the cpp ones with `-g -gdwarf-3`) and compares with
+`facts-diff.sh`. `PROJ` puts the Java projects elsewhere, since Ghidra refuses this worktree's
+`.claude` path. ExportFacts.java now writes blocks, data and labels of the default address
+space only. ELF's non-loaded sections (`.comment`, `.debug_*`, in OTHER) collided with ram's
+offsets, and their undefined bytes made the script fail on every binary with DWARF; PE programs
+have no such blocks.
+
+Totals of the 14 against Java (equal / Java's records):
+
+| record | equal / Java | rate |
+|---|---|---|
+| coretypes | 14 / 14 | 100% |
+| block | 326 / 417 | 78.2% |
+| undef | 1,034 / 1,407 | 73.5% |
+| tracked | 815 / 1,112 | 73.3% |
+| body | 771 / 1,112 | 69.3% |
+| string | 499 / 751 | 66.4% |
+| label | 4,558 / 7,315 | 62.3% |
+| override | 770 / 1,259 | 61.2% |
+| func | 113 / 1,112 | 10.2% |
+| data | 530 / 12,072 | 4.4% |
+| type | 14 / 1,107 | 1.3% |
+| comments | 0 / 646 | 0% |
+| ns | 0 / 295 | 0% |
+
+ghidra-rs writes 1,501 `underived` and 286 `extref` records, which Java does not have. The
+causes:
+- Java's EXTERNAL block functions: 297 func, body and tracked records ghidra-rs has as `extref`
+  of GOT slots;
+- ELF markup and DWARF data types, most of the missing `data` and `type`;
+- archive and DWARF prototypes, and GNU namespaces: `func`, `ns`, `comments`.
+
+On Hatred, `analyze --facts` was killed twice (out of memory, about 7 GB free on the desktop)
+after the analysis, 76 s and 107 s in; no Hatred facts were written. The prelude run (no
+address tables) fits.
 
 ## Speed
 
