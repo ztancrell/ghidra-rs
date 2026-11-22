@@ -6288,9 +6288,13 @@ thread): 10,488,140 instructions, 180,033 functions (407 imports), analysis 54.5
 `--functions`, `--gaps` and `--purges`; every one of its 179,630 defined STT_FUNC symbols is a
 function, 403 functions are at no symbol; `.text` coverage 43,002,764 / 45,177,887 bytes.
 Warnings: 10 relocations not applied, 22 slot jumps past an entry, 566 Repair Flow Damage
-calls. Java was not run on it (14 GB of RAM for a 508 MB binary; not tried). Not rerun after
-the review fixes (2026-11-21): the run waited in the heavy-run queue behind another job; the
-numbers above are from before them.
+calls. Java was not run on it (14 GB of RAM for a 508 MB binary; not tried). Superseded:
+"not rerun after the review fixes". Rerun on master 7ab9dc2b7c (int9, with Repair Flow Damage;
+2026-11-22, desktop, one thread): 10,484,883 instructions, 180,026 functions (407 imports),
+analysis 96.5 s; 179,636 functions exported; `.text` coverage 43,001,858 / 45,177,887 bytes.
+Warnings: 10 relocations not applied, 22 slot jumps past an entry; Repair Flow Damage now runs:
+8 runs, 3,257 instructions cleared, 7 functions removed, 5 data-pointer cases not modelled. The
+slower analysis (54.5 s before) was not traced (Repair Flow Damage, or load on the desktop).
 
 The PE path: `cargo test --release` 178 passed, 0 failed; `cargo fmt --check` and `cargo clippy
 --release --all-targets -- -D warnings` clean; M8 bars (`CORPORA=m8 bars.sh`, the 12.3 `x86.sla`,

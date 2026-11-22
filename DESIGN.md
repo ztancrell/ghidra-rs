@@ -160,7 +160,9 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   the x86-64 System V calling convention (`x86-64-gcc.cspec`), the GNU (Itanium) demangler and
   a DWARF types reader. Each is a port of Ghidra's own code, checked against the 12.3
   reference, as before. mercs2 stays a test bed. The rewrite project itself lives in
-  `~/projects/hatred-decomp`.
+  `~/projects/hatred-decomp`. Superseded: "GCC" above. Hatred's own code was built by clang 3.5.0
+  (its DWARF 3 compile units say so); GCC 4.4.7 and 4.8.1 appear only in `.comment`, from linked
+  libraries. The System V convention and the Itanium names are the same for both compilers.
 - 2026-11-21: Two ELF-only rules of branch `elf64` stay, although they were measured, not
   traced in Java: a PLT function of one `JMP [slot]` takes its import's no-return flag, and a
   `CALL [GOT slot]` to a no-return import does not end the flow (on libtcl it brought 743 body
