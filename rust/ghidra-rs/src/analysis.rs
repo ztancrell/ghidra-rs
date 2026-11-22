@@ -1700,11 +1700,13 @@ impl Analysis {
                 }
                 if let Some((p, _)) = op.ins.get(1).and_then(|v| val(v, fold)) {
                     if let Val::C(x) = p {
-                        if let Some(x) = addr(x).filter(|x| !refs.contains(x)) {
-                            refs.push(x); // WRITE reference through a folded address
-                        }
-                        if in_image(x) && !rw.contains(&x) {
-                            rw.push(x);
+                        if let Some(x) = addr(x) {
+                            if !refs.contains(&x) {
+                                refs.push(x); // WRITE reference through a folded address
+                            }
+                            if !rw.contains(&x) {
+                                rw.push(x);
+                            }
                         }
                     }
                     fold.mem.retain(|m| m.0 != p);
@@ -1727,11 +1729,13 @@ impl Analysis {
                     },
                     (2, [_, x]) if o.size == w => val(x, fold).and_then(|(p, _)| {
                         if let Val::C(x) = p {
-                            if let Some(x) = addr(x).filter(|x| !refs.contains(x)) {
-                                refs.push(x); // READ reference through a folded address
-                            }
-                            if in_image(x) && !rw.contains(&x) {
-                                rw.push(x);
+                            if let Some(x) = addr(x) {
+                                if !refs.contains(&x) {
+                                    refs.push(x); // READ reference through a folded address
+                                }
+                                if !rw.contains(&x) {
+                                    rw.push(x);
+                                }
                             }
                         }
                         load(p, fold).map(|(v, _)| (v, true))
@@ -1886,8 +1890,8 @@ impl Analysis {
                     refs.push(imm);
                 }
                 // a memory operand (not an immediate): READ or WRITE
-                if is_ref && v.space != 0 && !rw.contains(&(v.offset as u32)) {
-                    rw.push(v.offset as u32);
+                if is_ref && v.space != 0 && !rw.contains(&imm) {
+                    rw.push(imm);
                 }
             }
         }
