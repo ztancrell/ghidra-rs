@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 const USAGE: &str = "usage: ghidra-rs disasm <binary> [--func <symbol>|--addr <hex>] [--count N] [--pcode] [--sla <file>]
-       ghidra-rs analyze <pe32> [--functions <csv>] [--gaps <csv>] [--abi-callers <register_abi.csv> <out.csv> [--data-pointers]]
+       ghidra-rs analyze <pe32|elf64> [--functions <csv>] [--gaps <csv>] [--purges <txt>] [--abi-callers <register_abi.csv> <out.csv> [--data-pointers]]
                          [--decomp-prelude <out>] [--facts <out> [--protos <file> | --gdt <archive>]] [--seeds <csv> | --functions-from <csv>]... [--store <file>] [--sla <file>]
        ghidra-rs edit <pe32> --store <file> [--new-store] [--seeds <csv> | --functions-from <csv>]... [--sla <file>] <command>
            commands: add-relocated-entries <securom_functions.csv>
@@ -26,7 +26,9 @@ const USAGE: &str = "usage: ghidra-rs disasm <binary> [--func <symbol>|--addr <h
                      abi-candidates <out.csv> <out.txt> [<verified-c-dir>]   (needs --facts)
        ghidra-rs gdt-protos <archive.gdt> <out>     (the prototype file of tools/ghidra-protos.sh, from the archive)
        ghidra-rs decompile -i <script>
-       ghidra-rs datatest [--ref <decomp_dbg>] <test.xml|dir>...";
+       ghidra-rs datatest [--ref <decomp_dbg>] <test.xml|dir>...
+       ghidra-rs gnu-demangle <names.txt>   (one name per line; the line demangler_gnu_v2_41 prints for each)
+       ghidra-rs gnu-parse <tsv>     (mangled<TAB>native demangler text per line; the line format of tools/ghidra/GnuParseDump.java)";
 
 fn main() {
     if let Err(e) = run() {
@@ -55,8 +57,14 @@ fn run() -> Result<(), String> {
         out.flush().map_err(|e| e.to_string())?;
         return r.map(|_| ());
     }
+    if args.len() == 2 && args[0] == "gnu-demangle" {
+        return gnu_demangle(&args[1]);
+    }
     if args.len() >= 2 && args[0] == "datatest" {
         return datatest(&args[1..]);
+    }
+    if args.len() == 2 && args[0] == "gnu-parse" {
+        return gnu_parse(&args[1]);
     }
     if args.len() < 2 || args[0] != "disasm" {
         return Err(USAGE.into());
@@ -158,6 +166,39 @@ fn run() -> Result<(), String> {
         n += 1;
     }
     Ok(())
+}
+
+/// `gnu-demangle`: each line of the file through the GNU demangler's native half
+/// (`gnudemangle::native_demangle`, what Ghidra's `demangler_gnu_v2_41` prints for it), one line
+/// out per line in; a case not ported prints `ERR <reason>`. Runs on a thread with a large stack
+/// (the demangler recurses as deep as the C does).
+fn gnu_demangle(path: &str) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    let job = std::thread::Builder::new().stack_size(1 << 30).spawn(move || {
+        let mut out = String::new();
+        for line in text.lines() {
+            match ghidra_rs::gnudemangle::native_demangle(line) {
+                Ok(s) => out.push_str(&s),
+                Err(e) => out.push_str(&format!("ERR {e}")),
+            }
+            out.push('\n');
+        }
+        out
+    });
+    let out = job.map_err(|e| e.to_string())?.join().map_err(|_| "the demangler thread panicked".to_string())?;
+    std::io::stdout().write_all(out.as_bytes()).map_err(|e| e.to_string())
+}
+
+/// `gnu-parse`: [`ghidra_rs::gnuparse::dump_line`] of each `mangled<TAB>text` line.
+fn gnu_parse(path: &str) -> Result<(), String> {
+    let tsv = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::new(stdout.lock());
+    for line in tsv.lines() {
+        let (mangled, text) = line.split_once('\t').unwrap_or((line, ""));
+        writeln!(out, "{}", ghidra_rs::gnuparse::dump_line(mangled, text)).map_err(|e| e.to_string())?;
+    }
+    out.flush().map_err(|e| e.to_string())
 }
 
 /// `datatest`: run upstream decompiler datatests (`console::datatest`) on the Rust console, or
@@ -361,7 +402,7 @@ fn edit(path: &str, args: &[String], write: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// `analyze`: Ghidra-style function discovery on a 32-bit PE, writing the files of the mercs2
+/// `analyze`: Ghidra-style function discovery on a 32-bit PE or an ELF x86-64, writing the files of the mercs2
 /// scripts ExportFunctions.java (`--functions`) and ExportGaps.java (`--gaps`).
 fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     use ghidra_rs::{analysis, scripts};
@@ -369,6 +410,8 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     let mut store = None;
     let mut abi: Option<(String, String)> = None;
     let mut prelude = None;
+    let mut purges = None;
+    let sla_given = std::env::var_os("GHIDRA_RS_SLA").is_some() || args.iter().any(|a| a == "--sla");
     let (mut facts, mut protos, mut gdt) = (None, None, None);
     let mut sla = std::env::var_os("GHIDRA_RS_SLA").map(PathBuf::from).unwrap_or_else(|| Sleigh::sla_path("x86"));
     let mut it = args.iter();
@@ -381,6 +424,7 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
         match flag.as_str() {
             "--functions" => functions = Some(val),
             "--gaps" => gaps = Some(val),
+            "--purges" => purges = Some(val),
             "--decomp-prelude" => prelude = Some(val),
             "--facts" => facts = Some(val),
             "--protos" => protos = Some(val),
@@ -415,7 +459,25 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
         }
     }
     let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-    let img = analysis::Image::from_pe(&data).map_err(|e| format!("{path}: {e}"))?;
+    let img = if data.starts_with(b"\x7fELF") {
+        let img = analysis::Image::from_elf(&data).map_err(|e| format!("{path}: {e}"))?;
+        // x86:LE:64:default, the gcc compiler spec
+        if !sla_given {
+            sla = Sleigh::sla_path("x86-64");
+        }
+        if abi.is_some() || store.is_some() {
+            return Err(format!("{path}: --abi-callers and --store take a 32-bit PE only"));
+        }
+        // the facts and the prelude are the decompiler's, which reads x86:LE:32:default:windows
+        if facts.is_some() || prelude.is_some() {
+            return Err(format!(
+                "{path}: not ported: --facts and --decomp-prelude for x86:LE:64 (the core types, pointer size and x86-64-gcc.cspec prototypes of the facts; the decompiler is x86:LE:32 only)"
+            ));
+        }
+        img
+    } else {
+        analysis::Image::from_pe(&data).map_err(|e| format!("{path}: {e}"))?
+    };
     let sl = Sleigh::load(&sla)?;
     let t = std::time::Instant::now();
     // --facts: the functions discovery finds without the seeds are the ones Ghidra's
@@ -476,9 +538,10 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     let create = |p: &str| std::fs::File::create(p).map(std::io::BufWriter::new).map_err(|e| format!("{p}: {e}"));
     if functions.is_some() || prelude.is_some() || facts.is_some() {
         let t = std::time::Instant::now();
-        let files = ghidra_rs::fid::default_files();
+        // the databases are x86:LE:32's; Function ID on x86-64 is not ported (warned)
+        let files = if img.elf64 { Vec::new() } else { ghidra_rs::fid::default_files() };
         let dbs = files.iter().map(|f| ghidra_rs::fid::FidDb::open(f)).collect::<Result<Vec<_>, _>>()?;
-        let fid = ghidra_rs::fid::apply(&img, &an, &sl, &dbs)?;
+        let fid = if img.elf64 { Default::default() } else { ghidra_rs::fid::apply(&img, &an, &sl, &dbs)? };
         eprintln!(
             "function id: {} functions named from {} databases in {:.1}s",
             fid.len(),
@@ -542,6 +605,13 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     if let Some(p) = gaps {
         let (covered, total) = scripts::export_gaps(&img, &an, &mut create(&p)?).map_err(|e| e.to_string())?;
         println!("function coverage: {covered} / {total} .text bytes");
+    }
+    if let Some(p) = purges {
+        let mut w = create(&p)?;
+        let n = scripts::dump_purges(&img, &an, &mut w)
+            .and_then(|n| w.flush().map(|()| n))
+            .map_err(|e| format!("{p}: {e}"))?;
+        println!("dumped {n} functions");
     }
     if let Some((csv, out)) = abi {
         let t = std::time::Instant::now();

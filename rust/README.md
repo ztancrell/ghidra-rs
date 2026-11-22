@@ -50,6 +50,9 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   `MicrosoftDemangler` ("The Microsoft demangler").
 - `ghidra-rs/tests/mdmang.rs`, `tests/data/mdmang-vectors.tsv`: MDMangBaseTest's vectors,
   extracted by `tools/mdmang-vectors.sh`.
+- `ghidra-rs/src/gnudemangle.rs`, `ghidra-rs/src/gnuparse.rs`: Ghidra's GNU (Itanium C++ ABI)
+  demangler, its native half (libiberty's `cp-demangle.c` 2.41) and `GnuDemanglerParser` ("The
+  GNU demangler"); `tools/gnu-syms.sh` and `tools/ghidra/GnuParseDump.java` check them.
 - `ghidra-rs/tests/abi.rs`: register reads and writes (sub-registers as base-register bytes)
   of a few fixed instructions.
 - `build-sla.sh`: builds Ghidra's SLEIGH compiler and compiles `x86-64.sla` and `x86.sla`.
@@ -166,7 +169,7 @@ Varnodes print as a register name when one matches exactly, `0x5:4` for constant
 ## Analysis (Milestone 2): the mercs2 Ghidra scripts
 
 ```sh
-ghidra-rs analyze <pe32> [--functions <csv>] [--gaps <csv>] [--abi-callers <register_abi.csv> <out.csv> [--data-pointers]]
+ghidra-rs analyze <pe32|elf64> [--functions <csv>] [--gaps <csv>] [--purges <txt>] [--abi-callers <register_abi.csv> <out.csv> [--data-pointers]]
                          [--decomp-prelude <out>] [--facts <out> [--protos <file>]] [--seeds <csv> | --functions-from <csv>]... [--store <file>] [--sla <file>]
 ```
 
@@ -5871,6 +5874,94 @@ comments`, an error that stops `--functions` (`scripts::demangle`) and Function 
 (`fid::apply`, the `FID_conflict:` base name); a genuine failure (Java's `null` or
 `MDException`) keeps the raw name, as Ghidra does.
 
+### The GNU demangler, branch `gnudemangle` (2026-11-21)
+
+For Hatred's Linux build (DESIGN.md, 2026-11-21). Ghidra's GNU demangler is two parts, both ported:
+
+- `ghidra-rs/src/gnudemangle.rs`: the native program `demangler_gnu_v2_41`
+  (`GPL/DemanglerGnu/src/demangler_gnu_v2_41`): libiberty's `cp-demangle.c` (binutils 2.41) as
+  its `cxxfilt.c` drives it without options (`GnuDemanglerNativeProcess` passes none): one line
+  in, one line out, `cplus_demangle` in the auto style with `DMGL_PARAMS | DMGL_ANSI |
+  DMGL_VERBOSE`. The parse keeps the C's fixed component array (`2 * strlen` components, `strlen`
+  substitutions, slots reused after a backtrack) and its in-place edits; the printer keeps the
+  modifier and template lists as indices. Its limits are the C's: a name longer than 1,024
+  characters fails (`2 * strlen > DEMANGLE_RECURSION_LIMIT`), as do the printer's recursion
+  counts. Java gives the native process 3 s a name (GnuDemanglerOptions.java:51,
+  GnuDemanglerNativeProcess.java:152-162) and then has no demangling; a wall-clock bound would
+  make the output depend on the machine, so the stand-in is a fixed one: a text that passes
+  1 MiB (`OUT_LIMIT`) fails loudly as "not demangled: limit", and the printer stops there (a
+  256-character name of doubling template arguments reaches it in 0.01 s; no name of the
+  corpora comes near). `native_demangle`, `cplus_demangle` and `gnu_demangle` run on a thread
+  of their own with a 256 MiB stack (`STACK`, reserved, touched only as deep as the recursion
+  goes), so a hostile name cannot overflow a caller's stack. Not ported: the Rust demangler that the auto style tries first (`rust-demangle.c`; a
+  name it would take, v0 `_R` or legacy `_ZN...17h<hash>E`, fails as "not ported"), and the
+  options `cxxfilt` never sets here (`DMGL_JAVA`, `DMGL_TYPES`, the return postfix).
+- `ghidra-rs/src/gnuparse.rs`: `GnuDemanglerParser` with the standard replacements
+  (`default.gnu.demangler.replacements.txt`, read in place), the `Demangled*` objects it builds
+  (kind, names, namespace nodes, signature, return type, parameters, calling convention, const,
+  virtual, static, thunk, template) and `GnuDemangler.demangle`'s wrapping (skip rules,
+  `_GLOBAL_` / `__Z` / `._Z` / `DW.ref.` prefixes, the failure checks), with the analyzer's
+  options. Not ported (each fails loudly, none met in the corpora): non-ASCII text (checked at
+  the parse's start, and `substring` gives the same error, never a panic, where a byte index
+  falls inside a character), a
+  `DemangledVariable` without a name, an object as a namespace inside a `DemangledType`, an
+  unclosed `[` (Java loops forever there). A function pointer's `FuncDef<counter>` name is
+  `FuncDef` (never printed).
+- `gnudemangle::gnu_demangle(name)` is both together (`GnuDemangler.demangle`). Nothing in
+  `analyze` calls it yet: the Demangler analyzer picks the GNU demangler for ELF and Mach-O
+  programs (`GnuDemangler.canDemangle`), and `analyze` loads only PE32 until the ELF64 loader
+  lands; the PE path keeps `mdmang::microsoft_demangle`.
+- CLI: `ghidra-rs gnu-demangle <names.txt>` (the native half, one line per name) and `ghidra-rs
+  gnu-parse <tsv>` (`mangled<TAB>native text`, the line format of `GnuParseDump.java`).
+
+**The oracle.** The native demangler of the 12.3 reference
+(`ghidra_12.3_DEV/GPL/DemanglerGnu/os/linux_x86_64/demangler_gnu_v2_41`) for the text, and
+`tools/ghidra/GnuParseDump.java` (Ghidra 12.3's `GnuDemanglerParser` from its jars, with
+`GnuDemangler`'s private wrapping copied) for the parse. Names: `tools/gnu-syms.sh <binary>...`
+(the unique `_Z` names of `nm -a` and `nm -D`), into `rust/target/gnudem/`, never committed.
+Running the Java harness (from `rust/`):
+
+```
+export JAVA_HOME=/usr/lib/jvm/java-25-openjdk PATH=$JAVA_HOME/bin:$PATH
+G=<the 12.3 install>; D=target/gnudem; CP="$(find $G/Ghidra -name '*.jar' | tr '\n' :)"
+javac -nowarn -cp "$CP" -d $D/classes tools/ghidra/GnuParseDump.java
+paste $D/hatred.syms $D/hatred.ref > $D/hatred.tsv
+java -cp "$CP$D/classes" GnuParseDump < $D/hatred.tsv | grep -v '^INFO ' > $D/hatred.java
+target/release/ghidra-rs gnu-parse $D/hatred.tsv | cmp - $D/hatred.java
+```
+
+**Measured** (2026-11-21):
+
+| corpus | names | text identical | parse identical | failed |
+|---|---|---|---|---|
+| Hatred `Hatred-Linux-Shipping` (GCC 4.4.7, UE4) | 217,716 | 217,716 | 217,716 | 0 |
+| libstdc++.so.6 and libLLVM.so | 52,312 | 52,312 | 52,312 | 0 |
+| libQt6Core, libQt6Widgets, libboost_* (text only) | 70,358 | 70,358 | not run | 0 |
+| every prefix (3 characters on) of every 50th name above (text only) | 501,011 | 501,011 | not run | 0 |
+
+"Identical" is the whole output file (`cmp`). Of Hatred's names the native demangler leaves 192
+unchanged; the parse gives 217,519 objects, 195 `null`s and 2 Java exceptions
+(`IllegalArgumentException`, two `physx::Sq::AABBTree::walk` local names), which the port
+gives as the same errors. libstdc++ and libLLVM: 52,297 objects, 8 `null`s, 2
+`IllegalArgumentException` and 5 `StringIndexOutOfBoundsException` (`llvm::make_filter_range`
+names with `decltype`), the same in the port. The prefix corpus exercises the failure paths:
+484,186 of its lines do not demangle, on both sides. GCC 4.4 makes no lambdas (they came with
+GCC 4.5); the lambda grammar is checked by the LLVM, Qt and boost names and a unit test.
+
+Checks: `cargo fmt --check`, `cargo clippy --release --all-targets -- -D warnings` clean;
+`cargo test --release` 187 passed, 0 failed (unit tests of the grammar: substitutions,
+template arguments, ctor/dtor, operators, function pointers, lambdas, local names, the length
+limit; and of the parser: templated `operator>>`, `operator<<` with a function-pointer
+parameter, conversion operators). `bars.sh` with `CORPORA=m8`: 57 lines, each equal to
+`int8-c730b2db7d.summary`'s (the PE path is unchanged).
+
+After the limit and the stack thread (review fixes, 2026-11-21): Hatred 217,716 / 217,716 and
+libstdc++ with libLLVM 52,312 / 52,312 names text and parse identical again (the native
+demangler and GnuParseDump.java rerun), 0 errors; `cargo test --release` 187 passed, 0 failed;
+fmt and clippy clean. `gnu-demangle` takes 14.1 s for Hatred's names on the desktop (one
+thread spawned a call; the time before was not measured). Not measured: the stack the deepest
+Hatred name uses. Not run: M8 bars (no PE code changed).
+
 ### Integration `int8` (2026-11-20)
 
 `int8` merges, from master b6b02b2ca5 and in this order, `ref123` (57d7ac31ac), `gap-javafacts2`
@@ -6082,6 +6173,131 @@ Rows unchanged (Java facts 488 (11, 0) M8 7; Java's list 419 (18, 62) M8 5; plai
 run counts unchanged (plain 10 runs, 6,858 cleared, 6 removed, 16 disassembled again; Java's list
 7,349, 14, 11).
 
+## ELF64 analysis: Hatred's Linux build (branch `elf64`, 2026-11-21)
+
+`analyze` takes an ELF x86-64 file (DESIGN.md, 2026-11-21) with language x86:LE:64:default
+and its gcc compiler spec: `x86-64.sla` (the `--sla` or `GHIDRA_RS_SLA` given, else the one
+next to `x86.sla`) with `x86-64.pspec`, and `x86-64-gcc.cspec` read as data at build time.
+`--functions`, `--gaps` and `--purges` work; `--facts`, `--decomp-prelude`, `--abi-callers`
+and `--store` fail loudly on ELF (the facts encode x86:LE:32's core types and the decompiler
+reads x86:LE:32:default:windows only). `--purges <txt>` writes what `tools/ghidra/DumpPurges.java`
+writes (entry, purge, thunked function, body min, max, address count, no-return), on PE and ELF.
+
+The loader, `Image::from_elf` (ElfProgramBuilder.load, the parts analysis reads):
+
+- a memory block per allocated section, execute and write from the section flags, `.bss`
+  zero-filled and unmapped for the decompiler, `.tbss` left out (it overlaps the next section),
+  the `.got` blocks read-only (processGOTSections); image base 0x100000 for a shared object or
+  PIE whose lowest PT_LOAD of the first 20 program headers is at 0 (ElfHeader.findImageBase,
+  ElfLoaderOptionsFactory.IMAGE64_BASE_DEFAULT); every section must end below 4 GiB
+  (`Analysis` keeps `u32` addresses), checked before a `.bss` is allocated, else the load
+  fails; a relocatable object (ET_REL, `.o`) fails as not ported (Java packs its sections,
+  ElfProgramBuilder.java:3490-3500);
+- the dynamic relocations of X86_64_ElfRelocationHandler: RELATIVE, RELATIVE64, IRELATIVE and
+  the packed RELR form (image base adjustment plus addend; a prelinked RELATIVE adds it to the
+  word in place, ElfHeader.isPreLinked), R_X86_64_64, GLOB_DAT and JUMP_SLOT to a defined symbol
+  (its address plus the addend); GLOB_DAT and JUMP_SLOT to an undefined symbol make the GOT slot
+  an import of `<EXTERNAL>`, as an IAT slot of a PE, and write 0 there where Java writes the
+  address of its EXTERNAL block (no block here; so no code pointer is read from it). The rest,
+  and those at no 8 bytes of a section, are counted in a warning (Hatred: 10, the
+  COPY relocations, which Java does not apply either);
+- one-byte functions at every STT_FUNC symbol of `.symtab` and `.dynsym` (evaluateElfSymbol;
+  `.cold` parts, names matching ElfSymbol's `.+\.cold((\.[0-9]+)?)`, are none), at the entry point and at DT_INIT, DT_FINI and the init, preinit and
+  fini array entries (processEntryPoints); global and weak ones are the exports;
+- `.plt` past its first 16 bytes disassembled at load, following flows (processPLTSection).
+
+Not made: Ghidra's artificial EXTERNAL block and its functions (a PLT entry's thunk is written
+`EXTERNAL` in `--purges`), the GOT/PLT pointer markup, the ELF Scalar Operand References.
+
+Analysis on x86-64 (`Analysis::run` with `Image::elf64`):
+
+- no-return names from `Features/Base/data/ElfFunctionsThatDoNotReturn` (NoReturnFunctionAnalyzer:
+  leading `_` stripped, a `*` suffix a prefix), on import slots and symbol functions; a function
+  of one `JMP [slot]` through such a slot, or of `ENDBR64; BND JMP [slot]` (`.plt.sec` of
+  `-fcf-protection`: getThunkedAddr steps over an entry instruction without p-code,
+  CreateThunkFunctionCmd.java:568-572; the no-return flag and the `EXTERNAL` column of
+  `--purges` only, `resolve_thunk` still does not), is no-return (a thunk takes its external's flag);
+  a `CALL [GOT slot]` of a non-returning import does not end the flow (measured on libtcl,
+  where it brought 743 body sizes to Java's). Traced on libtcl with Java 12.3 (a probe script
+  over the analyzed program): Java ends the flow at 4 such calls (`abort`, `exit`, `_exit`,
+  `pthread_exit`, one call each, override CALL_RETURN) and goes on at all 904 calls of
+  `__stack_chk_fail`, though that external's flag is set too. Every one of the 908 calls has
+  operand reference type READ, not INDIRECTION, so Disassembler.checkForIndirectCallFlow
+  (Disassembler.java:1321-1337, `isIndirect()`) never fires on them; what overrides the 4 was not
+  found. The rule stays (DESIGN.md, 2026-11-21): right for 904 of the 908 calls;
+- the local fold works on 8-byte registers; a call kills the `<killedbycall>` registers of
+  x86-64-gcc.cspec's default prototype (RAX, RDX) and moves RSP by its `stackshift` (8), as
+  SymbolicPropogator.getDefaultStackDepthChange does for a model with a known extrapop;
+  constants are 64-bit; offsets from a register's start value stay 32-bit (modulo 2^32); a
+  value past 32 bits, a sign-extended disp32 like 0xffffffff80401000 among them, is in no
+  block, so it makes no reference, slot, code constant or table (Java makes none outside
+  memory); a direct flow past 32 bits makes no target and is counted in a warning (8-byte
+  right shifts are not folded). Superseded: "values stay 32-bit (an 8-byte constant is cut to
+  its low half)", the code before this fix;
+- switch tables `JMP qword ptr [reg*8 + table]` (with REX prefixes; a negative disp32 is no
+  table); Create Address Tables, the pointer check of the Reference analyzer
+  (OperandReferenceAnalyzer.checkForPointer), the jumps and calls through a slot read
+  8-byte pointers (getDefaultPointerSize; AddressTable.java:1074-1100), the tables start
+  4-aligned and checkTable tests `top + 4 * i` as Java does (AddressTableAnalyzer.java:401-407).
+  Superseded: before this fix only the switch tables and the scan for runs of code pointers
+  read 8 bytes, the rest 4;
+- not run: Function Start Search (`x86-64gcc_patterns.xml` is not ported), the RTTI analyzer
+  (MSVC's), X86 Function Callee Purge (Java's `canAnalyze` refuses 64-bit), Function ID (the
+  databases are x86:LE:32's). Not ported: PIC switch tables (`MOVSXD` of 4-byte offsets plus a
+  base; Java's DecompilerSwitchAnalyzer), getThunkedAddr past a no-p-code entry instruction
+  in `resolve_thunk` (`ENDBR64; JMP`, `NOP; JMP`), purges from data-type archives, DWARF, the
+  relocation guide of Create Address Tables (AddressTable.getEntry takes only relocated words
+  where the program has relocations), the Disassembler's thunk-aware no-return test
+  (isNoReturnCall reads Function.hasNoReturn, which follows a thunk, FunctionDB.java:1217-1222;
+  `descend` reads the no-return set alone, before bodies and thunks exist).
+
+Check: `tools/elf64-ref.sh [extra binaries]` builds `tools/corpus/elf64/*.c` with gcc -O2
+(non-PIE, PIE, and PIE with `-fcf-protection=full` as `-cet`, no `-g`: Java takes no-return flags from DWARF, which ghidra-rs does not read
+yet), runs Java 12.3's plain auto-analysis with `DumpPurges.java` once (kept in
+`rust/target/elf64/`) and `analyze --purges`, and compares the lines (Java's EXTERNAL-block
+functions left out). Against Java 12.3 (gcc 15, the desktop):
+
+| binary | Java | ghidra-rs | entries in both | identical lines | identical but the purge |
+|---|---|---|---|---|---|
+| t1 | 22 | 22 | 22 | 11 | 18 |
+| t1-pie | 20 | 19 | 19 | 8 | 14 |
+| t1-cet | 19 | 18 | 18 | 7 | 13 |
+| t2 | 24 | 24 | 24 | 15 | 22 |
+| t2-pie | 22 | 22 | 22 | 13 | 20 |
+| t2-cet | 21 | 21 | 21 | 12 | 19 |
+| `/usr/lib/libtcl8.6.so` | 2,535 | 2,533 | 2,533 | 2,438 | 2,444 |
+
+The causes: purges (Java's 0 on PLT thunks and `_init`, from data-type archives); PIC switch
+tables (t1-pie's `sw`, so its tail call makes no `puts` thunk; most of libtcl's 57 body
+counts); `NOP; JMP` and `ENDBR64; JMP [slot]` thunks (`frame_dummy` in each; 34 thunk
+columns of libtcl); Java's no-return on `_start` (its `hlt` after `__libc_start_main`) and
+on t1-pie's `die`, not traced; libtcl's 2 functions Java has more (0x1bf2cd, 0x1c4cca, odd
+addresses not traced).
+
+After the review fixes (2026-11-21: pointer size, values past 32 bits, ET_REL, ENDBR64 PLT
+thunks, EXTERNAL slots, IRELATIVE and RELATIVE64, section bounds): t1, t1-pie, t2 and t2-pie
+unchanged; libtcl 2,442 -> 2,444 identical but the purge (2,438 identical lines, unchanged),
+17 relocations counted not applied (the count before was not recorded). In the new `-cet`
+binaries the `ENDBR64; BND JMP [slot]` thunks of `abort` and `exit` are `EXTERNAL` and
+no-return as in Java; t1-cet's other differences are the causes above (`puts` thunk from the
+PIC switch's tail call, an `ENDBR64; JMP` thunk `resolve_thunk` does not make) and two body
+sizes and one no-return flag, not traced.
+
+Hatred (`Hatred-Linux-Shipping`, 508 MB, ELF x86-64 EXEC, 45 MB `.text`, the desktop, one
+thread): 10,488,140 instructions, 180,033 functions (407 imports), analysis 54.5 s, 87 s with
+`--functions`, `--gaps` and `--purges`; every one of its 179,630 defined STT_FUNC symbols is a
+function, 403 functions are at no symbol; `.text` coverage 43,002,764 / 45,177,887 bytes.
+Warnings: 10 relocations not applied, 22 slot jumps past an entry, 566 Repair Flow Damage
+calls. Java was not run on it (14 GB of RAM for a 508 MB binary; not tried). Not rerun after
+the review fixes (2026-11-21): the run waited in the heavy-run queue behind another job; the
+numbers above are from before them.
+
+The PE path: `cargo test --release` 178 passed, 0 failed; `cargo fmt --check` and `cargo clippy
+--release --all-targets -- -D warnings` clean; M8 bars (`CORPORA=m8 bars.sh`, the 12.3 `x86.sla`,
+a new prelude: cksum 3963700924, 29,768 functions, as `int8`'s) all 57 lines equal those of
+`baselines/int8-c730b2db7d.summary`. Not run: M500 bars, the Mac. After the review fixes: `cargo test
+--release` 178 passed, 0 failed; fmt and clippy clean; M8 bars 57 / 57 lines equal to the baseline.
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The
@@ -6097,7 +6313,9 @@ with output sent to `/dev/null`:
 ## Limits
 
 - One processor family: x86 (`x86-64.sla` and the 32-bit `x86.sla`). `analyze` takes 32-bit
-  PE files only.
+  PE files and ELF x86-64 files (functions, bodies, gaps; see "ELF64 analysis"); `--facts`,
+  `--decomp-prelude`, `--abi-callers`, `--store`, `edit`, `export` and the decompiler take
+  32-bit PE files only. Superseded (2026-11-21): "`analyze` takes 32-bit PE files only".
 - Context starts from the `.pspec` defaults. Context commits (`globalset`) are recorded per
   address in the `Parse` and apply to later decodes there (flowing ones from that address on);
   the x86 specs do not use them. Delay slots, `crossbuild`, `inst_next2` and flowref/flowdest

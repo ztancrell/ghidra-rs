@@ -1,4 +1,5 @@
-//! Function discovery, bodies and references for 32-bit x86 PE images, modelled on what
+//! Function discovery, bodies and references for 32-bit x86 PE images (and ELF x86-64 ones,
+//! `Image::from_elf`), modelled on what
 //! Ghidra's auto-analysis produces for the scripts in `main.rs` (ExportFunctions, ExportGaps).
 //! Every executable section is disassembled; results are reported for `.text`. See rust/README.md "Analysis" for what is and isn't covered.
 
@@ -29,6 +30,14 @@ pub struct Image {
     pub imports: HashMap<u32, (String, String)>, // IAT slot -> (library, function)
     pub export_dir: (u32, u32), // export directory (address, size): its tables hold RVAs, not addresses
     pub eat: Vec<(u32, u32)>,   // export address table: (slot, function it names)
+    /// An ELF x86-64 image (`from_elf`): pointers are 8 bytes, the language x86:LE:64:default
+    pub elf64: bool,
+    /// ELF: the functions the loader makes, in its order (ElfProgramBuilder: the symbol-table
+    /// STT_FUNC symbols, then the entry point and the dynamic entries); the exports hold the
+    /// global and weak ones and the entries
+    pub elf_funcs: Vec<(u32, String)>,
+    /// ELF: dynamic relocations `from_elf` does not apply (Ghidra applies them)
+    pub unapplied_relocs: usize,
 }
 
 impl Image {
@@ -111,6 +120,251 @@ impl Image {
         Ok(img)
     }
 
+    /// An ELF x86-64 file as Ghidra's ElfLoader loads it, what analysis reads of it
+    /// (ElfProgramBuilder.load): a memory block per allocated section (processSectionHeaders;
+    /// `.tbss` left out, it overlaps the next section), the `.got` blocks read-only
+    /// (processGOTSections), the image base 0x100000 for a shared object linked at 0
+    /// (ElfLoaderOptionsFactory.IMAGE64_BASE_DEFAULT), a one-byte function at each STT_FUNC
+    /// symbol of the symbol tables (evaluateElfSymbol; `.cold` parts are none), at the entry
+    /// point and at DT_INIT, DT_FINI and the entries of the init, preinit and fini arrays
+    /// (processEntryPoints). GOT slots the dynamic relocations bind to an undefined symbol are
+    /// imports of `<EXTERNAL>` (Library.UNKNOWN), as the IAT slots of a PE: Ghidra points them
+    /// at its EXTERNAL block, which is not made here. Addresses must fit in 32 bits.
+    pub fn from_elf(bytes: &[u8]) -> Result<Image, String> {
+        use object::elf;
+        use object::read::elf::{Dyn, ElfFile64, FileHeader, ProgramHeader, Rela, SectionHeader, Sym};
+        use object::LittleEndian as LE;
+        let file = ElfFile64::<LE>::parse(bytes).map_err(|e| e.to_string())?;
+        let (hdr, e) = (file.elf_header(), LE);
+        if hdr.e_machine(e) != elf::EM_X86_64 {
+            return Err(format!("ELF machine {} is not x86-64", hdr.e_machine(e)));
+        }
+        let kind = hdr.e_type(e);
+        if kind == elf::ET_REL {
+            // ElfProgramBuilder.java:3490-3500 packs an object's sections (all at 0) one after another
+            return Err("ELF relocatable object (ET_REL) is not ported: Java packs its sections".into());
+        }
+        let segs = hdr.program_headers(e, bytes).map_err(|e| e.to_string())?;
+        // ElfHeader.findImageBase (ElfHeader.java:1515-1539): the lowest PT_LOAD of the first 20
+        let min_load =
+            segs.iter().take(20).filter(|p| p.p_type(e) == elf::PT_LOAD).map(|p| p.p_vaddr(e)).min().unwrap_or(0);
+        let adj = if min_load == 0 && kind == elf::ET_DYN { 0x10_0000 } else { 0 };
+        let addr32 = |a: u64| {
+            a.checked_add(adj)
+                .and_then(|a| u32::try_from(a).ok())
+                .ok_or(format!("address {a:#x} + {adj:#x} is past 32 bits"))
+        };
+        let mut img = Image { elf64: true, ..Image::default() };
+        let sections = hdr.sections(e, bytes).map_err(|e| e.to_string())?;
+        for s in sections.iter() {
+            let flags = s.sh_flags(e);
+            let name = String::from_utf8_lossy(sections.section_name(e, s).unwrap_or_default()).into_owned();
+            if flags & u64::from(elf::SHF_ALLOC) == 0 || s.sh_size(e) == 0 || name == ".tbss" {
+                continue;
+            }
+            let nobits = s.sh_type(e) == elf::SHT_NOBITS;
+            // the whole section must lie below 4 GiB (`Analysis` keeps u32 addresses), checked
+            // before a `.bss` is allocated
+            let addr = addr32(s.sh_addr(e))?;
+            if u64::from(addr) + s.sh_size(e) > 1 << 32 {
+                return Err(format!("section {name} at {addr:#x}, {:#x} bytes, ends past 32 bits", s.sh_size(e)));
+            }
+            let size = s.sh_size(e) as usize;
+            let data = if nobits { vec![0; size] } else { s.data(e, bytes).map_err(|e| e.to_string())?.to_vec() };
+            img.sections.push(Section {
+                exec: flags & u64::from(elf::SHF_EXECINSTR) != 0,
+                readonly: flags & u64::from(elf::SHF_WRITE) == 0 || name.starts_with(".got"),
+                zero_tail: if nobits { size as u32 } else { 0 },
+                addr,
+                data,
+                name,
+            });
+        }
+        let exec_at = |img: &Image, a: u32| img.block_of(a).is_some_and(|s| s.exec);
+        // the symbol tables, .symtab first as the section order has it
+        let mut undefined = HashMap::new(); // (table, index) -> name, for the relocations
+        let mut defined = HashMap::new(); // (table, index) -> address
+        let mut made = HashSet::new(); // the entries of `elf_funcs`
+        for (ti, table) in sections.iter().enumerate() {
+            if !matches!(table.sh_type(e), elf::SHT_SYMTAB | elf::SHT_DYNSYM) {
+                continue;
+            }
+            let Some(syms) = table.symbols(e, bytes, &sections, object::SectionIndex(ti)).map_err(|e| e.to_string())?
+            else {
+                continue;
+            };
+            for (i, s) in syms.iter().enumerate() {
+                let name = String::from_utf8_lossy(s.name(e, syms.strings()).unwrap_or_default()).into_owned();
+                if s.st_shndx(e) == elf::SHN_UNDEF {
+                    undefined.insert((ti, i), name);
+                    continue;
+                }
+                if s.st_shndx(e) < elf::SHN_LORESERVE {
+                    defined.insert((ti, i), s.st_value(e) + adj);
+                }
+                if s.st_type() != elf::STT_FUNC
+                    || name.is_empty()
+                    || is_cold(&name)
+                    || s.st_shndx(e) >= elf::SHN_LORESERVE
+                {
+                    continue;
+                }
+                let a = addr32(s.st_value(e))?;
+                if made.insert(a) {
+                    img.elf_funcs.push((a, name.clone()));
+                }
+                if matches!(s.st_bind(), elf::STB_GLOBAL | elf::STB_WEAK) {
+                    img.exports.push((a, name));
+                }
+            }
+        }
+        img.entry = (hdr.e_entry(e) != 0).then(|| addr32(hdr.e_entry(e))).transpose()?;
+        // the dynamic relocations (X86_64_ElfRelocationHandler): GOT slots bound to undefined
+        // symbols by JUMP_SLOT and GLOB_DAT are imports, and hold Java's EXTERNAL-block address
+        // there (X86_64_ElfRelocationHandler.java:168-170; 0 here, which is no block); to a
+        // defined symbol they and R_X86_64_64 write its address plus the addend; RELATIVE,
+        // RELATIVE64 and IRELATIVE write the image base adjustment plus the addend, a prelinked
+        // RELATIVE plus the word in place (X86_64_ElfRelocationHandler.java:76-93; RELR, the
+        // packed form, the word in place). Others are counted, not applied (COPY, which Java
+        // does not apply either, among them), and so are those at no 8 bytes of a section.
+        // ElfHeader.isPreLinked (ElfHeader.java:1582-1626): "PRE" at the file's end, or DT_GNU_PRELINKED
+        let prelinked = bytes.len() >= 8 && String::from_utf8_lossy(&bytes[bytes.len() - 4..]).trim() == "PRE"
+            || sections.iter().filter(|s| s.sh_type(e) == elf::SHT_DYNAMIC).any(|d| {
+                d.data_as_array::<elf::Dyn64<LE>, _>(e, bytes)
+                    .is_ok_and(|ds| ds.iter().any(|x| x.d_tag(e) == u64::from(elf::DT_GNU_PRELINKED)))
+            });
+        let mut other = 0;
+        let put = |img: &mut Image, at: u32, f: &dyn Fn(u64) -> u64| {
+            let sec = img.sections.iter_mut().find(|s| at >= s.addr && (at - s.addr) as usize + 8 <= s.data.len());
+            sec.map(|sec| {
+                let o = (at - sec.addr) as usize;
+                let old = u64::from_le_bytes(sec.data[o..o + 8].try_into().unwrap());
+                sec.data[o..o + 8].copy_from_slice(&f(old).to_le_bytes());
+            })
+            .is_some()
+        };
+        for s in sections.iter() {
+            if s.sh_flags(e) & u64::from(elf::SHF_ALLOC) == 0 {
+                continue;
+            }
+            if s.sh_type(e) == elf::SHT_RELR {
+                let words: &[object::U64<LE>] = s.data_as_array(e, bytes).map_err(|e| e.to_string())?;
+                let mut next = 0u64;
+                for w in words.iter().map(|w| w.get(e)) {
+                    let at = if w & 1 == 0 {
+                        vec![w]
+                    } else {
+                        (1..64).filter(|b| w >> b & 1 != 0).map(|b| next + 8 * (b - 1)).collect()
+                    };
+                    for &a in &at {
+                        if !put(&mut img, addr32(a)?, &|v| v.wrapping_add(adj)) {
+                            other += 1;
+                        }
+                    }
+                    next = if w & 1 == 0 { w + 8 } else { next + 63 * 8 };
+                }
+                continue;
+            }
+            if s.sh_type(e) != elf::SHT_RELA {
+                continue;
+            }
+            let link = s.sh_link(e) as usize;
+            let relas: &[elf::Rela64<LE>] = s.data_as_array(e, bytes).map_err(|e| e.to_string())?;
+            for r in relas {
+                let (at, sym) = (addr32(r.r_offset(e))?, r.r_sym(e, false) as usize);
+                let addend = r.r_addend(e);
+                let applied = match r.r_type(e, false) {
+                    elf::R_X86_64_JUMP_SLOT | elf::R_X86_64_GLOB_DAT | elf::R_X86_64_64 => {
+                        if let Some(&v) = defined.get(&(link, sym)) {
+                            put(&mut img, at, &|_| v.wrapping_add(addend as u64))
+                        } else if let Some(name) = undefined.get(&(link, sym)).filter(|n| !n.is_empty()) {
+                            if r.r_type(e, false) == elf::R_X86_64_64 {
+                                false
+                            } else {
+                                img.imports.insert(at, ("<EXTERNAL>".to_string(), name.clone()));
+                                put(&mut img, at, &|_| 0)
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                    elf::R_X86_64_RELATIVE | elf::R_X86_64_RELATIVE64 if prelinked => {
+                        put(&mut img, at, &|v| v.wrapping_add(adj))
+                    }
+                    elf::R_X86_64_RELATIVE | elf::R_X86_64_RELATIVE64 | elf::R_X86_64_IRELATIVE => {
+                        put(&mut img, at, &|_| (adj as i64).wrapping_add(addend) as u64)
+                    }
+                    _ => false,
+                };
+                if !applied {
+                    other += 1;
+                }
+            }
+        }
+        img.unapplied_relocs = other;
+        let mut entries = Vec::new();
+        if hdr.e_entry(e) != 0 && matches!(kind, elf::ET_EXEC | elf::ET_DYN) {
+            entries.push((addr32(hdr.e_entry(e))?, "entry".to_string()));
+        }
+        // the dynamic table: DT_INIT, DT_FINI and the arrays (createDynamicEntryPoints)
+        let dynamic = sections.iter().find(|s| s.sh_type(e) == elf::SHT_DYNAMIC);
+        if let Some(d) = dynamic {
+            let dyns: &[elf::Dyn64<LE>] = d.data_as_array(e, bytes).map_err(|e| e.to_string())?;
+            let val = |tag: u32| dyns.iter().find(|x| x.d_tag(e) == u64::from(tag)).map(|x| x.d_val(e));
+            for (tag, name) in [(elf::DT_INIT, "_DT_INIT"), (elf::DT_FINI, "_DT_FINI")] {
+                if let Some(v) = val(tag) {
+                    entries.push((addr32(v)?, name.to_string()));
+                }
+            }
+            for (at, size, base) in [
+                (elf::DT_INIT_ARRAY, elf::DT_INIT_ARRAYSZ, "_INIT_"),
+                (elf::DT_PREINIT_ARRAY, elf::DT_PREINIT_ARRAYSZ, "_PREINIT_"),
+                (elf::DT_FINI_ARRAY, elf::DT_FINI_ARRAYSZ, "_FINI_"),
+            ] {
+                let (Some(at), Some(size)) = (val(at), val(size)) else { continue };
+                for i in 0..size / 8 {
+                    match img.read_ptr(addr32(at + 8 * i)?) {
+                        Some(0) => {}
+                        // relocated above where the array has RELATIVE relocations
+                        Some(f) => entries.push((f, format!("{base}{i}"))),
+                        None => break,
+                    }
+                }
+            }
+        }
+        for (a, name) in entries {
+            if !exec_at(&img, a) {
+                continue;
+            }
+            if made.insert(a) {
+                img.elf_funcs.push((a, name.clone()));
+            }
+            if img.exports.iter().all(|x| x.0 != a) {
+                img.exports.push((a, name));
+            }
+        }
+        Ok(img)
+    }
+
+    /// A pointer of the image: 4 bytes, or 8 for an ELF64 image (None past 32 bits).
+    pub fn read_ptr(&self, a: u32) -> Option<u32> {
+        if !self.elf64 {
+            return self.read_u32(a);
+        }
+        let s = self.block_of(a)?;
+        let o = (a - s.addr) as usize;
+        ptr_value(s.data.get(o..o + 8)?)
+    }
+
+    /// The pointer size in bytes.
+    pub fn ptr_size(&self) -> u32 {
+        if self.elf64 {
+            8
+        } else {
+            4
+        }
+    }
+
     pub fn c_string(&self, a: u32) -> String {
         let Some(s) = self.block_of(a) else { return String::new() };
         let b = &s.data[(a - s.addr) as usize..];
@@ -153,6 +407,7 @@ pub struct Ins {
     pub refs: Vec<u32>,        // data references: constant addresses inside the image
     pub rw: Vec<u32>,          // the `refs` a memory operand makes (READ or WRITE; the others are DATA)
     pub code_imms: Vec<u32>,   // immediates that point into an executable section
+    pub nop: bool,             // no p-code (ENDBR64), which getThunkedAddr steps over
 }
 
 /// The references `Analysis::disassemble` goes by: every destination, and the destinations in
@@ -168,7 +423,7 @@ struct Refs {
 /// SymbolicPropogator keeps unknown registers as symbols.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Val {
-    C(u32),
+    C(u64),
     S(u64, u32),
 }
 
@@ -236,6 +491,14 @@ pub struct Analysis {
     /// The purge X86 Function Callee Purge set, by function (`callee_purge`); none is unknown.
     pub callee_purges: HashMap<u32, u32>,
     reg_space: u32,
+    /// the local fold: register and pointer width, the stack pointer's offset, and the
+    /// registers a call kills besides it (the default prototype's `<killedbycall>`)
+    width: u32,
+    sp: u64,
+    killed: Vec<u64>,
+    /// the default prototype's stackshift where its extrapop is known (x86-64-gcc.cspec: 8); the
+    /// PE's `__stdcall` has an unknown one
+    stackshift: Option<u32>,
     /// Flow overrides of the project store (`store.rs`), by instruction: CALL_RETURN (true) or
     /// none (false) in place of what `call_return` derives. Empty without a store.
     pub overrides: HashMap<u32, bool>,
@@ -250,10 +513,17 @@ pub struct Analysis {
     body_owner: HashMap<u32, u32>,
     /// What `run` met that is not ported, one line each, for the caller to print.
     pub warnings: Vec<String>,
+    /// decodes of a direct flow whose target is past 32 bits (out of the image), for a warning
+    wide_flows: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 const MAX_STACK: [usize; 2] = [16, 1024]; // local fold, whole-function walk
 const MAX_MEM: [usize; 2] = [64, 1024];
+
+/// Ghidra's list for ELF (noReturnFunctionConstraints.xml), read as data at build time
+const ELF_NORETURN: &str = include_str!("../../../Ghidra/Features/Base/data/ElfFunctionsThatDoNotReturn");
+/// The x86-64 System V compiler spec of x86:LE:64:default:gcc, read as data at build time
+pub const X86_64_GCC_CSPEC: &str = include_str!("../../../Ghidra/Processors/x86/data/languages/x86-64-gcc.cspec");
 
 const KNOWN_NORETURN: [&str; 9] = [
     "ExitProcess",
@@ -363,28 +633,85 @@ impl Analysis {
             purge: HashMap::new(),
             callee_purges: HashMap::new(),
             reg_space: 0,
+            width: 4,
+            sp: 0x10,
+            killed: vec![0, 4, 8],
+            stackshift: None,
             overrides: HashMap::new(),
             fixed_bodies: BTreeMap::new(),
             thunks: HashMap::new(),
             thunk_of: BTreeMap::new(),
             body_owner: HashMap::new(),
             warnings: Vec::new(),
+            wide_flows: Default::default(),
         };
         let (rs, list) = sl.registers();
         an.fpu_ip = list.iter().find(|r| r.0 == "FPUInstructionPointer").map(|r| (rs, r.1));
         an.reg_space = rs;
-        for (slot, (_, name)) in &img.imports {
+        if img.elf64 {
+            // the fold of x86-64: 8-byte registers, RSP, and the `<killedbycall>` registers of
+            // x86-64-gcc.cspec's default prototype (x86win.cspec's EAX, ECX, EDX for the PE)
+            let reg = |n: &str| list.iter().find(|r| r.0 == n).map(|r| r.1).ok_or(format!("no register {n}"));
+            an.width = 8;
+            an.sp = reg("RSP")?;
+            let root = crate::xml::parse(X86_64_GCC_CSPEC).map_err(|e| format!("x86-64-gcc.cspec: {e}"))?;
+            let proto = root
+                .kid("default_proto")
+                .and_then(|d| d.kid("prototype"))
+                .ok_or("x86-64-gcc.cspec: no default prototype")?;
+            let killed =
+                proto.kid("killedbycall").map(|k| k.kids_named("register").collect::<Vec<_>>()).unwrap_or_default();
+            an.stackshift = (proto.attr("extrapop") != Some("unknown"))
+                .then(|| proto.attr("stackshift").and_then(|s| s.parse().ok()))
+                .flatten();
+            an.killed.clear();
+            for r in killed {
+                let (off, size) = list
+                    .iter()
+                    .find(|x| Some(x.0) == r.attr("name"))
+                    .map(|x| (x.1, x.2))
+                    .ok_or("x86-64-gcc.cspec: unknown killedbycall register")?;
+                // the vector registers lie past the integer ones the fold keeps
+                if size == 8 {
+                    an.killed.push(off);
+                }
+            }
+            // NoReturnFunctionAnalyzer with ElfFunctionsThatDoNotReturn: a symbol whose name,
+            // leading '_'s stripped, is on the list (or starts with a name ending in '*')
+            let names: Vec<&str> =
+                ELF_NORETURN.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).collect();
+            let listed = |n: &str| {
+                let n = n.trim_start_matches('_');
+                names.iter().any(|&l| l == n || l.strip_suffix('*').is_some_and(|p| n.starts_with(p)))
+            };
+            let named = img.imports.iter().map(|(&s, (_, n))| (s, n)).chain(img.elf_funcs.iter().map(|(a, n)| (*a, n)));
+            an.noreturn.extend(named.filter(|(_, n)| listed(n)).map(|(a, _)| a).collect::<Vec<_>>());
+            an.warnings.push(
+                "not ported for x86-64: Function Start Search (x86-64gcc_patterns.xml), Function ID, the GOT/PLT markup and EXTERNAL block, DWARF; the X86 Function Callee Purge analyzer does not run on 64-bit (Java's canAnalyze)"
+                    .into(),
+            );
+            if img.unapplied_relocs > 0 {
+                an.warnings.push(format!("not ported: {} ELF dynamic relocations not applied", img.unapplied_relocs));
+            }
+        }
+        for (slot, (_, name)) in img.imports.iter().filter(|_| !img.elf64) {
             if KNOWN_NORETURN.contains(&name.as_str()) {
                 an.noreturn.insert(*slot);
             }
         }
-        let mut seeds: Vec<u32> =
-            img.exports.iter().map(|e| e.0).chain(img.entry).chain(extra.iter().copied()).collect();
+        let mut seeds: Vec<u32> = img
+            .elf_funcs
+            .iter()
+            .chain(&img.exports)
+            .map(|e| e.0)
+            .chain(img.entry)
+            .chain(extra.iter().copied())
+            .collect();
         seeds.retain(|&a| an.is_code(img, a));
         // RTTI vftable slots: the RTTI analyzer (599) makes a function of each
-        // (`EHDataTypeUtilities.createFunctionIfNeeded`)
+        // (`EHDataTypeUtilities.createFunctionIfNeeded`); MSVC's, so not on ELF
         let mut rtti = Vec::new();
-        let tables = crate::scripts::vftables(img);
+        let tables = if img.elf64 { BTreeMap::new() } else { crate::scripts::vftables(img) };
         for &v in tables.keys() {
             for i in 0..4096 {
                 match img.read_u32(v + 4 * i) {
@@ -401,10 +728,11 @@ impl Analysis {
         // Create Address Tables: runs of 2+ code pointers in data are disassembled after
         // everything else, without making functions. (Making functions of lone pointers or of
         // referenced tables matched Ghidra worse: more extra functions than found ones.)
+        let w = img.ptr_size() as usize;
         for sec in img.sections.iter().filter(|s| !s.exec && s.name != "Headers") {
             let mut run = Vec::new();
-            for o in (0..sec.data.len().saturating_sub(3) + 4).step_by(4) {
-                let t = sec.data.get(o..o + 4).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()));
+            for o in (0..sec.data.len().saturating_sub(w - 1) + w).step_by(w) {
+                let t = sec.data.get(o..o + w).and_then(ptr_value).unwrap_or(0);
                 if an.is_code(img, t) {
                     run.push(t);
                     continue;
@@ -458,6 +786,22 @@ impl Analysis {
             // jumps through a pointer, with the thunks the Reference analyzer makes of them
             analyzer("Constant Reference Analyzer", Kind::Function, priority::REFERENCE_ANALYSIS - 4, Task::SlotJumps),
         ]);
+        // ElfDefaultGotPltMarkup.processPLTSection at load: `.plt` past its first 16 bytes is
+        // disassembled, following flows, from each byte no instruction covers yet; the first
+        // address that decodes nothing ends it (processLinkageTable). No function is made.
+        if let Some(plt) = img.section(".plt").filter(|s| img.elf64 && s.exec && s.data.len() > 16) {
+            let (mut a, end) = (plt.addr + 16, plt.addr + plt.data.len() as u32);
+            while a < end {
+                queue.push(a);
+                an.descend(img, sl, &mut p, &mut owner, &mut queue, &mut Vec::new());
+                if owner[(a - an.code_lo) as usize] == 0 {
+                    break;
+                }
+                while a < end && owner[(a - an.code_lo) as usize] != 0 {
+                    a += 1;
+                }
+            }
+        }
         mgr.notify(Kind::Byte, &exec().map(|s| s.addr).collect());
         // with `exact`, only the given functions are made (CreateFunctionCmd)
         let allowed: Option<HashSet<u32>> = exact.then(|| extra.iter().copied().collect());
@@ -494,11 +838,15 @@ impl Analysis {
                     queue.append(&mut tables_queue);
                     an.descend(img, sl, &mut p, &mut owner, &mut queue, &mut Vec::new());
                 }
+                // x86win_patterns.xml is the PE's; x86-64gcc_patterns.xml is not ported (warned)
+                Task::StartSearch | Task::StartSearchAfterData if img.elf64 => {}
                 Task::StartSearch | Task::StartSearchAfterData => {
                     an.start_search(img, sl, &mut p, &mut owner, &mut queue)
                 }
                 Task::SharedReturns => an.shared_returns(&set),
                 Task::SlotJumps => slot_thunks = an.slot_jumps(img, sl, &mut p, &mut owner, &set),
+                // X86FunctionPurgeAnalyzer.canAnalyze: 32-bit only
+                Task::Purge if img.elf64 => {}
                 Task::Purge => an.callee_purge(img, &set, &body_noreturn),
             }
             mgr.notify(Kind::Data, &data);
@@ -610,7 +958,7 @@ impl Analysis {
             let target = match (i.flow, i.slot) {
                 (Flow::Jump, _) => i.target,
                 // through a pointer that holds a function's entry (the facts' SecuROM slots)
-                (Flow::JumpInd, Some(s)) if !img.imports.contains_key(&s) => img.read_u32(s),
+                (Flow::JumpInd, Some(s)) if !img.imports.contains_key(&s) => img.read_ptr(s),
                 _ => None,
             };
             let one_jump = b.len() == 1 && target.is_some_and(|t| t != f && an.funcs.contains(&t));
@@ -639,6 +987,11 @@ impl Analysis {
             an.warnings.push(format!(
                 "not ported: getThunkedAddr past a no-p-code entry instruction: {nop_thunks} functions start `NOP; JMP` and are no thunks here"
             ));
+        }
+        let wide = an.wide_flows.load(std::sync::atomic::Ordering::Relaxed);
+        if wide > 0 {
+            an.warnings
+                .push(format!("{wide} decodes of a direct flow past 32 bits (out of the image): no target made"));
         }
         an.stack_purges(img);
         Ok(an)
@@ -831,7 +1184,7 @@ impl Analysis {
     fn slot_jump(&self, img: &Image, owner: &[u8], a: u32) -> Option<u32> {
         let i = self.insns.get(&a).filter(|i| i.flow == Flow::JumpInd)?;
         let s = i.slot.filter(|s| !img.imports.contains_key(s))?;
-        let t = img.read_u32(s).filter(|&t| t != 0 && self.is_code(img, t))?;
+        let t = img.read_ptr(s).filter(|&t| t != 0 && self.is_code(img, t))?;
         let inside = owner[(t - self.code_lo) as usize] >= 2 || self.body_owner.get(&t).is_some_and(|&g| g != t);
         (!inside).then_some(t)
     }
@@ -1013,8 +1366,29 @@ impl Analysis {
     }
 
     /// A function that does not return: marked, or a thunk of one (Function.hasNoReturn).
-    fn is_noreturn(&self, f: u32) -> bool {
-        self.noreturn.contains(&f) || self.noreturn.contains(&self.thunked_end(f))
+    pub fn is_noreturn(&self, f: u32) -> bool {
+        let t = self.thunked_end(f);
+        self.noreturn.contains(&f) || self.noreturn.contains(&t) || self.width == 8 && self.import_thunk_noreturn(t)
+    }
+
+    /// A function of one `JMP [slot]` through a non-returning import's slot: Ghidra makes it a
+    /// thunk of the external function (CreateThunkFunctionCmd.getThunkedExternalFunction),
+    /// whose no-return flag it takes. ELF only (a PLT entry); the PE path keeps its rule.
+    fn import_thunk_noreturn(&self, f: u32) -> bool {
+        self.slot_thunk(f).is_some_and(|s| self.noreturn.contains(&s))
+    }
+
+    /// The slot of a function whose body is one `JMP [slot]`; on x86-64 also one after an
+    /// entry instruction without p-code (`ENDBR64; BND JMP [slot]` of `.plt.sec`), which
+    /// CreateThunkFunctionCmd.getThunkedAddr steps over (CreateThunkFunctionCmd.java:568-572).
+    /// The PE path keeps the one-instruction body.
+    pub fn slot_thunk(&self, f: u32) -> Option<u32> {
+        let (body, first) = (self.bodies.get(&f)?, self.insns.get(&f)?);
+        let (jmp, n) = match first.nop && self.width == 8 {
+            true => (self.insns.get(&(f + first.len as u32))?, 2),
+            false => (first, 1),
+        };
+        (body.len() == n && jmp.flow == Flow::JumpInd).then_some(jmp.slot).flatten()
     }
 
     /// detectNoReturn: one pass over the calls of `set`; true if a suspicious target stayed
@@ -1244,19 +1618,20 @@ impl Analysis {
         // ECX,ESI; MOV EAX,[ECX]; MOV EDX,[EAX+0x14]; CALL EDX` gives a READ reference to the
         // slot vtable+0x14 and the call's target (Ghidra's COMPUTED_CALL reference). The fold
         // follows jumps (`descend` hands it to the target) and a call clobbers EAX/ECX/EDX/ESP.
-        let (uniq, rs) = (sl.uniq_space(), self.reg_space);
+        let (uniq, rs, w, sp) = (sl.uniq_space(), self.reg_space, self.width, self.sp);
         fold.regs.retain(|f| f.0 != uniq);
         fold.stack.clear();
         fold.mem_size = 0;
         fold.data.clear();
         let val = |v: &crate::sleigh::Varnode, fold: &Fold| -> Option<(Val, bool)> {
-            let mem = |x: u32| match fold.mem.iter().find(|m| m.0 == Val::C(x)) {
+            // an address past 32 bits is in no block: memory there is unknown
+            let mem = |x: u64| match fold.mem.iter().find(|m| m.0 == Val::C(x)) {
                 Some(m) => m.1.map(|v| (v, m.2)),
-                None => img.read_u32(x).map(|x| (Val::C(x), true)),
+                None => u32::try_from(x).ok().and_then(|x| img.read_ptr(x)).map(|x| (Val::C(x.into()), true)),
             };
             match v.space {
-                0 => Some((Val::C(v.offset as u32), false)),
-                s if s == code => (v.size == 4).then(|| mem(v.offset as u32)).flatten(),
+                0 => Some((Val::C(mask(v.offset, v.size)), false)),
+                s if s == code => (v.size == w).then(|| mem(v.offset)).flatten(),
                 s => match fold
                     .regs
                     .iter()
@@ -1265,17 +1640,19 @@ impl Analysis {
                     Some(f) if f.1 == v.offset && f.2 == v.size => f.3.map(|x| (x, f.4)),
                     // a constant's low bytes, `ROL EDX,CL` after `MOV ECX,[a]`
                     Some(f) if f.1 <= v.offset && v.offset + v.size as u64 <= f.1 + f.2 as u64 => match f.3 {
-                        Some(Val::C(c)) => Some((Val::C(mask(c >> (8 * (v.offset - f.1)), v.size)), f.4)),
+                        Some(Val::C(c)) if v.offset - f.1 < 4 => {
+                            Some((Val::C(mask(c >> (8 * (v.offset - f.1)), v.size)), f.4))
+                        }
                         _ => None,
                     },
-                    None if s == rs && v.size == 4 => Some((Val::S(v.offset, 0), false)),
+                    None if s == rs && v.size == w => Some((Val::S(v.offset, 0), false)),
                     _ => None,
                 },
             }
         };
         let load = |p: Val, fold: &Fold| -> Option<(Val, bool)> {
             match p {
-                Val::C(x) => val(&crate::sleigh::Varnode { space: code, offset: x as u64, size: 4 }, fold),
+                Val::C(x) => val(&crate::sleigh::Varnode { space: code, offset: x, size: w }, fold),
                 // memory nothing was stored to holds a symbol of its own (its first value), as
                 // Ghidra keeps an unknown location: `MOV EBP,[ESP+0xc]` is the third argument
                 Val::S(b, d) => match fold.mem.iter().find(|m| m.0 == p) {
@@ -1284,18 +1661,20 @@ impl Analysis {
                 },
             }
         };
-        let in_image = |x: u32| img.block_of(x).is_some();
+        // a folded value as an address: one past 32 bits is in no block (`from_elf` loads below 4 GiB)
+        let addr = |x: u64| u32::try_from(x).ok().filter(|&x| img.block_of(x).is_some());
+        let code_at = |x: u64| u32::try_from(x).ok().filter(|&x| self.is_code(img, x));
         // ponytail: at most MAX_STACK stack stores (ESP-relative) and MAX_MEM others, the newest;
         // Ghidra keeps all. Lookups are linear: a map if a body ever stores far more. (16 and 64,
         // the caps of the local fold, lose 7 gate lines on mercs2 now that walks span functions.)
-        let stack = fold.mem.iter().filter(|m| matches!(m.0, Val::S(0x10, _))).count();
+        let stack = fold.mem.iter().filter(|m| matches!(m.0, Val::S(b, _) if b == sp)).count();
         let (max_stack, max_mem) = (MAX_STACK[fold.whole as usize], MAX_MEM[fold.whole as usize]);
         if stack > max_stack {
-            let old = fold.mem.iter().position(|m| matches!(m.0, Val::S(0x10, _))).unwrap();
+            let old = fold.mem.iter().position(|m| matches!(m.0, Val::S(b, _) if b == sp)).unwrap();
             fold.mem.remove(old);
         }
         if fold.mem.len() - stack.min(max_stack) > max_mem {
-            let old = fold.mem.iter().position(|m| !matches!(m.0, Val::S(0x10, _))).unwrap();
+            let old = fold.mem.iter().position(|m| !matches!(m.0, Val::S(b, _) if b == sp)).unwrap();
             fold.mem.remove(old);
         }
         let mut computed = None;
@@ -1305,8 +1684,8 @@ impl Analysis {
                 let size = if op.opc == 2 { op.out.as_ref().map_or(0, |o| o.size) } else { op.ins[2].size };
                 fold.mem_size = size;
                 match op.ins.get(1).and_then(|v| val(v, fold)) {
-                    Some((Val::S(0x10, d), _)) => fold.stack.push((d, size, op.opc == 3)),
-                    Some((Val::C(x), _)) => fold.data.push((x, size, op.opc == 3)),
+                    Some((Val::S(b, d), _)) if b == sp => fold.stack.push((d, size, op.opc == 3)),
+                    Some((Val::C(x), _)) if x <= u64::from(u32::MAX) => fold.data.push((x as u32, size, op.opc == 3)),
                     _ => {}
                 }
             }
@@ -1315,53 +1694,63 @@ impl Analysis {
                 // a constant stored through a register, `MOV ECX,fn; MOV [EAX*8+t],ECX`: Ghidra's
                 // addStoredReferences (a plain immediate is an operand reference already)
                 if let (Some((Val::C(x), _)), true) = (v, op.ins.get(2).is_some_and(|v| v.space != 0)) {
-                    if self.is_code(img, x) && !code_imms.contains(&x) {
+                    if let Some(x) = code_at(x).filter(|x| !code_imms.contains(x)) {
                         code_imms.push(x);
                     }
                 }
                 if let Some((p, _)) = op.ins.get(1).and_then(|v| val(v, fold)) {
                     if let Val::C(x) = p {
-                        if in_image(x) && !refs.contains(&x) {
-                            refs.push(x); // WRITE reference through a folded address
-                        }
-                        if in_image(x) && !rw.contains(&x) {
-                            rw.push(x);
+                        if let Some(x) = addr(x) {
+                            if !refs.contains(&x) {
+                                refs.push(x); // WRITE reference through a folded address
+                            }
+                            if !rw.contains(&x) {
+                                rw.push(x);
+                            }
                         }
                     }
                     fold.mem.retain(|m| m.0 != p);
-                    let size4 = op.ins.get(2).is_some_and(|v| v.size == 4);
+                    let size4 = op.ins.get(2).is_some_and(|v| v.size == w);
                     fold.mem.push((p, v.filter(|_| size4).map(|v| v.0), v.is_some_and(|v| v.1)));
                 }
             }
             if let Some(o) = op.out.as_ref() {
                 let r = match (op.opc, op.ins.as_slice()) {
-                    (1, [x]) if o.size == 4 => val(x, fold),
+                    (1, [x]) if o.size == w => val(x, fold),
                     // smaller constants, for the carry of `STC; ADC EBP,[a]` (SecuROM)
-                    (1, [x]) if o.size < 4 => val(x, fold).filter(|v| matches!(v.0, Val::C(_))),
-                    (17 | 18, [x]) if o.size == 4 && x.size < 4 => match val(x, fold) {
+                    (1, [x]) if o.size < w => val(x, fold).filter(|v| matches!(v.0, Val::C(_))),
+                    (17 | 18, [x]) if o.size == w && x.size < w => match val(x, fold) {
                         Some((Val::C(c), _)) => {
-                            let sh = 32 - 8 * x.size;
-                            Some((Val::C(if op.opc == 17 { c } else { ((c << sh) as i32 >> sh) as u32 }), true))
+                            let sh = 64 - 8 * x.size;
+                            let c = if op.opc == 17 { c } else { ((c << sh) as i64 >> sh) as u64 };
+                            Some((Val::C(mask(c, o.size)), true))
                         }
                         _ => None,
                     },
-                    (2, [_, x]) if o.size == 4 => val(x, fold).and_then(|(p, _)| {
+                    (2, [_, x]) if o.size == w => val(x, fold).and_then(|(p, _)| {
                         if let Val::C(x) = p {
-                            if in_image(x) && !refs.contains(&x) {
-                                refs.push(x); // READ reference through a folded address
-                            }
-                            if in_image(x) && !rw.contains(&x) {
-                                rw.push(x);
+                            if let Some(x) = addr(x) {
+                                if !refs.contains(&x) {
+                                    refs.push(x); // READ reference through a folded address
+                                }
+                                if !rw.contains(&x) {
+                                    rw.push(x);
+                                }
                             }
                         }
                         load(p, fold).map(|(v, _)| (v, true))
                     }),
-                    (24 | 25, [x]) if o.size == 4 => match val(x, fold) {
-                        Some((Val::C(x), _)) => Some((Val::C(if op.opc == 24 { x.wrapping_neg() } else { !x }), true)),
+                    (24 | 25, [x]) if o.size == w => match val(x, fold) {
+                        Some((Val::C(x), _)) => {
+                            Some((Val::C(mask(if op.opc == 24 { x.wrapping_neg() } else { !x }, o.size)), true))
+                        }
                         _ => None,
                     },
                     (19 | 20 | 26 | 27 | 28 | 29 | 30 | 31 | 32, [x, y])
-                        if o.size <= 4 && y.size <= 4 && (o.size == 4 || op.opc != 31) =>
+                        if o.size <= w
+                            && y.size <= w
+                            && (o.size == w || op.opc != 31)
+                            && (o.size <= 4 || !matches!(op.opc, 30 | 31)) =>
                     {
                         val(x, fold).zip(val(y, fold)).and_then(|((x, _), (y, _))| {
                             let r = match (op.opc, x, y) {
@@ -1372,22 +1761,29 @@ impl Analysis {
                                         26 => x ^ y,
                                         27 => x & y,
                                         28 => x | y,
-                                        29 => x.checked_shl(y).unwrap_or(0),
-                                        30 => x.checked_shr(y).unwrap_or(0),
-                                        31 => (x as i32).checked_shr(y).unwrap_or(if (x as i32) < 0 { -1 } else { 0 })
-                                            as u32,
+                                        29 => u32::try_from(y).ok().and_then(|y| x.checked_shl(y)).unwrap_or(0),
+                                        30 => u32::try_from(y).ok().and_then(|y| x.checked_shr(y)).unwrap_or(0),
+                                        31 => {
+                                            let sh = 64 - 8 * o.size;
+                                            let x = (x << sh) as i64 >> sh;
+                                            u32::try_from(y).ok().and_then(|y| x.checked_shr(y)).unwrap_or(x >> 63)
+                                                as u64
+                                        }
                                         _ => x.wrapping_mul(y),
                                     },
                                     o.size,
                                 )),
-                                _ if o.size < 4 => return None,
+                                _ if o.size < w => return None,
+                                // offsets from a symbol stay 32-bit, modulo 2^32
                                 (19, Val::S(b, d), Val::C(c)) | (19, Val::C(c), Val::S(b, d)) => {
-                                    Val::S(b, d.wrapping_add(c))
+                                    Val::S(b, d.wrapping_add(c as u32))
                                 }
-                                (20, Val::S(b, d), Val::C(c)) => Val::S(b, d.wrapping_sub(c)),
-                                (27, Val::S(0x10, d), Val::C(m)) if fold.stack_and => Val::S(0x10, d & m),
+                                (20, Val::S(b, d), Val::C(c)) => Val::S(b, d.wrapping_sub(c as u32)),
+                                (27, Val::S(b, d), Val::C(m)) if b == sp && fold.stack_and => Val::S(sp, d & m as u32),
                                 (20 | 26, x, y) if x == y => Val::C(0), // `XOR EDI,EDI`
-                                (20, Val::S(b, d), Val::S(b2, d2)) if b == b2 => Val::C(d.wrapping_sub(d2)),
+                                (20, Val::S(b, d), Val::S(b2, d2)) if b == b2 => {
+                                    Val::C(mask(d.wrapping_sub(d2) as i32 as u64, w))
+                                }
                                 _ => return None,
                             };
                             Some((r, true))
@@ -1397,7 +1793,7 @@ impl Analysis {
                 };
                 if o.space == code {
                     // a direct store, `MOV [g],reg`
-                    let p = Val::C(o.offset as u32);
+                    let p = Val::C(o.offset);
                     fold.mem.retain(|m| m.0 != p);
                     fold.mem.push((p, r.map(|r| r.0), r.is_some_and(|r| r.1)));
                 } else {
@@ -1408,7 +1804,7 @@ impl Analysis {
             }
             if matches!(op.opc, 6 | 8) && op.ins[0].space != code {
                 if let Some((Val::C(t), _)) = val(&op.ins[0], fold) {
-                    computed = Some(t).filter(|&t| self.is_code(img, t));
+                    computed = code_at(t);
                 }
             }
             if matches!(op.opc, 7 | 8) {
@@ -1422,25 +1818,33 @@ impl Analysis {
                     let v = &op.ins[0];
                     let c = ops.iter().rev().find(|c| c.opc == 1 && c.out.as_ref().is_some_and(|o| o == v));
                     let v = c.map_or(v, |c| &c.ins[0]);
-                    (v.space == code).then_some(v.offset as u32).filter(|s| self.purge.contains_key(s))
+                    u32::try_from(v.offset).ok().filter(|s| v.space == code && self.purge.contains_key(s))
                 };
-                let callee = if op.opc == 7 { Some(op.ins[0].offset as u32) } else { through().or(computed) };
-                let esp = crate::sleigh::Varnode { space: rs, offset: 0x10, size: 4 };
-                let after = callee.and_then(|t| self.purge.get(&t)).zip(val(&esp, fold)).map(|(&n, (v, _))| match v {
-                    Val::C(x) => Val::C(x.wrapping_add(4 + n)),
-                    Val::S(b, d) => Val::S(b, d.wrapping_add(4 + n)),
+                let callee = if op.opc == 7 { u32::try_from(op.ins[0].offset).ok() } else { through().or(computed) };
+                let esp = crate::sleigh::Varnode { space: rs, offset: sp, size: w };
+                // a default prototype with a known extrapop: every call moves the stack pointer by its
+                // stackshift (SymbolicPropogator.getDefaultStackDepthChange), past the pushed return
+                let purge = self.stackshift.map(|s| s - w).or_else(|| callee.and_then(|t| self.purge.get(&t).copied()));
+                let after = purge.zip(val(&esp, fold)).map(|(n, (v, _))| match v {
+                    Val::C(x) => Val::C(mask(x.wrapping_add(u64::from(w + n)), w)),
+                    Val::S(b, d) => Val::S(b, d.wrapping_add(w + n)),
                 });
-                fold.regs.retain(|f| f.0 != rs || (f.1 >= 0xc && f.1 < 0x10) || (f.1 >= 0x14 && f.1 < 0x200));
-                for r in [0u64, 4, 8, 0x10] {
+                let gone = |r: u64| self.killed.iter().chain([&sp]).any(|&k| (k..k + w as u64).contains(&r));
+                fold.regs.retain(|f| f.0 != rs || f.1 < 0x200 && !gone(f.1));
+                for r in self.killed.iter().copied().chain([sp]) {
                     let new = Val::S(1 << 40 | (a as u64) << 8 | r, 0);
-                    fold.regs.push((rs, r, 4, Some(if r == 0x10 { after.unwrap_or(new) } else { new }), false));
+                    fold.regs.push((rs, r, w, Some(if r == sp { after.unwrap_or(new) } else { new }), false));
                 }
             }
             match op.opc {
                 // REP-prefixed string ops branch to their own start or end: no flow change
                 4 | 5 if op.ins[0].space == code && (op.ins[0].offset == a as u64 || op.ins[0].offset == next) => {}
                 4 | 5 | 7 if op.ins[0].space == code => {
-                    target = Some(op.ins[0].offset as u32);
+                    // a flow past 32 bits leaves the image: no target, counted in a warning
+                    target = u32::try_from(op.ins[0].offset).ok();
+                    if target.is_none() {
+                        self.wide_flows.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     flow = match op.opc {
                         4 => Flow::Jump,
                         5 => Flow::CondJump,
@@ -1455,7 +1859,7 @@ impl Analysis {
                     if let Some(c) = ops.iter().rev().find(|c| c.opc == 1 && c.out.as_ref().is_some_and(|o| o == v)) {
                         v = &c.ins[0];
                     }
-                    slot = (v.space == code).then_some(v.offset as u32);
+                    slot = u32::try_from(v.offset).ok().filter(|_| v.space == code);
                 }
                 10 => flow = Flow::Return,
                 _ => {}
@@ -1465,10 +1869,12 @@ impl Analysis {
             // x87 constructors copy inst_start into FPUInstructionPointer: not a reference
             let fpu_ip = op.out.as_ref().is_some_and(|o| Some((o.space, o.offset)) == self.fpu_ip);
             for v in op.ins.iter().skip(skip).chain(op.out.as_ref()) {
+                // a value past 32 bits is no address of the image: no reference, as Java makes
+                // none outside memory
+                let Ok(imm) = u32::try_from(v.offset) else { continue };
                 // e.g. PUSH offset callback (not CALL's pushed return address)
-                let imm = v.offset as u32;
                 if v.space == 0
-                    && v.size == 4
+                    && (v.size == 4 || v.size == w)
                     && v.offset != next
                     && !fpu_ip
                     && self.is_code(img, imm)
@@ -1477,20 +1883,20 @@ impl Analysis {
                     code_imms.push(imm);
                 }
                 let is_ref = match v.space {
-                    0 => v.size == 4 && img.block_of(v.offset as u32).is_some_and(|s| !s.exec), // immediate pointing at data
-                    s => s == code && img.block_of(v.offset as u32).is_some(),
+                    0 => (v.size == 4 || v.size == w) && img.block_of(imm).is_some_and(|s| !s.exec), // immediate pointing at data
+                    s => s == code && img.block_of(imm).is_some(),
                 };
-                if is_ref && !refs.contains(&(v.offset as u32)) {
-                    refs.push(v.offset as u32);
+                if is_ref && !refs.contains(&imm) {
+                    refs.push(imm);
                 }
                 // a memory operand (not an immediate): READ or WRITE
-                if is_ref && v.space != 0 && !rw.contains(&(v.offset as u32)) {
-                    rw.push(v.offset as u32);
+                if is_ref && v.space != 0 && !rw.contains(&imm) {
+                    rw.push(imm);
                 }
             }
         }
         let computed = computed.filter(|_| slot.is_none());
-        Some(Ins { len: len as u8, flow, target, slot, computed, refs, rw, code_imms })
+        Some(Ins { len: len as u8, flow, target, slot, computed, refs, rw, code_imms, nop: ops.is_empty() })
     }
 
     /// Ghidra's `disassemble(addr)` after analysis: recursive descent from `addrs` into bytes no
@@ -1735,22 +2141,25 @@ impl Analysis {
                     _ => false,
                 }
         };
+        // program.getDefaultPointerSize() words (AddressTable.java:1074-1100); an 8-byte value
+        // past 32 bits is in no block
+        let w = img.ptr_size();
         let mut elems: Vec<u32> = Vec::new();
         let mut cur = top;
-        while cur + 4 <= end {
-            let v = u32::from_le_bytes(s.data[(cur - s.addr) as usize..][..4].try_into().unwrap());
+        while u64::from(cur) + u64::from(w) <= u64::from(end) {
+            let v = ptr_value(&s.data[(cur - s.addr) as usize..][..w as usize]).unwrap_or(0);
             if v < 1024 || img.block_of(v).is_none() || (elems.len() > 1 && dests.contains(&cur)) || collides(v) {
                 break;
             }
             elems.push(v);
-            cur += 4;
+            cur += w;
         }
         let mut count = elems.len();
         if count >= min {
-            let stop = dests.range(top + 1..top + 4 * count as u32).next().copied();
-            let stop = stop.into_iter().chain((top..top + 4 * count as u32).find(|&a| !self.undefined(img, owner, a)));
+            let stop = dests.range(top + 1..top + w * count as u32).next().copied();
+            let stop = stop.into_iter().chain((top..top + w * count as u32).find(|&a| !self.undefined(img, owner, a)));
             if let Some(at) = stop.min() {
-                count = count.min(((at - top) / 4) as usize);
+                count = count.min(((at - top) / w) as usize);
             }
         }
         elems.truncate(count);
@@ -1760,13 +2169,14 @@ impl Analysis {
     /// AddressTable.makeTable: the words from `top` become pointers, each a reference to its
     /// value.
     fn make_table(&mut self, img: &Image, owner: &mut [u8], refs: &mut Refs, top: u32, elems: &[u32]) {
+        let w = img.ptr_size();
         for (i, &v) in elems.iter().enumerate() {
-            let slot = top + 4 * i as u32;
+            let slot = top + w * i as u32;
             self.table_slots.insert(slot, v);
             refs.dests.insert(v);
             if self.is_code(img, slot) {
                 let o = (slot - self.code_lo) as usize;
-                owner[o..].iter_mut().take(4).filter(|b| **b == 0).for_each(|b| *b = 4);
+                owner[o..].iter_mut().take(w as usize).filter(|b| **b == 0).for_each(|b| *b = 4);
             }
         }
     }
@@ -1789,9 +2199,11 @@ impl Analysis {
         asked: &mut HashSet<u32>,
     ) -> Vec<u32> {
         let dests = &refs.dests;
-        // checkForPointer: a value of 4096 up, and no reference into the rest of the slot
+        // checkForPointer: a value of 4096 up, and no reference into the rest of the slot, of
+        // getDefaultPointerSize bytes (OperandReferenceAnalyzer.java:961-972)
+        let w = img.ptr_size();
         let pointers = dests.iter().filter(|&&t| !self.is_code(img, t)).filter_map(|&t| {
-            img.read_u32(t).filter(|&v| v >= 4096 && dests.range(t + 1..t.saturating_add(4)).next().is_none())
+            img.read_ptr(t).filter(|&v| v >= 4096 && dests.range(t + 1..t.saturating_add(w)).next().is_none())
         });
         let mut out = Vec::new();
         for v in pointers.chain(self.table_slots.values().copied()) {
@@ -1840,15 +2252,19 @@ impl Analysis {
                 };
                 let count = elems.len();
                 // processAddressTable: checkTable, make the table, carry on one entry past it
+                let w = img.ptr_size();
                 let mut first = 0;
                 while first < count {
-                    let at = |i: usize| top + 4 * i as u32;
+                    let at = |i: usize| top + w * i as u32;
                     let strings = utf16_strings(s, at(first), at(count));
+                    // checkTable tests `start + 4 * i` and its byte 3 whatever the pointer size
+                    // (AddressTableAnalyzer.java:401-407)
+                    let chk = |i: usize| at(first) + 4 * (i - first) as u32;
                     let mut len = 0;
                     for i in first..count {
                         let offcut = self.is_code(img, elems[i]) && owner[(elems[i] - self.code_lo) as usize] == 2;
                         let far = i > first && elems[i - 1].abs_diff(elems[i]) > 0xff_ffff;
-                        if strings.iter().any(|r| r.contains(&at(i)) || r.contains(&(at(i) + 3))) || far || offcut {
+                        if strings.iter().any(|r| r.contains(&chk(i)) || r.contains(&(chk(i) + 3))) || far || offcut {
                             break;
                         }
                         len += 1;
@@ -1874,7 +2290,9 @@ impl Analysis {
                     }
                     first += len + 1;
                 }
-                top += 4 * count as u32;
+                // past the table's bytes (AddressTableAnalyzer.java:187-191); the next top is
+                // 4-aligned (tableAlignment, 4 whatever the pointer size)
+                top += w * count as u32;
             }
         }
         code
@@ -1919,7 +2337,7 @@ impl Analysis {
                         // the table is data: keep the pattern search out of it
                         if self.is_code(img, table) {
                             let t = (table - self.code_lo) as usize;
-                            let e = (t + 4 * cases.len()).min(owner.len());
+                            let e = (t + img.ptr_size() as usize * cases.len()).min(owner.len());
                             owner[t..e].iter_mut().filter(|b| **b == 0).for_each(|b| *b = 3);
                         }
                         self.tables.insert(a, cases);
@@ -1927,7 +2345,9 @@ impl Analysis {
                 }
                 let stop = !ins.falls_through()
                     || ins.flow == Flow::Call && ins.target.is_some_and(|t| self.noreturn.contains(&t))
-                    || ins.flow == Flow::CallInd && ins.slot.is_some_and(|s| self.noreturn.contains(&s));
+                    // ELF: Java's flow goes on past `CALL [GOT slot]` of a non-returning import (the slot
+                    // points into its EXTERNAL block; measured on libtcl, not traced)
+                    || ins.flow == Flow::CallInd && !img.elf64 && ins.slot.is_some_and(|s| self.noreturn.contains(&s));
                 recent.push(a);
                 let len = ins.len as u32;
                 log.push(a);
@@ -1945,26 +2365,51 @@ impl Analysis {
     // lie in the jump's own section.
     fn switch_table(&self, img: &Image, at: u32, recent: &[u32]) -> Option<(u32, Vec<u32>)> {
         let bytes = |a: u32| img.block_of(a).map(|s| &s.data[(a - s.addr) as usize..]);
-        let b = bytes(at)?.get(..7)?;
-        if b[0] != 0xff || b[1] != 0x24 || b[2] & 0xc7 != 0x85 {
+        // x86-64: `JMP qword ptr [reg*8 + table]`; a REX prefix may come before it and before
+        // the CMP or MOVZX (REX.X, REX.R and REX.B extend their registers)
+        let w = img.ptr_size();
+        fn split_rex(elf64: bool, c: &[u8]) -> (u8, &[u8]) {
+            match c.first() {
+                Some(&x) if elf64 && (0x40..0x50).contains(&x) => (x, &c[1..]),
+                _ => (0, c),
+            }
+        }
+        let rex = |c| split_rex(img.elf64, c);
+        let (px, b) = rex(bytes(at)?);
+        let b = b.get(..7)?;
+        if b[0] != 0xff || b[1] != 0x24 || b[2] & 0xc7 != if img.elf64 { 0xc5 } else { 0x85 } {
             return None;
         }
-        let mut reg = (b[2] >> 3) & 7; // the register the CMP bounds
+        let mut reg = (b[2] >> 3) & 7 | (px & 2) << 2; // the register the CMP bounds
         let table = u32::from_le_bytes(b[3..7].try_into().unwrap());
+        // x86-64 sign-extends the disp32: a negative one is past 32 bits, out of the image
+        if img.elf64 && (table as i32) < 0 {
+            return None;
+        }
         let mut count = None;
         let mut index_table = None; // two-level switch: `MOVZX reg,byte ptr [r + bytetable]`
         for &r in recent.iter().rev().take(8) {
             let Some(c) = bytes(r) else { continue };
+            let (cx, c) = rex(c);
             if let [0x0f, 0xb6, m, d0, d1, d2, d3, ..] = c {
-                if index_table.is_none() && m & 0xc0 == 0x80 && m & 7 != 4 && (m >> 3) & 7 == reg {
+                if index_table.is_none()
+                    && m & 0xc0 == 0x80
+                    && m & 7 != 4
+                    && ((m >> 3) & 7 | (cx & 4) << 1) == reg
+                    && !(img.elf64 && *d3 >= 0x80)
+                {
                     index_table = Some(u32::from_le_bytes([*d0, *d1, *d2, *d3]));
-                    reg = m & 7;
+                    reg = m & 7 | (cx & 1) << 3;
                     continue;
                 }
             }
+            // the CMP's ModRM names the low three bits, REX.B the fourth
+            let (low, high) = (reg & 7, reg >> 3 == cx & 1);
             let imm = match c {
-                [0x83, m, i, ..] if *m == 0xf8 | reg => Some(*i as u32),
-                [0x81, m, i0, i1, i2, i3, ..] if *m == 0xf8 | reg => Some(u32::from_le_bytes([*i0, *i1, *i2, *i3])),
+                [0x83, m, i, ..] if *m == 0xf8 | low && high => Some(*i as u32),
+                [0x81, m, i0, i1, i2, i3, ..] if *m == 0xf8 | low && high => {
+                    Some(u32::from_le_bytes([*i0, *i1, *i2, *i3]))
+                }
                 [0x3d, i0, i1, i2, i3, ..] if reg == 0 => Some(u32::from_le_bytes([*i0, *i1, *i2, *i3])),
                 _ => None,
             };
@@ -1981,7 +2426,7 @@ impl Analysis {
         let own = img.block_of(at)?.addr;
         let mut cases = Vec::new();
         for i in 0..count.unwrap_or(1024).min(1024) {
-            match img.read_u32(table + 4 * i as u32) {
+            match img.read_ptr(table + w * i as u32) {
                 Some(t) if self.is_code(img, t) && img.block_of(t).is_some_and(|s| s.addr == own) => cases.push(t),
                 _ => break,
             }
@@ -2130,7 +2575,8 @@ impl Analysis {
         }
         match i.flow {
             Flow::Call => i.target.is_some_and(|t| self.noreturn.contains(&t)) && !self.fallthru.contains(&a),
-            Flow::CallInd => i.slot.is_some_and(|s| self.noreturn.contains(&s)),
+            // not on ELF (x86-64): see `descend`
+            Flow::CallInd => self.width != 8 && i.slot.is_some_and(|s| self.noreturn.contains(&s)),
             Flow::Jump => i.target.is_some_and(|t| self.funcs.contains(&t) && self.insns.contains_key(&t)),
             _ => false,
         }
@@ -2349,7 +2795,7 @@ impl Analysis {
         match (i.flow, i.slot) {
             (Flow::Call | Flow::Jump, _) => i.target.filter(|t| self.funcs.contains(t)),
             (Flow::CallInd, Some(s)) if img.imports.contains_key(&s) => Some(s),
-            (Flow::CallInd, Some(s)) => img.read_u32(s).filter(|t| self.funcs.contains(t)),
+            (Flow::CallInd, Some(s)) => img.read_ptr(s).filter(|t| self.funcs.contains(t)),
             _ => None,
         }
     }
@@ -2370,10 +2816,26 @@ impl Analysis {
     }
 }
 
+/// A little-endian pointer of 4 or 8 bytes; None past 32 bits.
+/// ElfSymbol.isColdSymbol's pattern `.+\.cold((\.[0-9]+)?)` (ElfSymbol.java:96-98), a whole match.
+fn is_cold(name: &str) -> bool {
+    let tail = |t: &str| {
+        t.is_empty() || t.strip_prefix('.').is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+    };
+    name.match_indices(".cold").any(|(i, _)| i > 0 && tail(&name[i + 5..]))
+}
+
+fn ptr_value(b: &[u8]) -> Option<u32> {
+    match b.len() {
+        4 => Some(u32::from_le_bytes(b.try_into().ok()?)),
+        _ => u32::try_from(u64::from_le_bytes(b.try_into().ok()?)).ok(),
+    }
+}
+
 /// AddressTableAnalyzer.findPossibleStrings over `[from, to)`: the ranges of UTF-16 strings
 /// longer than 4 characters (tab, CR, LF and 0x20..0x7e, up to a 0 or half the range).
-fn mask(x: u32, size: u32) -> u32 {
-    if size >= 4 {
+fn mask(x: u64, size: u32) -> u64 {
+    if size >= 8 {
         x
     } else {
         x & ((1 << (8 * size)) - 1)
@@ -2484,8 +2946,17 @@ mod tests {
     /// order as CreateFunctionCmd makes it.
     pub(super) fn bare(insns: &[(u32, Flow, Option<u32>)], funcs: &[u32]) -> (Analysis, BTreeSet<u32>) {
         let ins = |&(a, flow, target): &(u32, Flow, Option<u32>)| {
-            let i =
-                Ins { len: 1, flow, target, slot: None, computed: None, refs: vec![], rw: vec![], code_imms: vec![] };
+            let i = Ins {
+                len: 1,
+                flow,
+                target,
+                slot: None,
+                computed: None,
+                refs: vec![],
+                rw: vec![],
+                code_imms: vec![],
+                nop: false,
+            };
             (a, i)
         };
         let mut an = Analysis {
@@ -2505,12 +2976,17 @@ mod tests {
             purge: HashMap::new(),
             callee_purges: HashMap::new(),
             reg_space: 0,
+            width: 4,
+            sp: 0x10,
+            killed: vec![0, 4, 8],
+            stackshift: None,
             overrides: HashMap::new(),
             fixed_bodies: BTreeMap::new(),
             thunks: HashMap::new(),
             thunk_of: BTreeMap::new(),
             body_owner: HashMap::new(),
             warnings: Vec::new(),
+            wide_flows: Default::default(),
         };
         let mut changed = BTreeSet::new();
         for &f in funcs {
