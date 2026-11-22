@@ -25,6 +25,7 @@ const USAGE: &str = "usage: ghidra-rs disasm <binary> [--func <symbol>|--addr <h
                      bindings <out.csv>
                      abi-candidates <out.csv> <out.txt> [<verified-c-dir>]   (needs --facts)
        ghidra-rs gdt-protos <archive.gdt> <out>     (the prototype file of tools/ghidra-protos.sh, from the archive)
+       ghidra-rs dwarf <elf> <out>                  (the DWARF import's data types and signatures, as tools/ghidra/DumpDwarf.java)
        ghidra-rs decompile -i <script>
        ghidra-rs datatest [--ref <decomp_dbg>] <test.xml|dir>...";
 
@@ -46,6 +47,22 @@ fn run() -> Result<(), String> {
     if args.len() == 3 && args[0] == "gdt-protos" {
         let ar = ghidra_rs::gdt::Archive::open(std::path::Path::new(&args[1]))?;
         let text = ghidra_rs::gdt::protos::export(&ar)?;
+        return std::fs::write(&args[2], text).map_err(|e| format!("{}: {e}", args[2]));
+    }
+    if args.len() == 3 && args[0] == "dwarf" {
+        let data = std::fs::read(&args[1]).map_err(|e| format!("{}: {e}", args[1]))?;
+        let t = std::time::Instant::now();
+        let imp = ghidra_rs::dwarf::import(&data).map_err(|e| e.to_string())?;
+        let text = ghidra_rs::dwarf::dump(&imp);
+        let types = text.lines().filter(|l| l.starts_with("T ")).count();
+        eprintln!(
+            "{} units, {} DIEs, {} types, {} functions, {:.1} s",
+            imp.units,
+            imp.dies,
+            types,
+            imp.funcs.len(),
+            t.elapsed().as_secs_f64()
+        );
         return std::fs::write(&args[2], text).map_err(|e| format!("{}: {e}", args[2]));
     }
     if args.len() == 3 && args[0] == "decompile" && args[1] == "-i" {

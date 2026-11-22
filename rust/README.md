@@ -42,6 +42,8 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   join; ExportFunctions counting a computed call in `callees` and `callers`.
 - `ghidra-rs/src/gdt/`: Ghidra's packed data-type archives (`.gdt`) read in place, read-only, and
   the import prototypes made from them (`--gdt`, `gdt-protos`).
+- `ghidra-rs/src/dwarf/`: Ghidra's DWARF importer: the data types and function signatures of an
+  ELF's DWARF (`ghidra-rs dwarf`; "The DWARF importer" below).
 - `ghidra-rs/src/factsout.rs`: `analyze --facts`: the facts of ghidra-rs's own analysis in the
   format of `tools/ghidra/ExportFacts.java` (stage S10, slices 2 and 3), for `load facts`.
 - `ghidra-rs/src/strings.rs`: Ghidra's ASCII Strings analyzer (the string search and the
@@ -4580,6 +4582,7 @@ ghidra-rs's own analysis of the binary, so `load facts` needs no project:
 ```sh
 ghidra-rs analyze <pe32> --facts <out> [--protos <file> | --gdt <archive>] [--seeds <csv> | --functions-from <csv>]
 ghidra-rs gdt-protos <archive.gdt> <out>   # the same file as ghidra-protos.sh, from the archive
+ghidra-rs dwarf <elf> <out>                 # the DWARF import's data types and signatures, as DumpDwarf.java
 tools/facts-own.sh            # mercs2: writes rust/target/facts/mercs2.facts and compares it
 tools/ghidra-protos.sh        # once per Ghidra version: $GHIDRA_REF/win32.protos
 ```
@@ -6001,6 +6004,64 @@ Silent 0 in every pair. Lines that moved:
 
 Every other line equals the baseline. Superseded: "Not run: M500 bars, the full 133-pair pass,
 the Mac" under "Integration `int8`" above.
+
+### The DWARF importer, branch `dwarf` (2026-11-21)
+
+`ghidra-rs/src/dwarf/` ports the part of Ghidra 12.3's DWARF analyzer
+(`ghidra.app.util.bin.format.dwarf`, run as `DWARFAnalyzer.added` does with the default
+`DWARFImportOptions`) that makes data types and function signatures. `ghidra-rs dwarf <elf> <out>`
+writes them in the form of `tools/ghidra/DumpDwarf.java`: one line per data type under `/DWARF`
+(structures and unions with their components, typedefs, enums, function definitions; pointers
+and arrays appear by name), one per function whose signature the import set, sorted.
+- `dwarf/read.rs`: unit headers (versions 2-5 read; DWARF 5's indexed forms `strx`, `addrx`,
+  `rnglistx` and its line and range tables are not), abbreviations, the DIE index of
+  `DIEContainer` (offsets, parents, siblings, the targets of `DW_AT_abstract_origin` /
+  `DW_AT_specification`), attribute values by form class (`DWARFNumericAttribute` with its
+  signedness guess for `data<n>`), the file table of a v2-v4 line header, `.debug_ranges`, and
+  the constant operations of `DWARFExpressionEvaluator` that member offsets and bounds use.
+  Raw parsing is its own code, not `gimli` (as asked); attributes are decoded on demand from
+  the section bytes.
+- `dwarf/dtm.rs`: the data-type model the importer drives: built-ins with x86-64 GCC's data
+  organization (sizes, the size-alignment map), pointers, arrays, typedefs, non-packed
+  structures (`StructureDataType.replace`, `insertAtOffset`, `insertBitFieldAt` with its
+  conflict shift), unions, packing (`AlignedComponentPacker` with GCC's bitfield rules),
+  enums, function definitions; `DataTypeManagerDB.resolve` for types without a source archive
+  (same-location equivalence, `.conflict` names, replace in place) and
+  `DWARFDataTypeConflictHandler`.
+- `dwarf/mod.rs`: `DIEAggregate`, `DWARFProgram.getName` (namespaces from mangled and linkage
+  names, the anonymous names: struct layout fingerprints, `_for_<member>`, `.dwarf_<offset>`),
+  `DWARFDataTypeManager` (base types, `getTypedefReplacement`), `DWARFDataTypeImporter` (every
+  tag it handles), `DataTypeGraphComparator`'s offset caching, `DWARFFunctionImporter` /
+  `DWARFFunction` (bodies from `low_pc`/`high_pc` or `.debug_ranges`, the `this` and
+  parameter-name fixups, the function definition of `createFuncSignatures`) and
+  `DWARFImporter.moveTypesIntoSourceFolders`.
+- What a Ghidra `Function` adds is copied from what the 12.3 run shows, not from ported code:
+  a return over 16 bytes becomes a pointer and a first parameter `__return_storage_ptr__`
+  (x86-64-gcc.cspec's `hidden_return`; `__thiscall` is not in that cspec), and a parameter named
+  `param_<n>` shows the default name of its ordinal after `this` and that pointer. The full
+  calling convention is the `x86-64 System V` piece of DESIGN.md (2026-11-21).
+
+Checked with `tools/dwarf-diff.sh` (builds `tools/dwarf/*.c*` with GCC 16.2.1 and clang 23.1.5,
+`-gdwarf-3` as Hatred's units, then `DumpDwarf.java` on 12.3 with `-noanalysis` and `ghidra-rs
+dwarf`, compared by key). Ten corpora (c1, cpp1 at -O0; c2 two units with conflicting layouts,
+cpp2 and cpp3 standard-library heavy, at -O2; each with GCC and clang): data types 5,760 of
+5,761 identical, 0 missing, 0 extra; function signatures 522 of 522 identical. The one
+difference (`cpp2-gcc`, `std::pair<std::_Rb_tree_node_base*, ...>`): Java's two members point
+through a `_Rb_tree_node_base *` that stayed in `/DWARF/_UNCATEGORIZED_/std` when its base type
+moved to `stl_tree.h` (a pointer record keeps its own category in `DataTypeManagerDB`); in
+ghidra-rs a pointer's category follows its base. Not traced further.
+
+Hatred (`Hatred-Linux-Shipping`, 508 MB; its DWARF 3 is clang 3.5.0's, the `.comment` lists GCC
+4.4.7 and 4.8.1 for linked libraries): 461 units, 15,334,680 DIEs, 276,572 data types (75,832
+structures, 162 unions, 53,623 typedefs, 5,551 enums, 141,404 function definitions; 3,180
+`.conflict` names), 142,793 function signatures, in 35.6 s and 1.67 GB peak memory.
+
+Not ported: local and global variables and their storage (so the STORAGE / FORMAL commit modes,
+the parameter spill and storage-verification fixups, and the cspec's `convert_to_ptr` for
+parameters), location lists and expressions beyond constants, line programs and source maps,
+macros (`DWARFMacroEnumCreator`), comments, descriptions and bookmarks, external debug files,
+Go and Rust special cases, the conflict queue's post-pass and `replace` of a type of another
+kind, inlined-function comments, a function's no-return from earlier analysis.
 
 ## Speed
 

@@ -3,6 +3,7 @@ pub mod abi;
 pub mod analysis;
 pub mod console;
 pub mod decomp;
+pub mod dwarf;
 pub mod edits;
 pub mod exports;
 pub mod factsout;
