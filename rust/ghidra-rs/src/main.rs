@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 const USAGE: &str = "usage: ghidra-rs disasm <binary> [--func <symbol>|--addr <hex>] [--count N] [--pcode] [--sla <file>]
-       ghidra-rs analyze <pe32> [--functions <csv>] [--gaps <csv>] [--abi-callers <register_abi.csv> <out.csv> [--data-pointers]]
+       ghidra-rs analyze <pe32|elf64> [--functions <csv>] [--gaps <csv>] [--purges <txt>] [--abi-callers <register_abi.csv> <out.csv> [--data-pointers]]
                          [--decomp-prelude <out>] [--facts <out> [--protos <file> | --gdt <archive>]] [--seeds <csv> | --functions-from <csv>]... [--store <file>] [--sla <file>]
        ghidra-rs edit <pe32> --store <file> [--new-store] [--seeds <csv> | --functions-from <csv>]... [--sla <file>] <command>
            commands: add-relocated-entries <securom_functions.csv>
@@ -361,7 +361,7 @@ fn edit(path: &str, args: &[String], write: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// `analyze`: Ghidra-style function discovery on a 32-bit PE, writing the files of the mercs2
+/// `analyze`: Ghidra-style function discovery on a 32-bit PE or an ELF x86-64, writing the files of the mercs2
 /// scripts ExportFunctions.java (`--functions`) and ExportGaps.java (`--gaps`).
 fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     use ghidra_rs::{analysis, scripts};
@@ -369,6 +369,8 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     let mut store = None;
     let mut abi: Option<(String, String)> = None;
     let mut prelude = None;
+    let mut purges = None;
+    let sla_given = std::env::var_os("GHIDRA_RS_SLA").is_some() || args.iter().any(|a| a == "--sla");
     let (mut facts, mut protos, mut gdt) = (None, None, None);
     let mut sla = std::env::var_os("GHIDRA_RS_SLA").map(PathBuf::from).unwrap_or_else(|| Sleigh::sla_path("x86"));
     let mut it = args.iter();
@@ -381,6 +383,7 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
         match flag.as_str() {
             "--functions" => functions = Some(val),
             "--gaps" => gaps = Some(val),
+            "--purges" => purges = Some(val),
             "--decomp-prelude" => prelude = Some(val),
             "--facts" => facts = Some(val),
             "--protos" => protos = Some(val),
@@ -415,7 +418,25 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
         }
     }
     let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-    let img = analysis::Image::from_pe(&data).map_err(|e| format!("{path}: {e}"))?;
+    let img = if data.starts_with(b"\x7fELF") {
+        let img = analysis::Image::from_elf(&data).map_err(|e| format!("{path}: {e}"))?;
+        // x86:LE:64:default, the gcc compiler spec
+        if !sla_given {
+            sla = Sleigh::sla_path("x86-64");
+        }
+        if abi.is_some() || store.is_some() {
+            return Err(format!("{path}: --abi-callers and --store take a 32-bit PE only"));
+        }
+        // the facts and the prelude are the decompiler's, which reads x86:LE:32:default:windows
+        if facts.is_some() || prelude.is_some() {
+            return Err(format!(
+                "{path}: not ported: --facts and --decomp-prelude for x86:LE:64 (the core types, pointer size and x86-64-gcc.cspec prototypes of the facts; the decompiler is x86:LE:32 only)"
+            ));
+        }
+        img
+    } else {
+        analysis::Image::from_pe(&data).map_err(|e| format!("{path}: {e}"))?
+    };
     let sl = Sleigh::load(&sla)?;
     let t = std::time::Instant::now();
     // --facts: the functions discovery finds without the seeds are the ones Ghidra's
@@ -476,9 +497,10 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     let create = |p: &str| std::fs::File::create(p).map(std::io::BufWriter::new).map_err(|e| format!("{p}: {e}"));
     if functions.is_some() || prelude.is_some() || facts.is_some() {
         let t = std::time::Instant::now();
-        let files = ghidra_rs::fid::default_files();
+        // the databases are x86:LE:32's; Function ID on x86-64 is not ported (warned)
+        let files = if img.elf64 { Vec::new() } else { ghidra_rs::fid::default_files() };
         let dbs = files.iter().map(|f| ghidra_rs::fid::FidDb::open(f)).collect::<Result<Vec<_>, _>>()?;
-        let fid = ghidra_rs::fid::apply(&img, &an, &sl, &dbs)?;
+        let fid = if img.elf64 { Default::default() } else { ghidra_rs::fid::apply(&img, &an, &sl, &dbs)? };
         eprintln!(
             "function id: {} functions named from {} databases in {:.1}s",
             fid.len(),
@@ -542,6 +564,13 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     if let Some(p) = gaps {
         let (covered, total) = scripts::export_gaps(&img, &an, &mut create(&p)?).map_err(|e| e.to_string())?;
         println!("function coverage: {covered} / {total} .text bytes");
+    }
+    if let Some(p) = purges {
+        let mut w = create(&p)?;
+        let n = scripts::dump_purges(&img, &an, &mut w)
+            .and_then(|n| w.flush().map(|()| n))
+            .map_err(|e| format!("{p}: {e}"))?;
+        println!("dumped {n} functions");
     }
     if let Some((csv, out)) = abi {
         let t = std::time::Instant::now();
