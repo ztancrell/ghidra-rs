@@ -5888,7 +5888,14 @@ For Hatred's Linux build (DESIGN.md, 2026-11-21). Ghidra's GNU demangler is two 
   substitutions, slots reused after a backtrack) and its in-place edits; the printer keeps the
   modifier and template lists as indices. Its limits are the C's: a name longer than 1,024
   characters fails (`2 * strlen > DEMANGLE_RECURSION_LIMIT`), as do the printer's recursion
-  counts. Not ported: the Rust demangler that the auto style tries first (`rust-demangle.c`; a
+  counts. Java gives the native process 3 s a name (GnuDemanglerOptions.java:51,
+  GnuDemanglerNativeProcess.java:152-162) and then has no demangling; a wall-clock bound would
+  make the output depend on the machine, so the stand-in is a fixed one: a text that passes
+  1 MiB (`OUT_LIMIT`) fails loudly as "not demangled: limit", and the printer stops there (a
+  256-character name of doubling template arguments reaches it in 0.01 s; no name of the
+  corpora comes near). `native_demangle`, `cplus_demangle` and `gnu_demangle` run on a thread
+  of their own with a 256 MiB stack (`STACK`, reserved, touched only as deep as the recursion
+  goes), so a hostile name cannot overflow a caller's stack. Not ported: the Rust demangler that the auto style tries first (`rust-demangle.c`; a
   name it would take, v0 `_R` or legacy `_ZN...17h<hash>E`, fails as "not ported"), and the
   options `cxxfilt` never sets here (`DMGL_JAVA`, `DMGL_TYPES`, the return postfix).
 - `ghidra-rs/src/gnuparse.rs`: `GnuDemanglerParser` with the standard replacements
@@ -5896,7 +5903,9 @@ For Hatred's Linux build (DESIGN.md, 2026-11-21). Ghidra's GNU demangler is two 
   (kind, names, namespace nodes, signature, return type, parameters, calling convention, const,
   virtual, static, thunk, template) and `GnuDemangler.demangle`'s wrapping (skip rules,
   `_GLOBAL_` / `__Z` / `._Z` / `DW.ref.` prefixes, the failure checks), with the analyzer's
-  options. Not ported (each fails loudly, none met in the corpora): non-ASCII text, a
+  options. Not ported (each fails loudly, none met in the corpora): non-ASCII text (checked at
+  the parse's start, and `substring` gives the same error, never a panic, where a byte index
+  falls inside a character), a
   `DemangledVariable` without a name, an object as a namespace inside a `DemangledType`, an
   unclosed `[` (Java loops forever there). A function pointer's `FuncDef<counter>` name is
   `FuncDef` (never printed).
@@ -5947,6 +5956,13 @@ template arguments, ctor/dtor, operators, function pointers, lambdas, local name
 limit; and of the parser: templated `operator>>`, `operator<<` with a function-pointer
 parameter, conversion operators). `bars.sh` with `CORPORA=m8`: 57 lines, each equal to
 `int8-c730b2db7d.summary`'s (the PE path is unchanged).
+
+After the limit and the stack thread (review fixes, 2026-11-21): Hatred 217,716 / 217,716 and
+libstdc++ with libLLVM 52,312 / 52,312 names text and parse identical again (the native
+demangler and GnuParseDump.java rerun), 0 errors; `cargo test --release` 187 passed, 0 failed;
+fmt and clippy clean. `gnu-demangle` takes 14.1 s for Hatred's names on the desktop (one
+thread spawned a call; the time before was not measured). Not measured: the stack the deepest
+Hatred name uses. Not run: M8 bars (no PE code changed).
 
 ### Integration `int8` (2026-11-20)
 

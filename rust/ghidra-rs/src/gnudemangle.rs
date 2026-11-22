@@ -21,6 +21,13 @@ use crate::mdmang::Error;
 const RECURSION_LIMIT: u32 = 2048;
 /// `MAX_RECURSION_COUNT` of the printer.
 const MAX_RECURSION_COUNT: i32 = 1024;
+/// The stand-in for Java's 3 s timeout on the native demangler (GnuDemanglerOptions.java:51,
+/// GnuDemanglerNativeProcess.java:152-162): a name whose text passes this many bytes fails as
+/// "not demangled: limit" (a wall-clock bound would make the output depend on the machine).
+const OUT_LIMIT: usize = 1 << 20;
+/// The stack of the thread `native_demangle` and `gnu_demangle` run on: the parse and the
+/// printer recurse as deep as the C (see rust/README.md, "The GNU demangler").
+const STACK: usize = 256 << 20;
 
 type Id = usize;
 
@@ -2087,6 +2094,8 @@ struct P<'c, 'a> {
     modifiers: Option<usize>,
     mods: Vec<Mod>,
     failure: bool,
+    /// the text passed OUT_LIMIT
+    limited: bool,
     recursion: i32,
     lambda_tpl_parms: i32,
     pack_index: i32,
@@ -2119,6 +2128,10 @@ impl<'c, 'a> P<'c, 'a> {
         self.failure = true;
     }
     fn ch(&mut self, c: u8) {
+        if self.out.len() >= OUT_LIMIT {
+            self.limited = true;
+            return;
+        }
         self.out.push(c);
         self.last = c;
     }
@@ -2417,6 +2430,9 @@ impl<'c, 'a> P<'c, 'a> {
 
     /// `d_print_comp`.
     fn comp(&mut self, dc: Option<Id>) {
+        if self.limited {
+            return;
+        }
         let Some(id) = dc else {
             self.fail();
             return;
@@ -3387,7 +3403,7 @@ impl<'c, 'a> P<'c, 'a> {
 }
 
 /// `cplus_demangle_print_callback`: `None` where the printer saw an error.
-fn print(comps: &[Comp], dc: Id) -> Option<Vec<u8>> {
+fn print(comps: &[Comp], dc: Id) -> Result<Option<Vec<u8>>, Error> {
     let mut p = P {
         c: comps,
         out: Vec::new(),
@@ -3399,6 +3415,7 @@ fn print(comps: &[Comp], dc: Id) -> Option<Vec<u8>> {
         modifiers: None,
         mods: Vec::new(),
         failure: false,
+        limited: false,
         recursion: 0,
         lambda_tpl_parms: 0,
         pack_index: 0,
@@ -3415,11 +3432,14 @@ fn print(comps: &[Comp], dc: Id) -> Option<Vec<u8>> {
     }
     p.num_copy_templates *= p.num_saved_scopes;
     p.comp(Some(dc));
-    (!p.failure).then_some(p.out)
+    if p.limited {
+        return Err(Error(format!("not demangled: limit (the text passes {OUT_LIMIT} bytes)")));
+    }
+    Ok((!p.failure).then_some(p.out))
 }
 
 /// `d_demangle_callback` with `DMGL_PARAMS | DMGL_ANSI | DMGL_VERBOSE`.
-fn d_demangle(mangled: &[u8]) -> Option<Vec<u8>> {
+fn d_demangle(mangled: &[u8]) -> Result<Option<Vec<u8>>, Error> {
     let at = |i: usize| mangled.get(i).copied().unwrap_or(0);
     let global = if mangled.starts_with(b"_Z") {
         None
@@ -3431,12 +3451,12 @@ fn d_demangle(mangled: &[u8]) -> Option<Vec<u8>> {
         Some(if at(9) == b'I' { T::GlobalConstructors } else { T::GlobalDestructors })
     } else {
         // DMGL_TYPES is not set
-        return None;
+        return Ok(None);
     };
     let mut state = 1;
     loop {
         if 2 * mangled.len() > RECURSION_LIMIT as usize {
-            return None;
+            return Ok(None);
         }
         let mut d = D::new(mangled, state);
         let mut dc = match global {
@@ -3456,7 +3476,7 @@ fn d_demangle(mangled: &[u8]) -> Option<Vec<u8>> {
             state = 0;
             continue;
         }
-        return dc.and_then(|dc| print(&d.comps, dc));
+        return dc.map_or(Ok(None), |dc| print(&d.comps, dc));
     }
 }
 
@@ -3544,10 +3564,26 @@ fn looks_rust(m: &[u8]) -> bool {
 /// first (not ported: an error where the symbol could be Rust), then the V3 ABI. `Ok(None)` where
 /// it returns `NULL`.
 pub fn cplus_demangle(mangled: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+    on_big_stack(|| cplus_demangle_here(mangled))
+}
+
+fn cplus_demangle_here(mangled: &[u8]) -> Result<Option<Vec<u8>>, Error> {
     if looks_rust(mangled) {
         return Err(Error("not ported: a Rust symbol (rust-demangle.c)".into()));
     }
-    Ok(d_demangle(mangled))
+    d_demangle(mangled)
+}
+
+/// Runs `f` on a thread of its own with a `STACK`-byte stack, so the recursion of a hostile
+/// name cannot overflow the caller's (a default thread has 2 MiB, the main one 8 MiB).
+fn on_big_stack<T: Send>(f: impl FnOnce() -> Result<T, Error> + Send) -> Result<T, Error> {
+    std::thread::scope(|s| {
+        let job = std::thread::Builder::new()
+            .stack_size(STACK)
+            .spawn_scoped(s, f)
+            .map_err(|e| Error(format!("the demangler thread: {e}")))?;
+        job.join().unwrap_or_else(|p| std::panic::resume_unwind(p))
+    })
 }
 
 /// The line `demangler_gnu_v2_41` (its `cxxfilt.c` main loop and `demangle_it`, no options) prints
@@ -3556,6 +3592,10 @@ pub fn cplus_demangle(mangled: &[u8]) -> Result<Option<Vec<u8>>, Error> {
 /// and every other character echoed. The output bytes are read as UTF-8 (lossy), as Java reads
 /// them on a UTF-8 platform.
 pub fn native_demangle(line: &str) -> Result<String, Error> {
+    on_big_stack(|| native_demangle_here(line))
+}
+
+fn native_demangle_here(line: &str) -> Result<String, Error> {
     let b = line.as_bytes();
     let valid = |c: u8| c.is_ascii_alphanumeric() || b"_$.".contains(&c);
     let mut out = Vec::new();
@@ -3568,7 +3608,7 @@ pub fn native_demangle(line: &str) -> Result<String, Error> {
         let tok = &b[start..i];
         if !tok.is_empty() {
             let skip = usize::from(tok[0] == b'.' || tok[0] == b'$');
-            match cplus_demangle(&tok[skip..])? {
+            match cplus_demangle_here(&tok[skip..])? {
                 None => out.extend_from_slice(tok),
                 Some(r) => {
                     if tok[0] == b'.' {
@@ -3591,7 +3631,7 @@ pub fn native_demangle(line: &str) -> Result<String, Error> {
 /// `GnuDemangler.canDemangle` takes ELF and Mach-O programs, `MicrosoftDemangler` the Windows PE
 /// ones).
 pub fn gnu_demangle(mangled: &str) -> Result<Option<crate::gnuparse::GnuDemangled>, Error> {
-    crate::gnuparse::demangle(mangled, |s| native_demangle(s).map(Some))
+    on_big_stack(|| crate::gnuparse::demangle(mangled, |s| native_demangle_here(s).map(Some)))
 }
 
 #[cfg(test)]

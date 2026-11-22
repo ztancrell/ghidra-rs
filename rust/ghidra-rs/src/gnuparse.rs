@@ -43,7 +43,8 @@ fn sub(s: &str, b: i64, e: i64) -> R<&str> {
     if b < 0 || e > s.len() as i64 || b > e {
         return sioobe();
     }
-    Ok(&s[b as usize..e as usize])
+    // a byte index inside a non-ASCII character: not ported (Java indexes UTF-16 units), not a panic
+    s.get(b as usize..e as usize).ok_or_else(|| Error("not ported: non-ASCII text (Java indexes UTF-16 units)".into()))
 }
 
 /// `s.substring(b)`.
