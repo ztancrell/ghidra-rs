@@ -6181,9 +6181,10 @@ run counts unchanged (plain 10 runs, 6,858 cleared, 6 removed, 16 disassembled a
 `analyze` takes an ELF x86-64 file (DESIGN.md, 2026-11-21) with language x86:LE:64:default
 and its gcc compiler spec: `x86-64.sla` (the `--sla` or `GHIDRA_RS_SLA` given, else the one
 next to `x86.sla`) with `x86-64.pspec`, and `x86-64-gcc.cspec` read as data at build time.
-`--functions`, `--gaps` and `--purges` work; `--facts`, `--decomp-prelude`, `--abi-callers`
-and `--store` fail loudly on ELF (the facts encode x86:LE:32's core types and the decompiler
-reads x86:LE:32:default:windows only). `--purges <txt>` writes what `tools/ghidra/DumpPurges.java`
+`--functions`, `--gaps`, `--purges` and `--decomp-prelude` work; `--facts`, `--abi-callers`
+and `--store` fail loudly on ELF (the facts encode x86:LE:32's core types). Superseded
+(2026-11-22, branch `m3-x64`): "`--decomp-prelude` fails on ELF; the decompiler reads
+x86:LE:32:default:windows only"; see "The decompiler on x86-64" below. `--purges <txt>` writes what `tools/ghidra/DumpPurges.java`
 writes (entry, purge, thunked function, body min, max, address count, no-return), on PE and ELF.
 
 The loader, `Image::from_elf` (ElfProgramBuilder.load, the parts analysis reads):
@@ -6425,6 +6426,39 @@ leaves a hole). Hatred is still not compared with Java, so these 43 are unverifi
 `cargo test --release` and `cargo test` (debug) 201 passed, 0 failed each (six new malformed-input
 tests in `dwarf/tests.rs`); fmt and clippy clean; `CORPORA=m8 tools/bars.sh` 57 of 57 lines equal
 to the int9 baseline.
+
+### The decompiler on x86-64 (branch `m3-x64`, 2026-11-22)
+
+The console's `load file` takes an ELF x86-64 file as x86:LE:64:default:gcc, as the reference's
+`BfdArchitecture::resolveArchitecture` picks it (bfd_arch.cc:88-110): `x86-64.sla` next to the
+`GHIDRA_RS_SLA` given, `x86-64.pspec`, `x86-64-gcc.cspec`. `analyze <elf64> --decomp-prelude`
+writes the prelude: `adjust vma 0x100000` for a PIE linked at 0 (where Ghidra loads it; the
+read-only sections then marked again), `.got`/`.got.plt` read-only, the GOT import slots and
+every function. What it needed:
+
+- the compiler spec's model rules (modelrules.cc): `<rule>` with `<datatype name="any">` and
+  `goto_stack`, `join_dual_class`, `hidden_return`, `convert_to_ptr`; return recovery goes
+  through `ParamListStandardOut::fillinMap`'s rule path. Storage assigned by a rule
+  (`ModelRule::assignAddress`, so locked prototypes) fails loudly; a model using what is not
+  ported (MSABI: `<group>`, `pointermax`) fails when chosen;
+- `goto [..]`, `call [..]`, `return [..]` in p-code snippets (the `x86_*_thunk` callfixups);
+- `print raw` and heritage's SUBPIECE offsets sized by the address size (8), not 4.
+
+`tools/elf64-decomp.sh` builds `tools/corpus/elf64/*.c` (non-PIE, PIE, `-cet`) and
+`tools/dwarf/cpp*.cpp` (clang++ and g++ -O2) and runs `decomp-diff.sh` on every function. Against
+decomp_dbg: 815 functions, the reference ran 805, identical 670; 105 loud (85 heritage output
+overlap guard, 10 `RulePieceStructure`'s CONCAT tree, 8 overlapping return value guard, 1
+overlapping parameter guard, 1 jump table through a CALLOTHER), 36 silent. The silent ones: 26
+where the ops a heritage pass makes for persistent globals are numbered one lower (the reference
+makes and deletes one op more first; not found yet), 9 where the reference casts `AL` before the
+`return`, 1 other. Hatred, 50 of its own camera and view functions
+(`tools/corpus/hatred-camera.txt`, prelude in 68 s): the reference ran 50, identical 31, loud 15
+(11 output overlap guard, 2 joined contiguous pieces, 2 overlapping parameter guard), silent 4
+(ghidra-rs guards `.bss` globals at calls the reference does not, and one numbering shift). Not
+compared with Java (no facts on ELF yet). `--facts` on ELF is not ported: the 64-bit core types,
+System V prototypes, GNU names and the DWARF types and signatures. The 32-bit path is unchanged:
+`CORPORA=m8 tools/bars.sh` 57 of 57 lines equal to the int9 baseline; `cargo test --release`
+201 passed; fmt and clippy clean.
 
 ## Speed
 

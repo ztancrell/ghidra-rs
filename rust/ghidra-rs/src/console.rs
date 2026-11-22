@@ -32,10 +32,18 @@ fn token(name: &str) -> String {
 /// - `map function` for every function, with its FID name or export name when it has one.
 pub fn prelude(img: &Image, an: &Analysis, fid: &BTreeMap<u32, crate::fid::Applied>) -> String {
     let mut s = String::from("option readonly on\n");
+    // a PIE linked at 0: bfd's sections move where ghidra-rs's image has them (IfcAdjustVma);
+    // the read-only ranges bfd gave at load stay at the old addresses, so all are marked again
+    if img.elf_adjust != 0 {
+        let _ = writeln!(s, "adjust vma 0x{:x}", img.elf_adjust);
+    }
     // ELF: bfd marks the sections without SHF_WRITE read-only itself (LoadImageBfd::getReadonly,
     // loadimage_bfd.cc:286-301); `.got` and `.got.plt` are read-only in ghidra-rs's image too
-    let marked = |n: &str| if img.elf64 { n.starts_with(".got") } else { n == ".rdata" };
-    for sec in img.sections.iter().filter(|s| marked(&s.name)) {
+    let marked = |sec: &crate::analysis::Section| match img.elf64 {
+        true => sec.name.starts_with(".got") || (img.elf_adjust != 0 && sec.readonly),
+        false => sec.name == ".rdata",
+    };
+    for sec in img.sections.iter().filter(|s| marked(s)) {
         let _ = writeln!(s, "readonly 0x{:08x}:{}", sec.addr, sec.data.len());
     }
     let mut imports: Vec<_> = img.imports.iter().collect();
@@ -218,6 +226,14 @@ impl Console {
                 arch.add_externref(slot, u64::from(addr(Some(refaddr))?));
                 if let Some(name) = name.first() {
                     arch.name_externref(slot, name.to_string());
+                }
+            }
+            // `adjust vma <n>`: ghidra-rs's ELF image is already where Ghidra loads it
+            ["adjust", "vma", n] => {
+                let arch = self.arch.as_ref().ok_or("No load image present")?;
+                let n = u64::from_str_radix(n.trim_start_matches("0x"), 16).map_err(|e| format!("{line}: {e}"))?;
+                if n != u64::from(arch.image.elf_adjust) {
+                    return Err(format!("{line}: not ported: an adjustment other than the image's own"));
                 }
             }
             ["option", "readonly", on @ ("on" | "off")] => {

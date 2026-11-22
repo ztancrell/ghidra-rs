@@ -197,6 +197,9 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `x86-64-gcc.cspec`): the ELF loader, `--functions`, `--gaps`, `--purges`; against Java 12.3 on
    libtcl 2,438 of 2,535 functions identical, on Hatred 180,033 functions in 54.5 s (Java not
    run). `--facts` and the decompiler stay x86:LE:32 (see `rust/README.md`, "ELF64 analysis").
+   Superseded (2026-11-22, branch `m3-x64`): the decompiler and `--decomp-prelude` take ELF
+   x86-64 (x86:LE:64:default:gcc), checked against the C++ reference; `--facts` is still
+   x86:LE:32 only (see `rust/README.md`, "The decompiler on x86-64").
 2b. CheckAbiCallers.java (register liveness over p-code), the mercs2 pipeline's per-batch
    check: `ghidra-rs analyze --abi-callers`. On branch `m2b-abi-callers`: 96.5% of the
    reference rows identical. On branch `abi-dropin` (a drop-in for the script, judged by the

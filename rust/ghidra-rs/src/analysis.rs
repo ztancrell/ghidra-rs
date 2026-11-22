@@ -38,6 +38,9 @@ pub struct Image {
     pub elf_funcs: Vec<(u32, String)>,
     /// ELF: dynamic relocations `from_elf` does not apply (Ghidra applies them)
     pub unapplied_relocs: usize,
+    /// ELF: what the image base was moved by (ElfHeader.findImageBase: 0x100000 for a PIE linked
+    /// at 0); bfd loads the file where it is linked, so the prelude moves it (`adjust vma`)
+    pub elf_adjust: u32,
 }
 
 impl Image {
@@ -154,7 +157,7 @@ impl Image {
                 .and_then(|a| u32::try_from(a).ok())
                 .ok_or(format!("address {a:#x} + {adj:#x} is past 32 bits"))
         };
-        let mut img = Image { elf64: true, ..Image::default() };
+        let mut img = Image { elf64: true, elf_adjust: adj as u32, ..Image::default() };
         let sections = hdr.sections(e, bytes).map_err(|e| e.to_string())?;
         for s in sections.iter() {
             let flags = s.sh_flags(e);
