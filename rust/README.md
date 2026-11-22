@@ -6054,7 +6054,11 @@ ghidra-rs a pointer's category follows its base. Not traced further.
 Hatred (`Hatred-Linux-Shipping`, 508 MB; its DWARF 3 is clang 3.5.0's, the `.comment` lists GCC
 4.4.7 and 4.8.1 for linked libraries): 461 units, 15,334,680 DIEs, 276,572 data types (75,832
 structures, 162 unions, 53,623 typedefs, 5,551 enums, 141,404 function definitions; 3,180
-`.conflict` names), 142,793 function signatures, in 35.6 s and 1.67 GB peak memory.
+`.conflict` names), 142,793 function signatures, in 35.6 s and 1.67 GB peak memory. Java on
+Hatred did not finish: `DumpDwarf.java` with a 3 GB heap (`GHIDRA_HEADLESS_MAXMEM`, the
+desktop's free memory with another agent building) was still importing types after 29 minutes
+at 3.4 GB resident when the desktop ran out of memory (the game itself was started) and it was
+stopped. So Hatred is not compared with Java; no subset of its units was compared either.
 
 Not ported: local and global variables and their storage (so the STORAGE / FORMAL commit modes,
 the parameter spill and storage-verification fixups, and the cspec's `convert_to_ptr` for
