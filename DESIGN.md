@@ -154,6 +154,13 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   with 12.3; mercs2's own project is copied, never upgraded in place. Superseded: "plain Java 12.2
   auto-analysis" in the entry above means plain Java 12.3 auto-analysis once the outputs are made
   again.
+- 2026-11-21: Hatred (native Linux build, `Hatred-Linux-Shipping`, ELF x86-64, GCC, with DWARF)
+  is the second game, and its needs start now, ahead of the rest of (a) and (c) in the
+  2026-11-14 order. Four pieces, all requested by the user: the ELF64 loader feeding `analyze`,
+  the x86-64 System V calling convention (`x86-64-gcc.cspec`), the GNU (Itanium) demangler and
+  a DWARF types reader. Each is a port of Ghidra's own code, checked against the 12.3
+  reference, as before. mercs2 stays a test bed. The rewrite project itself lives in
+  `~/projects/hatred-decomp`.
 
 ## Milestones
 
