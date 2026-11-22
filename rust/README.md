@@ -6335,11 +6335,31 @@ and arrays appear by name), one per function whose signature the import set, sor
   `DWARFFunction` (bodies from `low_pc`/`high_pc` or `.debug_ranges`, the `this` and
   parameter-name fixups, the function definition of `createFuncSignatures`) and
   `DWARFImporter.moveTypesIntoSourceFolders`.
-- What a Ghidra `Function` adds is copied from what the 12.3 run shows, not from ported code:
-  a return over 16 bytes becomes a pointer and a first parameter `__return_storage_ptr__`
-  (x86-64-gcc.cspec's `hidden_return`; `__thiscall` is not in that cspec), and a parameter named
-  `param_<n>` shows the default name of its ordinal after `this` and that pointer. The full
-  calling convention is the `x86-64 System V` piece of DESIGN.md (2026-11-21).
+- What a Ghidra `Function` adds: the return's rules of x86-64-gcc.cspec's default prototype
+  (x86-64-gcc.cspec:105-112) are ported: up to 16 bytes `join_dual_class`
+  (`MultiSlotDualAssign.assignAddress` with `PrimitiveExtractor`, so an x87 `long double` or a
+  struct of one, which no 8-byte tile holds, fails it), else `hidden_return`: the return becomes
+  a pointer and a first parameter `__return_storage_ptr__`. Still copied from what the 12.3 run
+  shows, not from ported code: `__thiscall` (not in that cspec) keeps `this` an ordinary first
+  parameter after that pointer, and a parameter named `param_<n>` shows the default name of its
+  ordinal after `this` and that pointer. Superseded (2026-11-22): "a return over 16 bytes becomes
+  a pointer" was the whole rule before; `dwarf/mod.rs` `join_dual_class` is the current one. The
+  full calling convention is the `x86-64 System V` piece of DESIGN.md (2026-11-21).
+- Malformed input (review fixes, 2026-11-22): what Java logs with `Msg.error` and skips is
+  skipped and counted as a warning (`ghidra-rs dwarf` prints the count and the first 20): a DIE
+  that cannot be read ends its unit (DIEContainer.java:402-409), a type that fails is skipped
+  (DWARFDataTypeManager.java:578-598), a function that fails is skipped
+  (DWARFFunctionImporter.java:109-143). Where Java's stack overflows (a nameless typedef of
+  itself, or two of each other), a depth bound of 256 on `getDWARFName` fails that type; a
+  member without a parent fails it as Java's NullPointerException does. A unit length past
+  `.debug_info` reads until a DIE fails; one that wraps Java's long leaves an empty unit and ends
+  the unit list; an empty first unit maps no DIE (`compUnitDieIndex` as Java's TreeMap). Java's
+  `int` and `long` arithmetic wraps (`wrapping_*`), an enum of more than 8 bytes fails its type
+  (EnumDataType.java:57). `DW_FORM_indirect`, nested lexical blocks and `markAllChildrenAsProcessed`
+  are iterated, so hostile nesting cannot exhaust the stack. The GNU forms 0x1f01, 0x1f02,
+  0x1f20, 0x1f21 (DWARFForm.java:243-246) are read. `getDataTypesByBaseName` lists the base
+  type, then the `.conflict` types in Java's HashMap order (CategoryDB.java:575-646); bitfield
+  bases compare by `getPrimitiveBaseDataType` (BitFieldDataType.java:241-253).
 
 Checked with `tools/dwarf-diff.sh` (builds `tools/dwarf/*.c*` with GCC 16.2.1 and clang 23.1.5,
 `-gdwarf-3` as Hatred's units, then `DumpDwarf.java` on 12.3 with `-noanalysis` and `ghidra-rs
@@ -6365,12 +6385,46 @@ the parameter spill and storage-verification fixups, and the cspec's `convert_to
 parameters), location lists and expressions beyond constants, line programs and source maps,
 macros (`DWARFMacroEnumCreator`), comments, descriptions and bookmarks, external debug files,
 Go and Rust special cases, the conflict queue's post-pass and `replace` of a type of another
-kind, inlined-function comments, a function's no-return from earlier analysis.
+kind, inlined-function comments, a function's no-return from earlier analysis. Also not
+ported (review findings left open, 2026-11-22): the STORAGE commit mode
+(`StorageVerificationDWARFFunctionFixup`, the CUSTOM_STORAGE path of
+`updateFunctionSignature`, the location expressions of parameters at entry); the parameter
+names `this` / `param_<n>` from `PrototypeModel` / `VariableSymbolDB` / `ParameterDB` source
+(still from the 12.3 output); a removal from a conflict map or a treeified bucket in the HashMap
+order (`java_hashmap_order`); a `long double` member's 16-byte component and packing in a union
+(`cpp4`'s union `U`, below). Low review findings left as they are (2026-11-22): zero-width
+bitfields are not skipped in `composite_part` (Java skips them, `BitFieldDataType.isZeroLength`);
+an enum with an unnamed enumerator keeps the others (Java's `add(null, ..)` throws and drops the
+enum); a negative array bound gives one element (Java's `ArrayDataType` throws); DWARF 5 type,
+partial and skeleton units are skipped or read (Java throws, `DWARFUnitHeader.java:61-72`);
+`line_strp` and `strp_sup` read as empty strings; abbreviation tag and attribute codes are cut
+to 16 bits.
 
 Rerun after the merge into master (2026-11-22, with `int9`'s ELF64 and demangler and Repair Flow
 Damage): `cargo test --release` 195 passed, 0 failed; fmt and clippy clean; `dwarf-diff.sh rust
 cmp` on the ten corpora (the branch's binaries and Java dumps, reused) gives the same counts as
 above: data types 5,760 of 5,761 identical, function signatures 522 of 522. Java was not rerun.
+
+Review fixes (branch `dwarf-fixes`, 2026-11-22; "Malformed input" above, and `join_dual_class`):
+the Java dumps of the ten corpora rerun on 12.3, same counts before and after the fixes (data
+types 5,760 of 5,761, function signatures 522 of 522, 0 warnings). A new corpus `cpp4`
+(`tools/dwarf/cpp4.cpp`, -O2, GCC and clang: a method returning a 24-byte struct with an
+unnamed parameter, `long double` returns, small structs and unions returned in registers):
+data types 32 of 34 identical, function signatures 17 of 18 (before `join_dual_class`: 14 of
+18; `K::ld` and `mk_ld` return `long double` through `__return_storage_ptr__` in Java). The
+three left: union `U` (`long double` member, both compilers: Java's component is 16 bytes and
+the union packed, ghidra-rs's 10 and not packed), and GCC's `mk_ld`, which Java gives the
+pointer return but no `__return_storage_ptr__` parameter (likely the STORAGE commit mode, not
+ported; not traced). Hatred: the same 461 units, 15,334,680 DIEs, 276,565 data type lines and
+142,793 signatures of the dump, 0 warnings, 32.8 s and 1.66 GB peak (before: 30.0 s, 1.66 GB);
+one typedef names another `.conflict` (`FFuncPtr` of `TBaseStaticDelegateInstance<const
+FSceneViewport *()>`: `_func_RetValType.conflict8`, was `.conflict11`: the HashMap order), and
+42 signatures now return through `__return_storage_ptr__` (`join_dual_class` fails: empty
+structs such as `TStatId` / `FNothing`, `TOptional<T>` whose packed `TTypeCompatibleBytes`
+leaves a hole). Hatred is still not compared with Java, so these 43 are unverified.
+`cargo test --release` and `cargo test` (debug) 201 passed, 0 failed each (six new malformed-input
+tests in `dwarf/tests.rs`); fmt and clippy clean; `CORPORA=m8 tools/bars.sh` 57 of 57 lines equal
+to the int9 baseline.
 
 ## Speed
 

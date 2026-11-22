@@ -13,7 +13,7 @@ cd "$(dirname "$0")/.."
 OUT=target/dwarf
 mkdir -p "$OUT"
 steps=${*:-build java rust cmp}
-names="c1-gcc cpp1-gcc c1-clang cpp1-clang c2-gcc c2-clang cpp2-gcc cpp2-clang cpp3-gcc cpp3-clang"
+names="c1-gcc cpp1-gcc c1-clang cpp1-clang c2-gcc c2-clang cpp2-gcc cpp2-clang cpp3-gcc cpp3-clang cpp4-gcc cpp4-clang"
 bins=${DWARF_BINS:-$(for n in $names; do printf "%s=%s/%s " "$n" "$OUT" "$n"; done)}
 GHIDRA_RS=${GHIDRA_RS:-target/release/ghidra-rs}
 
@@ -30,6 +30,8 @@ for step in $steps; do
         clang++ -std=c++17 -g -gdwarf-3 -O2 -o "$OUT/cpp2-clang" tools/dwarf/cpp2.cpp
         g++ -std=c++17 -g -gdwarf-3 -O2 -o "$OUT/cpp3-gcc" tools/dwarf/cpp3.cpp
         clang++ -std=c++17 -g -gdwarf-3 -O2 -o "$OUT/cpp3-clang" tools/dwarf/cpp3.cpp
+        g++ -std=c++17 -g -gdwarf-3 -O2 -o "$OUT/cpp4-gcc" tools/dwarf/cpp4.cpp
+        clang++ -std=c++17 -g -gdwarf-3 -O2 -o "$OUT/cpp4-clang" tools/dwarf/cpp4.cpp
         ;;
     java)
         for nb in $bins; do
