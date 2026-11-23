@@ -309,3 +309,46 @@
  }
  
  /// \class IfcProduceC
+--- a/loadimage_bfd.cc
++++ b/loadimage_bfd.cc
+@@ -96,6 +96,16 @@
+   thebfd = (bfd *)0;
+ }
+ 
++// ghidra-rs (decomp-ref.patch): an ELF section without SEC_ALLOC (.comment, .debug_*) is no part
++// of the image. bfd gives it the address 0, where it would overlap the program (Hatred's
++// .debug_info covers .bss); Java puts it in the OTHER space, not in ram
++// (ElfProgramBuilder.java:2948-2957), so it is neither read nor marked read-only here
++static bool notInImage(bfd *abfd,asection *p)
++
++{
++  return bfd_get_flavour(abfd) == bfd_target_elf_flavour && (p->flags & SEC_ALLOC) == 0;
++}
++
+ asection *LoadImageBfd::findSection(uintb offset,uintb &secsize) const
+ 
+ { // Return section containing offset, or closest greater section
+@@ -103,6 +113,7 @@
+   uintb start,stop;
+ 
+   for(p = thebfd->sections; p != (asection *)NULL; p = p->next) {
++    if (notInImage(thebfd,p)) continue;
+     start = p->vma;
+     secsize = (p->size!=0) ? p->size : p->rawsize;
+     stop = start + secsize;
+@@ -111,6 +122,7 @@
+   }
+   asection *champ = (asection *)0;
+   for(p = thebfd->sections; p != (asection *)NULL; p = p->next) {
++    if (notInImage(thebfd,p)) continue;
+     if (p->vma > offset) {
+       if (champ == (asection *)0)
+ 	champ = p;
+@@ -290,6 +302,7 @@
+   asection *p;
+ 
+   for(p = thebfd->sections; p != (asection *)NULL; p = p->next) {
++    if (notInImage(thebfd,p)) continue;
+     if ((p->flags & SEC_READONLY)!=0) {
+       start = p->vma;
+       secsize = (p->size!=0) ? p->size : p->rawsize;

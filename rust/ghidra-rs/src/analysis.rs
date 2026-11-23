@@ -41,9 +41,6 @@ pub struct Image {
     /// ELF: what the image base was moved by (ElfHeader.findImageBase: 0x100000 for a PIE linked
     /// at 0); bfd loads the file where it is linked, so the prelude moves it (`adjust vma`)
     pub elf_adjust: u32,
-    /// ELF: the non-loaded sections bfd marks read-only, (address, size): the console's
-    /// read-only ranges have them, as the reference's (not Java's, which does not load them)
-    pub bfd_readonly: Vec<(u64, u64)>,
     /// ELF: Java's EXTERNAL block, first and last address (ElfProgramBuilder.createExternalBlock,
     /// ElfProgramBuilder.java:1546-1568: uninitialized, writable). Not a section here: only the
     /// facts writer reads it, the analysis and the decompiler see no block there
@@ -191,16 +188,9 @@ impl Image {
         for s in sections.iter() {
             let flags = s.sh_flags(e);
             let name = String::from_utf8_lossy(sections.section_name(e, s).unwrap_or_default()).into_owned();
-            // bfd makes the non-loaded sections with contents (`.comment`, `.debug_*`) sections too,
-            // at their address (0) and read-only without SHF_WRITE, and the reference's
-            // LoadImageBfd::getReadonly (loadimage_bfd.cc:286-301) marks them; Java does not map them
-            if flags & u64::from(elf::SHF_ALLOC) == 0
-                && flags & u64::from(elf::SHF_WRITE) == 0
-                && matches!(s.sh_type(e), elf::SHT_PROGBITS | elf::SHT_NOTE)
-                && s.sh_size(e) != 0
-            {
-                img.bfd_readonly.push((s.sh_addr(e), s.sh_size(e)));
-            }
+            // a section without SHF_ALLOC (`.comment`, `.debug_*`) is no part of the image: Java puts
+            // it in the OTHER space, not in ram (ElfProgramBuilder.java:2948-2957), and the
+            // reference skips it as well (`notInImage`, tools/decomp-ref.patch)
             if flags & u64::from(elf::SHF_ALLOC) == 0 || s.sh_size(e) == 0 || name == ".tbss" {
                 continue;
             }

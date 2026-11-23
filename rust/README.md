@@ -1146,6 +1146,9 @@ rust/tools/decomp-diff.sh --script <file>      # one script on both engines, ful
   `DECOMP_JT_RAW` set (stage S3), it also prints to stderr the partial function each jump-table
   recovery simplifies (`print raw` form) and the reason a recovery fails. Run `decomp_dbg` by
   absolute path with `SLEIGHHOME=<repository root>`.
+  Superseded (2026-11-23): "without it the output is upstream's" holds for PE files; on an ELF
+  the patch always leaves the non-loaded sections out of the image ("The prelude path follows
+  Java" below).
 - `--decomp-prelude` writes console commands both engines `source` before a function:
   `option readonly on`, `readonly` over `.rdata` (so `.rdata` constants such as floats fold
   instead of printing as `fRam...`), for each IAT slot a `nocode` function named after the
@@ -1153,6 +1156,8 @@ rust/tools/decomp-diff.sh --script <file>      # one script on both engines, ful
   of decoding the bound address in the slot, which made 0x40a110 fail), and `map function` for
   every function with its FID or export name. For mercs2: 30,262 `map function` lines (1,022 of
   them import slots), 1,022 `map externalref`.
+  For an ELF also `override flow <address> callreturn` after a function's `map function`, for
+  its CALL_RETURN flow overrides ("The prelude path follows Java" below).
 - `decompile -i` reads `load file`, `source`, `map function`, `map externalref`, `readonly`,
   `option`, `fixup apply`, `load function`, `load addr`, `break start`, `decompile`,
   `print raw`, `continue` and `quit`, and echoes them as `decomp_dbg -i` does. `decompile`
@@ -1162,6 +1167,8 @@ rust/tools/decomp-diff.sh --script <file>      # one script on both engines, ful
   `parse line` defines types and locks `extern` prototypes (stage S6); `load facts <file>` (stage S10, not a
   command of `decomp_dbg`) reads the facts of a Ghidra project in place of the prelude; any other command fails with "not implemented in ghidra-rs".
   Superseded: until S6, `parse line` failed like `print C`.
+  Since 2026-11-23 also `override flow <address> callreturn`, on the function `map function`
+  made last and before it is loaded ("The prelude path follows Java" below).
   Superseded: until S2, `decompile` stopped at most at `heritage` and `continue` failed. Of the options
   `option readonly on|off` and `option currentaction decompile <group> on|off` have an
   effect (and print the reference's message); the others (`togglerule`: no rule is ported
@@ -6489,6 +6496,8 @@ backtrace):
   `.bss`, which bfd reads as zeros (`loadFill`). The console's image now has those ranges
   (`Image::bfd_readonly`) and reads `.bss` as zeros. This is the reference's loader, not Java's,
   which does not map them.
+  Superseded (2026-11-23, branch `fix-prelude`): `Image::bfd_readonly` is gone; the reference
+  skips these sections instead ("The prelude path follows Java" below).
 
 After the three: small ELF corpus identical 700 / 815 (was 670), loud 105, silent 0 (the reference
 ran 805; 10 it did not finish, 5 of them timed out at 120 s); Hatred camera identical 35 / 50 (was
@@ -6527,6 +6536,8 @@ records; they are `underived` now.
 
 Prototypes from the 64-bit data-type archives (Java gives `_init` `int _init(EVP_PKEY_CTX *)`)
 are not read.
+Superseded in part (2026-11-23, branch `fix-prelude`): still not applied, but a function the
+archive names is `underived ... function` ("Archive prototypes are loud" below).
 
 The EXTERNAL block and the GOT (branch `x64-facts`, 2026-11-22), in the facts only (the
 analysis and the decompiler have no block there). Superseded (2026-11-22, branch
@@ -6690,6 +6701,8 @@ causes:
 
 The facts path, which would follow Java here, fails loudly on both functions ("the decompile
 of a function in a namespace is not ported").
+Superseded (2026-11-23, branch `fix-prelude`): the function prints as in Java at the tail jump
+now, and `GMalloc` is not folded ("The prelude path follows Java" below).
 
 Checks: small ELF decompile 815, identical 701, loud 110, silent 0, 4 reference timeouts.
 Every ghidra-rs output is byte-identical to master's except 4 cpp3-clang functions that timed
@@ -6727,6 +6740,113 @@ and of the `-cet` `.plt.sec` thunks (Java names them after the external with its
 ghidra-rs `FUN_`), 4 no-return flags Java sets (`die.constprop.0`), 3 `main` with a call
 override Java writes (`protooverride` of a varargs call).
 
+Superseded (2026-11-23, branch `fix-prelude`): the 3,243 and the small corpus's 47; a function
+the archive names is `underived` now ("Archive prototypes are loud" below).
+
+#### The prelude path follows Java: non-loaded sections, flow overrides (branch `fix-prelude`, 2026-11-23)
+
+Hatred's `_ZN24AHeroCharacterControllerD0Ev` printed `iRam0000000000000000` on the prelude path
+for three reasons (above). The user's decision: fix all three. What tracing found and what was
+done:
+
+- Non-loaded sections. Java's ELF loader puts a section without SHF_ALLOC (`.comment`,
+  `.debug_*`) in the OTHER space, never in ram (ElfProgramBuilder.java:2948-2957). ghidra-rs's
+  image never had these sections: the bytes at 0 were only the reference's, where bfd gives
+  such a section the address 0 and `LoadImageBfd::findSection` and `getReadonly` take any
+  section. So the port is in the reference: `tools/decomp-ref.patch` adds `notInImage` to
+  loadimage_bfd.cc, and an ELF section without SEC_ALLOC is neither read nor marked read-only.
+  The test is for bfd's ELF flavour, so a PE file loads as before.
+- `Image::bfd_readonly` is removed. It copied the reference's read-only marking of those
+  sections; with the reference patched nothing marks `.bss` read-only, as in Java. The two
+  were one cause seen from two sides: ghidra-rs never mapped a non-loaded section at 0, it
+  only had their ranges as read-only.
+- Flow overrides. `analyze <elf64> --decomp-prelude` writes, after a function's `map function`,
+  `override flow <address> callreturn` for each instruction of its body with a CALL_RETURN
+  override in the facts (`factsout::call_returns`, the rule `--facts` writes its `override`
+  records by: Shared Return Calls' jump to another function, and a call that does not
+  return). `map function` makes the function the current one (IfcMapfunction sets `dcp->fd`;
+  the console's `map function` now does too), the order the upstream datatests use. After
+  `load function` the reference has followed the flow already (`IfaceDecompData::followFlow`)
+  and an override does nothing until a second `decompile`, so ghidra-rs's console refuses one
+  there. The console ports `IfcFlowOverride` for `callreturn` (another kind fails) and
+  `Override::CallReturn::performOverride` with `Funcdata::findPrimaryBranch` (override.cc:507-524,
+  flow.cc:477-478; `Flow::call_return_flow`): the branch becomes a CALL, a BRANCHIND or RETURN
+  a CALLIND, and a `RETURN #0` follows. Hatred's prelude: 215,775 lines, 34,932 of them
+  overrides.
+
+Limits of the overrides:
+- the PE prelude has none. Java has them on PE too, but they would change the mercs2 prelude
+  (its `cksum` is a `bars-queue.sh` check) and every baseline built on it; not done here;
+- they are ghidra-rs's own, not Java's: on Hatred `facts-diff.sh` has 31,356 `override`
+  records equal, 2,507 only Java has and 3,972 only ghidra-rs has (0x16a0590, a function of
+  one jump, is one);
+- a function gets the overrides of its body's instructions; flow that leaves the body finds
+  none.
+
+`analyze` on an ELF takes `x86-64.sla` next to a `GHIDRA_RS_SLA` that names x86's, as the
+console's `load file` does (`--sla` is taken as given), so `decomp-diff.sh` writes an ELF
+prelude itself. It failed there with "no register RSP": the script exports
+`GHIDRA_RS_SLA=x86.sla`.
+
+Checks (MacBook; the reference rebuilt with the patch, every run with the binary's own
+prelude):
+- Hatred `_ZN24AHeroCharacterControllerD0Ev` (0x1752ff0), `print C`: both engines print
+  `_ZN24AHeroCharacterControllerD2Ev(); func_0x016a0590(param_1); return;`, the call and return
+  Java has at the tail jump, and no flow into `FMemory::Free`;
+- `FMemory::Free` (0x18ded60) itself: both engines print
+  `if (piRam000000000515e4b0 == (int8 *)0x0)` and
+  `(**(code **)(*piRam000000000515e4b0 + 0x30))(piRam000000000515e4b0,param_1);`. `GMalloc`
+  is a global again, not the constant 0. The prelude names no data, so it prints by address
+  where Java prints `GMalloc`;
+- small ELF decompile corpus, 815 functions: identical 728 (was 701), loud 87 (was 110),
+  silent 0, no timeout (were 4). The reference ran 813; the 2 it fails at `load function`
+  ("Unable to load 512 bytes", as before) are loud in ghidra-rs. The loud ones: 63 heritage
+  output overlap guard, 12 `RulePieceStructure`'s CONCAT tree, 8 overlapping return value
+  guard, 1 overlapping parameter guard, 1 jump table through a CALLOTHER, and the 2 above;
+- Hatred camera corpus, 50 functions, Hatred's own prelude: identical 37 (was 35), loud 13
+  (was 15), silent 0;
+- the mercs2 prelude is byte-identical (`cksum` 805048874, 851,093 bytes; no `override` line);
+  `CORPORA=m8 tools/bars.sh`: 57 of 57 lines equal to the baseline;
+- `cargo test --release` 202 passed (201 and the one new test), `cargo clippy --all-targets
+  -- -D warnings` and `cargo fmt --check` clean.
+
+Not checked: Java's own C for these functions (the facts path still fails loudly on a function
+in a namespace); the desktop's reference, which must be rebuilt (`tools/decomp-ref.sh`) before
+its next `decomp-diff.sh` or `bars-queue.sh` run, since the patch changed.
+
+#### Archive prototypes are loud (branch `fix-prelude`, 2026-11-23)
+
+Java's Apply Data Archives analyzer gives a function the prototype of a function definition
+of its archive, `generic_clib_64` for an ELF x86-64 program (DataTypeArchiveUtility.java:114-142;
+Java's log on Hatred: "Applied data type archive: generic_clib_64"). The definition is found by
+name: the last identifier of a symbol's name, or that with one `_` before it
+(ApplyFunctionDataTypesCmd.java:138-176, 405-424). ghidra-rs does not apply these prototypes
+(the user's decision: not ported now), so its `func` record of such a function differed from
+Java's silently. Now `analyze <elf64> --facts` reads the names of the archive's function
+definitions (`Features/Base/data/typeinfo/generic/generic_clib_64.gdt` in the Ghidra
+tree the `.sla` is in, through `gdt::Archive`; the run fails without the file) and writes
+`underived <entry> function` for a function a symbol-table name of which matches
+(`factsout::archive_named`), and for a thunk of one. Nothing else of the record changes. The PE
+path does not read the archive.
+
+Hatred, `facts-diff.sh` against Java's facts: silent `func` records 3,243 -> 236; `underived`
+records 351,303 -> 354,311 (`function`: 171,701 -> 174,709); every row of the table above is
+unchanged (func 5,623 equal). 3,007 of the 3,243 had an archive name; among the functions not
+`underived` before, 1 with an archive name was equal to Java's and is loud now. `--facts`
+took 468 s, maximum RSS 7.27 GB. Small corpus (14 binaries): silent 47 -> 33 (the 14 `_init`),
+`underived` 1,495 -> 1,509, func 209 / 1,112 as before.
+
+Premise found wrong: the 3,137 counted as "archive prototypes" (above) were counted by what
+Java's record has, a locked prototype or a model; 3,007 have an archive name. The 236 left,
+none `underived`:
+- 104 with a locked prototype in Java and no archive name (60 `unknown`, 23 `__thiscall`,
+  21 `__stdcall`: `default_malloc_ex`, `str_free`, `err_state_LHASH_COMP`,
+  `uset_closeOver_53`): not traced; many are callbacks passed to archive functions;
+- 131 without one (105 `unknown`, 21 `__thiscall`, 5 `__stdcall`), the stack-local
+  differences among them: not traced;
+- `_start` (`processEntry`).
+Also not covered: a second name of a function. `Image::elf_funcs` keeps one name per entry, so
+an alias only Java sees can still match the archive.
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The

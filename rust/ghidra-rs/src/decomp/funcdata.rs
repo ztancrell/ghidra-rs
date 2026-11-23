@@ -93,6 +93,9 @@ pub struct Funcdata {
     next_unique: u64,
     /// header warnings (`Funcdata::warningHeader`), for `print C`
     pub(crate) warnings: Vec<String>,
+    /// the instructions with a `callreturn` flow override (`Override::pcodeover`, set by the
+    /// console's `override flow`): flow.rs makes the branch there a call followed by a return
+    pub(crate) call_returns: BTreeSet<u64>,
     /// `Varnode::mapentry`: the symbol and entry a varnode is linked to (`setSymbolEntry`,
     /// from `ActionNameVars` on)
     pub(crate) mapentry: BTreeMap<VarnodeId, (super::scope::SymbolId, usize)>,
@@ -196,6 +199,7 @@ impl Funcdata {
             localmap: super::varmap::LocalMap::empty(),
             next_unique: UNIQUE_ANALYSIS,
             warnings: Vec::new(),
+            call_returns: BTreeSet::new(),
             listing_comments: Vec::new(),
             isolated: std::collections::HashSet::new(),
             name_recs: Vec::new(),
