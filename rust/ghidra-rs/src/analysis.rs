@@ -52,7 +52,7 @@ pub struct Image {
     pub externals: Vec<External>,
     /// ELF: GOT slots a GLOB_DAT or JUMP_SLOT relocation binds to an EXTERNAL entry, and the
     /// value Java writes there (X86_64_ElfRelocationHandler.java:168-171: the entry plus the
-    /// addend); the slot itself holds 0 here
+    /// addend), which the slot holds here too
     pub got_external: HashMap<u32, u32>,
     /// ELF: the addresses of the named symbols the symbol tables define (Java's labels there)
     pub elf_named: HashSet<u32>,
@@ -159,8 +159,9 @@ impl Image {
     /// point and at DT_INIT, DT_FINI and the entries of the init, preinit and fini arrays
     /// (processEntryPoints). GOT slots the dynamic relocations bind to an undefined symbol are
     /// imports of `<EXTERNAL>` (Library.UNKNOWN), as the IAT slots of a PE: Ghidra points them
-    /// at its EXTERNAL block, which only the facts writer has (`external_block`, `externals`,
-    /// `got_external`): the slots hold 0 here. Addresses must fit in 32 bits.
+    /// at its EXTERNAL block, which only the facts writer has as a block (`external_block`,
+    /// `externals`, `got_external`); the slots hold the entry's address as in Java, an address
+    /// in no section here. Addresses must fit in 32 bits.
     pub fn from_elf(bytes: &[u8]) -> Result<Image, String> {
         use object::elf;
         use object::read::elf::{Dyn, ElfFile64, FileHeader, ProgramHeader, Rela, SectionHeader, Sym};
@@ -319,9 +320,9 @@ impl Image {
         }
         img.entry = (hdr.e_entry(e) != 0).then(|| addr32(hdr.e_entry(e))).transpose()?;
         // the dynamic relocations (X86_64_ElfRelocationHandler): GOT slots bound to undefined
-        // symbols by JUMP_SLOT and GLOB_DAT are imports, and hold Java's EXTERNAL-block address
-        // there (X86_64_ElfRelocationHandler.java:168-170; 0 here, which is no block); to a
-        // defined symbol they and R_X86_64_64 write its address plus the addend; RELATIVE,
+        // symbols by JUMP_SLOT and GLOB_DAT are imports, and hold Java's EXTERNAL-block entry
+        // plus the addend (X86_64_ElfRelocationHandler.java:168-171), an address in no block of
+        // this image; to a defined symbol they and R_X86_64_64 write its address plus the addend; RELATIVE,
         // RELATIVE64 and IRELATIVE write the image base adjustment plus the addend, a prelinked
         // RELATIVE plus the word in place (X86_64_ElfRelocationHandler.java:76-93; RELR, the
         // packed form, the word in place). Others are counted, not applied (COPY, which Java
@@ -377,20 +378,20 @@ impl Image {
                         if let Some(&v) = defined.get(&(link, sym)) {
                             put(&mut img, at, &|_| v.wrapping_add(addend as u64))
                         } else if let Some(name) = undefined.get(&(link, sym)).filter(|n| !n.is_empty()) {
-                            if r.r_type(e, false) == elf::R_X86_64_64 {
-                                false
-                            } else {
+                            // the EXTERNAL entry plus the addend (X86_64_ElfRelocationHandler.java:119-121,
+                            // 168-171); no entry: Java leaves the word as the file has it and marks
+                            // the relocation unhandled (AbstractElfRelocationHandler.java:160-183)
+                            let ext = ext_of.get(&(link, sym));
+                            let v = ext.map(|x| u64::from(img.externals[*x].addr).wrapping_add(addend as u64));
+                            if r.r_type(e, false) != elf::R_X86_64_64 {
                                 img.imports.insert(at, ("<EXTERNAL>".to_string(), name.clone()));
-                                if let Some(x) = ext_of.get(&(link, sym)) {
-                                    let v = u64::from(img.externals[*x].addr).wrapping_add(addend as u64);
-                                    img.got_external.insert(
-                                        at,
-                                        u32::try_from(v)
-                                            .map_err(|_| format!("GOT slot {at:#x}: {v:#x} is past 32 bits"))?,
-                                    );
+                                if let Some(v) = v {
+                                    let v32 = u32::try_from(v)
+                                        .map_err(|_| format!("GOT slot {at:#x}: {v:#x} is past 32 bits"))?;
+                                    img.got_external.insert(at, v32);
                                 }
-                                put(&mut img, at, &|_| 0)
                             }
+                            v.is_some_and(|v| put(&mut img, at, &|_| v))
                         } else {
                             false
                         }

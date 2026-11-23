@@ -6205,10 +6205,14 @@ The loader, `Image::from_elf` (ElfProgramBuilder.load, the parts analysis reads)
   the packed RELR form (image base adjustment plus addend; a prelinked RELATIVE adds it to the
   word in place, ElfHeader.isPreLinked), R_X86_64_64, GLOB_DAT and JUMP_SLOT to a defined symbol
   (its address plus the addend); GLOB_DAT and JUMP_SLOT to an undefined symbol make the GOT slot
-  an import of `<EXTERNAL>`, as an IAT slot of a PE, and write 0 there where Java writes the
-  address of its EXTERNAL block (no block here; so no code pointer is read from it). The rest,
-  and those at no 8 bytes of a section, are counted in a warning (Hatred: 10, the
-  COPY relocations, which Java does not apply either);
+  an import of `<EXTERNAL>`, as an IAT slot of a PE. They, and R_X86_64_64 to an undefined
+  symbol, write the symbol's EXTERNAL entry plus the addend, as Java does
+  (X86_64_ElfRelocationHandler.java:119-121, 168-171). The entry is in no block of this image
+  (see "The GOT import slots in the image"). An undefined symbol without an entry leaves the
+  word as the file has it (AbstractElfRelocationHandler.java:160-183, where Java marks it
+  unhandled). Superseded (2026-11-22, branch `fix-gotslots`): "write 0 there where Java writes
+  the address of its EXTERNAL block". The rest, and those at no 8 bytes of a section, are
+  counted in a warning (Hatred: 10, the COPY relocations, which Java does not apply either);
 - one-byte functions at every STT_FUNC symbol of `.symtab` and `.dynsym` (evaluateElfSymbol;
   `.cold` parts, names matching ElfSymbol's `.+\.cold((\.[0-9]+)?)`, are none), at the entry point and at DT_INIT, DT_FINI and the init, preinit and
   fini array entries (processEntryPoints); global and weak ones are the exports;
@@ -6525,7 +6529,9 @@ Prototypes from the 64-bit data-type archives (Java gives `_init` `int _init(EVP
 are not read.
 
 The EXTERNAL block and the GOT (branch `x64-facts`, 2026-11-22), in the facts only (the
-analysis and the decompiler still see 0 in the import slots and no block there):
+analysis and the decompiler have no block there). Superseded (2026-11-22, branch
+`fix-gotslots`): "the analysis and the decompiler still see 0 in the import slots"; the slots
+hold the entries' addresses now (see "The GOT import slots in the image" below):
 - Java's EXTERNAL block: an 8-byte entry per undefined symbol in symbol-table order (a sized
   object its size), from the first 0x1000 boundary past the highest block; a versioned name
   (`puts@GLIBC_2.2.5`) of an entry made before is that entry's PRE comment (`comments`,
@@ -6642,6 +6648,54 @@ ghidra-rs writes 351,303 `underived` records. Known limits, not fixed:
   silent;
 - not ported: DWARF and demangled function signatures, parameter storage, namespaces (`ns`
   records).
+
+#### The GOT import slots in the image (branch `fix-gotslots`, 2026-11-22)
+
+`Image::from_elf` writes Java's value into a GOT slot bound to an undefined symbol: its EXTERNAL
+entry plus the addend (X86_64_ElfRelocationHandler.java:119-121, 168-171), where it wrote 0.
+The analysis, the console and the facts' decompiler all read it. Per path:
+- facts path (`load facts`, compared with Java): the slot is read-only in Java's facts, so a
+  load from it folds to the entry's address, as in Java. On `t1-pie`'s `__do_global_dtors_aux`
+  with Java's facts and `option readonly on`, ghidra-rs read 0 before the fix, folded the test
+  away and dropped the call silently (`/* WARNING: Removing unreachable block */`). Now it
+  prints `__cxa_finalize(__dso_handle);`, the line Java 12.3 prints with "respect read-only"
+  on (DecompileOptions.setRespectReadOnly; the DecompileRef.java default, off, prints
+  `if (PTR___cxa_finalize_00103fe0 != ...)` on both engines);
+- prelude path (compared with decomp_dbg, which reads the file through bfd, no relocations):
+  the slot is an `externalref` of the prelude, and that clears its read-only flag
+  (`Arch::is_readonly`), so neither engine reads its value. No output changed;
+- the analysis: the entry is in no block of the image, like 0, so nothing changed. The 14
+  small binaries' `--facts` are byte-identical before and after. Hatred's facts-diff table
+  (above) is unchanged, and so is Hatred's `--decomp-prelude` (`cmp`). The function list is
+  the same.
+
+Hatred's `_ZN24AHeroCharacterControllerD0Ev` (0x1752ff0) printing
+`(**(code **)(iRam0000000000000000 + 0x30))(0,param_1);` on the prelude path is not this. Its
+causes:
+- the prelude has no flow overrides. Java's facts (and ghidra-rs's) have `override 1752ffd
+  CALL_RETURN`, so Java stops at the tail `JMP operator delete`. The console follows it
+  (flow.cc:299-315) through `_ZdlPv` into `FMemory::Free`, where `JMP RAX` (0x18ded87, a
+  vtable call) gives the "Could not recover jumptable" warning. The reference does the same;
+- `GMalloc` (0x515e4b0, `.bss`) is read-only on that path. bfd's `.debug_info` at 0
+  (0xad6042f bytes, `Image::bfd_readonly`, LoadImageBfd::getReadonly) covers `.bss`, so the load
+  folds to 0. In Java `.bss` is writable;
+- the reference then reads `*(0 + 0x30)` from `.comment`'s bytes at 0 (LoadImageBfd::findSection
+  and loadFill take any section, loaded or not) and prints `(*pcRam726328203a434377)(0,param_1);`.
+  ghidra-rs has no bytes at 0 and prints `iRam0000000000000000`. This is a silent difference
+  from the reference, and it is older than this fix (master f69e2a1869 prints the same). The
+  Hatred camera corpus did not show it: `decomp-diff.sh` with only `BIN` set takes the mercs2
+  prelude, and decomp-diff.sh's own prelude run fails on ELF ("no register RSP", from
+  `GHIDRA_RS_SLA=x86.sla`).
+
+The facts path, which would follow Java here, fails loudly on both functions ("the decompile
+of a function in a namespace is not ported").
+
+Checks: small ELF decompile 815, identical 701, loud 110, silent 0, 4 reference timeouts.
+Every ghidra-rs output is byte-identical to master's except 4 cpp3-clang functions that timed
+out at 120 s there and finish here (previous: 697 / 106 / 0, 12 reference timeouts or load
+errors). Hatred camera 35 / 15 / 0 with the mercs2 prelude, outputs identical to master's. The
+same 35 / 15 / 0 with Hatred's own prelude.
+
 
 ## Speed
 

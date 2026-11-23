@@ -1063,7 +1063,7 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
     if img.elf64 {
         for s in img.sections.iter().filter(|s| s.name.starts_with(".got") && s.zero_tail == 0) {
             for a in (s.addr..s.addr + s.data.len() as u32 / 8 * 8).step_by(8) {
-                let v = img.got_external.get(&a).copied().or_else(|| img.read_ptr(a)).unwrap_or(0);
+                let v = img.read_ptr(a).unwrap_or(0);
                 defs.insert(a, Def::Ptr(v));
             }
         }
