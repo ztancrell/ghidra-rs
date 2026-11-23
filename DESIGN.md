@@ -172,6 +172,18 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   System V prototypes, decompiler language x86:LE:64:default:gcc), checked against Java 12.3.
   User's decision. Addresses stay 32-bit for now (Hatred's highest is about 0x5300000; past
   4 GiB fails loudly); widening to 64-bit waits for a binary that needs it.
+- 2026-11-23: The prelude path (ELF) follows Java in the three things that made Hatred's
+  `GMalloc` print as `iRam0000000000000000`: non-loaded sections are no part of the image,
+  nothing marks them read-only (`Image::bfd_readonly` dropped), and the prelude carries the
+  CALL_RETURN flow overrides. User's decision ("do all three"). Tracing found the first two to
+  be one cause: only the reference mapped those sections, so the reference's loader is patched
+  (`tools/decomp-ref.patch`) and ghidra-rs's copy of its read-only marking removed
+  (`rust/README.md`, "The prelude path follows Java"). The PE prelude keeps no overrides for
+  now: adding them changes every mercs2 baseline, which waits for the user.
+- 2026-11-23: A function whose name Java's data-type archive (`generic_clib_64`) has a
+  definition for is written `underived` in the ELF facts, as the EXTERNAL block's functions
+  are. The archive's prototypes are not ported now; only its names are read, to know which
+  records to mark. User's decision (`rust/README.md`, "Archive prototypes are loud").
 
 ## Milestones
 

@@ -29,7 +29,12 @@ fn token(name: &str) -> String {
 /// - for each IAT slot, a function at the slot (`nocode`, named after the import) and an
 ///   external reference from the slot to it, so `CALL [slot]` becomes a call to the import
 ///   instead of a decode of the bound address the slot holds;
-/// - `map function` for every function, with its FID name or export name when it has one.
+/// - `map function` for every function, with its FID name or export name when it has one;
+/// - ELF only: after a function's `map function` (which makes it the current function, as in the
+///   datatests), `override flow <address> callreturn` for each instruction of its body with a
+///   CALL_RETURN override in the facts (`factsout::call_returns`: Shared Return Calls and calls
+///   that do not return), so flow stops at a tail jump to another function, as in Ghidra. The
+///   PE prelude has none: it and the checks built on it (bars.sh) stay as they are.
 pub fn prelude(img: &Image, an: &Analysis, fid: &BTreeMap<u32, crate::fid::Applied>) -> String {
     let mut s = String::from("option readonly on\n");
     // a PIE linked at 0: bfd's sections move where ghidra-rs's image has them (IfcAdjustVma);
@@ -54,9 +59,13 @@ pub fn prelude(img: &Image, an: &Analysis, fid: &BTreeMap<u32, crate::fid::Appli
         let _ = writeln!(s, "map externalref 0x{slot:08x} 0x{slot:08x} {name}");
     }
     let exports: BTreeMap<u32, &str> = img.exports.iter().map(|(a, n)| (*a, n.as_str())).collect();
+    let overrides = if img.elf64 { crate::factsout::call_returns(img, an, fid) } else { Default::default() };
     for &f in &an.funcs {
         let name = fid.get(&f).map(|a| a.name.as_str()).or_else(|| exports.get(&f).copied());
         let _ = writeln!(s, "map function 0x{f:08x}{}", name.map(|n| format!(" {}", token(n))).unwrap_or_default());
+        for a in an.bodies.get(&f).into_iter().flatten().filter(|a| overrides.contains(a)) {
+            let _ = writeln!(s, "override flow 0x{a:x} callreturn");
+        }
     }
     s
 }
@@ -81,6 +90,12 @@ pub struct Console {
     disabled: std::collections::HashSet<String>,
     /// `load facts` was given
     facts: bool,
+    /// `override flow <address> callreturn`, by function entry: the C++ keeps them in the
+    /// function's `Override`, which `Funcdata::clear` leaves
+    call_returns: std::collections::HashMap<u32, std::collections::BTreeSet<u64>>,
+    /// functions `load function` or `load addr` selected: the C++ follows the flow there
+    /// (`IfaceDecompData::followFlow`), so a flow override given later does not reach it
+    flowed: std::collections::HashSet<u32>,
 }
 
 /// The language `load file` gives a program, as `BfdArchitecture::resolveArchitecture`
@@ -196,6 +211,7 @@ impl Console {
                 if let Some(arch) = self.arch.as_mut().filter(|arch| !arch.functions.contains_key(&u64::from(a))) {
                     arch.add_function(u64::from(a), name.clone());
                 }
+                self.flowed.insert(a);
                 self.function = Some((a, name));
             }
             // `map function <addr> [<name>] [nocode]`: remembered for `load function`
@@ -208,14 +224,17 @@ impl Console {
                     .map_or_else(|| format!("func_0x{a:08x}"), |n| n.to_string());
                 arch.add_function(u64::from(a), name.clone());
                 // a name mapped twice finds the first (`findFirstByName`: the lowest dedup number)
-                self.functions.entry(name).or_insert(a);
+                self.functions.entry(name.clone()).or_insert(a);
                 if rest.contains(&"nocode") {
                     self.nocode.insert(a);
                 }
+                // `IfcMapfunction` makes it the current function (`dcp->fd`), not loaded yet
+                self.function = Some((a, name));
             }
             ["load", "function", name] if self.arch.is_some() => {
                 let a = *self.functions.get(*name).ok_or(format!("Unknown function name: {name}"))?;
                 writeln!(out, "Function {name}: 0x{a:08x}").map_err(io)?;
+                self.flowed.insert(a);
                 self.function = Some((a, name.to_string()));
             }
             ["break", "start", action] if self.arch.is_some() => self.break_start = Some(action.to_string()),
@@ -295,6 +314,21 @@ impl Console {
                 arch.add_readonly(u64::from(addr(Some(range))?), size);
                 writeln!(out, "Successfully marked range as readonly").map_err(io)?;
             }
+            // `IfcFlowOverride`: `override flow <address> branch|call|callreturn|return` on the
+            // current function, the one `map function` made last (the datatests' order). Only
+            // `callreturn` is ported, and only before the function is loaded: the C++ follows the
+            // flow at `load function`, and an override given after it waits for a second `decompile`
+            ["override", "flow", a, kind] => {
+                let (f, _) = self.function.as_ref().ok_or("No function selected")?;
+                if *kind != "callreturn" {
+                    return Err(format!("{line}: not ported: a flow override other than callreturn"));
+                }
+                if self.flowed.contains(f) {
+                    return Err(format!("{line}: not ported: a flow override on a function already loaded"));
+                }
+                self.call_returns.entry(*f).or_default().insert(u64::from(addr(Some(a))?));
+                writeln!(out, "Successfully added flow override").map_err(io)?;
+            }
             ["fixup", "apply", fixup, func] => {
                 let arch = self.arch.as_mut().ok_or("fixup apply: no program loaded")?;
                 let a = *self.functions.get(*func).ok_or(format!("Unknown function name: {func}"))?;
@@ -334,6 +368,7 @@ impl Console {
                 self.fd = Some(Funcdata::new(u64::from(*a)));
                 if let (Some(fd), Some(arch)) = (&mut self.fd, &self.arch) {
                     fd.types = arch.types.clone();
+                    fd.call_returns = self.call_returns.get(a).cloned().unwrap_or_default();
                     // the function symbol's prototype (`Funcdata::funcp`), locked by `parse line`
                     if let Some(p) = arch.function_proto(u64::from(*a)) {
                         fd.proto = p;

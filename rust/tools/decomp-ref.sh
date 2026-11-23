@@ -2,7 +2,8 @@
 # Build the milestone 3 reference: Ghidra's console decompiler decomp_dbg and its datatest runner
 # decomp_test_dbg, from the upstream C++ sources copied into rust/target/decomp-build, with
 # rust/tools/decomp-ref.patch applied (print raw also shows types and high variables, numbered by first appearance, when
-# DECOMP_RAW_EXTRA is set). The upstream tree is not modified. Builds x86.sla first when it is
+# DECOMP_RAW_EXTRA is set; an ELF section without SEC_ALLOC is left out of the image, as Java
+# leaves it out of ram). The upstream tree is not modified. Builds x86.sla first when it is
 # missing: decomp_dbg finds it through SLEIGHHOME (the repository root).
 #
 # On macOS it builds with Homebrew GCC (REF_CXX, default g++-16) and libstdc++, never Apple's
