@@ -46,6 +46,7 @@ pub const DW_TAG_CALL_SITE: u16 = 0x48;
 pub const DW_TAG_GNU_CALL_SITE: u16 = 0x4109;
 pub const DW_TAG_APPLE_PTRAUTH: u16 = 0x4300;
 
+pub const DW_AT_LOCATION: u16 = 0x02;
 pub const DW_AT_NAME: u16 = 0x03;
 pub const DW_AT_BYTE_SIZE: u16 = 0x0b;
 pub const DW_AT_STMT_LIST: u16 = 0x10;
