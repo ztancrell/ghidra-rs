@@ -6586,7 +6586,13 @@ address tables) fits. Superseded (2026-11-22): on the MacBook (32 GB) it complet
 there: `--decomp-prelude` 4.6 GB; `--functions` 10.85 GB before, 9.42 GB after constant
 propagation merges a chunk of functions at a time (the output is byte-identical); `--facts`
 11.17 GB before, 10.01 GB after, 354 s (the writer 187 s). The rest is the analysis itself
-(7.9 GB while it runs), so the desktop still lacks the memory. Hatred's facts: 180,026 func
+(7.9 GB while it runs), so the desktop still lacks the memory. Superseded (2026-11-22, branch
+`x64-facts`): the 10.01 GB and 354 s. Constant propagation now merges each chunk straight into
+the instructions (a per-byte "reached" mark), not into a copy of every reached instruction.
+`--facts` on the MacBook, `/usr/bin/time -l`: maximum RSS 9.98 GB before, 6.96 GB and 7.14 GB
+after (two runs); peak memory footprint 6.59 GB before, 4.39 GB and 4.43 GB after; the analysis
+110.2 s before, 101.1 s and 101.2 s after; total 361 s before, 357 s and 356 s after. The facts
+are byte-identical (`cmp`). Not tried on the desktop. Hatred's facts: 180,026 func
 and body records, 636,140 data, 859,434 label, 197,543 string, 475,155 undef, 35,328
 override, 407 extref. 343,951 are `underived`: 171,714 function, 166,125 comments, 6,112
 label. There is no Java comparison: Java was not run on Hatred.

@@ -2767,12 +2767,16 @@ impl Analysis {
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
             .max(1);
-        let this = &*self;
         // merged in function order, so the result does not depend on the thread count. The
         // walks run a chunk of functions at a time and each chunk is merged before the next, so
-        // the decodes of all functions are never held at once (on Hatred they were about 6 GB)
-        let mut merged: HashMap<u32, Ins> = HashMap::new();
+        // the decodes of all functions are never held at once (on Hatred they were about 6 GB).
+        // They are merged into the instructions in place: a walk reads only their length and
+        // flow, which the merge leaves (on Hatred a separate map of merged copies was most of
+        // the peak). An instruction a walk reaches gets the walks' references in place of its
+        // own; one no walk reaches keeps its own.
+        let mut reached = vec![false; (self.code_hi - self.code_lo) as usize];
         for funcs in funcs.chunks(1 << 14) {
+            let this = &*self;
             let found: Vec<Vec<Vec<(u32, Ins)>>> = std::thread::scope(|s| {
                 let hs: Vec<_> = (0..n)
                     .map(|t| {
@@ -2791,13 +2795,10 @@ impl Analysis {
             });
             for i in 0..funcs.len() {
                 for (a, d) in &found[i % n][i / n] {
-                    let m = merged.entry(*a).or_insert_with(|| Ins {
-                        refs: Vec::new(),
-                        rw: Vec::new(),
-                        code_imms: Vec::new(),
-                        computed: None,
-                        ..d.clone()
-                    });
+                    let m = self.insns.get_mut(a).unwrap();
+                    if !std::mem::replace(&mut reached[(a - self.code_lo) as usize], true) {
+                        (m.refs, m.rw, m.code_imms, m.computed) = (Vec::new(), Vec::new(), Vec::new(), None);
+                    }
                     for &r in &d.refs {
                         if !m.refs.contains(&r) {
                             m.refs.push(r);
@@ -2816,10 +2817,6 @@ impl Analysis {
                     m.computed = m.computed.or(d.computed);
                 }
             }
-        }
-        for (a, d) in merged {
-            let i = self.insns.get_mut(&a).unwrap();
-            (i.refs, i.rw, i.code_imms, i.computed) = (d.refs, d.rw, d.code_imms, d.computed);
         }
     }
 
