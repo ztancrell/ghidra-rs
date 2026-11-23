@@ -6935,8 +6935,8 @@ Premise found wrong: the 104 "with a locked prototype in Java and no archive nam
 to be callbacks typed from archive parameters. The ones traced are a thunk with a symbol
 (`default_malloc_ex`: `malloc`'s prototype) and callers with a prototype override; the 21 now
 equal and the 106 now `underived` were not looked at one by one.
-The 23 newly silent records (loud before, derived now, different for causes older than this
-branch): 19 stack locals (the cause of the 100 older ones, `factsout::locals`), 3 prototype
+The 22 newly silent records (loud before, derived now, different for causes older than this
+branch): 19 stack locals (the cause of the 100 older ones, `factsout::locals`), 2 prototype
 overrides and 1 more with other locals too (the cause of the 2 older ones, and of the small
 corpus's `main`). They do not block the merge: the user's decision of 2026-11-16 ("progress that
 exposes bugs", DESIGN.md), applied here by the coordinating session. The addresses are in
