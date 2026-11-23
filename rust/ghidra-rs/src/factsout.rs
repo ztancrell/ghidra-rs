@@ -580,12 +580,17 @@ impl Exporter<'_> {
     // functions, before the purge of functions made after that
     fn locals(&self, p: &mut Parse, f: u32) -> String {
         const PREFIXES: [u8; 10] = [0x66, 0x67, 0xf2, 0xf3, 0x26, 0x2e, 0x36, 0x3e, 0x64, 0x65];
-        let (rs, _) = self.sl.registers();
+        let (rs, list) = self.sl.registers();
+        // x86-64: RSP and 8-byte registers (RAX 0, RCX 8, ..., RDI 0x38; R8-R15 from 0x80)
+        let (elf64, w) = (self.img.elf64, self.ptr);
+        let sp_name = if elf64 { "RSP" } else { "ESP" };
+        let sp = list.iter().find(|r| r.0 == sp_name).map_or(4 * w as u64, |r| r.1);
         // offset -> (bytes, of no data-type)
         let mut vars: BTreeMap<i32, (u32, bool)> = BTreeMap::new();
         let mut accumulate = |offset: i32, ref_size: u32| {
-            // MAX_LOCAL_OFFSET, MAX_PARAM_OFFSET; from the return address up are parameters
-            if !(-(64 * 1024)..4).contains(&offset) {
+            // MAX_LOCAL_OFFSET, MAX_PARAM_OFFSET; from the return address up (the stack
+            // pentry's offset, getBaseStackParamOffset: 4, x86-64-gcc.cspec 8) are parameters
+            if !(-(64 * 1024)..w as i32).contains(&offset) {
                 return;
             }
             let size = ref_size.max(1) as i32;
@@ -612,18 +617,24 @@ impl Exporter<'_> {
             let Some(sec) = self.img.block_of(a) else { return };
             let bytes = &sec.data[(a - sec.addr) as usize..];
             let op = &bytes[bytes.iter().take_while(|b| PREFIXES.contains(b)).count()..];
-            let reg = |r: u64| fold.stack_offset(rs, r);
+            // x86-64: a REX prefix, before the opcode
+            let rex = op.first().copied().filter(|b| elf64 && (0x40..=0x4f).contains(b));
+            let op = &op[rex.is_some() as usize..];
+            let reg = |r: u64| fold.stack_offset(rs, sp, w, r);
             let modrm = op.get(1).map_or(0, |m| (m >> 3) & 7);
             // the slot the instruction uses itself, which no operand names
             let (skip_all, own_store, own_load) = match (op.first().copied().unwrap_or(0), modrm, op.get(1)) {
                 (0xc2 | 0xc3 | 0xca | 0xcb | 0xcf | 0xc8 | 0xc9 | 0x60 | 0x61 | 0x9c | 0x9d, ..) => (true, None, None),
                 (0xe8 | 0x9a, ..) | (0xff, 2 | 3, _) => (false, Some(None), None), // CALL: any store
+                // x86-64 `PUSH RSP`: its operand holds the slot's address when the STORE is
+                // made (RSP is lowered first), so getStackOpIndex finds it (Java's `_start`)
+                (0x54, ..) if elf64 && rex.is_none_or(|r| r & 1 == 0) => (false, None, None),
                 (0x50..=0x57 | 0x68 | 0x6a | 0x06 | 0x0e | 0x16 | 0x1e, ..) | (0xff, 6, _) => {
-                    (false, Some(reg(0x10)), None)
+                    (false, Some(reg(sp)), None)
                 }
-                (0x0f, _, Some(0xa0 | 0xa8)) => (false, Some(reg(0x10)), None),
+                (0x0f, _, Some(0xa0 | 0xa8)) => (false, Some(reg(sp)), None),
                 (0x58..=0x5f | 0x07 | 0x17 | 0x1f, ..) | (0x8f, 0, _) | (0x0f, _, Some(0xa1 | 0xa9)) => {
-                    (false, None, reg(0x10).map(|d| d.wrapping_sub(4)))
+                    (false, None, reg(sp).map(|d| d.wrapping_sub(w)))
                 }
                 _ => (false, None, None),
             };
@@ -636,9 +647,15 @@ impl Exporter<'_> {
                     accumulate(d as i32, fold.mem_size);
                 }
             }
-            // LEA: the stack address its register holds afterwards
+            // LEA: the stack address its register holds afterwards (x86-64 too: checkForX86
+            // compares the pointer size in bytes with 32, NewFunctionStackAnalysisCmd.java:147-152);
+            // REX.R extends the register field to R8-R15, which start at 0x80 (ia.sinc:19-24)
             if op.first() == Some(&0x8d) && !bytes[..bytes.len() - op.len()].contains(&0x66) {
-                if let Some(d) = reg(4 * modrm as u64) {
+                let at = match rex.filter(|r| r & 4 != 0) {
+                    Some(_) => 0x80 + 8 * modrm as u64,
+                    None => w as u64 * modrm as u64,
+                };
+                if let Some(d) = reg(at) {
                     accumulate(d as i32, fold.mem_size);
                 }
             }
@@ -658,7 +675,8 @@ impl Exporter<'_> {
                 xml,
                 "<mapsym><symbol id=\"0x0\" name=\"{name}\" typelock=\"false\" namelock=\"true\" cat=\"-1\">{ty}</symbol>\
                  <addr space=\"stack\" offset=\"0x{:x}\" size=\"{len}\"/><rangelist/></mapsym>",
-                offset as u32
+                // the stack space is as wide as a pointer
+                if elf64 { offset as i64 as u64 } else { u64::from(offset as u32) }
             );
         }
         xml

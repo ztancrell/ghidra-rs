@@ -556,13 +556,14 @@ pub struct Fold {
 }
 
 impl Fold {
-    /// The offset from ESP at the entry that the 4-byte register at `reg` of the register
-    /// space `rs` holds, where it holds a stack address.
-    pub fn stack_offset(&self, rs: u32, reg: u64) -> Option<u32> {
-        match self.regs.iter().find(|f| f.0 == rs && f.1 < reg + 4 && reg < f.1 + f.2 as u64) {
-            Some(&(_, at, 4, Some(Val::S(0x10, d)), _)) if at == reg => Some(d),
+    /// The offset from the stack pointer at the entry that the `w`-byte register at `reg` of
+    /// the register space `rs` holds, where it holds a stack address; `sp` is the stack
+    /// pointer's offset (ESP 0x10, RSP 0x20).
+    pub fn stack_offset(&self, rs: u32, sp: u64, w: u32, reg: u64) -> Option<u32> {
+        match self.regs.iter().find(|f| f.0 == rs && f.1 < reg + w as u64 && reg < f.1 + f.2 as u64) {
+            Some(&(_, at, size, Some(Val::S(b, d)), _)) if at == reg && size == w && b == sp => Some(d),
             Some(_) => None,
-            None => (reg == 0x10).then_some(0),
+            None => (reg == sp).then_some(0),
         }
     }
 }
