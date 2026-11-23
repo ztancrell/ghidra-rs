@@ -184,6 +184,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   definition for is written `underived` in the ELF facts, as the EXTERNAL block's functions
   are. The archive's prototypes are not ported now; only its names are read, to know which
   records to mark. User's decision (`rust/README.md`, "Archive prototypes are loud").
+  Superseded (2026-11-23, branch `fix-hatred-archives`): the prototypes are applied where the
+  x86-64 storage is ported; the rest stays `underived` (`rust/README.md`, "Archive prototypes
+  applied"). Open, for the user: Call Convention ID is taken to succeed, and a parameter is
+  name-locked from what Java's facts show (both listed there as known limits).
 
 ## Milestones
 

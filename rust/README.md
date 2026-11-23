@@ -6540,6 +6540,8 @@ Prototypes from the 64-bit data-type archives (Java gives `_init` `int _init(EVP
 are not read.
 Superseded in part (2026-11-23, branch `fix-prelude`): still not applied, but a function the
 archive names is `underived ... function` ("Archive prototypes are loud" below).
+Superseded (2026-11-23, branch `fix-hatred-archives`): applied where ported ("Archive prototypes
+applied" below).
 
 The EXTERNAL block and the GOT (branch `x64-facts`, 2026-11-22), in the facts only (the
 analysis and the decompiler have no block there). Superseded (2026-11-22, branch
@@ -6552,7 +6554,8 @@ hold the entries' addresses now (see "The GOT import slots in the image" below):
   1685-1713, 1945-2041). The block record is writable. It matched Java's on all 14 binaries;
 - a one-byte function at each STT_FUNC entry (ElfProgramBuilder.java:2140-2152), with the
   default model's extrapop and the no-return analyzers' mark: its prototype comes from the
-  archives, so each is `underived ... function`;
+  archives, so each is `underived ... function`. Superseded (2026-11-23, branch
+  `fix-hatred-archives`): only a GNU name or a definition that is not ported is;
 - GLOB_DAT and JUMP_SLOT slots of an undefined symbol hold its entry plus the addend
   (X86_64_ElfRelocationHandler.java:168-171), and every word of a `.got*` block is a pointer
   (ElfDefaultGotPltMarkup.java:78-93, 360-415), named `PTR_<pointee>_<address>`, or
@@ -6849,6 +6852,99 @@ none `underived`:
 - `_start` (`processEntry`).
 Also not covered: a second name of a function. `Image::elf_funcs` keeps one name per entry, so
 an alias only Java sees can still match the archive.
+Superseded (2026-11-23, branch `fix-hatred-archives`): the prototypes are applied, the 236 are
+traced in part and every name of a function counts ("Archive prototypes applied" below).
+#### Archive prototypes applied (branch `fix-hatred-archives`, 2026-11-23)
+
+`analyze <elf64> --facts` applies the function definitions of `generic_clib_64.gdt` as Java's
+Apply Data Archives analyzer does (ApplyDataArchiveAnalyzer, ApplyFunctionDataTypesCmd,
+ApplyFunctionSignatureCmd), where it wrote `underived ... function` for every function the
+archive names. What is ported:
+- which definition goes where (`factsout::archive_applied`): symbols are looked up by the last
+  identifier of their name, under the definition's name, or with one `_` before it when no
+  symbol has the name itself. The symbols are every named symbol of the symbol tables
+  (`Image::elf_symbols`, so a second name of a function counts), the entries and the EXTERNAL
+  block's. Superseded: "`Image::elf_funcs` keeps one name per entry, so an alias only Java sees
+  can still match the archive";
+- the source priority: the analyzer applies with `SourceType.IMPORTED` to a function whose
+  signature has a lower source. A function the DWARF importer gave a signature (`IMPORTED`)
+  keeps it. A GNU name is still mangled when the analyzer runs (the demangler comes later), so
+  it matches no definition; a thunk is skipped and shows the prototype of its target;
+- the prototype (`gdt::protos::export_elf64`, the exporter of the 32-bit archive with the
+  x86-64 gcc data organization): return type, parameters, varargs, the storage of
+  `x86-64-gcc.cspec`'s `__stdcall` for integers, pointers and enums up to 8 bytes (RDI, RSI,
+  RDX, RCX, R8, R9, then the stack from 8; RAX), a register parameter's range from the address
+  before the entry, the `type` records of the types named. The function keeps its name and
+  its stack locals;
+- Java's Call Convention ID analyzer after it (DecompilerCallConventionAnalyzer): a function
+  in memory with a parameter of a defined type gets `__stdcall`, locked; a function of the
+  EXTERNAL block and a thunk of one keep `unknown`;
+- the EXTERNAL block's functions and the thunks through a GOT slot are written without
+  `underived` when their name is no GNU mangling: with the archive's prototype, or plain;
+- a function with a symbol whose body is one jump to another function has the prototype of
+  that function (Java makes it a thunk, as one without a symbol);
+- the entry function has `processEntry`, locked, extrapop 0 (ElfProgramBuilder.java:651-668:
+  an executable or shared object whose OS/ABI is Linux or none; `Image::elf_process_entry`).
+
+Still `underived ... function` (loud):
+- a definition with a float, a composite, a type over 8 bytes or an `undefined` type in its
+  prototype (the cspec's `<rule>`s and XMM storage are not ported), one whose types fail to
+  encode, and a name two definitions have (Java applies one of two equivalent definitions and
+  neither of two others; `isEquivalent` is not ported);
+- an address two definitions reach (Java applies the first of a `HashMap`'s order);
+- a match through the `_` form on an image with DWARF: the DWARF importer's labels are
+  symbols too, and one named as the definition takes it from the `_` form (Hatred's `_init`
+  has no prototype in Java);
+- a function with a call fixup, and a thunk that itself has a symbol the archive names;
+- a function that calls one the archive gives a variable argument list: Java's Variadic
+  Function Signature Override analyzer (FormatStringAnalyzer) writes a prototype override at
+  such calls, which is not ported.
+
+Known limits, silent:
+- Call Convention ID is taken to succeed. Java runs the decompiler on the function (60 s limit)
+  and leaves `unknown` where that fails. On Hatred all 2,602 such functions got `__stdcall`.
+  A function Java's decompiler fails on would differ silently;
+- a parameter is written name-locked whatever its name, as Java's facts have it (`param_1` of
+  `isspace`); the rule in Java was not traced;
+- a symbol of the archive at an address with no function: Java may make a function there
+  (ApplyFunctionDataTypesCmd.java:218-262); ghidra-rs does not, and writes no record.
+
+Hatred, `facts-diff.sh` against Java's facts, before (master 3a5ba15656, measured again) and
+after: func equal 5,623 -> 9,098 of 180,433; silent func 236 -> 131; `underived` records
+354,311 -> 350,871 (`function` 174,709 -> 171,269); type 1 -> 933 equal (1 different, `fn`:
+the two sides have
+different function types of that name; 3 only ghidra-rs has: `double`, `undefined1`, `wchar_t`); every other
+row unchanged. `--facts` took 427 s, maximum RSS 7.25 GB. Small corpus (14 binaries): func equal
+209 -> 333 of 1,112; silent 33 -> 15; `underived` 1,509 -> 1,315.
+
+Of the 236 silent before: 21 are equal now, 106 are `underived` (the callers of functions with
+a variable argument list among them), 109 are still silent. The 131 silent now, by what differs:
+- 119 stack locals (100 of the 236, 19 in functions that were `underived` before): locals only
+  one side has, or of another size. Not traced;
+- 5 with a prototype override in Java at a call the rule above does not reach (`ENGINE_ctrl`,
+  `GENERAL_NAME_print`, `i2v_GENERAL_NAME`, `long_print`, `dump_value_LHASH_DOALL_ARG`; one of
+  them with other locals too): 2 of the 236, 3 new;
+- 3 thunks of more than one instruction (`default_malloc_ex`, `default_realloc_ex`,
+  `default_malloc_locked_ex`: 9 bytes, Java's CreateThunkFunctionCmd takes them, ghidra-rs's
+  one-jump rule does not);
+- 3 names: `__fstat` where Java has `fstat` (the primary symbol of two), `FUN_034924a1` and
+  `FUN_03492be7` where Java has the names of symbols that are no STT_FUNC
+  (`_vpaes_schedule_low_round`, `_bsaes_encrypt8_bitslice`);
+- 1 type of a local (`undefined1` where Java has `undefined`, `uloc_toLanguageTag_53`).
+Premise found wrong: the 104 "with a locked prototype in Java and no archive name" were not shown
+to be callbacks typed from archive parameters. The ones traced are a thunk with a symbol
+(`default_malloc_ex`: `malloc`'s prototype) and callers with a prototype override; the 21 now
+equal and the 106 now `underived` were not looked at one by one.
+The 22 newly silent records (loud before, derived now, different for causes older than this
+branch): 19 stack locals (the cause of the 100 older ones, `factsout::locals`), 2 prototype
+overrides and 1 more with other locals too (the cause of the 2 older ones, and of the small
+corpus's `main`). They do not block the merge: the user's decision of 2026-11-16 ("progress that
+exposes bugs", DESIGN.md), applied here by the coordinating session. The addresses are in
+`rust/target/baselines/archives-131.txt`.
+The small corpus's 15 silent: 7 in each `-cet` build (`.plt.sec` thunks, which ghidra-rs names
+`FUN_` and Java after the external, seen at `t1-cet` 0x1010c0; the others not looked at one by
+one) and `__clang_call_terminate` of `cpp2-clang` (a no-return flag Java sets).
+
 
 #### Hatred's loud stops: heritage overlaps, contiguous joins, unjustified inputs, `&` casts (branch `fix-hatred-rules`, 2026-11-23)
 
