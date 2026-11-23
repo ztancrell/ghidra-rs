@@ -783,6 +783,32 @@ impl ParamList {
         }
     }
 
+    /// Port of `ParamListStandard::getBiggestContainedParam` (fspec.cc:1358-1391): the offset
+    /// and size of the largest entry the range holds (`ParamEntry::containedBy`), when that
+    /// entry is exclusive. The C++ walks the resolver's range map from the range's start, so of
+    /// two entries of one size the one at the lower address wins.
+    pub(crate) fn biggest_contained(&self, space: Space, off: u64, size: u32) -> Option<(u64, u32)> {
+        // a wrapped range holds no parameter
+        let end = off.checked_add(u64::from(size).checked_sub(1)?)?;
+        let mut max: Option<(u64, &ParamEntry)> = None;
+        for e in &self.entries {
+            let base = match (&e.storage, space) {
+                (Storage::Space { space: s, offset, .. }, Space::Sleigh(sp)) if *s == sp => *offset,
+                (Storage::Stack { offset, .. }, Space::Stack) => *offset,
+                _ => continue,
+            };
+            let eend = base.wrapping_add(e.size as u64).wrapping_sub(1);
+            if base < off || base > end || eend > end {
+                continue;
+            }
+            if max.is_none_or(|(mbase, m)| e.size > m.size || (e.size == m.size && base < mbase)) {
+                max = Some((base, e));
+            }
+        }
+        // `isExclusion`
+        max.filter(|(_, e)| e.align == 0).map(|(base, e)| (base, e.size as u32))
+    }
+
     /// `ParamListStandard::characterizeAsParam` for a range of the stack space (`mask`: the
     /// space's offset mask; a wrapped range is no parameter).
     pub(crate) fn characterize_stack(&self, off: u64, size: u32, mask: u64) -> Containment {
@@ -1081,6 +1107,51 @@ impl ParamList {
         (low, high)
     }
 
+    /// Port of `ParamEntry::getContainer` (fspec.cc:296-331, little endian) for a range entry
+    /// `i` contains: the piece of a join holding it, the whole of an exclusive entry, or its
+    /// aligned slots of a stack entry.
+    fn container(&self, i: usize, space: Space, off: u64, size: u32) -> Option<(Space, u64, u32)> {
+        let e = &self.entries[i];
+        let end = off.wrapping_add(u64::from(size) - 1);
+        let within = |base: u64, esize: u64| off.wrapping_sub(base) < esize && end.wrapping_sub(base) < esize;
+        let base = match (&e.storage, space) {
+            (Storage::Join(pieces), Space::Sleigh(sp)) => {
+                // from the least significant piece
+                let hit = pieces.iter().rev().find(|&&(s, o, z)| s == sp && within(o, u64::from(z)));
+                return hit.map(|&(s, o, z)| (Space::Sleigh(s), o, z));
+            }
+            (Storage::Space { space: s, offset, .. }, Space::Sleigh(sp)) if *s == sp => *offset,
+            (Storage::Stack { offset, .. }, Space::Stack) => *offset,
+            _ => return None,
+        };
+        if !within(base, e.size as u64) {
+            return None;
+        }
+        if e.align == 0 {
+            return Some((space, base, e.size as u32));
+        }
+        let align = e.align as u64;
+        let start = off - off.wrapping_sub(base) % align;
+        let len = (end - start + 1).next_multiple_of(align);
+        Some((space, start, len as u32))
+    }
+
+    /// Port of `ParamListStandard::unjustifiedContainer` (fspec.cc:1394-1407): the container of a
+    /// range the first entry holding it holds unjustified.
+    pub(crate) fn unjustified_container(&self, space: Space, off: u64, size: u32) -> Option<(Space, u64, u32)> {
+        for (i, e) in self.entries.iter().enumerate() {
+            if i64::from(e.minsize) > i64::from(size) {
+                continue;
+            }
+            match self.justified_contain(i, space, off, size) {
+                None => continue,
+                Some(0) => return None,
+                Some(_) => return self.container(i, space, off, size),
+            }
+        }
+        None
+    }
+
     /// Port of `ParamEntry::justifiedContain` (little endian): for a register or join entry
     /// the offset of the range within the entry, for an aligned stack entry its offset within
     /// the slot, or `None`.
@@ -1353,6 +1424,70 @@ impl FuncProto {
     /// Port of `FuncProto::isAutoKilledByCall`.
     pub(crate) fn is_auto_killed_by_call(&self, arch: &Arch) -> bool {
         self.model_of(arch).is_some_and(|m| m.output.killed_by_call)
+    }
+
+    /// Port of `FuncProto::unjustifiedInputParam` (fspec.cc:4364-4392): the parameter storage
+    /// holding the range unjustified. Locked parameters decide when there are any (not varargs).
+    pub(crate) fn unjustified_input_param(
+        &self,
+        arch: &Arch,
+        space: Space,
+        off: u64,
+        size: u32,
+    ) -> Result<Option<(Space, u64, u32)>> {
+        if let Some(l) = self.locked.as_ref().filter(|l| !l.dotdotdot) {
+            // no inputs is `voidinputlock`; every locked parameter with storage is a lock test
+            for st in l.inputs.iter().filter_map(|p| p.storage.as_ref()) {
+                match super::locked::containment(st, space, off, size) {
+                    Containment::ContainsJustified => return Ok(None),
+                    Containment::ContainsUnjustified => {
+                        return Ok(Some(match st {
+                            Storage::Space { space, offset, size } => (Space::Sleigh(*space), *offset, *size),
+                            Storage::Stack { offset, size } => (Space::Stack, *offset, *size),
+                            Storage::Join(_) => {
+                                return err("unjustifiedInputParam: a locked join parameter is not ported")
+                            }
+                        }))
+                    }
+                    _ => {}
+                }
+            }
+            if l.inputs.is_empty() || l.inputs.iter().any(|p| p.storage.is_some()) {
+                return Ok(None);
+            }
+        }
+        Ok(self.model_of(arch).and_then(|m| m.input.unjustified_container(space, off, size)))
+    }
+
+    /// Port of `FuncProto::getBiggestContainedOutput` (fspec.cc:4432-4449) for an unlocked
+    /// output: the largest possible return storage the range holds. A locked output is not
+    /// ported and fails loudly.
+    pub(crate) fn biggest_contained_output(
+        &self,
+        arch: &Arch,
+        space: Space,
+        off: u64,
+        size: u32,
+    ) -> Result<Option<(u64, u32)>> {
+        if self.locked.is_some() {
+            return err("getBiggestContainedOutput of a locked prototype: not implemented in ghidra-rs yet");
+        }
+        Ok(self.model_of(arch).and_then(|m| m.output.biggest_contained(space, off, size)))
+    }
+
+    /// Port of `FuncProto::getBiggestContainedInputParam` (fspec.cc:4398-4426) where the model
+    /// decides (no locked inputs, or varargs). Locked inputs are not ported and fail loudly.
+    pub(crate) fn biggest_contained_input(
+        &self,
+        arch: &Arch,
+        space: Space,
+        off: u64,
+        size: u32,
+    ) -> Result<Option<(u64, u32)>> {
+        if self.locked.as_ref().is_some_and(|l| !l.dotdotdot) {
+            return err("getBiggestContainedInputParam of a locked prototype: not implemented in ghidra-rs yet");
+        }
+        Ok(self.model_of(arch).and_then(|m| m.input.biggest_contained(space, off, size)))
     }
 }
 
@@ -1854,6 +1989,22 @@ mod tests {
             a.trials.last_mut().unwrap().mark_active();
         }
         a
+    }
+
+    /// A range over two registers holds both: the first of the largest wins
+    /// (getBiggestContainedParam); a range the stack slots are in holds no exclusive entry. A
+    /// byte in the middle of a register sits unjustified in the whole register, in the middle of
+    /// a stack slot in that slot (getContainer).
+    #[test]
+    fn biggest_contained_and_unjustified_container() {
+        let l = list(vec![reg(4), reg(8), stack()]);
+        assert_eq!(l.biggest_contained(Space::Sleigh(3), 4, 8), Some((4, 4)));
+        assert_eq!(l.biggest_contained(Space::Sleigh(3), 6, 8), Some((8, 4)));
+        assert_eq!(l.biggest_contained(Space::Sleigh(3), 5, 4), None);
+        assert_eq!(l.biggest_contained(Space::Stack, 0, 1000), None);
+        assert_eq!(l.unjustified_container(Space::Sleigh(3), 5, 1), Some((Space::Sleigh(3), 4, 4)));
+        assert_eq!(l.unjustified_container(Space::Sleigh(3), 4, 2), None);
+        assert_eq!(l.unjustified_container(Space::Stack, 9, 1), Some((Space::Stack, 8, 4)));
     }
 
     /// x86 `__fastcall` (ECX, EDX, then the stack): a read of ECX and of the second stack slot.

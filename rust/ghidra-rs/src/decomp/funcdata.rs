@@ -1186,13 +1186,9 @@ impl Funcdata {
         at.checked_sub(1).map(|i| ops[i])
     }
 
-    /// Port of `AddrSpaceManager::joinPieces` for register pieces (most significant first)
-    /// that are not contiguous: the join record's offset.
+    /// Port of `AddrSpaceManager::findAddJoin` for register pieces (most significant first):
+    /// the join record's offset.
     pub(crate) fn join_pieces(&mut self, pieces: Vec<(u32, u64, u32)>) -> Result<u64> {
-        let contiguous = pieces.windows(2).all(|w| w[0].0 == w[1].0 && w[1].1 + u64::from(w[1].2) == w[0].1);
-        if contiguous {
-            return err("joining contiguous pieces: not implemented in ghidra-rs yet");
-        }
         let at = match self.joins.iter().position(|j| *j == pieces) {
             Some(i) => i,
             None => {
@@ -1201,6 +1197,17 @@ impl Funcdata {
             }
         };
         Ok(at as u64)
+    }
+
+    /// Port of `AddrSpaceManager::joinPieces` (translate.cc:783-792) for register pieces (most
+    /// significant first): the address of the whole, the one piece left when contiguous pieces
+    /// merge into a register, else a join record.
+    pub(crate) fn join_address(&mut self, arch: &Arch, mut pieces: Vec<(u32, u64, u32)>) -> Result<(Space, u64)> {
+        merge_sequence(arch, &mut pieces);
+        match pieces[..] {
+            [(space, off, _)] => Ok((Space::Sleigh(space), off)),
+            _ => Ok((Space::Join, self.join_pieces(pieces)?)),
+        }
     }
 
     /// The first op (alive or dead, not freed) whose sequence number sorts after `seq`, or the
@@ -1288,6 +1295,36 @@ impl Funcdata {
                 _ => {}
             }
         }
+    }
+}
+
+/// Port of `JoinRecord::mergeSequence` (translate.cc:199-232) for register pieces, most
+/// significant first, little endian: neighbours that are contiguous (`VarnodeData::isContiguous`)
+/// merge into one piece. When a merge ends as no register (`getExactRegisterName`), the
+/// sequence stays as it was.
+fn merge_sequence(arch: &Arch, seq: &mut Vec<(u32, u64, u32)>) {
+    let contiguous = |hi: &(u32, u64, u32), lo: &(u32, u64, u32)| {
+        let mask = super::heritage::space_mask(arch, Space::Sleigh(lo.0));
+        hi.0 != 0 && hi.0 == lo.0 && lo.1.wrapping_add(u64::from(lo.2)) & mask == hi.1
+    };
+    if !seq.windows(2).any(|w| contiguous(&w[0], &w[1])) {
+        return;
+    }
+    let mut res: Vec<(u32, u64, u32)> = seq[..1].to_vec();
+    let mut informal = false;
+    for lo in &seq[1..] {
+        match res.last_mut() {
+            Some(hi) if contiguous(hi, lo) => {
+                hi.1 = lo.1;
+                hi.2 += lo.2;
+                informal = !arch.exact_register(hi.0, hi.1, hi.2);
+            }
+            _ if informal => break,
+            _ => res.push(*lo),
+        }
+    }
+    if !informal {
+        *seq = res;
     }
 }
 

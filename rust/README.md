@@ -98,6 +98,8 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
 - `tools/decomp-diff.sh`: runs a corpus on both decompilers and compares; `tools/decomp-show.sh`,
   `tools/decomp-rank.sh`, `tools/decomp-bisect.sh`: the S2 debugging tools (verbose diff,
   easy-first order, first differing step; see "Debugging tools").
+- `tools/hatred-java-run.sh`: Java 12.3 on Hatred in one headless run, the facts and the C of a
+  function list ("Java's C of Hatred, for the full decompile comparison").
 - `tools/ghidra-diff.sh`, `tools/ghidra/DecompileRef.java`: the stage S10 check, `print C` against
   the C of Java Ghidra (see "Stage S10").
 - `tools/ghidra-facts.sh`, `tools/ghidra/ExportFacts.java`: the facts of the Java project for
@@ -6933,9 +6935,151 @@ Premise found wrong: the 104 "with a locked prototype in Java and no archive nam
 to be callbacks typed from archive parameters. The ones traced are a thunk with a symbol
 (`default_malloc_ex`: `malloc`'s prototype) and callers with a prototype override; the 21 now
 equal and the 106 now `underived` were not looked at one by one.
+The 23 newly silent records (loud before, derived now, different for causes older than this
+branch): 19 stack locals (the cause of the 100 older ones, `factsout::locals`), 3 prototype
+overrides and 1 more with other locals too (the cause of the 2 older ones, and of the small
+corpus's `main`). They do not block the merge: the user's decision of 2026-11-16 ("progress that
+exposes bugs", DESIGN.md), applied here by the coordinating session. The addresses are in
+`rust/target/baselines/archives-131.txt`.
 The small corpus's 15 silent: 7 in each `-cet` build (`.plt.sec` thunks, which ghidra-rs names
 `FUN_` and Java after the external, seen at `t1-cet` 0x1010c0; the others not looked at one by
 one) and `__clang_call_terminate` of `cpp2-clang` (a no-return flag Java sets).
+
+
+#### Hatred's loud stops: heritage overlaps, contiguous joins, unjustified inputs, `&` casts (branch `fix-hatred-rules`, 2026-11-23)
+
+Six of the seven stops a full decompile of Hatred's own module hit most are ported; the
+largest, `RulePieceStructure`'s CONCAT tree, is not (below).
+
+- heritage, a range larger than a call's possible return storage (`XMM0` over `XMM0_Qa`):
+  `Heritage::tryOutputOverlapGuard` and `guardOutputOverlap` (heritage.cc:1249-1310). The
+  return storage and the bytes around it are INDIRECT creations, concatenated after the call;
+- heritage, a range larger than any parameter of a call: `guardCallOverlappingInput`
+  (heritage.cc:1211-1236), a SUBPIECE before the call as the trial;
+- heritage, a range larger than the function's own return storage: `guardReturnsOverlapping`
+  (heritage.cc:1610-1637), a SUBPIECE before each RETURN.
+  The three read `ParamListStandard::getBiggestContainedParam` (fspec.cc:1358-1391,
+  `ParamList::biggest_contained`). A locked prototype there fails loudly
+  (`getBiggestContainedOutput`, `getBiggestContainedInputParam` of a locked prototype);
+- `AddrSpaceManager::joinPieces` with `JoinRecord::mergeSequence` (translate.cc:199-232,
+  783-792; `Funcdata::join_address`): contiguous pieces that make a register are that
+  register, no join. Its callers are the return value in two pieces, a call's output from its
+  trials and the double-precision whole. `join_pieces` is `findAddJoin` and no longer refuses
+  contiguous pieces (a decoded join and `renormalizeJoinAddress` make a record of them in the
+  C++ too);
+- `ActionUnjustifiedParams` (coreaction.cc:5179-5223) with `Funcdata::adjustInputVarnodes`
+  (funcdata_varnode.cc:508-549), `ParamListStandard::unjustifiedContainer`,
+  `ParamEntry::getContainer` and `FuncProto::unjustifiedInputParam` (fspec.cc:296-331,
+  1394-1407, 4364-4392): an input inside a parameter's storage, not justified, becomes a
+  SUBPIECE of one input of the whole storage. Superseded: "`ActionUnjustifiedParams` widening
+  (`adjustInputVarnodes`)" in the not-ported list of stage S4, and "A stack input fails loudly
+  there now" ("Local symbols");
+- `PrintC::checkAddressOfCast` (printc.cc:395-437): a CAST to a pointer to an array prints as
+  `&` when its input is the whole symbol of that array type or a PTRSUB to such a field, else
+  as the cast. Superseded: "Fail loudly: a cast to a pointer to an array" (print slice 2) and
+  `checkAddressOfCast` in the not-ported list of print slice 3.
+
+Not ported: the CONCAT tree rewrite of `RulePieceStructure` (ruleaction.cc:7515-7607). It needs
+`TypeFactory::getExactPiece`'s partial struct (`TypePartialStruct`: an 8-byte piece of
+`undefined1[16]`, the type of every 16-byte XMM value), the proto-partial flag in the merge
+tests (merge.cc:136-146, 261), `Merge::groupPartials` (merge.cc:967-976, 1375-1405),
+`ActionMarkExplicit::baseExplicit` (coreaction.cc:3205-3231), `Funcdata::linkProtoPartial`
+(funcdata_varnode.cc:1197-1214) and `HighVariable::setSymbol`'s group offset
+(variable.cc:258-260). It stays loud, and so does the partial struct on its own
+("getExactPiece: ... (getTypePartialStruct) is not ported").
+
+`tools/decomp-status.sh` runs ghidra-rs alone (`decompile`, `print C`, default options) on a
+list of functions and writes a status table by cause. Hatred's module here is the 9,994
+functions the prelude maps in 0x169e000-0x18a3250 (from the first function of the game module
+to `UInt8Property`, where the engine's code goes on); the list of the 10,011 counted on
+13b1dffecf was not kept, so the two counts are not the same list. Same prelude (master
+3a5ba15656's, 34,932 flow overrides), desktop:
+
+| | master 3a5ba15656 | this branch |
+|---|---|---|
+| functions run | 3,128 | the 452 loud ones, and 267 of the ok ones |
+| ok | 2,676 | 3,009 (333 of the 452; the 267 print byte-identical C) |
+| loud | 452 | 119 |
+| timeout (120 s) | 0 | 0 |
+
+Loud on master, by cause, and how many of them print now: output overlap guard 191 (111),
+joined contiguous pieces 126 (125), overlapping parameter guard 65 (59), CONCAT tree 29 (0),
+`adjustInputVarnodes` 14 (14), cast to a pointer to an array 13 (13), overlapping return value
+guard 12 (11), jump table through a CALLOTHER 2 (0). The 119 still loud: 83 CONCAT tree (54 of
+them were behind a ported stop), 21 partial struct, 11 type propagation into an array
+(`downChain`), 2 heritage after dead-code removal in the stack space, 2 CALLOTHER jump tables.
+
+
+Only the first 3,128 functions of the list (0x169e020-0x17562f0) were run: the desktop was
+swapping under other runs and the MacBook was loaded, so the full list on both builds did not
+fit. The other 6,866 were not run on either build. The 2,409 ok functions not run again are
+taken as unchanged because every path changed was a loud error before; this was not measured.
+
+
+Checks:
+- against the reference (decomp_dbg with this branch's patch, `print raw` and `print C`):
+  0x1725600 (the camera path), 0x16a8680 and 0x169e020 are identical in both; 0x16a27b0 and
+  0x16e38f0 pass the overlap guard and stop at the CONCAT tree and the partial struct;
+  47 of the functions that were loud on master (8 to 10 of each cause but the contiguous
+  pieces, 5), `print C`: the reference ran 47, identical 41, loud 6 (4 CONCAT tree, 2
+  `downChain`), silent 0;
+- small ELF decompile corpus, 815 functions: identical 790 (was 728), loud 23 (was 87: 16
+  CONCAT tree, 5 type propagation into an array, 1 partial struct, 1 jump table through a
+  CALLOTHER), silent 0. The reference ran 813; the 2 it cannot load ("Unable to load 512
+  bytes") were loud and now decompile in ghidra-rs, with nothing to compare them to;
+- Hatred camera corpus, 50 functions: identical 47 (was 37), loud 3 (was 13: CONCAT tree,
+  partial struct, `downChain`), silent 0;
+- `CORPORA=m8 tools/bars.sh` (desktop, reference rebuilt with the patch): 57 of 57 lines equal
+  to the baseline (`x64-13b1dffecf.summary`). No M500 check was run;
+- `cargo test --release` 203 passed (202 and the one new test), `cargo clippy --all-targets
+  -- -D warnings` and `cargo fmt --check` clean.
+
+Kept from before, not this branch's: `ParamActive::which_trial` tests every trial for a
+one-byte range, where the C++ returns after the first (fspec.cc:1981-1991).
+
+#### Java's C of Hatred, for the full decompile comparison (branch `hatred-java-run`, 2026-11-23)
+
+`tools/hatred-java-run.sh [<list>]` is the Java side: one headless run of Ghidra 12.3 that
+imports Hatred, auto-analyzes it, writes the facts (`ExportFacts.java`, as before) and Java's C
+of every function of a list (`DecompileRef.java`), in the Linux container on the MacBook. The
+project is kept (docker volume `hatred-java2`), so a later run with another list, or after a
+failed script, skips the import and the analysis (`-process -noanalysis -readOnly`) and captures only
+the addresses without a file. The script's header lists its variables and output files.
+`DecompileRef.java` now also takes `@<file>` (a file of addresses) and `all` (every function
+Java has), adds one line per function to `<output directory>.status` (`ok`, `failed`,
+`timeout`, `nofunc`, and the milliseconds) and prints a progress line every 100 functions; a
+result is written when its function is done, none is held. Its decompiler calls are unchanged
+(no options sent, 60 s), so the C is that of `ghidra-diff.sh`'s Java side.
+
+The run, on the MacBook (docker reachable: `colima start`), and the comparison with ghidra-rs,
+which is `ghidra-diff.sh` with the run's output directory as `GHIDRA_REF` (every address of
+the list has a file there, so it starts no Java) and Java's facts as `FACTS`:
+
+```
+PATH=/usr/local/bin:$PATH caffeinate -i rust/tools/hatred-java-run.sh <list>
+H=~/ghidra-rs/rust/target/hatred-java2
+GHIDRA_REF=$H BIN=~/hatred/Hatred-Linux-Shipping FACTS=$H/Hatred-Linux-Shipping.java.facts \
+    PRELUDE=<Hatred's prelude> OUT=<directory> rust/tools/ghidra-diff.sh <list>
+```
+
+`<list>` is the same file on both sides (its name without `.txt` names `java/<list>/`). The
+summary line and `<list>.miss` are `ghidra-diff.sh`'s: identical, loud, silent, and `java
+failed` for a function Java did not finish. `PRELUDE` must be set: `ghidra-diff.sh` writes a
+missing prelude at its default path, which is mercs2's.
+
+Checked on the desktop without the container (`DOCKER=0`, Ghidra 12.3 of
+`rust/target/java123`), on the small corpus's `t1` (non-PIE): the import run with `all` wrote
+the facts and 32 functions (26 s); a second run with the 22 functions the prelude maps with
+code took the kept project (13 s, 22 `ok`) and a third had nothing to do. The 22 files are
+byte-identical (`cmp`) to those of the import run and to those of master's `DecompileRef.java`
+given the 22 addresses on the same project. `ghidra-diff.sh` on them: java finished 22 / 22,
+identical 12 (loud 10, silent 0). An address without a function is `nofunc` in the status
+file and `java failed` in `ghidra-diff.sh`. Not run: the container path (colima was stopped;
+on the MacBook the script was run only up to its docker check, bash 3.2), a timeout or a
+failed function, and Hatred itself, neither the Java run nor `ghidra-diff.sh` with its 1.1 GB
+facts (one `load facts` per function). The last Hatred run (import, analysis and facts) took
+7,721 s and 26.0 GB; the decompile step adds to that, by how much is not measured. No function
+list is in the repository: the list is whatever the ghidra-rs Hatred run used.
 
 ## Speed
 
