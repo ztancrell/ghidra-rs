@@ -8,7 +8,7 @@
 //! the loader fails when a decompile reads it (see `Underived`). `tools/facts-diff.sh` compares
 //! the file with a Java project's, record by record.
 
-use crate::analysis::{Analysis, Flow, Image};
+use crate::analysis::{Analysis, Flow, Image, Ins};
 use crate::fid::Applied;
 use crate::sleigh::{Parse, Sleigh};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -759,6 +759,49 @@ fn name_functions(img: &Image, an: &Analysis, fid: &BTreeMap<u32, Applied>, prot
     funcs
 }
 
+/// Java's CALL_RETURN flow override at the instruction `i` of function `f`: a jump to another
+/// function is a call followed by a return (Ghidra's Shared Return Calls analyzer; a thunk's
+/// jump is not), and so is a call of a function that does not return (the no-return analyzers).
+fn call_return(an: &Analysis, funcs: &BTreeMap<u32, Func>, f: Option<u32>, i: &Ins) -> bool {
+    if f.and_then(|f| funcs.get(&f)).is_some_and(|x| x.thunked.is_some() || x.import.is_some()) {
+        return false;
+    }
+    match i.flow {
+        Flow::Jump => i.target.is_some_and(|t| Some(t) != f && an.funcs.contains(&t)),
+        Flow::Call => i.target.is_some_and(|t| an.noreturn.contains(&t)),
+        Flow::CallInd => i.slot.is_some_and(|s| an.noreturn.contains(&s)),
+        _ => false,
+    }
+}
+
+/// The function each instruction belongs to: the lowest entry whose body has it.
+fn owners(an: &Analysis) -> HashMap<u32, u32> {
+    let mut owner = HashMap::new();
+    for (&f, body) in &an.bodies {
+        for &a in body {
+            owner.entry(a).or_insert(f);
+        }
+    }
+    owner
+}
+
+/// The instructions `export` writes an `override ... CALL_RETURN` record for, for the
+/// decompiler prelude (`console::prelude`).
+pub fn call_returns(img: &Image, an: &Analysis, fid: &BTreeMap<u32, Applied>) -> BTreeSet<u32> {
+    let funcs = name_functions(img, an, fid, &Protos::default());
+    let owner = owners(an);
+    an.insns.iter().filter(|(a, i)| call_return(an, &funcs, owner.get(a).copied(), i)).map(|(&a, _)| a).collect()
+}
+
+/// Whether ApplyFunctionDataTypesCmd finds a function definition of the archive for a symbol
+/// named `name` (ApplyFunctionDataTypesCmd.java:138-176, 405-424): symbols are looked up by the
+/// last identifier of their name (`getValidName`), under the definition's name, or with one `_`
+/// before it when no symbol has the name itself (taken here as a match either way).
+fn archive_named(archive: &HashSet<String>, name: &str) -> bool {
+    let valid = name.rsplit(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$')).next().unwrap_or("");
+    archive.contains(valid) || valid.strip_prefix('_').is_some_and(|v| archive.contains(v))
+}
+
 /// What `export` takes besides the analysis.
 pub struct Inputs<'a> {
     /// Function ID's names
@@ -777,6 +820,10 @@ pub struct Inputs<'a> {
     pub strings: Option<&'a crate::strings::Model>,
     /// ELF: the functions the DWARF importer (`crate::dwarf`) gives a signature, by entry
     pub dwarf: &'a BTreeMap<u32, DwarfFunc>,
+    /// ELF: the names of the function definitions of the data-type archive Java's Apply Data
+    /// Archives analyzer applies (`generic_clib_64`). Their prototypes are not applied here: a
+    /// function one of them names is `underived`
+    pub archive: Option<&'a HashSet<String>>,
 }
 
 /// What the facts take of a function the DWARF importer gives a signature.
@@ -824,7 +871,7 @@ pub fn call_purges(img: &Image, an: &Analysis, inputs: &Inputs) -> HashMap<u32, 
 
 /// Write the facts of `an` to `out`.
 pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mut dyn Write) -> io::Result<()> {
-    let Inputs { fid, protos, analyzed, purges, cspec, strings, dwarf } = *inputs;
+    let Inputs { fid, protos, analyzed, purges, cspec, strings, dwarf, archive } = *inputs;
     let none = Protos::default();
     let mut ex = Exporter {
         img,
@@ -865,12 +912,7 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
     let mut p = sl.new_parse();
     // the functions Ghidra's analyzers worked on: every one, or the ones found without the seeds
     let auto = |f: u32| analyzed.is_none_or(|s| s.contains(&f));
-    let mut owner: HashMap<u32, u32> = HashMap::new();
-    for (&f, body) in &an.bodies {
-        for &a in body {
-            owner.entry(a).or_insert(f);
-        }
-    }
+    let owner = owners(an);
     for (&a, i) in &an.insns {
         // constant propagation sizes the data only in the functions it ran on
         let sized = match owner.get(&a) {
@@ -951,6 +993,12 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
     }
     sets.sort();
     let exports: HashMap<u32, &str> = img.exports.iter().map(|(a, n)| (*a, n.as_str())).collect();
+    // ELF: the functions a symbol name gives a prototype of Java's archive (the Apply Data
+    // Archives analyzer), which is not applied here
+    let named =
+        img.exports.iter().map(|(a, n)| (*a, n.as_str())).chain(img.elf_funcs.iter().map(|(a, n)| (*a, n.as_str())));
+    let archived: HashSet<u32> =
+        archive.map_or_else(HashSet::new, |ar| named.filter(|(_, n)| archive_named(ar, n)).map(|(a, _)| a).collect());
     let entries: Vec<u32> = an.funcs.iter().copied().filter(|f| an.bodies.contains_key(f)).collect();
     for (n, &f) in entries.iter().enumerate() {
         let func = ex.funcs[&f].clone();
@@ -984,6 +1032,8 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         let dw = dwarf.get(&f);
         if dw.is_some()
             || func.underived
+            || archived.contains(&f)
+            || archived.contains(&end)
             || (func.import.is_some() && !cdecl && !ex.protos.by_name.contains_key(&func.name))
         {
             ex.underived.insert((f, Underived::Function));
@@ -1190,21 +1240,9 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         }
     }
 
-    // flow overrides: a jump to another function is a call followed by a return
-    // (Ghidra's Shared Return Calls analyzer); a thunk's jump is not
-    // and so is a call of a function that does not return (the no-return analyzers)
+    // flow overrides (`call_return`)
     for (&a, i) in &an.insns {
-        let f = owner.get(&a).copied();
-        if f.and_then(|f| ex.funcs.get(&f)).is_some_and(|x| x.thunked.is_some() || x.import.is_some()) {
-            continue;
-        }
-        let call_return = match i.flow {
-            Flow::Jump => i.target.is_some_and(|t| Some(t) != f && an.funcs.contains(&t)),
-            Flow::Call => i.target.is_some_and(|t| an.noreturn.contains(&t)),
-            Flow::CallInd => i.slot.is_some_and(|s| an.noreturn.contains(&s)),
-            _ => false,
-        };
-        if call_return {
+        if call_return(an, &ex.funcs, owner.get(&a).copied(), i) {
             writeln!(out, "override\t{a:x}\tCALL_RETURN")?;
         }
     }
@@ -1265,5 +1303,15 @@ mod tests {
         assert_eq!((p.by_name["Sleep"].as_str(), p.types["5"].as_str()), ("<doc/>", "<type/>"));
         assert!(Protos::parse("ghidra-rs-protos 0\n").is_err());
         assert!(Protos::parse("ghidra-rs-protos 1\nbad\n").is_err());
+    }
+
+    #[test]
+    fn archive_names_as_apply_function_data_types_looks_them_up() {
+        let ar: HashSet<String> = ["malloc".to_string()].into();
+        assert!(archive_named(&ar, "malloc"));
+        assert!(archive_named(&ar, "_malloc"));
+        assert!(archive_named(&ar, "std::malloc"));
+        assert!(!archive_named(&ar, "__malloc"));
+        assert!(!archive_named(&ar, "malloc_usable_size"));
     }
 }

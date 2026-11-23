@@ -432,7 +432,6 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     let mut abi: Option<(String, String)> = None;
     let mut prelude = None;
     let mut purges = None;
-    let sla_given = std::env::var_os("GHIDRA_RS_SLA").is_some() || args.iter().any(|a| a == "--sla");
     let (mut facts, mut protos, mut gdt) = (None, None, None);
     let mut sla = std::env::var_os("GHIDRA_RS_SLA").map(PathBuf::from).unwrap_or_else(|| Sleigh::sla_path("x86"));
     let mut it = args.iter();
@@ -482,9 +481,13 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
     let img = if data.starts_with(b"\x7fELF") {
         let img = analysis::Image::from_elf(&data).map_err(|e| format!("{path}: {e}"))?;
-        // x86:LE:64:default, the gcc compiler spec
-        if !sla_given {
-            sla = Sleigh::sla_path("x86-64");
+        // x86:LE:64:default, the gcc compiler spec: `x86-64.sla`, next to a `GHIDRA_RS_SLA` that
+        // names x86's (as the console's `load file` takes it); `--sla` is taken as given
+        if !args.iter().any(|a| a == "--sla") {
+            sla = match std::env::var_os("GHIDRA_RS_SLA") {
+                Some(p) => PathBuf::from(p).with_file_name("x86-64.sla"),
+                None => Sleigh::sla_path("x86-64"),
+            };
         }
         if abi.is_some() || store.is_some() {
             return Err(format!("{path}: --abi-callers and --store take a 32-bit PE only"));
@@ -629,6 +632,23 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
             // the purges of auto-analysis: of the run without seeds, where seeds were given
             let callee_purges = plain.as_ref().map_or_else(|| an.callee_purges.clone(), |p| p.1.clone());
             let mut w = create(&p)?;
+            // ELF: the function names of the archive Java's Apply Data Archives analyzer applies
+            // (DataTypeArchiveUtility.getArchiveList: `generic_clib_64`), from the Ghidra tree
+            let archive = if img.elf64 {
+                let path = sla
+                    .ancestors()
+                    .nth(5)
+                    .map(|g| g.join("Features/Base/data/typeinfo/generic/generic_clib_64.gdt"))
+                    .ok_or_else(|| {
+                        format!("{}: not in a Ghidra tree (the data-type archive is found from it)", sla.display())
+                    })?;
+                let ar = ghidra_rs::gdt::Archive::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                let names: Result<std::collections::HashSet<String>, _> =
+                    ar.function_defs.iter().map(|&f| ar.get(f).map(|t| t.name.clone())).collect();
+                Some(names.map_err(|e| format!("{}: {e}", path.display()))?)
+            } else {
+                None
+            };
             let inputs = ghidra_rs::factsout::Inputs {
                 fid: &fid,
                 protos: protos.as_ref(),
@@ -637,6 +657,7 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
                 cspec: &cspec,
                 strings: Some(&strings),
                 dwarf: &dwarf,
+                archive: archive.as_ref(),
             };
             // the stack analysis goes by the purges Ghidra has at a call site
             let purges = ghidra_rs::factsout::call_purges(&img, &an, &inputs);

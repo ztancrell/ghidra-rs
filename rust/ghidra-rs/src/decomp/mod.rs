@@ -262,7 +262,6 @@ impl Arch {
             .iter()
             .filter(|s| s.readonly)
             .map(|s| (u64::from(s.addr), u64::from(s.addr) + loaded_len(s) as u64))
-            .chain(image.bfd_readonly.iter().map(|&(a, n)| (a, a + n)))
             .collect();
         Ok(Arch {
             sleigh,

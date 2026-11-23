@@ -389,12 +389,47 @@ impl Flow<'_> {
         let mut isfallthru = true;
         if let Some(op) = first_op {
             self.mark(op, OpFlags::START_INSTRUCTION);
+            // `pCodeOverride->performOverride` (flow.cc:477-478)
+            if self.fd.call_returns.contains(&addr) {
+                self.call_return_flow(addr, first)?;
+            }
             isfallthru = self.xref_control_flow(first, startbasic)?;
         }
         if isfallthru {
             self.addrlist.push(addr + step);
         }
         Ok(isfallthru)
+    }
+
+    /// Port of `Override::CallReturn::performOverride` (override.cc:507-524) with
+    /// `Funcdata::findPrimaryBranch`: the first branch (not an internal one), call or return of
+    /// the instruction at `addr`, whose ops start at dead-list position `first`, becomes a call,
+    /// and a new `RETURN #0` follows it.
+    fn call_return_flow(&mut self, addr: u64, first: usize) -> Result<()> {
+        let mut primary = None;
+        for &op in &self.fd.dead[first..] {
+            let found = match self.opc(op) {
+                Opcode::Branch | Opcode::Cbranch => !self.fd.vn(self.fd.input(op, 0)?).is_constant(),
+                Opcode::Branchind | Opcode::Call | Opcode::Callind | Opcode::Return => true,
+                _ => false,
+            };
+            if found {
+                primary = Some(op);
+                break;
+            }
+        }
+        let Some(op) = primary else { return err("Could not apply CALL_RETURN override") };
+        match self.opc(op) {
+            Opcode::Branch => self.fd.op_set_opcode(op, Opcode::Call),
+            Opcode::Branchind | Opcode::Return => self.fd.op_set_opcode(op, Opcode::Callind),
+            Opcode::Cbranch => return err("Do not currently support CBRANCH overrides"),
+            _ => {}
+        }
+        let ret = self.fd.new_op(Opcode::Return, addr);
+        let zero = self.fd.new_constant(1, 0);
+        self.fd.op_set_all_input(ret, &[zero])?;
+        self.fd.op_dead_insert_after(ret, op);
+        Ok(())
     }
 
     /// The SLEIGH translation of one instruction into new ops (`Sleigh::oneInstruction` with
