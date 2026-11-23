@@ -6260,8 +6260,12 @@ Analysis on x86-64 (`Analysis::run` with `Image::elf64`):
   4-aligned and checkTable tests `top + 4 * i` as Java does (AddressTableAnalyzer.java:401-407).
   Superseded: before this fix only the switch tables and the scan for runs of code pointers
   read 8 bytes, the rest 4;
-- not run: Function Start Search (`x86-64gcc_patterns.xml` is not ported), the RTTI analyzer
-  (MSVC's), X86 Function Callee Purge (Java's `canAnalyze` refuses 64-bit), Function ID (the
+- Function Start Search with `x86-64gcc_patterns.xml`: see "Function Start Search on x86-64"
+  below. Superseded (2026-11-23): "not run: Function Start Search (`x86-64gcc_patterns.xml` is
+  not ported)";
+- not run: the RTTI analyzer (MSVC's: RttiAnalyzer.canAnalyze takes Visual Studio and clang PE
+  files only; Java 12.3 has no analyzer for GCC's RTTI or vtables, its
+  RecoverClassesFromRTTIScript is a script, not auto-analysis), X86 Function Callee Purge (Java's `canAnalyze` refuses 64-bit), Function ID (the
   databases are x86:LE:32's). Not ported: purges from data-type archives, DWARF, the
   relocation guide of Create Address Tables (AddressTable.getEntry takes only relocated words
   where the program has relocations), the Disassembler's thunk-aware no-return test
@@ -6367,6 +6371,28 @@ larger (67 are at most the unresolved jumps). The function set, traced:
 The 14 small binaries (`--facts` against Java's, equal records): body 1,013 -> 1,029 / 1,112,
 label 4,645 -> 4,993 / 7,315, undef 1,034 -> 1,090 / 1,407, data 724 -> 740, override 770 ->
 782, func 209 -> 210; 2 PIC switch jumps counted unresolved (cpp binaries).
+
+#### Function Start Search on x86-64 (branch `fix-hatred-analysis`, 2026-11-23)
+
+`Analysis::start_search_gcc64` runs where the PE's `start_search` runs (Function Start Search
+and its After Data pass). It reads `x86-64gcc_patterns.xml` itself (`start_patterns`, built
+in with `include_str!`): `ditted` is DittedBitSequence.initFromDittedStringData, and
+`StartSet::hit` the pair rule of PatternPairSet.createFinalPatterns (`totalbits="40"
+postbits="24"`). At undefined bytes, as the PE's:
+- a pair of the `<funcstart/>` set makes a function and disassembles it;
+- the `ENDBR64` pair of `<codeboundary/>` is disassembled, no function made.
+
+Not ported, counted in a warning: the 20 `<pattern>` elements with `<funcstart
+after="defined" .../>` (checkAfterName's reference tests, `validcode`'s
+PseudoDisassembler.checkValidSubroutine with an instruction limit). `run` counts their matches
+at undefined bytes right after an instruction or data, or at a block's start. Not ported and
+not counted: a match at an instruction that lies in no function (checkAlreadyInFunctionAbove),
+as in the PE's port. A pattern file with another action or rule fails the analysis.
+
+Measured: Hatred one more function, 0x35840d0 `SDL_AssertionsQuit`, which Java has too (in
+both 180,025, Java only 13, ghidra-rs only 2; bodies different 105, unchanged); no
+`after="defined"` match counted. The 14 small binaries: every record count unchanged, none
+counted.
 
 The PE path: `cargo test --release` 178 passed, 0 failed; `cargo fmt --check` and `cargo clippy
 --release --all-targets -- -D warnings` clean; M8 bars (`CORPORA=m8 bars.sh`, the 12.3 `x86.sla`,

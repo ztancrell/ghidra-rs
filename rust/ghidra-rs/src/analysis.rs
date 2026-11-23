@@ -586,6 +586,9 @@ pub struct Analysis {
     slot_jumps_inside: HashSet<u32>,
     /// PIC switch jumps (`pic_switch_table`) whose table, bound or cases were not found.
     pic_switch_misses: BTreeSet<u32>,
+    /// Function Start Search on x86-64: undefined bytes after something defined where a
+    /// `<funcstart after="defined"/>` pattern matches (`start_search_gcc64`; none is applied).
+    start_after_defined: BTreeSet<u32>,
     pub bodies: BTreeMap<u32, Vec<u32>>, // function -> sorted instruction addresses
     pub table_slots: BTreeMap<u32, u32>, // Create Address Tables (`disassemble` with constants): slot -> pointer
     fpu_ip: Option<(u32, u64)>,          // FPUInstructionPointer, which x87 constructors set to inst_start
@@ -688,7 +691,7 @@ const POST_FILL: [Pat; 19] = [
 ];
 const POST_JMP: [Pat; 4] = [POST_FILL[0], POST_FILL[4], POST_FILL[5], POST_FILL[6]];
 
-fn matches(bytes: &[u8], pat: Pat) -> bool {
+fn matches(bytes: &[u8], pat: &[(u8, u8)]) -> bool {
     bytes.len() >= pat.len() && pat.iter().zip(bytes).all(|(&(v, m), &b)| b & m == v & m)
 }
 
@@ -701,6 +704,133 @@ fn pair_hit(d: &[u8], o: usize, pres: &[Pat], posts: &[Pat]) -> bool {
     pres.iter().filter(|p| o >= p.len() && matches(&d[o - p.len()..o], p)).any(|&pre| {
         posts.iter().any(|&post| bits(post) >= 16 && bits(pre) + bits(post) >= 32 && matches(&d[o..], post))
     })
+}
+
+/// x86-64gcc_patterns.xml, the pattern file of x86:LE:64 with the gcc compiler spec
+/// (patternconstraints.xml), read as Java reads it.
+const GCC64_PATTERNS: &str = include_str!("../../../Ghidra/Processors/x86/data/patterns/x86-64gcc_patterns.xml");
+
+/// What a pattern of a Function Start Search file does where it matches (FunctionStartAnalyzer's
+/// match actions): `<funcstart/>`, `<funcstart after="defined" .../>`, `<codeboundary/>`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum StartAct {
+    Func,
+    FuncAfterDefined,
+    Boundary,
+}
+
+/// A `<patternpairs>` set (prepatterns end right before the candidate), or a `<pattern>`: no
+/// prepatterns and no bit counts.
+#[derive(Debug)]
+struct StartSet {
+    total: u32,
+    post: u32,
+    pres: Vec<Vec<(u8, u8)>>,
+    posts: Vec<Vec<(u8, u8)>>,
+    act: StartAct,
+}
+
+impl StartSet {
+    /// PatternPairSet.createFinalPatterns (PatternPairSet.java:73-91): a prepattern and a
+    /// postpattern make a pattern when the postpattern has `post` fixed bits and both `total`.
+    fn hit(&self, d: &[u8], o: usize) -> bool {
+        let bits = |p: &[(u8, u8)]| p.iter().map(|&(_, m)| m.count_ones()).sum::<u32>();
+        let posts = || self.posts.iter().filter(|p| matches(&d[o..], p) && bits(p) >= self.post);
+        if self.pres.is_empty() {
+            return posts().next().is_some();
+        }
+        self.pres
+            .iter()
+            .filter(|p| o >= p.len() && matches(&d[o - p.len()..o], p))
+            .any(|pre| posts().any(|post| bits(pre) + bits(post) >= self.total))
+    }
+}
+
+/// DittedBitSequence.initFromDittedStringData (DittedBitSequence.java:365-460): words of hex
+/// digits after `0x`, or of bits; a `.` is a nibble or a bit that is not tested.
+fn ditted(text: &str) -> Result<Vec<(u8, u8)>, String> {
+    let bad = || format!("bad ditted bit sequence: {text}");
+    let mut out = Vec::new();
+    for word in text.split_whitespace() {
+        let (digits, width) = match word.strip_prefix("0x") {
+            Some(hex) => (hex, 4),
+            None => (word, 1),
+        };
+        let per_byte = 8 / width;
+        if digits.len() % per_byte != 0 {
+            return Err(bad());
+        }
+        for chunk in digits.as_bytes().chunks(per_byte) {
+            let (mut value, mut mask) = (0u8, 0u8);
+            for &c in chunk {
+                let (v, m) = match c {
+                    b'.' => (0, 0),
+                    _ => ((c as char).to_digit(1 << width).ok_or_else(bad)? as u8, (1u8 << width) - 1),
+                };
+                (value, mask) = (value << width | v, mask << width | m);
+            }
+            out.push((value, mask));
+        }
+    }
+    Ok(out)
+}
+
+/// Pattern.readPatterns on a pattern file: its `<patternpairs>` and `<pattern>` elements. An
+/// action or a rule other than the three of `StartAct` is an error (not ported).
+fn start_patterns(xml: &str) -> Result<Vec<StartSet>, String> {
+    // without the comments
+    let mut text = String::new();
+    let mut rest = xml;
+    while let Some((before, after)) = rest.split_once("<!--") {
+        text.push_str(before);
+        rest = after.split_once("-->").ok_or("pattern file: a comment does not end")?.1;
+    }
+    text.push_str(rest);
+    let datas = |s: &str| -> Result<Vec<Vec<(u8, u8)>>, String> {
+        s.split("<data>").skip(1).map(|d| ditted(d.split_once("</data>").map_or(d, |(d, _)| d))).collect()
+    };
+    let attr = |tag: &str, name: &str| -> Option<u32> {
+        tag.split_once(&format!("{name}=\""))?.1.split_once('"')?.0.parse().ok()
+    };
+    let act = |s: &str| -> Result<StartAct, String> {
+        let tags: Vec<&str> = s.split('<').skip(1).filter(|t| !t.starts_with("data>") && !t.starts_with('/')).collect();
+        match tags.as_slice() {
+            [t] if t.starts_with("codeboundary") => Ok(StartAct::Boundary),
+            [t] if t.starts_with("funcstart") && t.contains("after=\"defined\"") => Ok(StartAct::FuncAfterDefined),
+            [t] if t.trim_end().trim_end_matches('>').trim_end() == "funcstart/" => Ok(StartAct::Func),
+            _ => Err(format!("pattern file: not ported: the actions {tags:?}")),
+        }
+    };
+    let mut sets = Vec::new();
+    let mut rest = text.as_str();
+    loop {
+        let pairs = rest.find("<patternpairs");
+        let single = rest.find("<pattern>");
+        match (pairs, single) {
+            (Some(p), s) if s.is_none_or(|s| p < s) => {
+                let (block, after) =
+                    rest[p..].split_once("</patternpairs>").ok_or("pattern file: <patternpairs> does not end")?;
+                let head = block.split_once('>').map_or("", |(h, _)| h);
+                let (pre, post) = block.split_once("<postpatterns>").ok_or("pattern file: no <postpatterns>")?;
+                let post = post.split_once("</postpatterns>").map_or(post, |(p, _)| p);
+                sets.push(StartSet {
+                    total: attr(head, "totalbits").ok_or("pattern file: no totalbits")?,
+                    post: attr(head, "postbits").ok_or("pattern file: no postbits")?,
+                    pres: datas(pre)?,
+                    posts: datas(post)?,
+                    act: act(post)?,
+                });
+                rest = after;
+            }
+            (_, Some(s)) => {
+                let (block, after) =
+                    rest[s + 9..].split_once("</pattern>").ok_or("pattern file: <pattern> does not end")?;
+                sets.push(StartSet { total: 0, post: 0, pres: Vec::new(), posts: datas(block)?, act: act(block)? });
+                rest = after;
+            }
+            _ => return Ok(sets),
+        }
+    }
 }
 
 impl Analysis {
@@ -730,6 +860,7 @@ impl Analysis {
             fallthru: HashSet::new(),
             slot_jumps_inside: HashSet::new(),
             pic_switch_misses: BTreeSet::new(),
+            start_after_defined: BTreeSet::new(),
             bodies: BTreeMap::new(),
             table_slots: BTreeMap::new(),
             fpu_ip: None,
@@ -790,7 +921,7 @@ impl Analysis {
             let named = img.imports.iter().map(|(&s, (_, n))| (s, n)).chain(img.elf_funcs.iter().map(|(a, n)| (*a, n)));
             an.noreturn.extend(named.filter(|(_, n)| listed(n)).map(|(a, _)| a).collect::<Vec<_>>());
             an.warnings.push(
-                "not ported for x86-64: Function Start Search (x86-64gcc_patterns.xml), Function ID, the PLT markup, the EXTERNAL block (in the facts only), DWARF; the X86 Function Callee Purge analyzer does not run on 64-bit (Java's canAnalyze)"
+                "not ported for x86-64: Function ID, the PLT markup, the EXTERNAL block (in the facts only), DWARF; the X86 Function Callee Purge analyzer does not run on 64-bit (Java's canAnalyze)"
                     .into(),
             );
             if img.unapplied_relocs > 0 {
@@ -941,8 +1072,11 @@ impl Analysis {
                     queue.append(&mut tables_queue);
                     an.descend(img, sl, &mut p, &mut owner, &mut queue, &mut Vec::new());
                 }
-                // x86win_patterns.xml is the PE's; x86-64gcc_patterns.xml is not ported (warned)
-                Task::StartSearch | Task::StartSearchAfterData if img.elf64 => {}
+                // x86win_patterns.xml is the PE's, x86-64gcc_patterns.xml the ELF's
+                Task::StartSearch | Task::StartSearchAfterData if img.elf64 => {
+                    an.start_search_gcc64(img, sl, &mut p, &mut owner, &mut queue)?
+                }
+                Task::StartSearchAfterData if img.elf64 => {}
                 Task::StartSearch | Task::StartSearchAfterData => {
                     an.start_search(img, sl, &mut p, &mut owner, &mut queue)
                 }
@@ -1040,6 +1174,13 @@ impl Analysis {
             an.warnings.push(format!(
                 "not ported: CreateThunkFunctionCmd.isThunk for a jump through a slot past the entry: {} such jumps, no thunk made here",
                 an.slot_jumps_inside.len()
+            ));
+        }
+        if !an.start_after_defined.is_empty() {
+            an.warnings.push(format!(
+                "not ported: Function Start Search's `after=\"defined\"` patterns (x86-64gcc_patterns.xml): {} matches at undefined bytes after something defined, no function made, first at 0x{:x}",
+                an.start_after_defined.len(),
+                an.start_after_defined.first().copied().unwrap_or(0)
             ));
         }
         if !an.pic_switch_misses.is_empty() {
@@ -1679,6 +1820,59 @@ impl Analysis {
             }
         }
         hit
+    }
+
+    /// Function Start Search on x86-64 with the gcc compiler spec (FunctionStartAnalyzer with
+    /// x86-64gcc_patterns.xml), at undefined bytes, as `start_search`: a `<funcstart/>` pair
+    /// makes a function and disassembles it (FunctionStartAction.applyActionToSet, an undefined
+    /// code unit), the `ENDBR64` pair of `<codeboundary/>` disassembles only
+    /// (CodeBoundaryAction.apply).
+    // ponytail: the `<funcstart after="defined" .../>` patterns are not applied: their matches
+    // at undefined bytes right after something defined (or at a block's start) are counted in
+    // a warning (`start_after_defined`). Upgrade: checkAfterName with its reference tests and
+    // `validcode` (PseudoDisassembler.checkValidSubroutine with an instruction limit),
+    // FunctionStartAnalyzer.java:214-283, 337-383. Nor is a match at an instruction outside
+    // every function (checkAlreadyInFunctionAbove).
+    fn start_search_gcc64(
+        &mut self,
+        img: &Image,
+        sl: &Sleigh,
+        p: &mut crate::sleigh::Parse,
+        owner: &mut [u8],
+        queue: &mut Vec<u32>,
+    ) -> Result<(), String> {
+        let sets = start_patterns(GCC64_PATTERNS)?;
+        loop {
+            let mut changed = false;
+            self.start_after_defined.clear();
+            for sec in img.sections.iter().filter(|s| s.exec) {
+                let d = &sec.data;
+                for o in 0..d.len() {
+                    let a = sec.addr + o as u32;
+                    let at = (a - self.code_lo) as usize;
+                    if owner[at] != 0 {
+                        continue;
+                    }
+                    let Some(set) = sets.iter().find(|s| s.hit(d, o)) else { continue };
+                    match set.act {
+                        StartAct::FuncAfterDefined => {
+                            if o == 0 || owner[at - 1] != 0 {
+                                self.start_after_defined.insert(a);
+                            }
+                            continue;
+                        }
+                        StartAct::Func => drop(self.funcs.insert(a)),
+                        StartAct::Boundary => {}
+                    }
+                    queue.push(a);
+                    self.descend(img, sl, p, owner, queue, &mut Vec::new());
+                    changed |= owner[at] != 0;
+                }
+            }
+            if !changed {
+                return Ok(());
+            }
+        }
     }
 
     /// Function Start Search: functions at prologue patterns in bytes no code covers yet, each
@@ -3179,7 +3373,10 @@ impl RangeSet {
 
 #[cfg(test)]
 mod tests {
-    use super::{pair_hit, repair, Analysis, Flow, Image, Ins, RangeSet, Section, POST_FILL, PRE_FILL};
+    use super::{
+        ditted, pair_hit, repair, start_patterns, Analysis, Flow, Image, Ins, RangeSet, Section, StartAct,
+        GCC64_PATTERNS, POST_FILL, PRE_FILL,
+    };
     use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
     #[test]
@@ -3234,6 +3431,7 @@ mod tests {
             fallthru: HashSet::new(),
             slot_jumps_inside: HashSet::new(),
             pic_switch_misses: BTreeSet::new(),
+            start_after_defined: BTreeSet::new(),
             bodies: BTreeMap::new(),
             table_slots: BTreeMap::new(),
             fpu_ip: None,
@@ -3288,6 +3486,28 @@ mod tests {
             assert!(!an.call_return(0x60, &an.insns[&0x60]));
             assert_eq!(an.call_return(0x10, &an.insns[&0x10]), nr);
         }
+    }
+
+    #[test]
+    fn gcc64_start_patterns_read_as_java_reads_them() {
+        assert_eq!(
+            ditted("0x4883c4 ....1000 0xc3").unwrap(),
+            [(0x48, 0xff), (0x83, 0xff), (0xc4, 0xff), (8, 0xf), (0xc3, 0xff)]
+        );
+        assert_eq!(ditted("0xe9..").unwrap(), [(0xe9, 0xff), (0, 0)]);
+        assert!(ditted("0x4").is_err() && ditted("0101").is_err() && ditted("0xzz").is_err());
+        let sets = start_patterns(GCC64_PATTERNS).unwrap();
+        let acts: Vec<StartAct> = sets.iter().map(|s| s.act).collect();
+        assert_eq!(acts[..2], [StartAct::Func, StartAct::Boundary]);
+        assert!(acts.len() > 2 && acts[2..].iter().all(|&a| a == StartAct::FuncAfterDefined));
+        assert_eq!((sets[0].total, sets[0].post, sets[0].pres.len()), (40, 24, 21));
+        // RET NOP, then PUSH RBP; MOV RBP,RSP: 16 + 32 fixed bits
+        let d = [0xc3, 0x90, 0x55, 0x48, 0x89, 0xe5, 0x90];
+        assert!(sets[0].hit(&d, 2) && !sets[0].hit(&d, 1) && !sets[1].hit(&d, 2));
+        // ENDBR64 after the same bytes is a code boundary
+        assert!(sets[1].hit(&[0xc3, 0x90, 0xf3, 0x0f, 0x1e, 0xfa], 2));
+        // a pattern without prepatterns matches anywhere
+        assert!(!sets[2].hit(&d, 2) && sets[2..].iter().any(|s| s.hit(&d, 2)));
     }
 
     #[test]
