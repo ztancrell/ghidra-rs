@@ -1158,8 +1158,9 @@ rust/tools/decomp-diff.sh --script <file>      # one script on both engines, ful
   of decoding the bound address in the slot, which made 0x40a110 fail), and `map function` for
   every function with its FID or export name. For mercs2: 30,262 `map function` lines (1,022 of
   them import slots), 1,022 `map externalref`.
-  For an ELF also `override flow <address> callreturn` after a function's `map function`, for
-  its CALL_RETURN flow overrides ("The prelude path follows Java" below).
+  Also `override flow <address> callreturn` after a function's `map function`, for its
+  CALL_RETURN flow overrides ("The prelude path follows Java" below; ELF first, PE since
+  branch `pe-overrides`: 3,369 such lines for mercs2).
 - `decompile -i` reads `load file`, `source`, `map function`, `map externalref`, `readonly`,
   `option`, `fixup apply`, `load function`, `load addr`, `break start`, `decompile`,
   `print raw`, `continue` and `quit`, and echoes them as `decomp_dbg -i` does. `decompile`
@@ -6785,7 +6786,9 @@ done:
 
 Limits of the overrides:
 - the PE prelude has none. Java has them on PE too, but they would change the mercs2 prelude
-  (its `cksum` is a `bars-queue.sh` check) and every baseline built on it; not done here;
+  (its `cksum` is a `bars-queue.sh` check) and every baseline built on it; not done here.
+  Superseded (branch `pe-overrides`): the PE prelude writes them, see "The PE prelude gets
+  the flow overrides" below;
 - they are ghidra-rs's own, not Java's: on Hatred `facts-diff.sh` has 31,356 `override`
   records equal, 2,507 only Java has and 3,972 only ghidra-rs has (0x16a0590, a function of
   one jump, is one);
@@ -6822,6 +6825,63 @@ prelude):
 Not checked: Java's own C for these functions (the facts path still fails loudly on a function
 in a namespace); the desktop's reference, which must be rebuilt (`tools/decomp-ref.sh`) before
 its next `decomp-diff.sh` or `bars-queue.sh` run, since the patch changed.
+
+#### The PE prelude gets the flow overrides (branch `pe-overrides`, 2026-11-23)
+
+The user's decision: the PE prelude writes the CALL_RETURN flow overrides as the ELF prelude
+does. `console::prelude` no longer asks for an ELF: after each function's `map function` it
+writes `override flow <address> callreturn` for the instructions of its body that
+`factsout::call_returns` gives. The mercs2 prelude: 35,185 lines (was 31,816), 3,369 of them
+overrides; without the `override` lines it is the old file, byte for byte. Superseded: "the
+mercs2 prelude is byte-identical (`cksum` 805048874 ...)" above, which holds for the prelude
+before this branch.
+
+The rule is ghidra-rs's own on PE too, not Java's set. Measured against the facts of the Java
+project (`$GHIDRA_REF/mercs2.facts`, Java 12.3 after the mercs2 pipeline, 3,365 `override`
+records, all CALL_RETURN):
+
+| ghidra-rs | records | equal | only Java | only ghidra-rs |
+|---|---|---|---|---|
+| `analyze --facts`, plain discovery (`tools/facts-own.sh`, `facts-diff.sh`) | 4,556 | 2,666 | 699 | 1,890 |
+| the prelude's lines (`analyze --decomp-prelude`, by address) | 3,369 | 1,650 | 1,715 | 1,719 |
+
+The two rows differ because `--facts` runs discovery with Create Address Tables and constant
+propagation and the prelude does not, and the prelude writes only the instructions of a
+function's body. What makes each record only Java's or only ghidra-rs's was not traced here
+(the function set and the no-return set both differ, see "The comparison"). The difference is
+not silent in the decompile checks: both engines read the same prelude. It is one more way the
+prelude path differs from Java's own decompile, which the facts path measures.
+
+Checks (desktop, the reference rebuilt in the worktree, old and new prelude from the same
+build):
+- `CORPORA=m8 tools/bars.sh`: 57 of 57 lines the same with the old and the new prelude, and
+  equal to the M8 lines of baseline `x64-13b1dffecf`; silent 0. One M8 function has an override
+  (0x9eec5e, at 0x9eec68);
+- M500: 39 of the 500 functions get an override line (39 lines; 21 of the addresses are
+  Java's too). An override belongs to its function (`Override` of the `Funcdata` in the C++,
+  `Console::call_returns` by entry here), so only these 39 read a different script. All 57
+  M500 checks on the 39 with the new prelude (`TIMEOUT=30`): 39 / 39 identical in each,
+  loud 0, silent 0, timeout 0. With the old prelude, on the 38 without 0x4c48d0: 38 / 38 in
+  54 checks, 35 / 38 in `r5slock` and `r5dtlocksv` (loud 3: 0x48c986, 0x608500, 0x7874d0) and
+  36 / 38 in `svlock` (loud 2: 0x48c986, 0x608500), all "a piece of a locked stack
+  parameter", a path not ported; with the override flow no longer runs past the overridden
+  instruction into that path, so the three checks gain these functions. 0x4c48d0 is the function the reference did not
+  finish in 120 s (`cs-r`, old prelude); with the overrides both engines finish it;
+- full M500 checks run with the new prelude (baseline `x64-13b1dffecf` -> now):
+  `pcd` 499 / 499, reference finished 499 / 500 -> 500 / 500 of 500; `r5dtlocksv` and
+  `r5slock` 469 / 499 (loud 30) -> 472 / 499 (loud 27, all "a piece of a locked stack
+  parameter"; the reference does not finish 0x6b21e0 in 120 s); silent 0, timeout 0 in each.
+  The three agree with the baseline plus the change on the 39 functions;
+- small ELF decompile corpus (`tools/elf64-decomp.sh`), 815 functions: identical 790, loud 23
+  (16 CONCAT tree, 5 type propagation, 1 partial struct, 1 jump table through a CALLOTHER),
+  silent 0, the reference ran 813: unchanged;
+- `cargo test --release` 203 passed, `cargo clippy --all-targets -- -D warnings` and
+  `cargo fmt --check` clean.
+
+Not run: the other 53 M500 checks in full (only their 39 functions with an override, above),
+the r5d-adc, switch and simple corpora, the Mac, Java's own C. Every baseline of a mercs2
+check moves with the prelude; `rust/target/baselines/pe-overrides-<hash>.summary` holds the
+new M8 lines.
 
 #### Archive prototypes are loud (branch `fix-prelude`, 2026-11-23)
 
@@ -6990,7 +7050,8 @@ tests (merge.cc:136-146, 261), `Merge::groupPartials` (merge.cc:967-976, 1375-14
 `ActionMarkExplicit::baseExplicit` (coreaction.cc:3205-3231), `Funcdata::linkProtoPartial`
 (funcdata_varnode.cc:1197-1214) and `HighVariable::setSymbol`'s group offset
 (variable.cc:258-260). It stays loud, and so does the partial struct on its own
-("getExactPiece: ... (getTypePartialStruct) is not ported").
+("getExactPiece: ... (getTypePartialStruct) is not ported"). Superseded: ported on branch
+`fix-concat` (the section after this one).
 
 `tools/decomp-status.sh` runs ghidra-rs alone (`decompile`, `print C`, default options) on a
 list of functions and writes a status table by cause. Hatred's module here is the 9,994
@@ -7040,6 +7101,100 @@ Checks:
 
 Kept from before, not this branch's: `ParamActive::which_trial` tests every trial for a
 one-byte range, where the C++ returns after the first (fspec.cc:1981-1991).
+
+#### `RulePieceStructure`'s CONCAT tree, partial structs and proto-partial pieces (branch `fix-concat`, 2026-11-23)
+
+The largest of Hatred's loud stops is ported, with what it needs. A value put together by
+PIECEs whose data-type is an array, structure or union (every 16-byte XMM value is
+`undefined1[16]`) now prints as one assignment per piece (`axVar11._4_4_ = ...;`), as the C++
+prints it.
+
+- `TypePartialStruct` (type.cc:2714-2817, `getTypePartialStruct` 4431-4437): a piece of an
+  array, in types.rs (`Meta::PartialStruct`, `Kind::PartialStruct`: the parent, the offset, the
+  stripped type), with `getSubType`, `compare`, `printRaw`, `getComponentForPtr`,
+  `getHoleSize` (split.rs), `isPieceStructured`, and the strip of a partial in
+  `getTypePointer`, `getTypePointerStripArray` and `getTypeArray`. `getExactPiece`
+  (type.cc:4607-4639) makes one in its three ports (`infertypes::exact_piece`,
+  `Funcdata::exact_piece` in mapstate.rs, split.rs). Only a piece of an array: a piece of a
+  structure, union or enum still fails loudly (`TypeStruct::getSubType` is not in types.rs);
+- what reads the metatype: the cast rules (cast.cc:49-56, 90, 146, 341-374, 417),
+  `TypeOp::propagateToPointer` (typeop.cc:195-197), `MapState::addFixedType`
+  (varmap.cc:1052-1082: an open hint of the element, a fixed undefined one for a copied
+  constant), `SplitDatatype` (`categorizeDatatype`, `RootPointer::find` and the tests of the
+  three rules, subflow.cc:2146, 2258-2272, 2967-3011), the type-lock tests of `SubvariableFlow`,
+  `SplitFlow` and `SubfloatFlow` (subflow.cc:103, 114, 1757, 3248), `RuleAndStructure`,
+  `RuleExpandLoad`, `isPrimitiveWhole`, `ScopeInternal::retypeSymbol`;
+- `HighVariable::stripType` (variable.cc:304-322) in `variable::h_type`: a partial struct is
+  the undefined type of its size unless a structured symbol backs the variable as a piece. The
+  C++ caches a variable's type and does not recompute it when a symbol is linked, so what
+  `stripType` did is cached the same way (`HighVariable::stripped`, dirtied by a merge, a
+  removed member and `Varnode::updateType`), and `mergeTestRequired` asks for the type of its
+  second variable only when the first is locked, as the C++ does (merge.cc:107-109);
+- `RulePieceStructure` (ruleaction.cc:7369-7607): `determineDatatype` (with
+  `Varnode::getStructuredType`), `spanningRange`, `findReplaceZext`, `separateSymbol` and the
+  tree rewrite of `applyOp`: each piece of the tree goes to its offset in the storage of the
+  whole, a leaf elsewhere through a COPY, an inner varnode by a new varnode, and the pieces
+  that are not address-tied are marked proto-partial (`Varnode::proto_partial`,
+  `PcodeOp::concat_root`);
+- `PieceNode` (op.cc:843-918) in merge.rs: `isLeaf`, `gatherPieces`, and `findRoot` through
+  proto-partial varnodes;
+- `Address::renormalize` for a tree in the join space (`renormalizeJoinAddress` with
+  `JoinRecord::getEquivalentAddress`, translate.cc:145-175, 908-953; `Funcdata::renormalize_join`):
+  a piece of a join is its register, a range over several pieces their join. A join with a
+  constant piece fails loudly;
+- the proto-partial flag in `mergeTestRequired` and `mergeTestBasic` (merge.cc:136-146, 261),
+  `Merge::groupPartials` and `groupPartialRoot` (merge.cc:967-976, 1375-1405);
+- `ActionMarkExplicit::baseExplicit` (coreaction.cc:3204-3231): the pieces of a partial root
+  and the base of its PIECEs are explicit;
+- `Funcdata::linkProtoPartial` (funcdata_varnode.cc:1197-1214), `HighVariable::setSymbol`'s
+  group offset (variable.cc:258-260), `establishGroupSymbolOffset` (625-636) and the
+  proto-partial preference of `compareName` (472-473).
+
+Superseded: "Not ported: the CONCAT tree rewrite of `RulePieceStructure`" and "the partial
+struct on its own" (the section above); "`groupPartials` fails loudly on a registered
+proto-partial root" and "`stripType`" in the not-ported list of stage S7; "the CONCAT tree
+rewrite of `piecestructure`" (R5 slice 4); "a piece of an array symbol as a data-type
+(`getTypePartialStruct`)" ("Local symbols"); "a partial struct, array" in `finalizeDatatype`;
+"a piece of a structure or array (`TypePartialStruct`...)" in the split rules, for arrays.
+
+Still loud:
+- type propagation into an array (`TypePointer::downChain`): its callers make a
+  `TypePointerRel` of the parent (`propagateAddIn2Out`, typeop.cc), a data-type ghidra-rs does
+  not have, with its own printing and pointer arithmetic. Not a small step; left as it is;
+- a constant that is a piece of a structured symbol (`PrintC::pushConstant` of a partial
+  struct: a cast to the type);
+- `SplitDatatype::buildOutConcats` (the other maker of proto-partials), partial unions and
+  enums, a piece of a structure, a join with a constant piece.
+
+The first 3,128 functions of Hatred's module (the list and prelude of the section above:
+`0x169e020`-`0x17562f0`, 34,932 flow overrides), `tools/decomp-status.sh`:
+
+| | master f91fd31ed2 (desktop) | this branch on fe4043a333 (desktop) |
+|---|---|---|
+| ok | 3,009 | 3,113 |
+| loud | 119 | 15 |
+| timeout (120 s) | 0 | 0 |
+
+Loud on master, by cause, and how many print now: CONCAT tree 83 (83), partial struct 21
+(21), `downChain` 11 (0), heritage after dead-code removal in the stack space 2 (0), jump
+table through a CALLOTHER 2 (0). The 15 still loud: 11 `downChain`, 2 heritage after dead-code removal, 2 CALLOTHER jump tables. The 3,009 ok on master are ok still.
+
+Checks:
+- against the reference (decomp_dbg with this branch's patch, `print C`), all 119 functions
+  loud on master: the reference ran 119, identical 104 (every one that prints), loud 15 (the 15 above), silent 0. Run on the MacBook, after 0x16a27b0 and 0x16e38f0 gave the same bytes there as on the desktop, on both engines; with the branch before it was moved onto fe4043a333, whose changes touch no decompiler source;
+- small ELF decompile corpus, 815 functions: identical 807 (was 790), loud 6 (was 23:
+  5 `downChain`, 1 jump table through a CALLOTHER left), silent 0; the reference ran 813 (the 2 it cannot load decompile in ghidra-rs,
+  with nothing to compare them to);
+- Hatred camera corpus, 50 functions: identical 49 (was 47), loud 1 (was 3; `downChain` left), silent 0;
+- `CORPORA=m8 tools/bars.sh` (desktop, reference rebuilt): 57 of 57 lines equal to the baseline (`x64-13b1dffecf.summary`); `simple`: pc-r, pc-t, pcc-r, pcc-t 194 / 194, pcd 198 / 200, pmd 199 / 200; `r5d-adc`: r5d, r5dt, r5dtlock 215 / 215, r5dtlocksv 202 / 215, all as before. No M500 check was run;
+- `cargo test --release` 206 passed (two of them new: `partial_struct`, `join_ranges`),
+  `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` clean.
+
+Not measured: the other 6,866 functions of the module. Not looked for in the compared functions,
+so possibly never run: a tree in the join space over more than two pieces, a zero extension
+inside a tree (`findReplaceZext`), a piece of a symbol with an entry (`determineDatatype`'s
+partial case: no symbol is linked before `ActionNameVars`), a stripped type cached before the
+symbol was linked.
 
 #### Java's C of Hatred, for the full decompile comparison (branch `hatred-java-run`, 2026-11-23)
 

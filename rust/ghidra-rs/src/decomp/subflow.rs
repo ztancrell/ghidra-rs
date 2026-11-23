@@ -265,8 +265,8 @@ impl<'a> SubvariableFlow<'a> {
             return None;
         }
         // a locked varnode without a recorded type has the default one, of its own size
-        let locked_other_size =
-            v.has(VnFlags::TYPELOCK) && v.ty.map_or(v.size, |t| self.fd.types.size(t)) != self.flowsize;
+        let locked_other_size = super::infertypes::locked_whole(self.fd, vn)
+            && v.ty.map_or(v.size, |t| self.fd.types.size(t)) != self.flowsize;
         if self.sext {
             // an input or a global cannot be assumed sign-extended
             let unknown_ext = (!self.aggressive && v.is_input()) || v.has(VnFlags::PERSIST);

@@ -1199,6 +1199,72 @@ impl Funcdata {
         Ok(at as u64)
     }
 
+    /// Port of `AddrSpaceManager::renormalizeJoinAddress` with
+    /// `JoinRecord::getEquivalentAddress` (translate.cc:145-175, 908-953), little endian: what
+    /// the `size` bytes at `off` of the join record `rec` are: the record itself (`None`), or
+    /// the pieces they cover, most significant first, cut to the range.
+    fn join_range(&self, rec: u64, off: i64, size: u32) -> Result<Option<Vec<(u32, u64, u32)>>> {
+        let pieces = usize::try_from(rec).ok().and_then(|i| self.joins.get(i));
+        let pieces = pieces.ok_or_else(|| LowlevelError("Join address not covered by a JoinRecord".into()))?;
+        let total: i64 = pieces.iter().map(|p| i64::from(p.2)).sum();
+        if off == 0 && i64::from(size) == total {
+            return Ok(None);
+        }
+        // the piece holding a byte, counted from the least significant (the last), and the
+        // bytes before it in that piece
+        let equivalent = |mut small: i64| {
+            if small < 0 {
+                return None;
+            }
+            for pos in (0..pieces.len()).rev() {
+                let piece_size = i64::from(pieces[pos].2);
+                if small < piece_size {
+                    return Some((pos, small));
+                }
+                small -= piece_size;
+            }
+            None
+        };
+        let (Some((pos1, trunc1)), Some((pos2, trunc2))) = (equivalent(off), equivalent(off + i64::from(size) - 1))
+        else {
+            return err("Join address range not covered");
+        };
+        let mut new = pieces[pos2..=pos1].to_vec();
+        if new.iter().any(|p| Space::Sleigh(p.0) == CONST_SPACE) {
+            return err("renormalizeJoinAddress: a join with a constant piece is not ported");
+        }
+        // the least significant piece starts at the first byte, the most significant ends at
+        // the last
+        let cut_high = i64::from(pieces[pos2].2) - trunc2 - 1;
+        if let Some(low) = new.last_mut() {
+            low.1 = low.1.wrapping_add(trunc1 as u64);
+            low.2 -= trunc1 as u32;
+        }
+        new[0].2 -= cut_high as u32;
+        Ok(Some(new))
+    }
+
+    /// `Address::renormalize` of `off` bytes into the join record `rec`, for `size` bytes: the
+    /// record, the piece holding the range, or the join record of the pieces it covers, which
+    /// is made when missing (`findAddJoin`).
+    pub(crate) fn renormalize_join(&mut self, rec: u64, off: i64, size: u32) -> Result<(Space, u64)> {
+        Ok(match self.join_range(rec, off, size)? {
+            None => (Space::Join, rec),
+            Some(p) if p.len() == 1 => (Space::Sleigh(p[0].0), p[0].1),
+            Some(p) => (Space::Join, self.join_pieces(p)?),
+        })
+    }
+
+    /// [`Funcdata::renormalize_join`] without making a record: `None` when the range covers
+    /// several pieces no record joins (no varnode is stored there).
+    pub(crate) fn find_join_range(&self, rec: u64, off: i64, size: u32) -> Result<Option<(Space, u64)>> {
+        Ok(match self.join_range(rec, off, size)? {
+            None => Some((Space::Join, rec)),
+            Some(p) if p.len() == 1 => Some((Space::Sleigh(p[0].0), p[0].1)),
+            Some(p) => self.joins.iter().position(|j| *j == p).map(|i| (Space::Join, i as u64)),
+        })
+    }
+
     /// Port of `AddrSpaceManager::joinPieces` (translate.cc:783-792) for register pieces (most
     /// significant first): the address of the whole, the one piece left when contiguous pieces
     /// merge into a register, else a join record.
@@ -1599,5 +1665,28 @@ impl Funcdata {
             self.op_set_input(op, newrep, slot)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// renormalizeJoinAddress on a join of two 8-byte registers (most significant first): the
+    /// whole is the record, a half is its register, a range across both is the record of the
+    /// cut pieces.
+    #[test]
+    fn join_ranges() {
+        let mut fd = Funcdata::new(0);
+        let rec = fd.join_pieces(vec![(4, 0x10, 8), (4, 0, 8)]).unwrap();
+        assert_eq!(fd.renormalize_join(rec, 0, 16).unwrap(), (Space::Join, rec));
+        assert_eq!(fd.renormalize_join(rec, 0, 8).unwrap(), (Space::Sleigh(4), 0));
+        assert_eq!(fd.renormalize_join(rec, 8, 8).unwrap(), (Space::Sleigh(4), 0x10));
+        assert_eq!(fd.renormalize_join(rec, 12, 4).unwrap(), (Space::Sleigh(4), 0x14));
+        assert_eq!(fd.find_join_range(rec, 4, 8).unwrap(), None);
+        let mid = fd.renormalize_join(rec, 4, 8).unwrap();
+        assert_eq!(fd.joins[mid.1 as usize], vec![(4, 0x10, 4), (4, 4, 4)]);
+        assert_eq!(fd.find_join_range(rec, 4, 8).unwrap(), Some(mid));
+        assert!(fd.renormalize_join(rec, 12, 8).is_err());
     }
 }

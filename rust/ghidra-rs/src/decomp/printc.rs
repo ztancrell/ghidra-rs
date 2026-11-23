@@ -1413,10 +1413,7 @@ impl PrintC<'_> {
         let out = self.fd.op(op).out.ok_or_else(|| LowlevelError("print C: a SUBPIECE without output".into()))?;
         let (input, off) = (self.fd.input(op, 0)?, self.fd.input(op, 1)?);
         let intype = super::cast::print_facing(self.fd, input)?;
-        // isPieceStructured (the partial struct and union metatypes are not ported)
-        if self.fd.op(op).flags.has(OpFlags::SPECIAL_PRINT)
-            && matches!(self.fd.types.meta(intype), Meta::Array | Meta::Struct | Meta::Union)
-        {
+        if self.fd.op(op).flags.has(OpFlags::SPECIAL_PRINT) && self.fd.types.is_piece_structured(intype) {
             // TypeOpSubpiece::computeByteOffsetForComposite, little-endian
             let mut byte_off = i64::from(self.fd.vn(off).offset as i32);
             let sz = self.fd.vn(out).size;
@@ -1653,6 +1650,10 @@ impl PrintC<'_> {
                 return self.push_integer(val, size, meta == Meta::Int, vn);
             }
             Meta::Unknown => return self.push_integer(val, size, false, vn),
+            // the C++ prints a cast to the type and the value: not ported
+            Meta::PartialStruct => {
+                return err("print C: a constant that is a piece of a structured symbol is not ported")
+            }
             Meta::Bool => return self.push_atom(Atom::Text(if val != 0 { "true" } else { "false" }.into())),
             Meta::Void => return err("Cannot have a constant of type void"),
             Meta::Float => return self.push_atom(Atom::Text(float_token(val, size))),
