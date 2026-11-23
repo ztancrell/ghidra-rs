@@ -5482,9 +5482,9 @@ Java's sites that set a body, and what is ported:
 
 Also not ported: getThunkedAddr's p-code register tracking (thunks of more than one
 instruction, e.g. adjustor stubs), CALL_TERMINATOR thunks, getThunkedAddr stepping over an entry
-instruction without p-code (`NOP; JMP x` is a thunk of x in Java; `run` counts the functions
-that start with a one-byte `NOP` and a direct `JMP` and prints `warning: not ported:
-getThunkedAddr past a no-p-code entry instruction` when there are any; mercs2: none), the one-byte placeholder body of a
+instruction without p-code (Superseded, 2026-11-23, branch `fix-hatred-analysis`: ported,
+`Analysis::thunk_insn`; `NOP; JMP x` is a thunk of x; mercs2 has none, so the warning that
+counted them is gone), the one-byte placeholder body of a
 function made before its code, the no-return analyzer per batch. Superseded (2026-11-19):
 Shared Return Calls now runs per batch at 398; see "Shared Return Calls per batch" below.
 
@@ -6262,13 +6262,14 @@ Analysis on x86-64 (`Analysis::run` with `Image::elf64`):
   read 8 bytes, the rest 4;
 - not run: Function Start Search (`x86-64gcc_patterns.xml` is not ported), the RTTI analyzer
   (MSVC's), X86 Function Callee Purge (Java's `canAnalyze` refuses 64-bit), Function ID (the
-  databases are x86:LE:32's). Not ported: PIC switch tables (`MOVSXD` of 4-byte offsets plus a
-  base; Java's DecompilerSwitchAnalyzer), getThunkedAddr past a no-p-code entry instruction
-  in `resolve_thunk` (`ENDBR64; JMP`, `NOP; JMP`), purges from data-type archives, DWARF, the
+  databases are x86:LE:32's). Not ported: purges from data-type archives, DWARF, the
   relocation guide of Create Address Tables (AddressTable.getEntry takes only relocated words
   where the program has relocations), the Disassembler's thunk-aware no-return test
   (isNoReturnCall reads Function.hasNoReturn, which follows a thunk, FunctionDB.java:1217-1222;
-  `descend` reads the no-return set alone, before bodies and thunks exist).
+  `descend` reads the no-return set alone, before bodies and thunks exist). Superseded
+  (2026-11-23, branch `fix-hatred-analysis`): "Not ported: PIC switch tables, getThunkedAddr
+  past a no-p-code entry instruction in `resolve_thunk`"; see "Thunks and PIC switches on
+  x86-64" below.
 
 Check: `tools/elf64-ref.sh [extra binaries]` builds `tools/corpus/elf64/*.c` with gcc -O2
 (non-PIE, PIE, and PIE with `-fcf-protection=full` as `-cet`, no `-g`: Java takes no-return flags from DWARF, which ghidra-rs does not read
@@ -6314,6 +6315,58 @@ analysis 96.5 s; 179,636 functions exported; `.text` coverage 43,001,858 / 45,17
 Warnings: 10 relocations not applied, 22 slot jumps past an entry; Repair Flow Damage now runs:
 8 runs, 3,257 instructions cleared, 7 functions removed, 5 data-pointer cases not modelled. The
 slower analysis (54.5 s before) was not traced (Repair Flow Damage, or load on the desktop).
+
+#### Thunks and PIC switches on x86-64 (branch `fix-hatred-analysis`, 2026-11-23)
+
+- Thunks behind an entry instruction without p-code. `resolve_thunk` and `fixup_body` test
+  the instruction getThunkedAddr tests: the entry's, or the next one in address order where the
+  entry's has no p-code (`Analysis::thunk_insn`, CreateThunkFunctionCmd.java:565-572). So
+  `NOP; JMP x` and `ENDBR64; JMP x` are thunks of x (`frame_dummy`). The facts name a thunk by
+  the same body (`Analysis::thunk_jump`: one jump, or one after such an entry instruction).
+  On every processor: mercs2 has no such function. Not ported, as before: getThunkedAddr's
+  walk over up to three instructions with its register tracking.
+- PIC switch tables (`Analysis::pic_switch_table`): `LEA base,[RIP + table]`, `MOVSXD
+  r,dword ptr [base + index*4]`, `ADD r,base` or `LEA r,[r + base]`, `JMP r` (a NOTRACK prefix
+  allowed). The table holds 4-byte offsets from its own start. The count comes from the `CMP
+  index,imm` before it, the index followed back through register moves and `MOVZX r32,r8`
+  (then a byte compare), over the straight-line history and the history of the first jump
+  that reached the run. Every case must lie in the jump's section. This is a byte pattern, as
+  `switch_table` is, where Java runs the decompiler's jump-table recovery
+  (DecompilerSwitchAnalyzer, DecompilerSwitchAnalysisCmd). A jump of this form whose table,
+  bound or cases the pattern does not find stays unresolved and is counted in a warning (`not
+  ported: the decompiler's jump-table recovery`). An instruction with a p-code branch inside
+  (`MINSS`, `CMOVcc`; `Ins::inner`) between the compare and the jump makes it unresolved too:
+  the switch block then has two in-edges, where the decompiler's guard search stops
+  (JumpBasic::analyzeGuards). Hatred's 0x3835ec1 is such a jump, and Java does not recover it.
+  Not checked by the pattern: another jump into the instructions between the compare and the
+  switch.
+
+Measured against Java 12.3's facts (the body records; functions outside Java's EXTERNAL
+block), Hatred, the desktop:
+
+| | master 3a5ba15656 | with both |
+|---|---|---|
+| functions Java / ghidra-rs | 180,038 / 180,026 | 180,038 / 180,026 |
+| in both / Java only / ghidra-rs only | 180,024 / 14 / 2 | 180,024 / 14 / 2 |
+| bodies different (Java larger / ghidra-rs larger) | 237 (224 / 13) | 105 (92 / 13) |
+| PIC switch jumps counted unresolved | not counted | 67 |
+
+The 13 bodies ghidra-rs has larger are the same before and after. Not traced: the 92 Java has
+larger (67 are at most the unresolved jumps). The function set, traced:
+- Java only, 7 in `.plt` (0x15bdd00 `__cxa_pure_virtual`, ...): PLT entries no instruction
+  refers to (likely made by Java's PLT markup, not ported; not traced);
+- Java only, 7 in `.text` at STT_FUNC symbols (0x3582df0 `SDL_TicksQuit`, ...): Repair Flow
+  Damage removes 7 functions here (the same count; not checked one by one);
+- ghidra-rs only, 0x1b25ce4 and 0x1b2dc44: the targets of an entry `JMP` into the function's
+  own body (0x1b25cd0, 0x1b2dc30), thunks here. Likely cause, read from the source and not
+  traced in Java: the function exists with its DWARF body before analysis, so the target
+  lies in a function and CreateThunkFunctionCmd refuses
+  (getFunctionContaining, CreateThunkFunctionCmd.java:352-356); the analysis does not read
+  DWARF bodies.
+
+The 14 small binaries (`--facts` against Java's, equal records): body 1,013 -> 1,029 / 1,112,
+label 4,645 -> 4,993 / 7,315, undef 1,034 -> 1,090 / 1,407, data 724 -> 740, override 770 ->
+782, func 209 -> 210; 2 PIC switch jumps counted unresolved (cpp binaries).
 
 The PE path: `cargo test --release` 178 passed, 0 failed; `cargo fmt --check` and `cargo clippy
 --release --all-targets -- -D warnings` clean; M8 bars (`CORPORA=m8 bars.sh`, the 12.3 `x86.sla`,

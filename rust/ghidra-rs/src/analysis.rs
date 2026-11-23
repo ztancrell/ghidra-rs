@@ -506,6 +506,7 @@ pub struct Ins {
     pub rw: Vec<u32>,          // the `refs` a memory operand makes (READ or WRITE; the others are DATA)
     pub code_imms: Vec<u32>,   // immediates that point into an executable section
     pub nop: bool,             // no p-code (ENDBR64), which getThunkedAddr steps over
+    pub inner: bool,           // a p-code branch inside the instruction (MINSS, CMOVcc): it splits a basic block
 }
 
 /// The references `Analysis::disassemble` goes by: every destination, and the destinations in
@@ -583,6 +584,8 @@ pub struct Analysis {
     /// Jumps through a slot past a function's entry, which Java's Reference analyzer may make
     /// a thunk (CreateThunkFunctionCmd.isThunk on the holding function, not ported).
     slot_jumps_inside: HashSet<u32>,
+    /// PIC switch jumps (`pic_switch_table`) whose table, bound or cases were not found.
+    pic_switch_misses: BTreeSet<u32>,
     pub bodies: BTreeMap<u32, Vec<u32>>, // function -> sorted instruction addresses
     pub table_slots: BTreeMap<u32, u32>, // Create Address Tables (`disassemble` with constants): slot -> pointer
     fpu_ip: Option<(u32, u64)>,          // FPUInstructionPointer, which x87 constructors set to inst_start
@@ -726,6 +729,7 @@ impl Analysis {
             noreturn: HashSet::new(),
             fallthru: HashSet::new(),
             slot_jumps_inside: HashSet::new(),
+            pic_switch_misses: BTreeSet::new(),
             bodies: BTreeMap::new(),
             table_slots: BTreeMap::new(),
             fpu_ip: None,
@@ -1038,6 +1042,13 @@ impl Analysis {
                 an.slot_jumps_inside.len()
             ));
         }
+        if !an.pic_switch_misses.is_empty() {
+            an.warnings.push(format!(
+                "not ported: the decompiler's jump-table recovery (DecompilerSwitchAnalyzer): {} PIC switch jumps (MOVSXD of a table offset) whose table or bound the pattern did not find, first at 0x{:x}",
+                an.pic_switch_misses.len(),
+                an.pic_switch_misses.first().copied().unwrap_or(0)
+            ));
+        }
         an.body_owner = HashMap::new();
         // a thunk's purge is its thunked function's (FunctionDB.getStackPurgeSize)
         let thunked: Vec<(u32, u32)> = an.thunk_of.keys().map(|&f| (f, an.thunked_end(f))).collect();
@@ -1053,14 +1064,13 @@ impl Analysis {
         // two thunk definitions: the purges go by `thunk_of`, the facts' names and
         // `Project::thunked` by a body of one direct jump to a function
         let (only_made, only_one_jump) = an.bodies.iter().fold((0, 0), |(m, o), (&f, b)| {
-            let i = &an.insns[&f];
-            let target = match (i.flow, i.slot) {
+            let target = an.thunk_jump(f, b).and_then(|i| match (i.flow, i.slot) {
                 (Flow::Jump, _) => i.target,
                 // through a pointer that holds a function's entry (the facts' SecuROM slots)
                 (Flow::JumpInd, Some(s)) if !img.imports.contains_key(&s) => img.read_ptr(s),
                 _ => None,
-            };
-            let one_jump = b.len() == 1 && target.is_some_and(|t| t != f && an.funcs.contains(&t));
+            });
+            let one_jump = target.is_some_and(|t| t != f && an.funcs.contains(&t));
             match (an.thunk_of.contains_key(&f), one_jump) {
                 (true, false) => (m + 1, o),
                 (false, true) => (m, o + 1),
@@ -1070,21 +1080,6 @@ impl Analysis {
         if only_made + only_one_jump > 0 {
             an.warnings.push(format!(
                 "thunks disagree: {only_made} made by CreateFunctionCmd (thunk_of, the purges) are no one-jump body (the facts' names), {only_one_jump} one-jump bodies were not made thunks"
-            ));
-        }
-        // getThunkedAddr steps over an entry instruction without p-code (`NOP; JMP x` is a thunk
-        // of x); resolve_thunk does not. Counted for the one-byte NOP only
-        let nop_thunks = an
-            .bodies
-            .keys()
-            .filter(|&&f| {
-                img.block_of(f).is_some_and(|s| s.data.get((f - s.addr) as usize) == Some(&0x90))
-                    && an.insns.get(&(f + 1)).is_some_and(|i| i.flow == Flow::Jump)
-            })
-            .count();
-        if nop_thunks > 0 {
-            an.warnings.push(format!(
-                "not ported: getThunkedAddr past a no-p-code entry instruction: {nop_thunks} functions start `NOP; JMP` and are no thunks here"
             ));
         }
         let wide = an.wide_flows.load(std::sync::atomic::Ordering::Relaxed);
@@ -1243,7 +1238,7 @@ impl Analysis {
         referring: &mut Vec<u32>,
         changed: &mut BTreeSet<u32>,
     ) -> Option<Vec<u32>> {
-        let t = self.insns.get(&f).filter(|i| i.flow == Flow::Jump)?.target.filter(|&t| t != f)?;
+        let t = self.thunk_insn(f).filter(|i| i.flow == Flow::Jump)?.target.filter(|&t| t != f)?;
         if referring.contains(&f) {
             return None;
         }
@@ -1366,10 +1361,10 @@ impl Analysis {
         let new = self.walk(f, |a| self.bodies.contains_key(&a));
         let overlaps = new.iter().any(|a| self.body_owner.get(a).is_some_and(|&g| g != f));
         if !self.thunk_of.contains_key(&f) && !overlaps {
-            let i = &self.insns[&f];
-            if let Some(t) = i
-                .target
-                .filter(|t| i.flow == Flow::Jump && *t != f && self.bodies.contains_key(t) && self.thunked_end(*t) != f)
+            if let Some(t) = self
+                .thunk_insn(f)
+                .and_then(|i| i.target.filter(|_| i.flow == Flow::Jump))
+                .filter(|t| *t != f && self.bodies.contains_key(t) && self.thunked_end(*t) != f)
             {
                 self.thunk_of.insert(f, t);
                 if self.bodies.get(&f) != Some(&new) {
@@ -1475,6 +1470,29 @@ impl Analysis {
     /// whose no-return flag it takes. ELF only (a PLT entry); the PE path keeps its rule.
     fn import_thunk_noreturn(&self, f: u32) -> bool {
         self.slot_thunk(f).is_some_and(|s| self.noreturn.contains(&s))
+    }
+
+    /// The instruction getThunkedAddr tests first: the entry's, or, where that has no p-code
+    /// (`ENDBR64`, `NOP`), the next instruction in address order (getInstructionAfter,
+    /// CreateThunkFunctionCmd.java:565-572).
+    fn thunk_insn(&self, f: u32) -> Option<&Ins> {
+        let i = self.insns.get(&f)?;
+        if i.nop {
+            self.insns.range(f + 1..).next().map(|(_, i)| i)
+        } else {
+            Some(i)
+        }
+    }
+
+    /// The jump of a body that is one jump, or one jump after an entry instruction without
+    /// p-code (`thunk_insn`): the body the facts name a thunk by.
+    pub fn thunk_jump(&self, f: u32, body: &[u32]) -> Option<&Ins> {
+        let first = self.insns.get(&f)?;
+        match (first.nop, body) {
+            (false, [_]) => Some(first),
+            (true, [_, a]) => self.insns.get(a),
+            _ => None,
+        }
     }
 
     /// The slot of a function whose body is one `JMP [slot]`; on x86-64 also one after an
@@ -1995,7 +2013,10 @@ impl Analysis {
             }
         }
         let computed = computed.filter(|_| slot.is_none());
-        Some(Ins { len: len as u8, flow, target, slot, computed, refs, rw, code_imms, nop: ops.is_empty() })
+        let inner = ops.iter().any(|op| {
+            matches!(op.opc, 4 | 5) && (op.ins[0].space != code || op.ins[0].offset == a as u64 + len as u64)
+        });
+        Some(Ins { len: len as u8, flow, target, slot, computed, refs, rw, code_imms, nop: ops.is_empty(), inner })
     }
 
     /// Ghidra's `disassemble(addr)` after analysis: recursive descent from `addrs` into bytes no
@@ -2408,11 +2429,14 @@ impl Analysis {
         log: &mut Vec<u32>,
     ) {
         let mut pending: HashMap<u32, Fold> = HashMap::new();
+        // x86-64: the history of the first jump that reached a run, for `pic_switch_table`
+        let mut reached: HashMap<u32, Vec<u32>> = HashMap::new();
         while let Some(start) = queue.pop() {
             let mut a = start;
             let mut recent: Vec<u32> = Vec::new(); // straight-line history, for switch bounds
                                                    // the fold of the first jump that reached `start` (Ghidra: first flow wins)
             let mut fold = pending.remove(&start).unwrap_or_default();
+            let before = reached.remove(&start).unwrap_or_default();
             while self.is_code(img, a) && owner[(a - self.code_lo) as usize] == 0 {
                 let Some(ins) = self.decode(img, sl, p, a, &mut fold) else { break };
                 let o = (a - self.code_lo) as usize;
@@ -2427,16 +2451,29 @@ impl Analysis {
                     }
                     if ins.flow != Flow::Call && owner[(t - self.code_lo) as usize] == 0 {
                         pending.entry(t).or_insert_with(|| fold.clone());
+                        if img.elf64 {
+                            reached.entry(t).or_insert_with(|| {
+                                recent[recent.len().saturating_sub(8)..].iter().copied().chain([a]).collect()
+                            });
+                        }
                     }
                     queue.push(t);
                 }
                 if ins.flow == Flow::JumpInd {
-                    if let Some((table, cases)) = self.switch_table(img, a, &recent) {
+                    let mut found = self.switch_table(img, a, &recent).map(|t| (t, img.ptr_size()));
+                    if found.is_none() && img.elf64 {
+                        match self.pic_switch_table(img, a, &[&before[..], &recent[..]].concat()) {
+                            Some(Ok(t)) => found = Some((t, 4)),
+                            Some(Err(())) => drop(self.pic_switch_misses.insert(a)),
+                            None => {}
+                        }
+                    }
+                    if let Some(((table, cases), width)) = found {
                         queue.extend(&cases);
                         // the table is data: keep the pattern search out of it
                         if self.is_code(img, table) {
                             let t = (table - self.code_lo) as usize;
-                            let e = (t + img.ptr_size() as usize * cases.len()).min(owner.len());
+                            let e = (t + width as usize * cases.len()).min(owner.len());
                             owner[t..e].iter_mut().filter(|b| **b == 0).for_each(|b| *b = 3);
                         }
                         self.tables.insert(a, cases);
@@ -2457,6 +2494,132 @@ impl Analysis {
                 a += len;
             }
         }
+    }
+
+    /// A PIC switch of GCC and clang on x86-64: `LEA base,[RIP + table]`, `MOVSXD r,dword ptr
+    /// [base + index*4]`, `ADD r,base` (or `LEA r,[r + base]`), `JMP r`, the table holding 4-byte
+    /// offsets from its own start. The entry count is the `CMP index,imm` before it, the index
+    /// followed back through register moves. Every case must lie in the jump's own section.
+    /// `hist` is the straight-line history before the jump, after that of the first jump that
+    /// reached its run. Err: the jump has the form, but its table, its bound or a case was not
+    /// found.
+    // ponytail: a byte pattern, as `switch_table`. Java recovers these tables with the
+    // decompiler (DecompilerSwitchAnalyzer.java:95-120, DecompilerSwitchAnalysisCmd); a jump of
+    // this form the pattern does not resolve stays unresolved and is counted
+    // (`pic_switch_misses`). Upgrade: the decompiler's jump-table recovery (decomp/jumptable.rs)
+    // on the functions with an unresolved computed jump.
+    fn pic_switch_table(&self, img: &Image, at: u32, hist: &[u32]) -> Option<Result<(u32, Vec<u32>), ()>> {
+        let bytes = |a: u32| img.block_of(a).map(|s| &s.data[(a - s.addr) as usize..]);
+        fn rex(c: &[u8]) -> (u8, &[u8]) {
+            match c.first() {
+                Some(&x) if (0x40..0x50).contains(&x) => (x, &c[1..]),
+                _ => (0, c),
+            }
+        }
+        // `JMP reg`, after a NOTRACK prefix of `-fcf-protection`
+        let j = bytes(at)?;
+        let (jx, j) = rex(j.strip_prefix(&[0x3e]).unwrap_or(j));
+        let jr = match j {
+            [0xff, m, ..] if m & 0xf8 == 0xe0 => m & 7 | (jx & 1) << 3,
+            _ => return None,
+        };
+        let [.., movsxd, sum] = hist else { return None };
+        // the sum into the jump's register: `ADD jr,x` or `LEA jr,[x + y]`
+        let (sx, s) = rex(bytes(*sum)?);
+        let pair = match s {
+            [0x01, m, ..] if sx & 8 != 0 && m & 0xc0 == 0xc0 && (m & 7 | (sx & 1) << 3) == jr => {
+                (jr, (m >> 3) & 7 | (sx & 4) << 1)
+            }
+            [0x03, m, ..] if sx & 8 != 0 && m & 0xc0 == 0xc0 && ((m >> 3) & 7 | (sx & 4) << 1) == jr => {
+                (jr, m & 7 | (sx & 1) << 3)
+            }
+            [0x8d, m, sib, ..]
+                if sx & 8 != 0
+                    && m & 0xc7 == 0x04
+                    && sib & 0xc0 == 0
+                    && sib & 7 != 5
+                    && (sib >> 3) & 7 | (sx & 2) << 2 != 4
+                    && ((m >> 3) & 7 | (sx & 4) << 1) == jr =>
+            {
+                (sib & 7 | (sx & 1) << 3, (sib >> 3) & 7 | (sx & 2) << 2)
+            }
+            _ => return None,
+        };
+        // `MOVSXD r,dword ptr [base + index*4]`
+        let (mx, m) = rex(bytes(*movsxd)?);
+        let (dst, base, mut index) = match m {
+            [0x63, m, sib, ..]
+                if mx & 8 != 0
+                    && m & 0xc7 == 0x04
+                    && sib & 0xc0 == 0x80
+                    && sib & 7 != 5
+                    && (sib >> 3) & 7 | (mx & 2) << 2 != 4 =>
+            {
+                ((m >> 3) & 7 | (mx & 4) << 1, sib & 7 | (mx & 1) << 3, (sib >> 3) & 7 | (mx & 2) << 2)
+            }
+            _ => return None,
+        };
+        if pair != (dst, base) && pair != (base, dst) {
+            return None;
+        }
+        let (mut table, mut count) = (None, None);
+        // the index came through `MOVZX r32,r8`: a byte compare bounds it
+        let mut byte = false;
+        // an instruction with a p-code branch inside lies between: the switch block has two
+        // in-edges, where the decompiler's guard search stops (JumpBasic::analyzeGuards,
+        // jumptable.cc; Hatred 0x3835ec1, a MINSS, which Java does not recover)
+        let mut split = false;
+        for &r in hist[..hist.len() - 2].iter().rev().take(12) {
+            let Some(c) = bytes(r) else { continue };
+            let (cx, c) = rex(c);
+            let m1 = c.get(1).copied().unwrap_or(0);
+            split |= count.is_none() && self.insns.get(&r).is_some_and(|i| i.inner);
+            let (reg, rm) = ((m1 >> 3) & 7 | (cx & 4) << 1, m1 & 7 | (cx & 1) << 3);
+            match c {
+                [0x8d, m, d0, d1, d2, d3, ..] if table.is_none() && cx & 8 != 0 && m & 0xc7 == 0x05 && reg == base => {
+                    let next = r + 6 + (cx != 0) as u32;
+                    table = Some(next.wrapping_add(u32::from_le_bytes([*d0, *d1, *d2, *d3])));
+                }
+                _ if count.is_some() => {}
+                // a register move renames the index
+                [0x89, m, ..] if m & 0xc0 == 0xc0 && rm == index => index = reg,
+                [0x8b, m, ..] if m & 0xc0 == 0xc0 && reg == index => index = rm,
+                [0x0f, 0xb6, m, ..] if m & 0xc0 == 0xc0 && (m >> 3) & 7 | (cx & 4) << 1 == index => {
+                    index = m & 7 | (cx & 1) << 3;
+                    // without a REX prefix 4-7 are AH-BH
+                    if index >= 4 && cx == 0 {
+                        return Some(Err(()));
+                    }
+                    byte = true;
+                }
+                [0x3c, i, ..] if byte && index == 0 => count = Some(*i as usize + 1),
+                [0x80, m, i, ..] if byte && m & 0xf8 == 0xf8 && rm == index => count = Some(*i as usize + 1),
+                _ if byte => {}
+                [0x83, m, i, ..] if m & 0xf8 == 0xf8 && rm == index => count = Some(*i as usize + 1),
+                [0x81, m, i0, i1, i2, i3, ..] if m & 0xf8 == 0xf8 && rm == index => {
+                    count = Some(u32::from_le_bytes([*i0, *i1, *i2, *i3]) as usize + 1)
+                }
+                [0x3d, i0, i1, i2, i3, ..] if index == 0 => {
+                    count = Some(u32::from_le_bytes([*i0, *i1, *i2, *i3]) as usize + 1)
+                }
+                _ => {}
+            }
+            if table.is_some() && count.is_some() {
+                break;
+            }
+        }
+        let (Some(table), Some(count), false) = (table, count, split) else { return Some(Err(())) };
+        let own = img.block_of(at)?.addr;
+        let case = |i: usize| {
+            let t = table.wrapping_add(img.read_u32(table.checked_add(4 * i as u32)?)?);
+            (self.is_code(img, t) && img.block_of(t).is_some_and(|s| s.addr == own)).then_some(t)
+        };
+        // 1024: `switch_table`'s cap
+        Some(if count > 1024 {
+            Err(())
+        } else {
+            (0..count).map(case).collect::<Option<Vec<u32>>>().map(|c| (table, c)).ok_or(())
+        })
     }
 
     // `JMP dword ptr [reg*4 + table]`, bounded by a preceding `CMP reg,imm` when there is one,
@@ -3055,6 +3218,7 @@ mod tests {
                 rw: vec![],
                 code_imms: vec![],
                 nop: false,
+                inner: false,
             };
             (a, i)
         };
@@ -3069,6 +3233,7 @@ mod tests {
             noreturn: HashSet::new(),
             fallthru: HashSet::new(),
             slot_jumps_inside: HashSet::new(),
+            pic_switch_misses: BTreeSet::new(),
             bodies: BTreeMap::new(),
             table_slots: BTreeMap::new(),
             fpu_ip: None,
@@ -3123,6 +3288,28 @@ mod tests {
             assert!(!an.call_return(0x60, &an.insns[&0x60]));
             assert_eq!(an.call_return(0x10, &an.insns[&0x10]), nr);
         }
+    }
+
+    #[test]
+    fn pic_switch_needs_its_bound_and_one_in_edge() {
+        // CMP EAX,2; JA; LEA RDX,[RIP + table]; MOVSXD RAX,[RDX + RAX*4]; ADD RAX,RDX; JMP RAX;
+        // three cases; the table of offsets from itself
+        let mut data = vec![0x83, 0xf8, 0x02, 0x77, 0x00, 0x48, 0x8d, 0x15, 0x0c, 0, 0, 0];
+        data.extend([0x48, 0x63, 0x04, 0x82, 0x48, 0x01, 0xd0, 0xff, 0xe0, 0xc3, 0xc3, 0xc3]);
+        data.extend([-3i32, -2, -1].iter().flat_map(|o| o.to_le_bytes()));
+        let text = Section { name: ".text".into(), exec: true, readonly: true, zero_tail: 0, addr: 0x1000, data };
+        let img = Image { sections: vec![text], elf64: true, ..Image::default() };
+        let hist = [0x1000, 0x1003, 0x1005, 0x100c, 0x1010];
+        let (mut an, _) = bare(&hist.map(|a| (a, Flow::Fall, None)), &[]);
+        (an.code_lo, an.code_hi) = (0x1000, 0x1024);
+        let cases = Some(Ok((0x1018, vec![0x1015, 0x1016, 0x1017])));
+        assert_eq!(an.pic_switch_table(&img, 0x1013, &hist), cases);
+        // without the compare the form is there, the bound is not
+        assert_eq!(an.pic_switch_table(&img, 0x1013, &hist[2..]), Some(Err(())));
+        assert_eq!(an.pic_switch_table(&img, 0x1013, &hist[4..]), None);
+        // a p-code branch inside an instruction after the compare splits the block
+        an.insns.get_mut(&0x1005).unwrap().inner = true;
+        assert_eq!(an.pic_switch_table(&img, 0x1013, &hist), Some(Err(())));
     }
 
     #[test]
