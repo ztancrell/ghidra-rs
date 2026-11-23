@@ -1,5 +1,5 @@
-//! Checks over the archive of the Ghidra tree, `windows_vs12_32.gdt` (a test fails without it,
-//! as the decoder tests do without the .sla files).
+//! Checks over the archives of the Ghidra tree, `windows_vs12_32.gdt` and `generic_clib_64.gdt`
+//! (a test fails without them, as the decoder tests do without the .sla files).
 use super::*;
 
 fn archive() -> Archive {
@@ -53,4 +53,41 @@ fn protos_match_java_slice() {
         lines[22827],
         "type\t500000000000000\t<def name=\"uintptr_t\" id=\"0x500000000000000\"><type name=\"uint\" id=\"0xc0000000000000cd\" metatype=\"uint\" size=\"4\"/></def>"
     );
+}
+
+/// `export_elf64` of `generic_clib_64.gdt` against Java 12.3's facts of an ELF x86-64 program
+/// (`puts` and `exit` of tools/corpus/elf64/t1.c, the ids aside): a parameter in RDI from the
+/// address before the entry, the return in EAX, no model. The archive does not mark `exit`
+/// as not returning: the no-return analyzers do.
+#[test]
+fn elf64_protos_match_java_slice() {
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../Ghidra/Features/Base/data/typeinfo/generic/generic_clib_64.gdt");
+    assert!(p.exists(), "{} is missing", p.display());
+    let text = protos::export_elf64(&Archive::open(&p).unwrap()).unwrap();
+    let proto = |name: &str| text.lines().find(|l| l.starts_with(&format!("proto\t{name}\t"))).unwrap();
+    assert!(proto("puts").ends_with(concat!(
+        " name=\"__s\" typelock=\"true\" namelock=\"true\" merge=\"false\" cat=\"0\" index=\"0x0\">",
+        "<type name=\"\" metatype=\"ptr\" size=\"8\"><type name=\"char\" id=\"0xc00000000000007b\" metatype=\"int\" ",
+        "size=\"1\" char=\"true\"/></type></symbol><addr space=\"register\" offset=\"0x38\" size=\"8\"/><rangelist>",
+        "<range space=\"ram\" first=\"@PC@\" last=\"@PC@\"/></rangelist></mapsym></symbollist></scope></localdb>",
+        "<prototype extrapop=\"8\" model=\"unknown\"><returnsym typelock=\"true\"><addr space=\"register\" ",
+        "offset=\"0x0\" size=\"4\"/><type name=\"int\" id=\"0xc000000000000099\" metatype=\"int\" size=\"4\"/>",
+        "</returnsym></prototype></function><addr space=\"ram\" offset=\"@ADDR@\" size=\"@SIZE@\"/><rangelist/>",
+        "</mapsym></doc>"
+    )));
+    assert!(proto("exit").contains(concat!(
+        "<addr space=\"register\" offset=\"0x38\" size=\"4\"/><rangelist><range space=\"ram\" first=\"@PC@\" ",
+        "last=\"@PC@\"/></rangelist></mapsym></symbollist></scope></localdb><prototype extrapop=\"8\" ",
+        "model=\"unknown\"><returnsym typelock=\"true\"><addr/><void/></returnsym></prototype>"
+    )));
+    // every type a prototype names has its record
+    let ids: std::collections::HashSet<&str> =
+        text.lines().filter_map(|l| l.strip_prefix("type\t")?.split('\t').next()).collect();
+    for l in text.lines().filter(|l| l.starts_with("proto\t")) {
+        for r in l.split("<typeref ").skip(1) {
+            let id = r.split(" id=\"0x").nth(1).and_then(|x| x.split('"').next()).unwrap();
+            assert!(ids.contains(id), "{id} of {}", &l[..40]);
+        }
+    }
 }
