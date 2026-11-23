@@ -4429,7 +4429,8 @@ strings excepted); struct, union or array symbols near an address `RulePtrArith`
 (`TypeSpacebase::nearestArrayedComponent`); a string that is not plain ASCII, or of wide
 characters (Java reads strings with the listing's character sets, `getStringData`); a function
 data-type with a prototype used for an indirect call (`forceSet`); the decompile of a function
-in a namespace; a prototype with only its inputs or only its output locked, an unlocked
+in a namespace (superseded, 2026-11-23, branch `fix-hatred-facts`: it is ported, see "Namespaces
+and DWARF prototypes in the ELF facts"); a prototype with only its inputs or only its output locked, an unlocked
 varargs prototype, custom storage, hidden return parameters, `inline`, prototype and
 jump-table overrides; names recommended for register variables; locked local variables;
 every flow override but `CALL_RETURN` on a jump or a call; volatile memory; signed
@@ -6518,7 +6519,9 @@ ran 805; 10 it did not finish, 5 of them timed out at 120 s); Hatred camera iden
   not run on x86-64);
 - names from the symbol tables, local ones too.
 
-Not ported, written as `underived ... function`, which the loader fails on:
+Superseded in part (2026-11-23, branch `fix-hatred-facts`, "Namespaces and DWARF prototypes in
+the ELF facts" below): namespaces are written, and the DWARF prototype where its storage is
+known. Not ported, written as `underived ... function`, which the loader fails on:
 - a GNU-mangled name (`gnudemangle::gnu_demangle`, picked by the program format as
   `DemanglerAnalyzer` does): Java puts the function in its namespaces and gives it the
   mangling's signature; its plate comment is `underived ... comments`;
@@ -6664,7 +6667,8 @@ ghidra-rs writes 351,303 `underived` records. Known limits, not fixed:
   cause is a function ghidra-rs does not find (0x3582f90);
 - `func_children` drops the DWARF function process_subprogram makes for a call site; it may be
   silent;
-- not ported: DWARF and demangled function signatures, parameter storage, namespaces (`ns`
+- superseded in part (branch `fix-hatred-facts`, below): namespaces and some DWARF prototypes
+  are written. Was: not ported: DWARF and demangled function signatures, parameter storage, namespaces (`ns`
   records).
 
 #### The GOT import slots in the image (branch `fix-gotslots`, 2026-11-22)
@@ -7235,6 +7239,116 @@ failed function, and Hatred itself, neither the Java run nor `ghidra-diff.sh` wi
 facts (one `load facts` per function). The last Hatred run (import, analysis and facts) took
 7,721 s and 26.0 GB; the decompile step adds to that, by how much is not measured. No function
 list is in the repository: the list is whatever the ghidra-rs Hatred run used.
+
+#### Namespaces and DWARF prototypes in the ELF facts (branch `fix-hatred-facts`, 2026-11-23)
+
+What Java's decompiler gets for a C++ ELF, in three parts.
+
+**Namespaces.** A `func` record is in the namespaces of Java's primary symbol (`<doc id>`,
+`<parent id>`), and each namespace a record is in has its `ns` record (`getNamespacePath`):
+- a function of the DWARF import: the DWARF name and its namespaces. The importer's label is
+  made primary (DWARFFunction.java:389-395); the Demangler analyzer's name is then only one
+  more symbol (AbstractDemanglerAnalyzer.java:157-177, DemangledFunction.java:466-474);
+- a GNU name without DWARF: the demangler's namespaces (DemangledObject.createNamespace,
+  DemangledObject.java:600-660; a name over 2,000 UTF-16 units cut by `ensureNameLength`). Its
+  signature is still not written, so the record stays `underived ... function`;
+- a thunk takes the namespaces of its end with its name.
+The `label` record of a DWARF function has the DWARF name.
+
+**Functions in a namespace on the facts path** (`load facts`). The loader no longer fails on
+"the decompile of a function in a namespace". The declaration prints every namespace
+(`emitSymbolScope` with no current scope); after it a name prints the scopes of its symbol from
+the first one the function is not in (`Symbol::getResolutionDepth`,
+`Scope::findDistinguishingScope`; `Facts::scoped_name`). Where the first printed name (the
+symbol's own when no scope is printed) is the name of a namespace, function or data symbol in a
+namespace between the function and the shared scope, Java prints one more scope
+(`DecompileCallback.isNameUsed`): that fails loudly ("is hidden by a name of the namespace").
+Two namespaces whose `ns` texts are equal fail loudly too. Not looked for, as before: a local
+variable of that name.
+
+**DWARF prototypes** (`dwarf/pcode.rs`, `dwarf::Func::storage`). The prototype the DWARF
+import gives a function is written as Java's `HighFunction` sends it: each parameter a locked
+`cat="0"` symbol with its data type and storage (`this` and `__return_storage_ptr__` as
+auto-parameters), the locked return value, `__thiscall` locked or `unknown`, `voidlock`,
+`dotdotdot`. Storage is the calling convention's (FORMAL commit mode,
+`ParamListStandard.assignMap` with x86-64-gcc.cspec: `join_dual_class` up to 16 bytes from RDI,
+RSI, RDX, RCX, R8, R9 and XMM0-7, else the stack from offset 8; the return from RAX/RDX and
+XMM0/XMM1, a hidden return's pointer in RAX). The data types the prototypes name are `type`
+records (`PcodeDataTypeManager.encodeType`: structures with bit fields, unions, enums,
+typedefs, pointers, arrays, function definitions).
+
+A function of the DWARF import stays `underived ... function` where the port does not know
+what Java has (each with the reason in `dwarf::Func::storage`'s error):
+- a parameter, or a variable below the function, with a `DW_AT_location`: Java may read a
+  storage from it (STORAGE commit mode and custom storage, a `<name>_local` parameter spill, a
+  local variable of the function). Location expressions and lists are not evaluated;
+- no `this` and a parameter or a namespace: Java has the default model's name locked
+  (`__stdcall`) on most of these and `unknown` on others. The setter is likely Java's Call
+  Convention ID analyzer ("Archive prototypes applied" above), which decompiles the function;
+  when it leaves `unknown` (`main`, libstdc++'s sort helpers) was not traced;
+- a GNU name at the entry whose demangled name is not the DWARF name in a namespace
+  (`isAlreadyDemangled` false): the demangler goes on to its calling convention and signature;
+- a `.conflict` data type name anywhere under the prototype (the order Java resolves conflicts
+  in is not kept everywhere), an array of no length, a bit field in a union, a built-in type
+  without a core type, storage past the 500 bytes of the stack entry;
+- a thunk (as before), and a DWARF function that takes a prototype of the archive or of the
+  function it jumps to (Hatred's `SDL_ThreadID_REAL`, one `JMP pthread_self`: Java keeps the
+  DWARF signature there; the rule was not traced).
+
+Measured against Java 12.3 (MacBook; master 3a5ba15656 and the branch before master
+fe4043a333, `fix-hatred-archives`, was merged into it, on the same inputs;
+`tools/facts-diff.sh`, equal / Java's records):
+
+| | record | master | branch |
+|---|---|---|---|
+| small corpus (14) | func | 209 / 1,112 | 213 / 1,112 |
+| | ns | 0 / 295 | 189 / 295 |
+| | type | 14 / 1,107 | 16 / 1,107 |
+| | label | 4,645 / 7,315 | 4,648 / 7,315 |
+| | silent func | 33 | 33, the same ones |
+| Hatred | func | 5,623 / 180,433 | 6,108 / 180,433 |
+| | ns | 0 / 44,952 | 22,814 / 44,952 (48 extra) |
+| | type | 1 / 38,393 | 358 / 38,393 (3 different) |
+| | label | 711,278 / 883,411 | 714,835 / 883,411 |
+| | data | 492,177 / 2,076,322 | 496,778 / 2,076,322 |
+| | `underived ... function` | 174,709 | 174,292 |
+| | silent func | 236 | 236, the same ones |
+
+Every other row of both tables is unchanged. Superseded: the `ns` rows 0 / 295 and 0 / 44,952
+and the func rows of the tables above. The `ns` records still missing are those of data
+symbols (vtables, statics) and of functions ghidra-rs names otherwise; the 48 extra were not
+traced. `type` records are keyed by name in `facts-diff.sh`, so types of one name in two
+categories show as different.
+
+After master fe4043a333 (`fix-hatred-archives`) was merged into the branch, against that master
+on the same inputs (MacBook): small corpus func 333 -> 339 / 1,112, ns 0 -> 190 / 295, type 65
+-> 67, silent func 15 -> 15 (the same); Hatred func 9,098 -> 9,582 / 180,433, ns 0 -> 22,813 /
+44,952 (48 extra), type 933 -> 1,282 / 38,393, `underived ... function` 171,269 -> 170,854,
+silent func 131 -> 131 (the same), label and data as in the table. `cargo test --release` 206
+passed; fmt and clippy clean; mercs2 M500 with Java facts 488 -> 489 identical of 499 (loud 11
+-> 10, silent 0); `CORPORA=m8 tools/bars.sh` 57 lines equal to that master's; the PE facts of
+mercs2 byte-identical (before the last ELF-only guard). Not obtained: `tools/elf64-decomp.sh`
+(it stopped at the first binary in this worktree's setup on the MacBook; not diagnosed), and
+the loud / silent split of the Hatred camera corpus (identical 46 of 50, the reference ran 50;
+that master's own count was not taken).
+
+The guards cost most of the possible gain,
+ and what they hide is measured. With a location
+list (`DW_FORM_data4`/`data8`) taken as "no storage", Hatred's equal `func` records were
+63,423 (type 26,562), with 2,063 new silent ones: 1,691 the locked `__stdcall` of functions
+without `this`, about 150 a `join` of more than 16 bytes (fixed: the rule's `maxsize`), about
+95 `.conflict` names, and about 70 with Java's DWARF locals or `_local` spills. With the
+entry looked up in `.debug_loc` (unit base `DW_AT_low_pc`, as DWARFLocationList.readV4) the
+count fell to 9,283 and 21 of the locals were still silent, so that reading does not match
+Java's and was dropped. Open: port DWARFVariable.readStorage with DWARFExpressionEvaluator
+(which lists give a storage at the entry), and Call Convention ID on DWARF functions.
+
+mercs2 with Java's facts against Java's C (`ghidra-diff.sh m500`, MacBook, the desktop's
+12.3 facts and captured C): identical 488 -> 489 of 499, loud 11 -> 10, silent 0 -> 0. A
+function in a namespace now decompiles.
+
+Not ported (item 4 of the task, not started): DWARF types on the prelude path (0x16e1920 still
+prints `xunknown4` at `param_1+0x9c` there).
 
 ## Speed
 

@@ -123,6 +123,12 @@ pub(crate) struct Facts {
     code_protos: HashSet<TypeId>,
     /// namespaces by id (`getNamespacePath`): the names from the outermost in, each with `::`
     ns: HashMap<u64, String>,
+    /// the names of a namespace by its `ns` text (`a::b::`), the outermost first; `Err`: two
+    /// namespaces have that text
+    ns_paths: HashMap<String, std::result::Result<Vec<String>, ()>>,
+    /// the names used in a namespace that is not the global one (its `ns` text, the name): its
+    /// namespaces, functions and data symbols (`DecompileCallback.isNameUsed`)
+    ns_names: HashSet<(String, String)>,
     /// what the writer of the facts did not derive (`analyze --facts`, factsout.rs), by
     /// address: `function`, `locals`, `comments`, `label`. A decompile that reads one fails
     underived: HashMap<u64, Vec<Range<usize>>>,
@@ -302,6 +308,42 @@ impl Facts {
         Ok((doc.kid("mapsym").ok_or_else(|| facts_err("<doc> without <mapsym>".into()))?, prefix))
     }
 
+    /// The names of the namespace with the `ns` text `prefix` (`a::b::`), none for the global one.
+    fn ns_path(&self, prefix: &str) -> Result<&[String]> {
+        if prefix.is_empty() {
+            return Ok(&[]);
+        }
+        match self.ns_paths.get(prefix) {
+            Some(Ok(p)) => Ok(p),
+            Some(Err(())) => err(format!("facts: two namespaces are written {prefix}: not ported")),
+            None => err(format!("facts: no namespace is written {prefix}")),
+        }
+    }
+
+    /// A symbol's name (its namespaces glued before it, `ns::name`) as a function in the
+    /// namespace `own` (its `ns` text) prints it: `Symbol::getResolutionDepth` (database.cc)
+    /// from the function's local scope, whose parents are its namespaces. Every scope of the
+    /// symbol from the first the function is not in (`Scope::findDistinguishingScope`) is
+    /// printed, none when the symbol's scope holds the function. With `hidden`: whether the
+    /// first printed name, the symbol's own when none is, is used in a namespace between the
+    /// function and the scope shared with the symbol (`isNameUsed`, which asks
+    /// `DecompileCallback.isNameUsed`): one more scope would be printed.
+    pub(crate) fn scoped_name(&self, own: &str, name: &str) -> Result<(String, bool)> {
+        let (prefix, base) = super::printlanguage::scope_cut(name).map_or(("", name), |i| name.split_at(i + 2));
+        let (up, sp) = (self.ns_path(own)?, self.ns_path(prefix)?);
+        let shared = up.iter().zip(sp).take_while(|(a, b)| a == b).count();
+        let first = sp.get(shared).map_or(base, |s| s.as_str());
+        let mut scope: String = up[..shared].iter().map(|n| format!("{n}::")).collect();
+        let mut hidden = false;
+        for n in &up[shared..] {
+            scope.push_str(n);
+            scope.push_str("::");
+            hidden |= self.ns_names.contains(&(scope.clone(), first.to_string()));
+        }
+        let shown: String = sp[shared..].iter().map(|n| format!("{n}::")).collect();
+        Ok((format!("{shown}{base}"), hidden))
+    }
+
     /// Index the records of `text` and decode its core types into `arch` (in place of the
     /// console's) and its `type` records after them.
     pub(crate) fn load(arch: &mut Arch, text: String) -> Result<Facts> {
@@ -338,10 +380,14 @@ impl Facts {
             types: HashMap::new(),
             code_protos: HashSet::new(),
             ns: HashMap::new(),
+            ns_paths: HashMap::new(),
+            ns_names: HashSet::new(),
             underived: HashMap::new(),
         };
         // functions in a namespace: entry and namespace id, named once the `ns` records are read
         let mut scoped = Vec::new();
+        // data symbols in a namespace: namespace id and name
+        let mut scoped_data: Vec<(u64, String)> = Vec::new();
         let scope_id = |x: &str| attr_of(x, "<doc", "id").map_or(Ok(0), |id| hex(&id));
         let mut dec =
             TypeDecoder { records: HashMap::new(), done: Cow::Owned(HashMap::new()), code_protos: HashSet::new() };
@@ -420,6 +466,11 @@ impl Facts {
                         DataKind::Symbol
                     };
                     let tag = head.split("<mapsym>").nth(1).and_then(|t| t.split('>').next()).unwrap_or("");
+                    if !x.starts_with("<doc id=\"0x0\">") {
+                        if let Some(name) = attr_of(head, "<mapsym><", "name") {
+                            scoped_data.push((scope_id(x)?, name));
+                        }
+                    }
                     f.data.insert(
                         hex(a)?,
                         DataRec {
@@ -465,8 +516,22 @@ impl Facts {
                 }
                 ("ns", Some(id), Some(x), None) => {
                     let path = parse(x)?;
-                    let names = path.kids.iter().filter(|v| !v.text.is_empty()).map(|v| format!("{}::", v.text));
-                    f.ns.insert(hex(id)?, names.collect());
+                    let names: Vec<String> =
+                        path.kids.iter().filter(|v| !v.text.is_empty()).map(|v| v.text.clone()).collect();
+                    let mut text = String::new();
+                    for (n, name) in names.iter().enumerate() {
+                        if !text.is_empty() {
+                            f.ns_names.insert((text.clone(), name.clone()));
+                        }
+                        text.push_str(name);
+                        text.push_str("::");
+                        let path = names[..=n].to_vec();
+                        let known = f.ns_paths.entry(text.clone()).or_insert_with(|| Ok(path.clone()));
+                        if known.as_ref().is_ok_and(|k| *k != path) {
+                            *known = Err(());
+                        }
+                    }
+                    f.ns.insert(hex(id)?, text);
                 }
                 ("underived", Some(a), Some(what), None) => {
                     f.underived.entry(hex(a)?).or_default().push(at(what));
@@ -477,8 +542,13 @@ impl Facts {
         for (entry, id) in scoped.into_iter().filter(|s| s.1 != 0) {
             let prefix = f.ns.get(&id).ok_or_else(|| facts_err(format!("no namespace with id {id:#x}")))?;
             if let Some(func) = arch.functions.get_mut(&entry) {
+                f.ns_names.insert((prefix.clone(), func.name.clone()));
                 func.name.insert_str(0, prefix);
             }
+        }
+        for (id, name) in scoped_data {
+            let prefix = f.ns.get(&id).ok_or_else(|| facts_err(format!("no namespace with id {id:#x}")))?;
+            f.ns_names.insert((prefix.clone(), name));
         }
         let ids: Vec<u64> = dec.records.keys().copied().collect();
         for id in ids {
@@ -633,10 +703,7 @@ impl Facts {
         let func = sym.kid("function").ok_or_else(|| facts_err("no <function>".into()))?;
         let name = func.attr("name").unwrap_or("");
         let unported = |what: &str| LowlevelError(format!("facts: function {name}: {what} is not ported"));
-        if own && !prefix.is_empty() {
-            // its declaration and the scope every other name resolves from
-            return Err(unported("the decompile of a function in a namespace"));
-        }
+        let _ = prefix;
         if func.flag("inline") || func.kid("jumptablelist").is_some() || func.kid("override").is_some() {
             return Err(unported("an inline flag, jump-table override or prototype override"));
         }

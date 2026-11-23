@@ -334,9 +334,13 @@ impl PrintC<'_> {
             self.emit.spaces(1, 0);
         }
         self.emit.open_group();
-        // emitSymbolScope: a function in the global scope needs no scope prefix
+        // emitSymbolScope with no current scope: every namespace of the function
         let text = self.name_text(name)?;
         self.emit.print_str(&text);
+        // pushScope(fd->getScopeLocal()): the names after it resolve from the function's namespace
+        if self.arch.facts.is_some() {
+            self.scope = super::printlanguage::scope_cut(name).map_or(String::new(), |i| name[..i + 2].to_string());
+        }
         self.emit.spaces(FUNCTION_CALL.spacing, FUNCTION_CALL.bump);
         self.emit.open_paren("(");
         self.emit.spaces(0, FUNCTION_CALL.bump);
@@ -1578,6 +1582,15 @@ impl PrintC<'_> {
     /// local scope holds the same name (`isNameUsed`), which would print a `::` prefix (not
     /// ported).
     fn check_scope_depth(&self, name: &str) -> Result<()> {
+        // in a namespace: a name of the function's namespaces hides the symbol's first scope
+        if let Some(facts) = self.arch.facts.as_ref().filter(|_| !self.scope.is_empty()) {
+            if facts.scoped_name(&self.scope, name)?.1 {
+                return err(format!(
+                    "print C: {name} is hidden by a name of the namespace {} (one more scope prefix) and is not ported",
+                    self.scope
+                ));
+            }
+        }
         if self.fd.symtab.find_first_by_name(LOCAL, name).is_some() {
             return err(format!(
                 "print C: the global {name} is hidden by a local name (a scope prefix) and is not ported"

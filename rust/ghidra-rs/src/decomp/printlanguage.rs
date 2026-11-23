@@ -92,6 +92,9 @@ pub(crate) struct PrintC<'a> {
     pub(crate) depth: u32,
     /// the body comments (`commsorter`)
     pub(crate) commsorter: super::comment::CommentSorter,
+    /// the `ns` text of the namespace of the function being printed (`a::b::`), once its
+    /// declaration is printed (`pushScope` of its local scope); empty in the global one
+    pub(crate) scope: String,
     /// `StringManager::stringMap`: the string read at an address (its code points and whether
     /// it was truncated; none: no string), kept for the next constant at that address, whatever
     /// its character type
@@ -113,6 +116,7 @@ impl<'a> PrintC<'a> {
             modstack: Vec::new(),
             depth: 0,
             commsorter: Default::default(),
+            scope: String::new(),
             strings: Default::default(),
         }
     }
@@ -343,8 +347,12 @@ impl<'a> PrintC<'a> {
     /// `DecompileResults.getDecompiledFunction` prints, the name cleaned by its
     /// `PrettyPrinter` ([`clean_name`]); without them, what the C++ console prints (the name).
     pub(crate) fn name_text(&self, name: &str) -> Result<String> {
-        if self.arch.facts.is_some() {
-            clean_name(name)
+        if let Some(facts) = self.arch.facts.as_ref() {
+            // emitSymbolScope: the scopes printed from the function's own namespace
+            match self.scope.is_empty() {
+                true => clean_name(name),
+                false => clean_name(&facts.scoped_name(&self.scope, name)?.0),
+            }
         } else {
             Ok(name.to_string())
         }
@@ -421,11 +429,8 @@ pub(crate) fn most_natural_base(val: u64) -> u32 {
     }
 }
 
-/// A name as Java's `PrettyPrinter` prints it: the facts glue a symbol's namespace path to its
-/// name (`ns::name`), which the C++ prints as separate syntax tokens (`emitSymbolScope`, not
-/// cleaned) before the name token (cleaned, [`illegal_char_cpp`]). The prefix is the text up to
-/// the last `::` outside template brackets.
-pub(crate) fn clean_name(name: &str) -> Result<String> {
+/// Where the namespace path glued before a name ends: the last `::` outside template brackets.
+pub(crate) fn scope_cut(name: &str) -> Option<usize> {
     let mut depth = 0u32;
     let mut cut = None;
     for (i, c) in name.char_indices() {
@@ -436,7 +441,15 @@ pub(crate) fn clean_name(name: &str) -> Result<String> {
             _ => {}
         }
     }
-    match cut {
+    cut
+}
+
+/// A name as Java's `PrettyPrinter` prints it: the facts glue a symbol's namespace path to its
+/// name (`ns::name`), which the C++ prints as separate syntax tokens (`emitSymbolScope`, not
+/// cleaned) before the name token (cleaned, [`illegal_char_cpp`]). The prefix is the text up to
+/// the last `::` outside template brackets.
+pub(crate) fn clean_name(name: &str) -> Result<String> {
+    match scope_cut(name) {
         Some(i) => Ok(format!("{}::{}", &name[..i], illegal_char_cpp(&name[i + 2..])?)),
         None => illegal_char_cpp(name),
     }

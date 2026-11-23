@@ -504,7 +504,11 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
         use object::Object;
         object::File::parse(&*data).is_ok_and(|f| f.section_by_name(".debug_info").is_some())
     };
-    let dwarf: std::collections::BTreeMap<u32, ghidra_rs::factsout::DwarfFunc> = if has_dwarf {
+    type DwarfFacts = (
+        std::collections::BTreeMap<u32, ghidra_rs::factsout::DwarfFunc>,
+        std::collections::HashMap<String, Result<String, String>>,
+    );
+    let (dwarf, dwarf_types): DwarfFacts = if has_dwarf {
         let imp = ghidra_rs::dwarf::import(&data).map_err(|e| format!("{path}: DWARF: {e}"))?;
         // Java's GCC Exception Handlers analyzer (GccExceptionAnalyzer) writes `try {` comments
         // in the bodies of functions with a call-site table; `.eh_frame` and its tables are
@@ -514,15 +518,20 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
             object::File::parse(&*data)
                 .is_ok_and(|f| f.section_by_name(".gcc_except_table").is_some_and(|s| s.size() > 0))
         };
-        imp.funcs
+        // the prototypes and data types as Java's decompiler gets them, before the import is freed
+        let (mut protos, types) = ghidra_rs::dwarf::pcode::facts(&imp, &ghidra_rs::factsout::core_ids64());
+        let funcs = imp
+            .funcs
             .into_iter()
             .filter_map(|f| {
                 // the import adds the image base adjustment itself (programBaseAddressFixup)
                 let a = u32::try_from(f.addr).ok()?;
                 let plate = if eh { Err(()) } else { f.plate };
-                Some((a, ghidra_rs::factsout::DwarfFunc { name: f.name, plate }))
+                let facts = protos.remove(&f.addr)?;
+                Some((a, ghidra_rs::factsout::DwarfFunc { name: f.name, plate, facts }))
             })
-            .collect()
+            .collect();
+        (funcs, types)
     } else {
         Default::default()
     };
@@ -661,6 +670,7 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
                 cspec: &cspec,
                 strings: Some(&strings),
                 dwarf: &dwarf,
+                dwarf_types: &dwarf_types,
                 archive: archive.as_ref().map(|a| &a.0),
             };
             // the stack analysis goes by the purges Ghidra has at a call site

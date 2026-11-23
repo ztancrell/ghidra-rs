@@ -101,6 +101,8 @@ struct Func {
     /// the function a thunk jumps to
     thunked: Option<u32>,
     underived: bool,
+    /// ELF: the names of its namespaces, the outermost first
+    ns: Vec<String>,
 }
 
 impl Func {
@@ -111,10 +113,11 @@ impl Func {
             return self.named(raw);
         }
         // a GNU name: Java takes the demangled name, puts it in its namespaces and gives the
-        // function the signature of its mangling (DemangledFunction.applyTo); the namespaces
-        // and that signature are not written here, so the function is not derived
+        // function the signature of its mangling (DemangledFunction.applyTo); that signature
+        // is not written here, so the function is not derived
         self.name = raw.to_string();
         if let Ok(Some(d)) = crate::gnudemangle::gnu_demangle(raw) {
+            self.ns = demangled_ns(&d);
             if let Some(n) = d.name {
                 self.name = n;
             }
@@ -140,7 +143,24 @@ impl Func {
     }
 }
 
+/// The namespaces Java's demangler puts a symbol in, the outermost first
+/// (DemangledObject.createNamespace and getNamespaceList, DemangledObject.java:600-660).
+fn demangled_ns(d: &crate::gnuparse::GnuDemangled) -> Vec<String> {
+    d.namespace.iter().rev().map(|n| ensure_name_length(&n.name)).collect()
+}
+
+/// `DemangledObject.ensureNameLength` (DemangledObject.java:683-699): a name of more than
+/// `SymbolUtilities.MAX_SYMBOL_NAME_LENGTH` (2000) UTF-16 units is its first 1000 and `...`.
+fn ensure_name_length(name: &str) -> String {
+    let units: Vec<u16> = name.encode_utf16().collect();
+    match units.len() <= 2000 {
+        true => name.to_string(),
+        false => format!("{}...", String::from_utf16_lossy(&units[..1000])),
+    }
+}
+
 /// One address something refers to.
+
 #[derive(Clone, Copy, Default)]
 struct Target {
     /// bytes of the last read or write with a size (constant propagation's `createData`)
@@ -216,6 +236,12 @@ struct Exporter<'a> {
     core: HashMap<String, String>,
     /// the size of a pointer: 4, or 8 on ELF x86-64
     ptr: u32,
+    /// ELF: the `type` records of the DWARF import (`Inputs::dwarf_types`)
+    dwarf_types: &'a HashMap<String, Result<String, String>>,
+    /// the ids of the namespaces the written records are in, by path (the global one is 0)
+    ns_ids: HashMap<Vec<String>, u32>,
+    /// of `ns_ids`, the ones a record is in: Java writes an `ns` record for these
+    ns_used: BTreeSet<u32>,
 }
 
 /// `name="..." ... id="0x..."` of every type in the core types.
@@ -228,6 +254,12 @@ fn core_ids(core: &str) -> HashMap<String, String> {
         }
     }
     m
+}
+
+/// Name -> id of the core types of x86:LE:64 with the gcc compiler spec, for
+/// `crate::dwarf::pcode::facts`.
+pub fn core_ids64() -> HashMap<String, String> {
+    core_ids(CORE_TYPES64)
 }
 
 /// What Java's Call Convention ID analyzer (DecompilerCallConventionAnalyzer,
@@ -305,6 +337,7 @@ impl Exporter<'_> {
         noreturn: bool,
         locals: &str,
         archived: Option<(&str, bool)>,
+        dwarf: Option<(&crate::dwarf::pcode::Proto, &str)>,
     ) -> String {
         // PE: the prototype of an import by its name; ELF: of the definition Apply Data
         // Archives applied (`archived`)
@@ -363,21 +396,56 @@ impl Exporter<'_> {
         if self.img.elf_process_entry == Some(addr) && f.thunked.is_none() && f.import.is_none() {
             (model, lock, extrapop) = ("processEntry", " modellock=\"true\"", "0".to_string());
         }
-        let symbols =
-            if locals.is_empty() { "<symbollist/>".into() } else { format!("<symbollist>{locals}</symbollist>") };
+        // ELF: the prototype of the DWARF import (DWARFFunction.updateFunctionSignature): its
+        // model locked, every parameter a locked symbol of the function (HighFunction's
+        // `cat="0"` symbols; one in a register holds from the byte before the entry), the
+        // return value locked with its storage
+        let (mut params, mut proto) = (String::new(), format!("model=\"{model}\"{lock}{nr}><returnsym><addr/><void/>"));
+        if let Some((p, model)) = dwarf {
+            let lock = if model == "unknown" { "" } else { " modellock=\"true\"" };
+            for (k, x) in p.params.iter().enumerate() {
+                let range = match x.register {
+                    true => format!(
+                        "<rangelist><range space=\"ram\" first=\"0x{0:x}\" last=\"0x{0:x}\"/></rangelist>",
+                        addr - 1
+                    ),
+                    false => "<rangelist/>".to_string(),
+                };
+                let _ = write!(
+                    params,
+                    "<mapsym><symbol name=\"{}\" typelock=\"true\" namelock=\"true\" merge=\"false\"{} cat=\"0\" \
+                     index=\"0x{k:x}\">{}</symbol>{}{range}</mapsym>",
+                    esc(&x.name),
+                    x.flag,
+                    x.ty,
+                    x.addr
+                );
+            }
+            let dots = if p.varargs { " dotdotdot=\"true\"" } else { "" };
+            let void = if p.params.is_empty() { " voidlock=\"true\"" } else { "" };
+            proto =
+                format!("model=\"{model}\"{lock}{dots}{void}{nr}><returnsym typelock=\"true\">{}{}", p.ret.0, p.ret.1);
+        }
+        let symbols = match params.is_empty() && locals.is_empty() {
+            true => "<symbollist/>".into(),
+            false => format!("<symbollist>{params}{locals}</symbollist>"),
+        };
+        let ns = self.ns_id(&f.ns);
         let inject = self.fixups.get(&f.name).map(|i| format!("<inject>{i}</inject>")).unwrap_or_default();
         format!(
-            "<doc id=\"0x0\"><mapsym><function id=\"0x0\" name=\"{name}\" size=\"{size}\"{nr}>\
+            "<doc id=\"0x{ns:x}\"><mapsym><function id=\"0x0\" name=\"{name}\" size=\"{size}\"{nr}>\
              <addr space=\"ram\" offset=\"0x{addr:x}\"/><localdb lock=\"false\" main=\"stack\">\
-             <scope name=\"{name}\"><parent id=\"0x0\"/><rangelist/>{symbols}</scope></localdb>\
-             <prototype extrapop=\"{extrapop}\" model=\"{model}\"{lock}{nr}><returnsym><addr/><void/></returnsym>\
+             <scope name=\"{name}\"><parent id=\"0x{ns:x}\"/><rangelist/>{symbols}</scope></localdb>\
+             <prototype extrapop=\"{extrapop}\" {proto}</returnsym>\
              {inject}</prototype></function><addr space=\"ram\" offset=\"0x{addr:x}\" size=\"{size}\"/>\
              <rangelist/></mapsym></doc>"
         )
     }
 
-    /// Keep the `type` records `xml` refers to, and those they refer to.
-    fn note_types(&mut self, xml: &str) {
+    /// Keep the `type` records `xml` refers to, and those they refer to. False: one of them is
+    /// a data type of the DWARF import that is not ported.
+    fn note_types(&mut self, xml: &str) -> bool {
+        let mut ok = true;
         let mut todo: Vec<String> = Vec::new();
         let scan = |x: &str, todo: &mut Vec<String>| {
             for t in x.split("<typeref ").skip(1) {
@@ -388,12 +456,30 @@ impl Exporter<'_> {
         };
         scan(xml, &mut todo);
         while let Some(id) = todo.pop() {
-            if let Some(rec) = self.protos.types.get(&id) {
-                if self.types.insert(id) {
-                    scan(rec, &mut todo);
+            match (self.protos.types.get(&id), self.dwarf_types.get(&id)) {
+                (Some(rec), _) | (None, Some(Ok(rec))) => {
+                    if self.types.insert(id) {
+                        scan(rec, &mut todo);
+                    }
                 }
+                (None, Some(Err(_))) => ok = false,
+                (None, None) => {}
             }
         }
+        ok
+    }
+
+    /// The id of the namespace `path` names (0: the global one), kept for its `ns` record.
+    fn ns_id(&mut self, path: &[String]) -> u32 {
+        for n in 1..=path.len() {
+            let next = self.ns_ids.len() as u32 + 1;
+            self.ns_ids.entry(path[..n].to_vec()).or_insert(next);
+        }
+        let id = self.ns_ids.get(path).copied().unwrap_or(0);
+        if id != 0 {
+            self.ns_used.insert(id);
+        }
+        id
     }
 
     /// `<doc>` of a data symbol.
@@ -803,7 +889,7 @@ fn name_functions(img: &Image, an: &Analysis, fid: &BTreeMap<u32, Applied>, prot
             } else {
                 end.name.clone()
             };
-            (me.model, me.import, me.underived) = (end.model, end.import, end.underived);
+            (me.model, me.import, me.underived, me.ns) = (end.model, end.import, end.underived, end.ns);
             me.thunked = Some(t);
         }
         if let Some(slot) = funcs[&f].import {
@@ -915,6 +1001,9 @@ pub struct Inputs<'a> {
     pub strings: Option<&'a crate::strings::Model>,
     /// ELF: the functions the DWARF importer (`crate::dwarf`) gives a signature, by entry
     pub dwarf: &'a BTreeMap<u32, DwarfFunc>,
+    /// ELF: the `type` records of the data types the DWARF prototypes name, by id
+    /// (`crate::dwarf::pcode::facts`); `Err`: a data type that is not ported
+    pub dwarf_types: &'a HashMap<String, Result<String, String>>,
     /// ELF: the names of the function definitions of the data-type archive Java's Apply Data
     /// Archives analyzer applies (`generic_clib_64`). `protos` has the prototypes of those
     /// `gdt::protos::export_elf64` writes; a function another one is applied to is `underived`
@@ -927,6 +1016,45 @@ pub struct DwarfFunc {
     pub name: String,
     /// its plate comment (`crate::dwarf::Func::plate`)
     pub plate: Result<Option<String>, ()>,
+    /// its namespaces, name and prototype
+    pub facts: crate::dwarf::pcode::FuncFacts,
+}
+
+/// The prototype Java has for a function of the DWARF import after the Demangler analyzer went
+/// over the symbols at its entry (`names`), or what of it is not ported. The DWARF analyzer
+/// runs first and sets the signature (DWARFFunction.updateFunctionSignature); for each GNU name
+/// DemangledFunction.applyTo (DemangledFunction.java:430-520) then:
+/// - does nothing when a symbol of the demangled name is at the address in a namespace
+///   (isAlreadyDemangled, DemangledObject.java:400-420): the DWARF name;
+/// - else adds its name and goes on to the calling convention and the signature of the
+///   mangling (DemangledFunction.java:466-520). Not ported: on the small corpus Java then has
+///   the default model's name locked (`__stdcall`) where the DWARF import alone leaves
+///   `unknown`, and which call sets it was not traced.
+///
+/// With the prototype, the model's name: DWARF's `__thiscall`, else `unknown`.
+fn dwarf_signature<'a>(
+    d: &'a DwarfFunc,
+    names: &[&str],
+) -> Result<(&'a crate::dwarf::pcode::Proto, &'static str), String> {
+    let proto = d.facts.proto.as_ref().map_err(Clone::clone)?;
+    let model = if proto.this { "__thiscall" } else { "unknown" };
+    for raw in names {
+        let g = match crate::gnudemangle::gnu_demangle(raw) {
+            Ok(Some(g)) => g,
+            Ok(None) => continue,
+            Err(e) => return Err(format!("the demangling of {raw}: {e}")),
+        };
+        let Some(name) = g.name.as_deref().map(ensure_name_length) else { continue };
+        if g.kind != crate::gnuparse::GnuKind::Function {
+            return Err(format!("the demangled {raw}, which is no function"));
+        }
+        if d.facts.ns.is_empty() || name != d.facts.base {
+            return Err(format!(
+                "the demangler's calling convention and signature for {raw} on a function of the DWARF import"
+            ));
+        }
+    }
+    Ok((proto, model))
 }
 
 /// The bytes a call pops besides the return address, as Ghidra's stack analysis has them at a
@@ -967,7 +1095,7 @@ pub fn call_purges(img: &Image, an: &Analysis, inputs: &Inputs) -> HashMap<u32, 
 
 /// Write the facts of `an` to `out`.
 pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mut dyn Write) -> io::Result<()> {
-    let Inputs { fid, protos, analyzed, purges, cspec, strings, dwarf, archive } = *inputs;
+    let Inputs { fid, protos, analyzed, purges, cspec, strings, dwarf, dwarf_types, archive } = *inputs;
     let none = Protos::default();
     let mut ex = Exporter {
         img,
@@ -981,6 +1109,9 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         types: BTreeSet::new(),
         core: core_ids(if img.elf64 { CORE_TYPES64 } else { CORE_TYPES }),
         ptr: if img.elf64 { 8 } else { 4 },
+        dwarf_types,
+        ns_ids: HashMap::new(),
+        ns_used: BTreeSet::new(),
     };
     // bodies as ranges; where bodies overlap the lowest entry keeps the bytes
     let mut body_ranges: BTreeMap<u32, Vec<(u32, u32)>> = BTreeMap::new();
@@ -1109,6 +1240,16 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         Some(None) => Ok(None),
         _ => Err(()),
     };
+    // ELF: every symbol name at an address (the Demangler analyzer works on each)
+    let mut names_at: HashMap<u32, Vec<&str>> = HashMap::new();
+    if img.elf64 {
+        for &(a, n) in &symbols {
+            let v = names_at.entry(a).or_default();
+            if !v.contains(&n) {
+                v.push(n);
+            }
+        }
+    }
     let entries: Vec<u32> = an.funcs.iter().copied().filter(|f| an.bodies.contains_key(f)).collect();
     for (n, &f) in entries.iter().enumerate() {
         let func = ex.funcs[&f].clone();
@@ -1150,8 +1291,28 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
             false => Ok(None),
         };
         // Call Convention ID works on a function in memory, not on the EXTERNAL block's
-        let proto = def.unwrap_or(None).map(|d| (d, slot.is_none()));
-        let xml = ex.function_xml(&func, f, size, purge, noreturn, &locals, proto);
+        let archive_proto = def.unwrap_or(None).map(|d| (d, slot.is_none()));
+        // ELF: the DWARF importer's symbol is the primary one, in its namespaces
+        // (DWARFFunction.syncWithExistingGhidraFunction, DWARFFunction.java:389-395: the label
+        // made primary); the Demangler analyzer then adds its own as another symbol
+        // (AbstractDemanglerAnalyzer.java:157-177, DemangledFunction.java:466-474). A thunk
+        // keeps the name of its end
+        let dw = dwarf.get(&f);
+        let sig = dw.filter(|_| !thunk).map(|d| dwarf_signature(d, names_at.get(&f).map_or(&[][..], |v| v)));
+        let mut shown = func.clone();
+        if let Some(d) = dw.filter(|_| !thunk) {
+            (shown.name, shown.ns) = (d.facts.base.clone(), d.facts.ns.clone());
+            if let Some(me) = ex.funcs.get_mut(&f) {
+                (me.name, me.ns) = (shown.name.clone(), shown.ns.clone());
+            }
+        }
+        let proto = sig.as_ref().and_then(|s| s.as_ref().ok()).copied();
+        let noreturn = noreturn || proto.is_some_and(|p| p.0.noreturn);
+        let xml = ex.function_xml(&shown, f, size, purge, noreturn, &locals, archive_proto, proto);
+        // a prototype naming a data type that is not ported is not derived; neither is a DWARF
+        // function that takes a prototype of the archive or of the function it jumps to (which
+        // of the two Java keeps was seen once, DWARF's on Hatred's SDL_ThreadID_REAL, not traced)
+        let dwarf_ok = proto.is_some() && archive_proto.is_none() && via.is_none() && ex.note_types(&xml);
         // Java's Variadic Function Signature Override analyzer (FormatStringAnalyzer) writes a
         // prototype override at a call of a function with a variable argument list that takes a
         // format string. Not ported: a function that calls one the archive gives such a list
@@ -1188,11 +1349,10 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
             writeln!(out, "tracked\t{f:x}\t{x}</tracked_pointset>")?;
         }
         let cdecl = func.model == Some("__cdecl");
-        // a function the DWARF importer gives a signature: Java's DWARF analyzer applies its types
-        // and parameters, which are not written here
-        let dw = dwarf.get(&f);
-        if dw.is_some()
-            || func.underived
+        // a function the DWARF importer gives a signature has it written (`dwarf_signature`),
+        // or is not derived; a GNU name without one has the signature of its mangling in Java
+        if (dw.is_some() && !dwarf_ok)
+            || (dw.is_none() && func.underived)
             || def.is_err()
             || calls_varargs
             || (!img.elf64 && func.import.is_some() && !cdecl && !ex.protos.by_name.contains_key(&func.name))
@@ -1251,7 +1411,7 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         writeln!(out, "data\t{slot:x}\t{}\t{sym}", ex.ptr)?;
         // a `__cdecl` function pops nothing: its extrapop is known without a prototype
         let cdecl = func.model == Some("__cdecl");
-        let xml = ex.function_xml(&func, slot, 2, cdecl.then_some(0), an.noreturn.contains(&slot), "", None);
+        let xml = ex.function_xml(&func, slot, 2, cdecl.then_some(0), an.noreturn.contains(&slot), "", None, None);
         writeln!(out, "extref\t{slot:x}\t{xml}")?;
         if func.underived || !(cdecl || ex.protos.by_name.contains_key(name)) {
             ex.underived.insert((slot, Underived::Function));
@@ -1275,7 +1435,7 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         func.name_from(&x.name, true);
         let def = archived(&ex, Some(a), &func.name);
         let proto = def.unwrap_or(None).map(|d| (d, false));
-        let xml = ex.function_xml(&func, a, 1, None, ext_noreturn.contains(&a), "", proto);
+        let xml = ex.function_xml(&func, a, 1, None, ext_noreturn.contains(&a), "", proto, None);
         writeln!(out, "func\t{a:x}\t{xml}\nbody\t{a:x}\t{a:x}-{a:x}")?;
         if func.underived || def.is_err() {
             ex.underived.insert((a, Underived::Function));
@@ -1413,11 +1573,24 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         }
     }
 
+    // the namespaces of the records (`getNamespacePath`: the global one, then each by its id)
+    let mut spaces: Vec<(&Vec<String>, &u32)> = ex.ns_ids.iter().collect();
+    spaces.sort_by_key(|s| s.1);
+    for (path, id) in spaces.into_iter().filter(|s| ex.ns_used.contains(s.1)) {
+        let mut x = "<parent><val/>".to_string();
+        for n in 1..=path.len() {
+            let _ = write!(x, "<val id=\"0x{:x}\">{}</val>", ex.ns_ids[&path[..n]], esc(&path[n - 1]));
+        }
+        writeln!(out, "ns\t{id:x}\t{x}</parent>")?;
+    }
     for (a, what) in &ex.underived {
         writeln!(out, "underived\t{a:x}\t{}", what.word())?;
     }
     for id in &ex.types {
-        writeln!(out, "type\t{id}\t{}", ex.protos.types[id])?;
+        match (ex.protos.types.get(id), dwarf_types.get(id)) {
+            (Some(rec), _) | (None, Some(Ok(rec))) => writeln!(out, "type\t{id}\t{rec}")?,
+            _ => {}
+        }
     }
     if !ex.types.contains(UNDEFINED.0) {
         writeln!(out, "type\t{}\t{}", UNDEFINED.0, UNDEFINED.1)?;
@@ -1460,6 +1633,13 @@ mod tests {
     }
 
     #[test]
+    fn long_demangled_names_are_cut_as_java_cuts_them() {
+        assert_eq!(ensure_name_length("abc"), "abc");
+        assert_eq!(ensure_name_length(&"x".repeat(2000)).len(), 2000);
+        assert_eq!(ensure_name_length(&"x".repeat(2001)), format!("{}...", "x".repeat(1000)));
+    }
+
+    #[test]
     fn call_fixups_and_prototypes() {
         let spec = "<callfixup name=\"EH_prolog\">\n<target name=\"__EH_prolog\"/><target name=\"_EH_prolog\"/>\n\
                     <pcode/></callfixup><callfixup name=\"x\"><target name=\"y\"/></callfixup>";
@@ -1492,7 +1672,18 @@ mod tests {
         assert_eq!(at[&6], None);
         // the `_` form is not known where the DWARF importer made labels; its functions keep
         // their signature
-        let dwarf = BTreeMap::from([(1, DwarfFunc { name: "malloc".into(), plate: Ok(None) })]);
+        let dwarf = BTreeMap::from([(
+            1,
+            DwarfFunc {
+                name: "malloc".into(),
+                plate: Ok(None),
+                facts: crate::dwarf::pcode::FuncFacts {
+                    ns: Vec::new(),
+                    base: "malloc".into(),
+                    proto: Err(String::new()),
+                },
+            },
+        )]);
         let at = archive_applied(&ar, &symbols, &dwarf);
         assert_eq!((at.get(&1), at[&3], at[&5]), (None, Some("malloc"), None));
         assert!(has_defined_param("<mapsym><symbol name=\"a\" cat=\"0\" index=\"0x0\"><type/></symbol>"));
