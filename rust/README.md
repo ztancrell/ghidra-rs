@@ -6641,7 +6641,8 @@ auto-analysis with ExportFacts.java): exit 0, 7,721 s, cgroup `memory.peak` 25.9
 
 ghidra-rs writes 351,303 `underived` records. Known limits, not fixed:
 - 6,209 `func` records differ from Java's by an extra stack local `local_8` (undefined8 at
-  stack -8) and are not marked `underived`: a silent difference;
+  stack -8) and are not marked `underived`: a silent difference. Superseded (branch
+  `fix-local8`, below): the x86-64 stack locals are fixed; the 6,209 had other causes too;
 - 75 of Java's `comments` records have no record of ghidra-rs, derived or `underived`; one
   cause is a function ghidra-rs does not find (0x3582f90);
 - `func_children` drops the DWARF function process_subprogram makes for a call site; it may be
@@ -6696,6 +6697,35 @@ out at 120 s there and finish here (previous: 697 / 106 / 0, 12 reference timeou
 errors). Hatred camera 35 / 15 / 0 with the mercs2 prelude, outputs identical to master's. The
 same 35 / 15 / 0 with Hatred's own prelude.
 
+The stack locals of x86-64 (branch `fix-local8`, 2026-11-22). The Stack analyzer's port
+(`factsout::locals`, NewFunctionStackAnalysisCmd) read x86's 32-bit register layout on x86-64:
+ESP at 0x10 (RDX there) and 4-byte registers, so it took the slot a `PUSH` or `POP` uses
+itself for one an operand names. That gave `local_8` at every `POP RBP` and `local_res0` at
+`_start`'s `POP RSI`. It now reads RSP (0x20), 8-byte registers, a REX prefix (R8-R15 from
+0x80, ia.sinc:19-24) and parameters from 8 up (x86-64-gcc.cspec's stack pentry). As in Java:
+checkForX86 compares the pointer size in bytes with 32 (NewFunctionStackAnalysisCmd.java:147-152),
+so the LEA rule holds on x86-64 too; `PUSH RSP` names its own slot (RSP is lowered before the
+STORE, where SymbolicPropogator.makeReference calls evaluateSymbolicReference), Java's
+`local_10` of `_start`. A stack offset is written 64 bits wide (`0xfffffffffffffff8`, as Java
+writes it). The 32-bit path is unchanged. Small corpus: func 177 -> 209 / 1,112, every other
+kind unchanged. Hatred: func 2,657 -> 5,623 equal (174,795 different), every other row as in
+the table above; maximum RSS 6.76 GB (1,095 s, the MacBook loaded by other runs). Superseded:
+the func row above.
+
+Hatred's silent `func` records (different from Java's, no `underived ... function` record at
+the entry): 6,209 -> 3,243, all of them among the 6,209. What is left, none marked `underived`:
+- 3,085 where Java has a prototype with a locked return type (2,619 `__stdcall`, 466 of the
+  unknown model; C library names: `CRYPTO_*`, ICU's `ucal_*_53`, curl), and 52 with a
+  `__stdcall` or `__thiscall` model and no locked return: prototypes ghidra-rs does not
+  have (the 64-bit data-type archives are not read, above);
+- 100 whose stack locals still differ (locals only ghidra-rs has, only Java has, or both): not
+  traced;
+- `_start`: Java gives it the `processEntry` model (extrapop 0), ghidra-rs `unknown`;
+- 4 other (2 names, 2 locals).
+The small corpus's 47 silent: 14 `_start` (`processEntry`), the archive prototypes of `_init`
+and of the `-cet` `.plt.sec` thunks (Java names them after the external with its prototype,
+ghidra-rs `FUN_`), 4 no-return flags Java sets (`die.constprop.0`), 3 `main` with a call
+override Java writes (`protooverride` of a varargs call).
 
 ## Speed
 
