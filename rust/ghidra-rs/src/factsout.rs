@@ -262,6 +262,29 @@ pub fn core_ids64() -> HashMap<String, String> {
     core_ids(CORE_TYPES64)
 }
 
+/// What Java's Call Convention ID analyzer (DecompilerCallConventionAnalyzer,
+/// DecompilerParallelConventionAnalysisCmd) does to the prototype of a function in the global
+/// namespace that an archive definition with a parameter of a defined type was applied to: the
+/// model the decompiler reports, locked. x86-64-gcc.cspec has one model the decompiler can
+/// report for a function sent as `unknown`, its default.
+// ponytail: this takes Java's decompile of the function to complete, as all 2,602 such
+// functions of Hatred did. Where it fails or runs over the analyzer's 60 s, Java keeps
+// `unknown` and this record differs silently; running the decompiler here is the upgrade.
+const CCID: (&str, &str) = (
+    "</localdb><prototype extrapop=\"8\" model=\"unknown\"",
+    "</localdb><prototype extrapop=\"8\" model=\"__stdcall\" modellock=\"true\"",
+);
+
+/// DecompilerCallConventionAnalyzer.hasDefinedParameterTypes on a prototype of the archive: a
+/// parameter whose type is not `undefined` or `undefined<n>`.
+fn has_defined_param(xml: &str) -> bool {
+    xml.split("<mapsym><symbol ")
+        .skip(1)
+        .filter_map(|s| s.split_once("</symbol>"))
+        .filter(|(s, _)| s.contains(" cat=\"0\""))
+        .any(|(s, _)| !s.split_once('>').is_some_and(|(_, ty)| ty.starts_with("<typeref name=\"undefined")))
+}
+
 /// The call fixups of a compiler spec: target name -> fixup name.
 pub fn callfixups(cspec: &str) -> HashMap<String, String> {
     let mut m = HashMap::new();
@@ -304,6 +327,7 @@ impl Exporter<'_> {
     }
 
     /// `<doc>` of a function at `addr` (its entry, or the import slot it hangs on).
+    #[allow(clippy::too_many_arguments)]
     fn function_xml(
         &mut self,
         f: &Func,
@@ -311,10 +335,40 @@ impl Exporter<'_> {
         size: u32,
         purge: Option<u32>,
         noreturn: bool,
-        (locals, dwarf): (&str, Option<(&crate::dwarf::pcode::Proto, &str)>),
+        locals: &str,
+        archived: Option<(&str, bool)>,
+        dwarf: Option<(&crate::dwarf::pcode::Proto, &str)>,
     ) -> String {
-        if let Some(xml) = self.protos.by_name.get(&f.name).filter(|_| f.import.is_some()) {
+        // PE: the prototype of an import by its name; ELF: of the definition Apply Data
+        // Archives applied (`archived`)
+        let proto = match archived {
+            Some((n, _)) => self.protos.by_name.get(n),
+            None => self.protos.by_name.get(&f.name).filter(|_| f.import.is_some() && !self.img.elf64),
+        };
+        if let Some(xml) = proto {
             let mut xml = xml.clone();
+            if let Some((n, ccid)) = archived {
+                // the function keeps its name (FunctionRenameOption.RENAME_IF_DEFAULT) and its
+                // stack variables
+                let (from, to) = (esc(n), esc(&f.name));
+                xml = xml
+                    .replacen(
+                        &format!(" name=\"{from}\" size=\"@SIZE@\""),
+                        &format!(" name=\"{to}\" size=\"@SIZE@\""),
+                        1,
+                    )
+                    .replacen(&format!("<scope name=\"{from}\">"), &format!("<scope name=\"{to}\">"), 1);
+                if !locals.is_empty() {
+                    xml = match xml.contains("<symbollist/>") {
+                        true => xml.replacen("<symbollist/>", &format!("<symbollist>{locals}</symbollist>"), 1),
+                        false => xml.replacen("</symbollist>", &format!("{locals}</symbollist>"), 1),
+                    };
+                }
+                if ccid && has_defined_param(&xml) {
+                    xml = xml.replacen(CCID.0, CCID.1, 1);
+                }
+                xml = xml.replace("@PC@", &format!("0x{:x}", addr.wrapping_sub(1)));
+            }
             if noreturn && !xml.contains(" noreturn=\"true\"") {
                 // the no-return analyzers mark the function after the archive's prototype
                 xml = xml.replacen("size=\"@SIZE@\">", "size=\"@SIZE@\" noreturn=\"true\">", 1);
@@ -335,7 +389,13 @@ impl Exporter<'_> {
             None if self.img.elf64 => "8".to_string(),
             None => "unknown".to_string(),
         };
-        let (model, lock) = f.model.map_or(("unknown", ""), |m| (m, " modellock=\"true\""));
+        let (mut model, mut lock) = f.model.map_or(("unknown", ""), |m| (m, " modellock=\"true\""));
+        let mut extrapop = extrapop;
+        // ELF: the entry function has `processEntry` (ElfProgramBuilder.processEntryPoints),
+        // extrapop 0 in x86-64-gcc.cspec
+        if self.img.elf_process_entry == Some(addr) && f.thunked.is_none() && f.import.is_none() {
+            (model, lock, extrapop) = ("processEntry", " modellock=\"true\"", "0".to_string());
+        }
         // ELF: the prototype of the DWARF import (DWARFFunction.updateFunctionSignature): its
         // model locked, every parameter a locked symbol of the function (HighFunction's
         // `cat="0"` symbols; one in a register holds from the byte before the entry), the
@@ -371,7 +431,6 @@ impl Exporter<'_> {
             false => format!("<symbollist>{params}{locals}</symbollist>"),
         };
         let ns = self.ns_id(&f.ns);
-
         let inject = self.fixups.get(&f.name).map(|i| format!("<inject>{i}</inject>")).unwrap_or_default();
         format!(
             "<doc id=\"0x{ns:x}\"><mapsym><function id=\"0x0\" name=\"{name}\" size=\"{size}\"{nr}>\
@@ -879,13 +938,49 @@ pub fn call_returns(img: &Image, an: &Analysis, fid: &BTreeMap<u32, Applied>) ->
     an.insns.iter().filter(|(a, i)| call_return(an, &funcs, owner.get(a).copied(), i)).map(|(&a, _)| a).collect()
 }
 
-/// Whether ApplyFunctionDataTypesCmd finds a function definition of the archive for a symbol
-/// named `name` (ApplyFunctionDataTypesCmd.java:138-176, 405-424): symbols are looked up by the
-/// last identifier of their name (`getValidName`), under the definition's name, or with one `_`
-/// before it when no symbol has the name itself (taken here as a match either way).
-fn archive_named(archive: &HashSet<String>, name: &str) -> bool {
-    let valid = name.rsplit(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$')).next().unwrap_or("");
-    archive.contains(valid) || valid.strip_prefix('_').is_some_and(|v| archive.contains(v))
+/// `ApplyFunctionDataTypesCmd.getValidName`: the last identifier of a symbol's name.
+fn valid_name(name: &str) -> &str {
+    name.rsplit(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$')).next().unwrap_or("")
+}
+
+/// The addresses ApplyFunctionDataTypesCmd looks a function up at, with the name of the
+/// archive's function definition it applies there (ApplyFunctionDataTypesCmd.java:138-176,
+/// 196-262, 405-424): each definition goes to the symbols whose valid name is its name, or, when
+/// no symbol has that, the name with one `_` before it. `None` where what Java applies is not
+/// known here:
+/// - two definitions reach the address (Java applies the first of its `HashMap`'s order; the
+///   second has no higher `SourceType` than the first);
+/// - the `_` form on an image with DWARF: the labels the DWARF importer makes are symbols too,
+///   and one named as the definition takes it from the `_` form.
+///
+/// Java applies it to a function that is no thunk and whose signature has a lower source than
+/// `IMPORTED`: not to one the DWARF importer gave a signature (`dwarf`, `IMPORTED` itself; no
+/// address of those is returned). A GNU name is still mangled when the analyzer runs (the
+/// demangler comes later), so its whole name is its valid name.
+fn archive_applied<'a>(
+    archive: &'a HashSet<String>,
+    symbols: &[(u32, &str)],
+    dwarf: &BTreeMap<u32, DwarfFunc>,
+) -> HashMap<u32, Option<&'a str>> {
+    let mut by_valid: HashMap<&str, Vec<u32>> = HashMap::new();
+    for &(a, n) in symbols {
+        by_valid.entry(valid_name(n)).or_default().push(a);
+    }
+    let mut out: HashMap<u32, Option<&str>> = HashMap::new();
+    for def in archive {
+        let (at, sure) = match by_valid.get(def.as_str()) {
+            Some(at) => (at, true),
+            None => match by_valid.get(format!("_{def}").as_str()) {
+                Some(at) => (at, dwarf.is_empty()),
+                None => continue,
+            },
+        };
+        for a in at.iter().filter(|a| !dwarf.contains_key(a)) {
+            let def = sure.then_some(def.as_str());
+            out.entry(*a).and_modify(|d| *d = d.filter(|d| Some(*d) == def)).or_insert(def);
+        }
+    }
+    out
 }
 
 /// What `export` takes besides the analysis.
@@ -910,8 +1005,8 @@ pub struct Inputs<'a> {
     /// (`crate::dwarf::pcode::facts`); `Err`: a data type that is not ported
     pub dwarf_types: &'a HashMap<String, Result<String, String>>,
     /// ELF: the names of the function definitions of the data-type archive Java's Apply Data
-    /// Archives analyzer applies (`generic_clib_64`). Their prototypes are not applied here: a
-    /// function one of them names is `underived`
+    /// Archives analyzer applies (`generic_clib_64`). `protos` has the prototypes of those
+    /// `gdt::protos::export_elf64` writes; a function another one is applied to is `underived`
     pub archive: Option<&'a HashSet<String>>,
 }
 
@@ -973,7 +1068,8 @@ pub fn call_purges(img: &Image, an: &Analysis, inputs: &Inputs) -> HashMap<u32, 
     let protos = inputs.protos.unwrap_or(&none);
     // the prototype of the function itself comes after its symbols
     let proto_purge = |name: &str| {
-        let xml = protos.by_name.get(name)?;
+        // x86-64: no purge from a prototype (every model of x86-64-gcc.cspec has an extrapop)
+        let xml = protos.by_name.get(name).filter(|_| !img.elf64)?;
         let at = xml.find("</localdb><prototype extrapop=\"")? + "</localdb><prototype extrapop=\"".len();
         xml[at..].split('"').next()?.parse::<u32>().ok()?.checked_sub(4)
     };
@@ -1124,19 +1220,33 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
     }
     sets.sort();
     let exports: HashMap<u32, &str> = img.exports.iter().map(|(a, n)| (*a, n.as_str())).collect();
-    // ELF: the functions a symbol name gives a prototype of Java's archive (the Apply Data
-    // Archives analyzer), which is not applied here
-    let named =
-        img.exports.iter().map(|(a, n)| (*a, n.as_str())).chain(img.elf_funcs.iter().map(|(a, n)| (*a, n.as_str())));
-    let archived: HashSet<u32> =
-        archive.map_or_else(HashSet::new, |ar| named.filter(|(_, n)| archive_named(ar, n)).map(|(a, _)| a).collect());
+    // ELF: the function definitions of Java's archive the Apply Data Archives analyzer applies,
+    // by address, looked up among every symbol Java has when it runs: the symbol tables', the
+    // entries' and the EXTERNAL block's
+    let symbols: Vec<(u32, &str)> = (img.elf_symbols.iter())
+        .chain(&img.exports)
+        .chain(&img.elf_funcs)
+        .map(|(a, n)| (*a, n.as_str()))
+        .chain(img.externals.iter().map(|x| (x.addr, x.name.as_str())))
+        .collect();
+    let applied = archive.map_or_else(HashMap::new, |ar| archive_applied(ar, &symbols, dwarf));
+    // the definition whose prototype the record of the function at `a` takes, or `Err` where
+    // Java's is not derived: a definition `export_elf64` leaves out, or one on a function with
+    // a call fixup
+    let archived = |ex: &Exporter, a: Option<u32>, name: &str| match a.map(|a| applied.get(&a)) {
+        Some(Some(Some(def))) if ex.protos.by_name.contains_key(*def) && !ex.fixups.contains_key(name) => {
+            Ok(Some(*def))
+        }
+        Some(None) => Ok(None),
+        _ => Err(()),
+    };
     // ELF: every symbol name at an address (the Demangler analyzer works on each)
-    let mut symbols: HashMap<u32, Vec<&str>> = HashMap::new();
+    let mut names_at: HashMap<u32, Vec<&str>> = HashMap::new();
     if img.elf64 {
-        for (a, n) in img.exports.iter().chain(img.elf_funcs.iter()) {
-            let v = symbols.entry(*a).or_default();
-            if !v.contains(&n.as_str()) {
-                v.push(n.as_str());
+        for &(a, n) in &symbols {
+            let v = names_at.entry(a).or_default();
+            if !v.contains(&n) {
+                v.push(n);
             }
         }
     }
@@ -1153,13 +1263,42 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         };
         let thunk = func.thunked.is_some() || func.import.is_some();
         let locals = if auto(f) && !thunk { ex.locals(&mut p, f) } else { String::new() };
+        // ELF: a function with a symbol whose body is one jump to another function is a thunk in
+        // Java, as one without a symbol is (`name_functions`): it keeps its name and has the
+        // prototype of the function it jumps to (to: its entry, the GOT slot of an import,
+        // whether that function is not derived)
+        let jump = (img.elf64 && !thunk && an.bodies[&f].len() == 1).then(|| an.insns.get(&f)).flatten();
+        let via = match jump.map(|i| (i.flow, i.target, i.slot)) {
+            Some((Flow::Jump, Some(t), _)) if t != f => {
+                ex.funcs.get(&t).map(|x| (x.thunked.unwrap_or(t), x.import, x.underived))
+            }
+            Some((Flow::JumpInd, _, Some(s))) if img.imports.contains_key(&s) => Some((f, Some(s), false)),
+            _ => None,
+        };
+        let (to, slot, to_underived) = via.unwrap_or((end, func.import, false));
+        // ELF: the function the record's prototype is of: the end of a thunk chain, the
+        // EXTERNAL entry of a thunk through a GOT slot
+        let proto_of = match slot {
+            Some(slot) => img.got_external.get(&slot).copied(),
+            None => Some(to),
+        };
+        // a thunk is skipped (ApplyFunctionDataTypesCmd.java:206); whether a function with a
+        // symbol of the archive was a thunk already when the analyzer ran is not known here
+        let def = match img.elf64 {
+            true if (thunk || via.is_some()) && applied.contains_key(&f) => Err(()),
+            true if to_underived || (via.is_some() && dwarf.contains_key(&to)) => Err(()),
+            true => archived(&ex, proto_of, &func.name),
+            false => Ok(None),
+        };
+        // Call Convention ID works on a function in memory, not on the EXTERNAL block's
+        let archive_proto = def.unwrap_or(None).map(|d| (d, slot.is_none()));
         // ELF: the DWARF importer's symbol is the primary one, in its namespaces
         // (DWARFFunction.syncWithExistingGhidraFunction, DWARFFunction.java:389-395: the label
         // made primary); the Demangler analyzer then adds its own as another symbol
         // (AbstractDemanglerAnalyzer.java:157-177, DemangledFunction.java:466-474). A thunk
         // keeps the name of its end
         let dw = dwarf.get(&f);
-        let sig = dw.filter(|_| !thunk).map(|d| dwarf_signature(d, symbols.get(&f).map_or(&[][..], |v| v)));
+        let sig = dw.filter(|_| !thunk).map(|d| dwarf_signature(d, names_at.get(&f).map_or(&[][..], |v| v)));
         let mut shown = func.clone();
         if let Some(d) = dw.filter(|_| !thunk) {
             (shown.name, shown.ns) = (d.facts.base.clone(), d.facts.ns.clone());
@@ -1169,9 +1308,31 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         }
         let proto = sig.as_ref().and_then(|s| s.as_ref().ok()).copied();
         let noreturn = noreturn || proto.is_some_and(|p| p.0.noreturn);
-        let xml = ex.function_xml(&shown, f, size, purge, noreturn, (&locals, proto));
+        let xml = ex.function_xml(&shown, f, size, purge, noreturn, &locals, archive_proto, proto);
         // a prototype naming a data type that is not ported is not derived
         let dwarf_ok = proto.is_some() && ex.note_types(&xml);
+        // Java's Variadic Function Signature Override analyzer (FormatStringAnalyzer) writes a
+        // prototype override at a call of a function with a variable argument list that takes a
+        // format string. Not ported: a function that calls one the archive gives such a list
+        // (or a definition whose prototype is not written) is not derived
+        let calls_varargs = img.elf64
+            && !thunk
+            && an.bodies[&f].iter().filter_map(|a| an.insns.get(a)).any(|i| {
+                let callee = match (i.flow, i.target, i.slot) {
+                    (Flow::Call, Some(t), _) => ex.funcs.get(&t).map(|x| (x.thunked.unwrap_or(t), x.import)),
+                    (Flow::CallInd, _, Some(s)) if img.imports.contains_key(&s) => Some((s, Some(s))),
+                    _ => None,
+                };
+                let at = callee.and_then(|(to, slot)| match slot {
+                    Some(s) => img.got_external.get(&s).copied(),
+                    None => Some(to),
+                });
+                at.and_then(|a| applied.get(&a)).is_some_and(|def| {
+                    let proto = def.and_then(|d| ex.protos.by_name.get(d));
+                    let tag = proto.and_then(|x| x.split("</localdb><prototype ").nth(1)?.split('>').next());
+                    tag.is_none_or(|t| t.contains(" dotdotdot=\"true\""))
+                })
+            });
         writeln!(out, "func\t{f:x}\t{xml}")?;
         write!(out, "body\t{f:x}")?;
         for (first, last) in &body_ranges[&f] {
@@ -1190,9 +1351,9 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         // or is not derived; a GNU name without one has the signature of its mangling in Java
         if (dw.is_some() && !dwarf_ok)
             || (dw.is_none() && func.underived)
-            || archived.contains(&f)
-            || archived.contains(&end)
-            || (func.import.is_some() && !cdecl && !ex.protos.by_name.contains_key(&func.name))
+            || def.is_err()
+            || calls_varargs
+            || (!img.elf64 && func.import.is_some() && !cdecl && !ex.protos.by_name.contains_key(&func.name))
         {
             ex.underived.insert((f, Underived::Function));
         }
@@ -1248,7 +1409,7 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         writeln!(out, "data\t{slot:x}\t{}\t{sym}", ex.ptr)?;
         // a `__cdecl` function pops nothing: its extrapop is known without a prototype
         let cdecl = func.model == Some("__cdecl");
-        let xml = ex.function_xml(&func, slot, 2, cdecl.then_some(0), an.noreturn.contains(&slot), ("", None));
+        let xml = ex.function_xml(&func, slot, 2, cdecl.then_some(0), an.noreturn.contains(&slot), "", None, None);
         writeln!(out, "extref\t{slot:x}\t{xml}")?;
         if func.underived || !(cdecl || ex.protos.by_name.contains_key(name)) {
             ex.underived.insert((slot, Underived::Function));
@@ -1259,7 +1420,7 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
     // ELF: the EXTERNAL block's functions, one-byte thunks of the external functions
     // (ElfProgramBuilder.java:2140-2152), with the default model's extrapop and a PRE comment of
     // the versioned names (ElfProgramBuilder.java:2031-2041; DecompileCallback.java:583, `user2`).
-    // Their prototypes come from the data-type archives, which are not read
+    // One the archive has a definition for takes its prototype; a GNU name is the demangler's
     let mut ext_noreturn = HashSet::new();
     for (slot, to) in &img.got_external {
         if an.noreturn.contains(slot) {
@@ -1268,10 +1429,15 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
     }
     for x in img.externals.iter().filter(|x| x.func) {
         let a = x.addr;
-        let func = Func { name: x.name.clone(), ..Func::default() };
-        let xml = ex.function_xml(&func, a, 1, None, ext_noreturn.contains(&a), ("", None));
+        let mut func = Func::default();
+        func.name_from(&x.name, true);
+        let def = archived(&ex, Some(a), &func.name);
+        let proto = def.unwrap_or(None).map(|d| (d, false));
+        let xml = ex.function_xml(&func, a, 1, None, ext_noreturn.contains(&a), "", proto, None);
         writeln!(out, "func\t{a:x}\t{xml}\nbody\t{a:x}\t{a:x}-{a:x}")?;
-        ex.underived.insert((a, Underived::Function));
+        if func.underived || def.is_err() {
+            ex.underived.insert((a, Underived::Function));
+        }
         if !x.versions.is_empty() {
             writeln!(
                 out,
@@ -1485,11 +1651,43 @@ mod tests {
 
     #[test]
     fn archive_names_as_apply_function_data_types_looks_them_up() {
-        let ar: HashSet<String> = ["malloc".to_string()].into();
-        assert!(archive_named(&ar, "malloc"));
-        assert!(archive_named(&ar, "_malloc"));
-        assert!(archive_named(&ar, "std::malloc"));
-        assert!(!archive_named(&ar, "__malloc"));
-        assert!(!archive_named(&ar, "malloc_usable_size"));
+        let ar: HashSet<String> = ["malloc", "init", "open", "read", "close"].map(String::from).into();
+        let symbols = [
+            (1, "malloc"),
+            (2, "_malloc"),
+            (3, "std::malloc"),
+            (4, "__malloc"),
+            (5, "_init"),
+            (6, "open"),
+            (6, "_read"),
+        ];
+        let dwarf = BTreeMap::new();
+        let at = archive_applied(&ar, &symbols, &dwarf);
+        // `_malloc` is not looked at: a symbol has the name itself; `_init` is
+        assert_eq!((at[&1], at[&3], at[&5]), (Some("malloc"), Some("malloc"), Some("init")));
+        assert!(!at.contains_key(&2) && !at.contains_key(&4));
+        // two definitions at one address
+        assert_eq!(at[&6], None);
+        // the `_` form is not known where the DWARF importer made labels; its functions keep
+        // their signature
+        let dwarf = BTreeMap::from([(
+            1,
+            DwarfFunc {
+                name: "malloc".into(),
+                plate: Ok(None),
+                facts: crate::dwarf::pcode::FuncFacts {
+                    ns: Vec::new(),
+                    base: "malloc".into(),
+                    proto: Err(String::new()),
+                },
+            },
+        )]);
+        let at = archive_applied(&ar, &symbols, &dwarf);
+        assert_eq!((at.get(&1), at[&3], at[&5]), (None, Some("malloc"), None));
+        assert!(has_defined_param("<mapsym><symbol name=\"a\" cat=\"0\" index=\"0x0\"><type/></symbol>"));
+        assert!(!has_defined_param(
+            "<mapsym><symbol name=\"a\" cat=\"0\" index=\"0x0\"><typeref name=\"undefined4\"/></symbol>\
+             <mapsym><symbol name=\"local_8\" cat=\"-1\"><type/></symbol>"
+        ));
     }
 }

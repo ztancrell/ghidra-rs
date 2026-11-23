@@ -46,9 +46,10 @@ fn esc(s: &str) -> String {
 }
 
 /// The id a data type of the program's manager is written with. Java's are its database's
-/// keys, which `tools/facts-diff.sh` leaves out; these only tie a `<typeref>` to its record.
+/// keys, which `tools/facts-diff.sh` leaves out; these only tie a `<typeref>` to its record, in a
+/// range no id of the core types or of the archive prototypes (`Protos`) is in.
 fn db_id(i: u32) -> u64 {
-    0x1000_0000_0000_0000 + u64::from(i) + 1
+    0xd000_0000_0000_0000 + u64::from(i) + 1
 }
 
 /// Close a `<type ...>` element whose opening tag is the first `open` bytes of `s`: in the tag

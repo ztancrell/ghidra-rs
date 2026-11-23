@@ -476,7 +476,7 @@ impl SplitVarnode {
                     _ => err("constructJoinAddress: a piece outside a SLEIGH space"),
                 };
                 let pieces = vec![piece(hi)?, piece(lo)?];
-                (Space::Join, fd.join_pieces(pieces)?)
+                fd.join_address(arch, pieces)?
             }
         };
         let w = fd.new_varnode(self.wholesize, space, offset);

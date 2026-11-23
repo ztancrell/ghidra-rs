@@ -419,6 +419,11 @@ impl Arch {
             .map(|((_, o, std::cmp::Reverse(z)), name)| (name.as_str(), *o, *z))
     }
 
+    /// `SleighBase::getExactRegisterName` as a test: a register is exactly this range.
+    pub(crate) fn exact_register(&self, space: u32, off: u64, size: u32) -> bool {
+        self.registers.contains_key(&(space, off, std::cmp::Reverse(size)))
+    }
+
     /// Port of `LoadImageBfd::loadFill`: `buf.len()` bytes from `addr`, which must be loaded;
     /// past it the read goes on into later sections, and bytes no section holds are zero.
     /// `None` when `addr` itself is not loaded (`DataUnavailError`).

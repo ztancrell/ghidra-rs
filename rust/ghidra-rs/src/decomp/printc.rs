@@ -20,9 +20,9 @@
 //! symbol's start, else the unnamed location).
 //!
 //! Every construct the C++ would print that is not ported fails with an error naming it, so a
-//! function prints identically or not at all. Not ported yet: the long suffix of a constant, a
-//! cast to a pointer to an array (`checkAddressOfCast`), the label of a block of several ranges
-//! without ops, a variable that is part of an external reference or larger than the function or
+//! function prints identically or not at all. Not ported yet: the long suffix of a constant, the
+//! label of a block of several ranges without ops, a variable that is part of an external
+//! reference or larger than the function or
 //! external reference at its address (`pushPartialSymbol` of a code pointer,
 //! `pushMismatchSymbol`), a function that writes read-only memory (the warning of
 //! `fillinReadOnly` is not ported), unions, `TypePointerRel`, CALLOTHER of a built-in user-op, the
@@ -1325,13 +1325,53 @@ impl PrintC<'_> {
         Ok(())
     }
 
-    /// Port of `PrintC::opTypeCast`: `(type)` and the input. A cast to a pointer to an array
-    /// (`checkAddressOfCast`, which may print `&`) fails loudly.
+    /// Port of `PrintC::checkAddressOfCast` (printc.cc:395-437): whether the CAST `op`, to the
+    /// pointer to an array `dt0`, prints as `&`: its input points to the array's element type and
+    /// is a whole symbol of that array type, or a PTRSUB to a field of it.
+    fn check_address_of_cast(&mut self, op: OpId, dt0: TypeId) -> Result<bool> {
+        let vnin = self.fd.input(op, 0)?;
+        let dt1 = super::cast::print_facing(self.fd, vnin)?;
+        let types = &self.fd.types;
+        let (Some(base0), Some(base1)) = (types.ptr_to(dt0), types.ptr_to(dt1)) else { return Ok(false) };
+        let TKind::Array { elem, .. } = types.get(base0).kind else { return Ok(false) };
+        let array_size = types.size(base0);
+        if types.strip_typedefs(elem) != types.strip_typedefs(base1) {
+            return Ok(false);
+        }
+        let h = super::variable::high(self.fd, vnin)?;
+        let mapped = self.fd.mapentry.get(&vnin).map(|&(sym, _)| sym);
+        let whole = mapped.is_some() && super::namevars::symbol_offset(self.fd, self.arch, h)? == -1;
+        let symbol_type = match (mapped, self.fd.vn(vnin).def) {
+            (Some(sym), _) if whole => self.fd.symtab.symbol(sym).ty,
+            (_, Some(ptrsub)) if self.fd.op(ptrsub).opc == Opcode::Ptrsub => {
+                let root = super::cast::print_facing(self.fd, self.fd.input(ptrsub, 0)?)?;
+                let off = self.fd.vn(self.fd.input(ptrsub, 1)?).offset as i64;
+                match self.fd.types.ptr_to(root) {
+                    // a sub-type at an offset into it, or none, is no symbol type
+                    Some(to) => match super::infertypes::sub_type(self.fd, self.arch, to, off)? {
+                        Some((t, 0)) => Some(t),
+                        _ => return Ok(false),
+                    },
+                    None => None,
+                }
+            }
+            _ => None,
+        };
+        Ok(symbol_type.is_some_and(|t| self.fd.types.meta(t) == Meta::Array && self.fd.types.size(t) == array_size))
+    }
+
+    /// Port of `PrintC::opTypeCast`: `(type)` and the input, or `&` and the input for a cast to a
+    /// pointer to an array that `checkAddressOfCast` accepts.
     fn op_type_cast(&mut self, op: OpId) -> Result<()> {
         let out = self.fd.op(op).out.ok_or_else(|| LowlevelError("print C: a CAST without output".into()))?;
         let dt = super::cast::print_facing(self.fd, out)?;
-        if self.fd.types.ptr_to(dt).is_some_and(|to| self.fd.types.meta(to) == Meta::Array) {
-            return err("print C: a cast to a pointer to an array (checkAddressOfCast) is not ported");
+        // `isPointerToArray`
+        if self.fd.types.ptr_to(dt).is_some_and(|to| self.fd.types.meta(to) == Meta::Array)
+            && self.check_address_of_cast(op, dt)?
+        {
+            self.push_op(&ADDRESSOF)?;
+            self.push_vn(self.fd.input(op, 0)?, op, self.mods);
+            return Ok(());
         }
         // option_nocasts is off
         self.push_op(&TYPECAST)?;

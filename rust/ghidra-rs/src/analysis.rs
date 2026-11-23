@@ -53,6 +53,14 @@ pub struct Image {
     pub got_external: HashMap<u32, u32>,
     /// ELF: the addresses of the named symbols the symbol tables define (Java's labels there)
     pub elf_named: HashSet<u32>,
+    /// ELF: every named symbol the symbol tables define at an address, of any type but a
+    /// section's or a file's: Java's labels and function names there
+    /// (ApplyFunctionDataTypesCmd looks a function definition up among them)
+    pub elf_symbols: Vec<(u32, String)>,
+    /// ELF: the entry function, which Java gives the `processEntry` calling convention
+    /// (ElfProgramBuilder.processEntryPoints, ElfProgramBuilder.java:651-668: an executable or
+    /// shared object whose OS/ABI is Linux or none)
+    pub elf_process_entry: Option<u32>,
 }
 
 /// An entry of Java's EXTERNAL block (ElfProgramBuilder.allocateExternalSymbol).
@@ -286,6 +294,7 @@ impl Image {
                     if !name.is_empty() && !matches!(s.st_type(), elf::STT_SECTION | elf::STT_FILE) {
                         if let Ok(a) = addr32(s.st_value(e)) {
                             img.elf_named.insert(a);
+                            img.elf_symbols.push((a, name.clone()));
                         }
                     }
                 }
@@ -403,6 +412,9 @@ impl Image {
         let mut entries = Vec::new();
         if hdr.e_entry(e) != 0 && matches!(kind, elf::ET_EXEC | elf::ET_DYN) {
             entries.push((addr32(hdr.e_entry(e))?, "entry".to_string()));
+            if matches!(hdr.e_ident().os_abi, elf::ELFOSABI_NONE | elf::ELFOSABI_LINUX) {
+                img.elf_process_entry = Some(addr32(hdr.e_entry(e))?);
+            }
         }
         // the dynamic table: DT_INIT, DT_FINI and the arrays (createDynamicEntryPoints)
         let dynamic = sections.iter().find(|s| s.sh_type(e) == elf::SHT_DYNAMIC);

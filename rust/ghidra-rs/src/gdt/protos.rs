@@ -7,7 +7,8 @@
 //! queue of pointers in composites and function definitions), the ids of the symbols of each
 //! function and its parameters, the parameter storage of `x86win.cspec`'s models
 //! (`ParamListStandard`, `ParamEntry`), and the encoders (`PcodeDataTypeManager`,
-//! `FunctionPrototype`, `LocalSymbolMap`, `HighSymbol`).
+//! `FunctionPrototype`, `LocalSymbolMap`, `HighSymbol`). `export_elf64` does the same for a function
+//! in memory of an x86:LE:64:default:gcc program, for the part of `x86-64-gcc.cspec` that is ported.
 use super::db::Result;
 use super::{kind, Archive, Kind, DEFAULT_ID, POINTER};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -26,8 +27,8 @@ const ID_BASE: u64 = 0x4000_0000_0000_0000;
 /// would then differ from Java's in these three ids.
 const EXTRA_BUILTIN_IDS: [(&str, u64); 3] =
     [("long", 0xc000_0000_0000_009b), ("uchar", 0xc000_0000_0000_00c7), ("ulong", 0xc000_0000_0000_00cf)];
-/// The data organization of x86:LE:32 windows: pointer size.
-const POINTER_SIZE: i32 = 4;
+/// The core types of x86:LE:64 gcc (a built-in has the same id in both lists).
+const CORE_TYPES64: &str = include_str!("../facts_coretypes64.xml");
 
 /// A data type as the program holds it: an archive type, or a pointer the program made
 /// (`settleCDataType`, the hidden return pointer).
@@ -110,23 +111,82 @@ const FASTCALL_INPUT: [Entry; 3] = [
     STACK,
 ];
 
-/// A model of x86win.cspec: name, its extrapop (`None`: unknown) and inputs. `default` is the
-/// cspec's `<default_proto>`, `__stdcall` (`getCallingConvention("default")`); `__thiscall`
-/// (ECX, `thisbeforeretpointer`) is not ported.
-fn model(name: &str) -> Result<(Option<i32>, &'static [Entry])> {
-    const STD: [Entry; 1] = [STACK];
-    match name {
-        "__stdcall" | "default" => Ok((None, &STD)),
-        "__cdecl" => Ok((Some(4), &STD)),
-        "__fastcall" => Ok((None, &FASTCALL_INPUT)),
-        n => Err(format!("calling convention {n} not ported")),
-    }
+fn reg64<const OFFSET: u64>(_: u64, size: i32) -> Storage {
+    Storage::Register { offset: OFFSET, size }
+}
+const fn general64(storage: fn(u64, i32) -> Storage) -> Entry {
+    Entry { class: Class::General, minsize: 1, size: 8, alignment: 0, storage }
+}
+// ponytail: of x86-64-gcc.cspec's `__stdcall`, the general registers and the stack only (RDI
+// 0x38, RSI 0x30, RDX 0x10, RCX 0x8, R8 0x80, R9 0x88, RAX 0x0 of x86-64.sla). A float, a
+// composite and anything over 8 bytes fail by name (`assign_address`), so the cspec's `<rule>`s
+// (join_dual_class, goto_stack, hidden_return) never decide; reading the .cspec is the upgrade.
+const SYSV_INPUT: [Entry; 7] = [
+    general64(reg64::<0x38>),
+    general64(reg64::<0x30>),
+    general64(reg64::<0x10>),
+    general64(reg64::<0x8>),
+    general64(reg64::<0x80>),
+    general64(reg64::<0x88>),
+    Entry { class: Class::General, minsize: 1, size: 500, alignment: 8, storage: stack },
+];
+const SYSV_OUTPUT: [Entry; 1] = [general64(reg64::<0x0>)];
+
+/// The program an archive is applied to: its compiler spec and data organization.
+#[derive(Clone, Copy, PartialEq)]
+enum Target {
+    /// x86:LE:32:default:windows (`x86win.cspec`)
+    Win32,
+    /// x86:LE:64:default:gcc (`x86-64-gcc.cspec`)
+    Elf64,
 }
 
-/// `CompilerSpec.getCallingConvention`: a model the cspec has (or `default`), else none
-/// (`unknown`).
-fn known_model(name: &str) -> Option<&str> {
-    ["__stdcall", "__cdecl", "__fastcall", "__thiscall", "default"].contains(&name).then_some(name)
+impl Target {
+    /// The data organization's pointer size; the offset of the first stack parameter too.
+    fn pointer_size(self) -> i32 {
+        match self {
+            Target::Win32 => 4,
+            Target::Elf64 => 8,
+        }
+    }
+
+    /// A model of the cspec: name, its extrapop (`None`: unknown) and inputs. `default` is the
+    /// cspec's `<default_proto>`, `__stdcall` (`getCallingConvention("default")`); x86win's
+    /// `__thiscall` (ECX, `thisbeforeretpointer`) is not ported.
+    fn model(self, name: &str) -> Result<(Option<i32>, &'static [Entry])> {
+        const STD: [Entry; 1] = [STACK];
+        match (self, name) {
+            (Target::Win32, "__stdcall" | "default") => Ok((None, &STD)),
+            (Target::Win32, "__cdecl") => Ok((Some(4), &STD)),
+            (Target::Win32, "__fastcall") => Ok((None, &FASTCALL_INPUT)),
+            (Target::Elf64, "__stdcall" | "default") => Ok((Some(8), &SYSV_INPUT)),
+            (_, n) => Err(format!("calling convention {n} not ported")),
+        }
+    }
+
+    fn output(self) -> &'static [Entry] {
+        match self {
+            Target::Win32 => &OUTPUT,
+            Target::Elf64 => &SYSV_OUTPUT,
+        }
+    }
+
+    /// `CompilerSpec.getCallingConvention`: a model the cspec has (or `default`), else none
+    /// (`unknown`). A definition naming a model of x86-64-gcc.cspec is not ported
+    /// (`generic_clib_64` has none).
+    fn known_model(self, name: &str) -> Result<Option<&str>> {
+        match self {
+            Target::Win32 => {
+                Ok(["__stdcall", "__cdecl", "__fastcall", "__thiscall", "default"].contains(&name).then_some(name))
+            }
+            Target::Elf64
+                if ["__stdcall", "__thiscall", "MSABI", "syscall", "processEntry", "default"].contains(&name) =>
+            {
+                Err(format!("calling convention {name} of a definition not ported on x86-64"))
+            }
+            Target::Elf64 => Ok(None),
+        }
+    }
 }
 
 /// The display name, metatype and size of a built-in class (`getDecompilerDisplayName`);
@@ -195,14 +255,18 @@ struct Exporter<'a> {
     queue: BTreeMap<i64, i64>,
     resolving: bool,
     next_symbol: u64,
+    target: Target,
 }
 
 impl<'a> Exporter<'a> {
-    fn new(ar: &'a Archive) -> Result<Exporter<'a>> {
+    fn new(ar: &'a Archive, target: Target) -> Result<Exporter<'a>> {
         let re =
             regex_lite::Regex::new(r#"<type name="([^"]*)"[^>]* id="0x([0-9a-f]+)""#).map_err(|e| e.to_string())?;
+        // x86-64: its own list over the 32-bit one, which has `longlong` and `ulonglong`
+        let core64 = if target == Target::Elf64 { CORE_TYPES64 } else { "" };
         let core = re
             .captures_iter(CORE_TYPES)
+            .chain(re.captures_iter(core64))
             .filter_map(|c| Some((c[1].to_string(), u64::from_str_radix(&c[2], 16).ok()?)))
             .chain(EXTRA_BUILTIN_IDS.iter().map(|(n, id)| (n.to_string(), *id)))
             .collect();
@@ -216,7 +280,30 @@ impl<'a> Exporter<'a> {
             queue: BTreeMap::new(),
             resolving: false,
             next_symbol: 2,
+            target,
         })
+    }
+
+    /// A built-in class in the target's data organization: gcc's x86-64 has an 8-byte `long`
+    /// and a 4-byte `wchar_t`.
+    fn builtin(&self, class: &str) -> Result<BuiltIn> {
+        let mut b = builtin(class)?;
+        if self.target == Target::Elf64 {
+            match class {
+                "LongDataType" | "UnsignedLongDataType" => b.size = 8,
+                "WideCharDataType" => b.size = 4,
+                _ => {}
+            }
+        }
+        Ok(b)
+    }
+
+    fn ptr_len(&self, length: i8) -> i32 {
+        if length < 0 {
+            self.target.pointer_size()
+        } else {
+            length as i32
+        }
     }
 
     // ---- the program's data types (DataTypeManagerDB.resolve) ----
@@ -325,15 +412,15 @@ impl<'a> Exporter<'a> {
     fn length(&self, t: Ty) -> Result<i32> {
         let a = match t {
             Ty::Void => return Ok(0),
-            Ty::PtrTo(_) => return Ok(POINTER_SIZE),
+            Ty::PtrTo(_) => return Ok(self.target.pointer_size()),
             Ty::Arch(a) => a,
         };
         if a == DEFAULT_ID {
             return Ok(1);
         }
         Ok(match &self.ar.get(a)?.kind {
-            Kind::BuiltIn(c) => builtin(c)?.size,
-            Kind::Pointer { length, .. } => ptr_len(*length),
+            Kind::BuiltIn(c) => self.builtin(c)?.size,
+            Kind::Pointer { length, .. } => self.ptr_len(*length),
             Kind::Array { element, count, element_length } => count * self.elem_len(*element, *element_length)?,
             Kind::Typedef { base } => self.length(Ty::Arch(*base))?,
             // CompositeDB.getLength: an empty composite is 1 byte
@@ -354,15 +441,15 @@ impl<'a> Exporter<'a> {
     fn alignment(&self, t: Ty) -> Result<i32> {
         let a = match t {
             Ty::Void => return Ok(1),
-            Ty::PtrTo(_) => return Ok(POINTER_SIZE),
+            Ty::PtrTo(_) => return Ok(self.target.pointer_size()),
             Ty::Arch(a) => a,
         };
         if a == DEFAULT_ID {
             return Ok(1);
         }
         Ok(match &self.ar.get(a)?.kind {
-            Kind::BuiltIn(c) => builtin(c)?.size.max(1),
-            Kind::Pointer { length, .. } => ptr_len(*length),
+            Kind::BuiltIn(c) => self.builtin(c)?.size.max(1),
+            Kind::Pointer { length, .. } => self.ptr_len(*length),
             Kind::Array { element, .. } => self.alignment(Ty::Arch(*element))?,
             Kind::Typedef { base } => self.alignment(Ty::Arch(*base))?,
             Kind::Composite { alignment, .. } => *alignment,
@@ -388,7 +475,7 @@ impl<'a> Exporter<'a> {
         Ok(match self.base(t)? {
             Ty::PtrTo(_) => Class::Ptr,
             Ty::Arch(a) if a != DEFAULT_ID => match &self.ar.get(a)?.kind {
-                Kind::BuiltIn(c) if builtin(c)?.meta == "float" => Class::Float,
+                Kind::BuiltIn(c) if self.builtin(c)?.meta == "float" => Class::Float,
                 Kind::Pointer { .. } => Class::Ptr,
                 _ => Class::General,
             },
@@ -411,8 +498,23 @@ impl<'a> Exporter<'a> {
     /// `None`: no entry fits (FAIL); `Some(None)`: NO_ASSIGNMENT.
     fn assign_address(&self, t: Ty, entries: &[Entry], status: &mut [i32]) -> Result<Option<Option<Storage>>> {
         if let Ty::Arch(a) = self.base(t)? {
-            if a == DEFAULT_ID {
+            if a == DEFAULT_ID && self.target == Target::Win32 {
                 return Ok(Some(None));
+            }
+        }
+        if self.target == Target::Elf64 {
+            // only what a general register or the stack holds whole (`SYSV_INPUT`)
+            let plain = match self.base(t)? {
+                Ty::PtrTo(_) => true,
+                Ty::Arch(a) => match &self.ar.get(a)?.kind {
+                    Kind::Pointer { .. } | Kind::Enum { .. } => true,
+                    Kind::BuiltIn(c) => self.builtin(c)?.meta != "float",
+                    _ => false,
+                },
+                Ty::Void => false,
+            };
+            if !plain || !(1..=8).contains(&self.length(t)?) {
+                return Err("the x86-64 storage of a float, a composite or a type over 8 bytes not ported".into());
             }
         }
         let class = self.class(t)?;
@@ -444,7 +546,7 @@ impl<'a> Exporter<'a> {
                 continue;
             }
             status[grp] = slot + used;
-            return Ok(Some(Some((e.storage)(4 + (slot * e.alignment) as u64, sz))));
+            return Ok(Some(Some((e.storage)((self.target.pointer_size() + slot * e.alignment) as u64, sz))));
         }
         Ok(None)
     }
@@ -458,7 +560,7 @@ impl<'a> Exporter<'a> {
     fn name_id(&self, a: i64) -> Result<String> {
         let dt = self.ar.get(a)?;
         if let Kind::BuiltIn(c) = &dt.kind {
-            let b = builtin(c)?;
+            let b = self.builtin(c)?;
             return Ok(format!(" name=\"{}\" id=\"{:#x}\"", b.name, self.core_id(b.name)?));
         }
         let p = self.prog.get(&a).ok_or_else(|| format!("{} ({a:#x}) was not resolved", dt.name))?;
@@ -476,7 +578,7 @@ impl<'a> Exporter<'a> {
             return Ok(());
         }
         match &self.ar.get(a)?.kind {
-            Kind::BuiltIn(c) if builtin(c)?.inline || c == "VoidDataType" => return self.type_xml(o, t, size),
+            Kind::BuiltIn(c) if self.builtin(c)?.inline || c == "VoidDataType" => return self.type_xml(o, t, size),
             Kind::Pointer { .. } | Kind::Array { .. } => return self.type_xml(o, t, size),
             Kind::FunctionDef { .. } => {}
             _ if self.length(t)? <= 0 => return self.type_xml(o, t, size),
@@ -499,7 +601,7 @@ impl<'a> Exporter<'a> {
                 o.push_str("<void/>");
                 return Ok(());
             }
-            Ty::PtrTo(to) => return self.pointer_xml(o, to, POINTER_SIZE),
+            Ty::PtrTo(to) => return self.pointer_xml(o, to, self.target.pointer_size()),
             Ty::Arch(a) => a,
         };
         if a == DEFAULT_ID {
@@ -510,7 +612,7 @@ impl<'a> Exporter<'a> {
         let dt = self.ar.get(a)?;
         match &dt.kind {
             Kind::BuiltIn(c) => {
-                let b = builtin(c)?;
+                let b = self.builtin(c)?;
                 if c == "VoidDataType" {
                     o.push_str("<void/>");
                 } else {
@@ -527,7 +629,7 @@ impl<'a> Exporter<'a> {
                 self.type_ref(o, Ty::Arch(*base), sz)?;
                 o.push_str("</def>");
             }
-            Kind::Pointer { to, length } => self.pointer_xml(o, *to, ptr_len(*length))?,
+            Kind::Pointer { to, length } => self.pointer_xml(o, *to, self.ptr_len(*length))?,
             Kind::Array { element, count, element_length } => {
                 if *count == 0 {
                     return Err(format!("zero-length array {a:#x} not ported"));
@@ -587,7 +689,7 @@ impl<'a> Exporter<'a> {
             Kind::FunctionDef { ret, params, varargs, noreturn, convention } => {
                 write!(o, "<type{} metatype=\"code\" size=\"1\">", self.name_id(a)?).map_err(|e| e.to_string())?;
                 // FunctionPrototype(FunctionSignature): cspec.matchConvention (default: __stdcall)
-                let extrapop = model(known_model(convention).unwrap_or("__stdcall"))?.0;
+                let extrapop = self.target.model(self.target.known_model(convention)?.unwrap_or("__stdcall"))?.0;
                 let mut p = Proto {
                     extrapop,
                     model: convention.clone(),
@@ -686,8 +788,9 @@ impl<'a> Exporter<'a> {
         let func_id = self.next_symbol;
         self.next_symbol += 1;
         // getCallingConvention: a name the cspec lacks gives none (unknown, default model)
-        let conv = known_model(&convention);
-        let (extrapop_model, inputs) = model(conv.unwrap_or("__stdcall"))?;
+        let conv = self.target.known_model(&convention)?;
+        let (extrapop_model, inputs) = self.target.model(conv.unwrap_or("__stdcall"))?;
+        let output = self.target.output();
         // createParameters
         let mut ret_ty = Ty::Arch(ret);
         let mut args: Vec<(Option<String>, Ty)> = Vec::new();
@@ -720,7 +823,7 @@ impl<'a> Exporter<'a> {
         let mut hidden = None;
         if ret_ty != Ty::Void {
             let mut status = [0; 3];
-            match self.assign_address(ret_ty, &OUTPUT, &mut status)? {
+            match self.assign_address(ret_ty, output, &mut status)? {
                 Some(Some(s)) => ret_storage = Some(s),
                 // NO_ASSIGNMENT (DEFAULT): invalid storage, an unlocked void (grabFromFunction)
                 Some(None) => {
@@ -730,7 +833,7 @@ impl<'a> Exporter<'a> {
                 None => {
                     let Ty::Arch(r) = ret_ty else { return Err("hidden return of a made pointer".into()) };
                     let mut status = [0; 3];
-                    ret_storage = self.assign_address(Ty::PtrTo(r), &OUTPUT, &mut status)?.flatten();
+                    ret_storage = self.assign_address(Ty::PtrTo(r), output, &mut status)?.flatten();
                     hidden = Some(r);
                 }
             }
@@ -761,7 +864,7 @@ impl<'a> Exporter<'a> {
         }
         // updateStackPurgeSize, then FunctionPrototype.grabFromFunction's extrapop
         let extrapop = match extrapop_model {
-            Some(_) => Some(4),
+            Some(n) => Some(n),
             None if failed => None,
             None => {
                 let stack: Vec<(u64, i32)> = slots
@@ -804,7 +907,9 @@ impl<'a> Exporter<'a> {
                 if id >> 56 != ID_BASE >> 56 {
                     write!(o, " id=\"{id:#x}\"").map_err(|e| e.to_string())?;
                 }
-                let namelock = !is_default_param_name(n);
+                // an x86-64 program's parameter is name-locked whatever its name: Java's facts have
+                // `param_1` of `isspace` so (the rule in Java was not traced)
+                let namelock = self.target == Target::Elf64 || !is_default_param_name(n);
                 write!(o, " name=\"{}\" typelock=\"{typelock}\" namelock=\"{namelock}\"", esc(n))
                     .map_err(|e| e.to_string())?;
                 // HighSymbol.isIsolated: a type-locked symbol is not merged
@@ -822,7 +927,13 @@ impl<'a> Exporter<'a> {
                 // MappedEntry.encode: a logical size only for a float smaller than its storage
                 let logical = if self.class(*t)? == Class::Float { sz } else { storage_size(s) };
                 addr_xml(&mut o, s, logical);
-                o.push_str("<rangelist/></mapsym>");
+                // a register parameter of a function in memory holds from the address before
+                // its entry, `@PC@` (the x86 export's functions are external: no range)
+                if self.target == Target::Elf64 && matches!(s, Storage::Register { .. }) {
+                    o.push_str("<rangelist><range space=\"ram\" first=\"@PC@\" last=\"@PC@\"/></rangelist></mapsym>");
+                } else {
+                    o.push_str("<rangelist/></mapsym>");
+                }
             }
             o.push_str("</symbollist>");
         }
@@ -872,21 +983,13 @@ impl<'a> Exporter<'a> {
                     .ar
                     .types
                     .iter()
-                    .find(|(_, d)| matches!(&d.kind, Kind::BuiltIn(c) if builtin(c).is_ok_and(|b| b.name == name)))
+                    .find(|(_, d)| matches!(&d.kind, Kind::BuiltIn(c) if self.builtin(c).is_ok_and(|b| b.name == name)))
                     .ok_or_else(|| format!("built-in {name} is not in the archive"))?
                     .0
             }
         };
         self.type_xml(&mut o, Ty::Arch(t), 0)?;
         Ok(o)
-    }
-}
-
-fn ptr_len(length: i8) -> i32 {
-    if length < 0 {
-        POINTER_SIZE
-    } else {
-        length as i32
     }
 }
 
@@ -960,7 +1063,7 @@ struct Proto {
 /// analyzer skips a name given twice or holding a tab), then `type` lines for every type they
 /// name, breadth first.
 pub fn export(ar: &Archive) -> Result<String> {
-    let mut ex = Exporter::new(ar)?;
+    let mut ex = Exporter::new(ar, Target::Win32)?;
     let typeref = regex_lite::Regex::new(r#"<typeref name="([^"]*)" id="(0x[0-9a-f]+)""#).map_err(|e| e.to_string())?;
     let mut out = String::from("ghidra-rs-protos 1\n");
     let mut names = HashSet::new();
@@ -987,6 +1090,64 @@ pub fn export(ar: &Archive) -> Result<String> {
         let xml = ex.data_type(v).map_err(|e| format!("type {id}: {e}"))?;
         scan(&xml, &mut queue);
         out.push_str(&format!("type\t{}\t{}\n", &id[2..], line(&xml)));
+    }
+    Ok(out)
+}
+
+/// The prototypes Java's Apply Data Archives analyzer gives the functions of an
+/// x86:LE:64:default:gcc program (`ApplyFunctionSignatureCmd` on a function in memory), in
+/// `export`'s format, with `@PC@` for the address before the function's entry. Left out, for
+/// the caller to fail on by name: a definition whose storage or types are not ported, and a name
+/// two definitions have (ApplyFunctionDataTypesCmd.collectFunctionDefinitions applies one of two
+/// equivalent definitions and neither of two others; `isEquivalent` is not ported). The ids are
+/// those of a program that resolved every definition in table order, not Java's.
+pub fn export_elf64(ar: &Archive) -> Result<String> {
+    let mut ex = Exporter::new(ar, Target::Elf64)?;
+    // the ids of the types `xml` names
+    let ids = |xml: &str| -> Vec<String> {
+        let refs = xml.split("<typeref ").skip(1);
+        refs.filter_map(|r| Some(r.split(" id=\"0x").nth(1)?.split('"').next()?.to_string())).collect()
+    };
+    let mut given: HashMap<&str, u32> = HashMap::new();
+    for &f in &ar.function_defs {
+        *given.entry(ar.get(f)?.name.as_str()).or_insert(0) += 1;
+    }
+    let mut out = String::from("ghidra-rs-protos 1\n");
+    // id -> its `type` record and the ids that names; `None`: not ported
+    let mut types: BTreeMap<String, Option<(String, Vec<String>)>> = BTreeMap::new();
+    let mut named: HashSet<String> = HashSet::new();
+    for &f in &ar.function_defs {
+        let name = &ar.get(f)?.name;
+        if name.contains('\t') || given[name.as_str()] != 1 {
+            continue;
+        }
+        let Ok(xml) = ex.function(f) else { continue };
+        // every type the prototype names, and those they name
+        let (mut todo, mut seen) = (ids(&xml), HashSet::new());
+        let mut ported = true;
+        while let Some(id) = todo.pop().filter(|_| ported) {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let rec = types.entry(id.clone()).or_insert_with(|| {
+                let rec = u64::from_str_radix(&id, 16).ok().and_then(|v| ex.data_type(v).ok())?;
+                let named = ids(&rec);
+                Some((rec, named))
+            });
+            match rec {
+                Some((_, named)) => todo.extend(named.iter().cloned()),
+                None => ported = false,
+            }
+        }
+        if ported {
+            out.push_str(&format!("proto\t{name}\t{}\n", line(&xml)));
+            named.extend(seen);
+        }
+    }
+    for (id, rec) in types.iter().filter(|(id, _)| named.contains(*id)) {
+        if let Some((rec, _)) = rec {
+            out.push_str(&format!("type\t{id}\t{}\n", line(rec)));
+        }
     }
     Ok(out)
 }
