@@ -89,6 +89,11 @@ pub struct Func {
     pub params: Vec<(String, Id)>,
     pub varargs: bool,
     pub noreturn: bool,
+    /// the plate comment `decorateFunctionWithDWARFInfo` gives it (`None`: none); `Err` where it
+    /// is not derived: a local variable or label below the function (an `Unresolved local var`
+    /// PRE comment may go there), a body of more than one range, or another DIE at its address
+    /// (`decorateFunctionWithAlternateInfo`)
+    pub plate: std::result::Result<Option<String>, ()>,
 }
 
 /// The import's result: the program's data types and the functions with signatures.
@@ -1702,6 +1707,7 @@ impl<'a> Prog<'a> {
     fn import_functions(&mut self) -> Vec<Func> {
         let mut done: HashSet<u32> = HashSet::new();
         let mut addrs: HashSet<u64> = HashSet::new();
+        let mut dups: HashSet<u64> = HashSet::new();
         let mut funcs = Vec::new();
         for i in 0..self.dw.offsets.len() as u32 {
             if self.dw.has_ref[i as usize] {
@@ -1719,13 +1725,20 @@ impl<'a> Prog<'a> {
                 _ => continue,
             };
             // DWARFFunctionImporter.java:109-143: a function that fails is logged and skipped
-            match self.process_subprogram(&g, &mut done, &mut addrs) {
+            match self.process_subprogram(&g, &mut done, &mut addrs, &mut dups) {
                 Ok(Some(f)) => funcs.push(f),
                 Ok(None) => {}
                 Err(e) => self
                     .dw
                     .warnings
                     .push(format!("Error when processing DWARF information for DIE {:x}: {e}", self.off(g[0]))),
+            }
+        }
+        // a later DIE at a function's address may append `DWARF alternate signature: `
+        // (DWARFFunctionImporter.java:169-176, 223-235), which compares with the program's signature
+        for f in &mut funcs {
+            if dups.contains(&f.addr) {
+                f.plate = Err(());
             }
         }
         funcs
@@ -1736,6 +1749,7 @@ impl<'a> Prog<'a> {
         g: &Agg,
         done: &mut HashSet<u32>,
         addrs: &mut HashSet<u64>,
+        dups: &mut HashSet<u64>,
     ) -> Result<Option<Func>> {
         if !done.insert(g[0]) {
             return Ok(None);
@@ -1765,14 +1779,18 @@ impl<'a> Prog<'a> {
         }
         let varargs = !self.children(g, DW_TAG_UNSPECIFIED_PARAMETERS).is_empty();
         if !addrs.insert(addr) {
+            dups.insert(addr);
             self.mark_children(g[0], done);
             return Ok(None);
         }
         // processFuncChildren: only call sites start other functions; locals are not ported
-        self.func_children(g[0], done, addrs)?;
+        self.func_children(g[0], done, addrs, dups)?;
         if !self.is_exec(addr) {
             return Ok(None);
         }
+        // origFuncDef = asFunctionDefinition(true) before the fixups (DWARFFunctionImporter.java:168)
+        let orig_params: Vec<(String, Id)> =
+            params.iter().map(|(pd, ty, _)| (self.dni_name(pd).to_string(), *ty)).collect();
         // fixups: ThisCallingConvention, then ParamName (NameDeduper)
         let mut cc = None;
         if let Some((pd, _, true)) = params.first() {
@@ -1799,6 +1817,29 @@ impl<'a> Prog<'a> {
             used.insert(m.clone());
             names.push(m);
         }
+        // decorateFunctionWithDWARFInfo (DWARFFunctionImporter.java:238-323) with the default
+        // options: the original name if it changed, the original prototype if the fixups changed
+        // it, and the body ranges of a function of more than one (not written here)
+        let plate = if body.len() > 1 || self.has_below(g[0], &[DW_TAG_VARIABLE, DW_TAG_LABEL]) {
+            Err(())
+        } else {
+            let name = self.dni_name(&dni).to_string();
+            let mut plate: Option<String> = None;
+            if let Some(o) = dni.orig.as_deref().filter(|o| *o != name) {
+                append_comment(&mut plate, "DWARF original name: ", o);
+            }
+            let new_params: Vec<(String, Id)> = names.iter().cloned().zip(params.iter().map(|p| p.1)).collect();
+            let orig = self.prototype_string(None, ret, &name, &orig_params, varargs, noreturn);
+            if self.prototype_string(cc.as_deref(), ret, &name, &new_params, varargs, noreturn) != orig {
+                append_comment(&mut plate, "DWARF original prototype: ", &orig);
+            }
+            // a type renamed `.conflict` here: on Hatred Java's comment has the plain name (11 of
+            // 11), when Java names it so was not traced
+            match orig.contains(".conflict") {
+                true => Err(()),
+                false => Ok(plate),
+            }
+        };
         // createFuncSignatures: the function definition data type
         let pcp = self.parent_cp(&dni);
         let fparams =
@@ -1848,7 +1889,7 @@ impl<'a> Prog<'a> {
                 p.0 = format!("param_{}", i - autos + 1);
             }
         }
-        Ok(Some(Func { addr, name: qual.join("::"), cc, ret, params: fparams, varargs, noreturn }))
+        Ok(Some(Func { addr, name: qual.join("::"), cc, ret, params: fparams, varargs, noreturn, plate }))
     }
 
     /// `MultiSlotDualAssign.assignAddress` for x86-64-gcc.cspec's output (MultiSlotDualAssign.java:236-304:
@@ -1973,7 +2014,13 @@ impl<'a> Prog<'a> {
     /// `processFuncChildren` with `processLexicalBlock` / `processInlinedSubroutine`, in Java's
     /// order (Java recurses per nesting level; iterated here). A call site's failure fails the
     /// enclosing function, as Java's exception does.
-    fn func_children(&mut self, die: u32, done: &mut HashSet<u32>, addrs: &mut HashSet<u64>) -> Result<()> {
+    fn func_children(
+        &mut self,
+        die: u32,
+        done: &mut HashSet<u32>,
+        addrs: &mut HashSet<u64>,
+        dups: &mut HashSet<u64>,
+    ) -> Result<()> {
         let mut stack = vec![(die, self.dw.children(die).collect::<Vec<_>>().into_iter())];
         while let Some((parent, it)) = stack.last_mut() {
             let parent = *parent;
@@ -1991,13 +2038,63 @@ impl<'a> Prog<'a> {
                     // Java passes the enclosing function's aggregate without its head here
                     let g = self.agg(parent);
                     if g.len() > 1 {
-                        self.process_subprogram(&g[1..].to_vec(), done, addrs)?;
+                        self.process_subprogram(&g[1..].to_vec(), done, addrs, dups)?;
                     }
                 }
                 _ => {}
             }
         }
         Ok(())
+    }
+
+    /// Whether a DIE below `die` has one of `tags`.
+    fn has_below(&self, die: u32, tags: &[u16]) -> bool {
+        let mut stack: Vec<u32> = self.dw.children(die).collect();
+        while let Some(c) = stack.pop() {
+            if tags.contains(&self.dw.tags[c as usize]) {
+                return true;
+            }
+            stack.extend(self.dw.children(c));
+        }
+        false
+    }
+
+    /// `FunctionDefinitionDataType.getPrototypeString(true)` (FunctionDefinitionDataType.java:261-295;
+    /// no calling convention is `unknown`, not shown)
+    fn prototype_string(
+        &self,
+        cc: Option<&str>,
+        ret: Id,
+        name: &str,
+        params: &[(String, Id)],
+        varargs: bool,
+        noreturn: bool,
+    ) -> String {
+        let mut s = String::new();
+        if noreturn {
+            s.push_str("noreturn ");
+        }
+        s.push_str(&self.dtm.name(ret));
+        s.push(' ');
+        if let Some(cc) = cc {
+            s.push_str(cc);
+            s.push(' ');
+        }
+        s.push_str(name);
+        s.push('(');
+        for (i, (n, t)) in params.iter().enumerate() {
+            let _ = write!(s, "{} {n}", self.dtm.name(*t));
+            if i + 1 < params.len() || varargs {
+                s.push_str(", ");
+            }
+        }
+        if varargs {
+            s.push_str("...");
+        } else if params.is_empty() {
+            s.push_str("void");
+        }
+        s.push(')');
+        s
     }
 
     // ---- DWARFImporter.moveTypesIntoSourceFolders
@@ -2232,6 +2329,22 @@ pub fn dump(imp: &Import) -> String {
     let mut out = lines.join("\n");
     out.push('\n');
     out
+}
+
+/// `DWARFUtil.appendComment` with the separator `\n` (DWARFUtil.java:343-359, AppendCommentCmd):
+/// a blank comment or one the comment already holds is not added.
+fn append_comment(plate: &mut Option<String>, prefix: &str, comment: &str) {
+    if comment.trim().is_empty() || plate.as_deref().is_some_and(|p| p.contains(comment)) {
+        return;
+    }
+    match plate {
+        Some(p) => {
+            p.push('\n');
+            p.push_str(prefix);
+            p.push_str(comment);
+        }
+        None => *plate = Some(format!("{prefix}{comment}")),
+    }
 }
 
 fn sig(d: &Dtm, cc: Option<&str>, ret: Id, varargs: bool, noreturn: bool) -> String {

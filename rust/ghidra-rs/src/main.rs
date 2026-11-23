@@ -501,9 +501,25 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
         use object::Object;
         object::File::parse(&*data).is_ok_and(|f| f.section_by_name(".debug_info").is_some())
     };
-    let dwarf: std::collections::BTreeSet<u32> = if has_dwarf {
+    let dwarf: std::collections::BTreeMap<u32, ghidra_rs::factsout::DwarfFunc> = if has_dwarf {
         let imp = ghidra_rs::dwarf::import(&data).map_err(|e| format!("{path}: DWARF: {e}"))?;
-        imp.funcs.iter().filter_map(|f| u32::try_from(f.addr + u64::from(img.elf_adjust)).ok()).collect()
+        // Java's GCC Exception Handlers analyzer (GccExceptionAnalyzer) writes `try {` comments
+        // in the bodies of functions with a call-site table; `.eh_frame` and its tables are
+        // not read here, so with a `.gcc_except_table` no function's comments are derived
+        let eh = {
+            use object::{Object, ObjectSection};
+            object::File::parse(&*data)
+                .is_ok_and(|f| f.section_by_name(".gcc_except_table").is_some_and(|s| s.size() > 0))
+        };
+        imp.funcs
+            .into_iter()
+            .filter_map(|f| {
+                // the import adds the image base adjustment itself (programBaseAddressFixup)
+                let a = u32::try_from(f.addr).ok()?;
+                let plate = if eh { Err(()) } else { f.plate };
+                Some((a, ghidra_rs::factsout::DwarfFunc { name: f.name, plate }))
+            })
+            .collect()
     } else {
         Default::default()
     };

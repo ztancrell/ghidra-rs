@@ -6509,8 +6509,44 @@ Not ported, written as `underived ... function`, which the loader fails on:
 - a function the DWARF importer (`src/dwarf/`) gives a signature: Java's DWARF analyzer applies
   its types and parameters.
 
+The DWARF importer's plate comment of a function (branch `x64-facts`, 2026-11-22;
+`dwarf::Func::plate`, DWARFFunctionImporter.java:168-176, 223-358,
+FunctionDefinitionDataType.java:261-295, DWARFUtil.java:343-359, DWARFFunction.java:284-287,
+501-517, DWARFImportOptions.java:124-145) is written; on a GNU name in a namespace it stands
+for the demangler's (DemangledObject.java:400-420). It is `underived ... comments` where the
+function has a local variable or label DIE, a body of several ranges, another DIE at the same
+address, or a `.conflict` type in its prototype, and on every function of an image with a
+non-empty `.gcc_except_table` (GccExceptionAnalyzer's `try {` comments are not ported). On PIE
+binaries the DWARF addresses got the image base twice (the import applies
+programBaseAddressFixup itself), so their DWARF functions were written as plain `func`
+records; they are `underived` now.
+
 Prototypes from the 64-bit data-type archives (Java gives `_init` `int _init(EVP_PKEY_CTX *)`)
 are not read.
+
+The EXTERNAL block and the GOT (branch `x64-facts`, 2026-11-22), in the facts only (the
+analysis and the decompiler still see 0 in the import slots and no block there):
+- Java's EXTERNAL block: an 8-byte entry per undefined symbol in symbol-table order (a sized
+  object its size), from the first 0x1000 boundary past the highest block; a versioned name
+  (`puts@GLIBC_2.2.5`) of an entry made before is that entry's PRE comment (`comments`,
+  `user2`), another name made before is that entry (ElfProgramBuilder.java:1511-1568,
+  1685-1713, 1945-2041). The block record is writable. It matched Java's on all 14 binaries;
+- a one-byte function at each STT_FUNC entry (ElfProgramBuilder.java:2140-2152), with the
+  default model's extrapop and the no-return analyzers' mark: its prototype comes from the
+  archives, so each is `underived ... function`;
+- GLOB_DAT and JUMP_SLOT slots of an undefined symbol hold its entry plus the addend
+  (X86_64_ElfRelocationHandler.java:168-171), and every word of a `.got*` block is a pointer
+  (ElfDefaultGotPltMarkup.java:78-93, 360-415), named `PTR_<pointee>_<address>`, or
+  `PTR_<address>` where the value is no memory address (isValidPointer); a symbol of the symbol
+  tables at the slot (`_GLOBAL_OFFSET_TABLE_`) or a pointer into the middle of an entry is
+  `underived ... label`. ELF has no `extref` records any more (Java has none: the slots point
+  into memory);
+- a pointer's data record is 8 bytes on x86-64 (it was 4).
+
+Not ported: the functions Java has at the EXTERNAL entries of STT_NOTYPE symbols
+(`__gmon_start__`, `_ITM_registerTMCloneTable`, `_ITM_deregisterTMCloneTable`: 84 records of
+the 14 binaries; which analysis makes them was not traced), data at object entries, and the
+PLT thunks of PIE binaries (`puts` at the PLT).
 
 `tools/elf64-facts.sh` runs Java 12.3's plain auto-analysis with ExportFacts.java on the 14
 binaries of the small corpus (the cpp ones with `-g -gdwarf-3`) and compares with
@@ -6520,26 +6556,38 @@ space only. ELF's non-loaded sections (`.comment`, `.debug_*`, in OTHER) collide
 offsets, and their undefined bytes made the script fail on every binary with DWARF; PE programs
 have no such blocks.
 
-Totals of the 14 against Java (equal / Java's records):
+On the MacBook (2026-11-22) the script runs in an Arch Linux container (colima): the
+binaries are built there (gcc 16.2.1, clang 23.1.5, the desktop's versions) and Java is the
+Linux 12.3 DEV build (`build/dist/ghidra_12.3_DEV_20261120.zip`) on OpenJDK 25.0.5.1;
+ghidra-rs and `facts-diff.sh` run on macOS with the Java facts it left. The 14 binaries took
+Java 6 min 42 s.
 
-| record | equal / Java | rate |
-|---|---|---|
-| coretypes | 14 / 14 | 100% |
-| block | 326 / 417 | 78.2% |
-| undef | 1,034 / 1,407 | 73.5% |
-| tracked | 815 / 1,112 | 73.3% |
-| body | 771 / 1,112 | 69.3% |
-| string | 499 / 751 | 66.4% |
-| label | 4,558 / 7,315 | 62.3% |
-| override | 770 / 1,259 | 61.2% |
-| func | 113 / 1,112 | 10.2% |
-| data | 530 / 12,072 | 4.4% |
-| type | 14 / 1,107 | 1.3% |
-| comments | 0 / 646 | 0% |
-| ns | 0 / 295 | 0% |
+Totals of the 14 against Java (equal / Java's records), master 13b1dffecf and branch
+`x64-facts` on the same binaries and Java facts:
 
-ghidra-rs writes 1,501 `underived` and 286 `extref` records, which Java does not have. The
-causes:
+| record | master | x64-facts | rate |
+|---|---|---|---|
+| coretypes | 14 / 14 | 14 / 14 | 100% |
+| tracked | 815 / 1,112 | 1,057 / 1,112 | 95.1% |
+| body | 771 / 1,112 | 1,013 / 1,112 | 91.1% |
+| block | 326 / 417 | 340 / 417 | 81.5% |
+| undef | 1,034 / 1,407 | 1,034 / 1,407 | 73.5% |
+| string | 500 / 751 | 500 / 751 | 66.6% |
+| label | 4,645 / 7,315 | 4,645 / 7,315 | 63.5% |
+| override | 770 / 1,259 | 770 / 1,259 | 61.2% |
+| comments | 0 / 646 | 251 / 646 | 38.9% |
+| func | 113 / 1,112 | 177 / 1,112 | 15.9% |
+| data | 531 / 12,072 | 724 / 12,072 | 6.0% |
+| type | 14 / 1,107 | 14 / 1,107 | 1.3% |
+| ns | 0 / 295 | 0 / 295 | 0% |
+
+Superseded (2026-11-22): the desktop run's master figures (string 499, label 4,558, data 530;
+the binaries were rebuilt since). Superseded (2026-11-22, the DWARF plate comments): comments
+242 / 646 (37.5%) and 1,488 `underived`; no comments record differs from Java's.
+
+ghidra-rs writes 1,495 `underived` records (master: 1,501, and 286 `extref`), which Java
+does not have. Superseded: the causes below were master's; the EXTERNAL block's are ported
+above. The causes:
 - Java's EXTERNAL block functions: 297 func, body and tracked records ghidra-rs has as `extref`
   of GOT slots;
 - ELF markup and DWARF data types, most of the missing `data` and `type`;
@@ -6551,10 +6599,49 @@ address tables) fits. Superseded (2026-11-22): on the MacBook (32 GB) it complet
 there: `--decomp-prelude` 4.6 GB; `--functions` 10.85 GB before, 9.42 GB after constant
 propagation merges a chunk of functions at a time (the output is byte-identical); `--facts`
 11.17 GB before, 10.01 GB after, 354 s (the writer 187 s). The rest is the analysis itself
-(7.9 GB while it runs), so the desktop still lacks the memory. Hatred's facts: 180,026 func
+(7.9 GB while it runs), so the desktop still lacks the memory. Superseded (2026-11-22, branch
+`x64-facts`): the 10.01 GB and 354 s. Constant propagation now merges each chunk straight into
+the instructions (a per-byte "reached" mark), not into a copy of every reached instruction.
+`--facts` on the MacBook, `/usr/bin/time -l`: maximum RSS 9.98 GB before, 6.96 GB and 7.14 GB
+after (two runs); peak memory footprint 6.59 GB before, 4.39 GB and 4.43 GB after; the analysis
+110.2 s before, 101.1 s and 101.2 s after; total 361 s before, 357 s and 356 s after. The facts
+are byte-identical (`cmp`). Not tried on the desktop. Hatred's facts: 180,026 func
 and body records, 636,140 data, 859,434 label, 197,543 string, 475,155 undef, 35,328
 override, 407 extref. 343,951 are `underived`: 171,714 function, 166,125 comments, 6,112
-label. There is no Java comparison: Java was not run on Hatred.
+label. There is no Java comparison: Java was not run on Hatred. Superseded (2026-11-22,
+branch `x64-facts`): the counts above, and "Java was not run on Hatred".
+
+Java 12.3 on Hatred (the Linux DEV build in a Linux container on the MacBook, `-Xmx24G`, plain
+auto-analysis with ExportFacts.java): exit 0, 7,721 s, cgroup `memory.peak` 25.97 GB
+(25,969,389,568 B). ghidra-rs (MacBook, the same code as the small corpus above): 356 s,
+7.14 GB maximum RSS. `facts-diff.sh` of the two:
+
+| record | equal | different | missing | extra | Java | equal / Java |
+|---|---|---|---|---|---|---|
+| coretypes | 1 | 0 | 0 | 0 | 1 | 100% |
+| wref | 36 | 0 | 0 | 0 | 36 | 100% |
+| tracked | 180,418 | 0 | 15 | 2 | 180,433 | 100.0% |
+| body | 180,181 | 237 | 15 | 2 | 180,433 | 99.9% |
+| block | 30 | 0 | 1 | 0 | 31 | 96.8% |
+| undef | 227,281 | 878 | 7,246 | 6,655 | 235,405 | 96.5% |
+| override | 31,356 | 0 | 2,507 | 3,972 | 33,863 | 92.6% |
+| string | 196,587 | 369 | 29,362 | 400 | 226,318 | 86.9% |
+| label | 711,278 | 148,123 | 24,010 | 33 | 883,411 | 80.5% |
+| data | 492,177 | 84,988 | 1,499,157 | 55,279 | 2,076,322 | 23.7% |
+| func | 2,657 | 177,761 | 15 | 2 | 180,433 | 1.5% |
+| comments | 345 | 0 | 148,608 | 0 | 148,953 | 0.2% |
+| type | 1 | 0 | 38,392 | 0 | 38,393 | 0.0% |
+| ns | 0 | 0 | 44,952 | 0 | 44,952 | 0% |
+
+ghidra-rs writes 351,303 `underived` records. Known limits, not fixed:
+- 6,209 `func` records differ from Java's by an extra stack local `local_8` (undefined8 at
+  stack -8) and are not marked `underived`: a silent difference;
+- 75 of Java's `comments` records have no record of ghidra-rs, derived or `underived`; one
+  cause is a function ghidra-rs does not find (0x3582f90);
+- `func_children` drops the DWARF function process_subprogram makes for a call site; it may be
+  silent;
+- not ported: DWARF and demangled function signatures, parameter storage, namespaces (`ns`
+  records).
 
 ## Speed
 
