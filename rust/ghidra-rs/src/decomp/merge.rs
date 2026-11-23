@@ -12,9 +12,10 @@
 //! `groupWith`; the `VariablePiece`s are in variable.rs), which the merge tests, `collectInputs`,
 //! `inflateTest` and `markInternalCopies` read.
 //!
-//! Not ported (each fails loudly or cannot arise): the groups of proto-partial PIECEs
-//! (`groupPartials`; superseded: "`VariablePiece` groups", all of them, before print slice 5),
-//! symbols other than the
+//! The CONCAT trees of proto-partial PIECEs (`PieceNode`, `groupPartials`) are grouped the same
+//! way. (Superseded: "Not ported: the groups of proto-partial PIECEs".)
+//!
+//! Not ported (each fails loudly or cannot arise): symbols other than the
 //! locked parameters of the function (`high_symbol`; multi-entry symbols, `mergeMultiEntry` has
 //! none), union data-types needing resolution, join padding
 //! records (`markPurePaddingCopies` has none).
@@ -160,10 +161,14 @@ fn test_required(fd: &mut Funcdata, hout: HighId, hin: HighId) -> Result<bool> {
     if hin == hout {
         return Ok(true);
     }
+    // the type of `hout` is asked for only when `hin` is locked (merge.cc:107-109), which
+    // matters to the cache of a partial struct's stripped form (`h_type`)
     let (tin, lin) = h_type(fd, hin);
-    let (tout, lout) = h_type(fd, hout);
-    if lin && lout && tin != tout {
-        return Ok(false);
+    if lin {
+        let (tout, lout) = h_type(fd, hout);
+        if lout && tin != tout {
+            return Ok(false);
+        }
     }
     let tied = |fd: &Funcdata, h| h_is(fd, h, VnFlags::ADDRTIED);
     let (pin, pout) = (h_is(fd, hin, VnFlags::PERSIST), h_is(fd, hout, VnFlags::PERSIST));
@@ -179,6 +184,18 @@ fn test_required(fd: &mut Funcdata, hout: HighId, hin: HighId) -> Result<bool> {
                 return Ok(false);
             }
         } else if h_extra_out(fd, x) {
+            return Ok(false);
+        }
+    }
+    // a piece being concatenated merges with nothing tied to storage (merge.cc:136-146)
+    let (fin, fout) = (super::variable::hflags(fd, hin), super::variable::hflags(fd, hout));
+    for (a, b) in [(fin, fout), (fout, fin)] {
+        if a.has(VnFlags::PROTO_PARTIAL)
+            && (b.has(VnFlags::PROTO_PARTIAL)
+                || b.has(VnFlags::INPUT)
+                || b.has(VnFlags::ADDRTIED)
+                || b.has(VnFlags::PERSIST))
+        {
             return Ok(false);
         }
     }
@@ -261,7 +278,12 @@ fn test_must(fd: &Funcdata, vn: VarnodeId) -> Result<()> {
 
 /// Port of `Merge::mergeTestBasic`.
 fn test_basic(fd: &Funcdata, vn: Option<VarnodeId>) -> bool {
-    vn.is_some_and(|vn| vn_has_cover(fd, vn) && !vn_implied(fd, vn) && !fd.vn(vn).has(VnFlags::SPACEBASE))
+    vn.is_some_and(|vn| {
+        vn_has_cover(fd, vn)
+            && !vn_implied(fd, vn)
+            && !fd.vn(vn).has(VnFlags::PROTO_PARTIAL) // merge.cc:261
+            && !fd.vn(vn).has(VnFlags::SPACEBASE)
+    })
 }
 
 /// Port of `Merge::merge`: merge unless the covers intersect.
@@ -1394,10 +1416,73 @@ pub(crate) fn mark_implied_action(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
     Ok(count)
 }
 
-/// `PieceNode::findRoot`: the PIECE output this address-tied varnode is the piece of, by its
-/// storage, upward.
-fn piece_root(fd: &Funcdata, mut vn: VarnodeId) -> Result<VarnodeId> {
-    while fd.vn(vn).has(VnFlags::ADDRTIED) {
+/// Port of `PieceNode` (op.hh): a varnode of a CONCAT tree as the input `slot` of the PIECE
+/// `op`, its byte offset in the data-type of the root and whether it is a leaf.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PieceNode {
+    pub(crate) op: OpId,
+    pub(crate) slot: usize,
+    pub(crate) type_offset: i32,
+    pub(crate) leaf: bool,
+}
+
+/// `Address::operator+` in `space`: the offset wrapped to the space.
+pub(crate) fn addr_add(arch: &Arch, space: Space, offset: u64, add: i64) -> u64 {
+    offset.wrapping_add(add as u64) & super::heritage::space_mask(arch, space)
+}
+
+/// Port of `PieceNode::isLeaf` (op.cc:843-859): `vn`, at `rel_offset` bytes into the value of
+/// `root`, ends the CONCAT tree.
+fn piece_is_leaf(fd: &Funcdata, arch: &Arch, root: VarnodeId, vn: VarnodeId, rel_offset: i32) -> bool {
+    let v = fd.vn(vn);
+    if v.has(VnFlags::MAPPED) && fd.mapentry.get(&root) != fd.mapentry.get(&vn) {
+        return true;
+    }
+    if !v.def.is_some_and(|d| fd.op(d).opc == Opcode::Piece) || v.descend.len() != 1 {
+        return true;
+    }
+    if v.has(VnFlags::ADDRTIED) {
+        let r = fd.vn(root);
+        // the address is not renormalized: inside a join record it is no varnode's
+        let at = match r.space {
+            Space::Join if rel_offset != 0 => return true,
+            _ => addr_add(arch, r.space, r.offset, i64::from(rel_offset)),
+        };
+        if (v.space, v.offset) != (r.space, at) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Port of `PieceNode::gatherPieces` (op.cc:907-918): the CONCAT tree under the PIECE `op`,
+/// each varnode before the ones under it, the most significant input (slot 0) first. Little
+/// endian: slot 0 sits above slot 1.
+pub(crate) fn gather_pieces(
+    fd: &Funcdata,
+    arch: &Arch,
+    stack: &mut Vec<PieceNode>,
+    root: VarnodeId,
+    op: OpId,
+    base_offset: i32,
+    root_offset: i32,
+) -> Result<()> {
+    for slot in 0..2 {
+        let vn = fd.input(op, slot)?;
+        let offset = if slot == 0 { base_offset + fd.vn(fd.input(op, 1)?).size as i32 } else { base_offset };
+        let leaf = piece_is_leaf(fd, arch, root, vn, offset - root_offset);
+        stack.push(PieceNode { op, slot, type_offset: offset, leaf });
+        if let (false, Some(def)) = (leaf, fd.vn(vn).def) {
+            gather_pieces(fd, arch, stack, root, def, offset, root_offset)?;
+        }
+    }
+    Ok(())
+}
+
+/// `PieceNode::findRoot` (op.cc:866-893): the PIECE output this proto-partial or address-tied
+/// varnode is the piece of, by its storage, upward.
+pub(crate) fn piece_root(fd: &Funcdata, mut vn: VarnodeId) -> Result<VarnodeId> {
+    while fd.vn(vn).has(VnFlags::PROTO_PARTIAL) || fd.vn(vn).has(VnFlags::ADDRTIED) {
         let mut piece: Option<OpId> = None;
         for &op in fd.vn(vn).descend.iter() {
             let o = fd.op(op);
@@ -1407,15 +1492,14 @@ fn piece_root(fd: &Funcdata, mut vn: VarnodeId) -> Result<VarnodeId> {
             let Some(slot) = fd.slot_of(op, vn) else { continue };
             let Some(out) = o.out else { continue };
             let ov = fd.vn(out);
-            if ov.space == Space::Join {
-                return err("PieceNode::findRoot: join address, not ported");
-            }
             // little endian: the most significant piece (slot 0) sits above the other
-            let mut off = ov.offset;
-            if slot == 0 {
-                off = off.wrapping_add(u64::from(fd.vn(o.ins[1]).size));
-            }
-            if (ov.space, off) == (fd.vn(vn).space, fd.vn(vn).offset) {
+            let add = if slot == 0 { u64::from(fd.vn(o.ins[1]).size) } else { 0 };
+            let at = match ov.space {
+                // Address::renormalize: the piece of the join, or the pieces, holding the range
+                Space::Join => fd.find_join_range(ov.offset, add as i64, fd.vn(vn).size)?,
+                space => Some((space, ov.offset.wrapping_add(add))),
+            };
+            if at == Some((fd.vn(vn).space, fd.vn(vn).offset)) {
                 piece = match piece {
                     Some(p) if compare_order(fd, op, p) == 0 => Some(p),
                     _ => Some(op),
@@ -1489,14 +1573,22 @@ fn base_explicit(fd: &Funcdata, vn: VarnodeId, mut maxref: usize) -> Result<i32>
                     return Ok(-1);
                 }
             }
-            // proto-partial roots (`isPartialRoot`) are never made here
-            Opcode::Piece if piece_root(fd, vn)? == vn => return Ok(-1),
-            Opcode::Piece => {}
+            Opcode::Piece => {
+                // a piece of a structure being put together is explicit; the PIECEs inside the
+                // tree are hidden (coreaction.cc:3204-3212)
+                let root = piece_root(fd, vn)?;
+                if root == vn || fd.vn(root).def.is_some_and(|d| fd.op(d).flags.has(OpFlags::PARTIAL_ROOT)) {
+                    return Ok(-1);
+                }
+            }
             _ => return Ok(-1),
         }
     } else if v.has(VnFlags::MAPPED) {
         // mapped without being address-tied (`syncVarnodesWithSymbols` sets the one, never the
         // other): explicit
+        return Ok(-1);
+    } else if v.has(VnFlags::PROTO_PARTIAL) || (d.opc == Opcode::Piece && fd.vn(d.ins[0]).has(VnFlags::PROTO_PARTIAL)) {
+        // a piece of a structure, and the base of the PIECEs building one (coreaction.cc:3222-3230)
         return Ok(-1);
     }
     if v.descend.is_empty() {
@@ -1707,24 +1799,63 @@ pub(crate) fn assign_high_action(fd: &mut Funcdata, arch: &Arch) -> Result<i32> 
 }
 
 /// `ActionMergeRequired`: `mergeAddrTied`, `groupPartials`, `mergeMarker`.
-pub(crate) fn merge_required(fd: &mut Funcdata, _: &Arch) -> Result<i32> {
+pub(crate) fn merge_required(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     merge_addr_tied(fd)?;
-    group_partials(fd)?;
+    group_partials(fd, arch)?;
     merge_marker(fd)?;
     Ok(0)
 }
 
-/// `Merge::registerProtoPartialRoot`: for the rules that make proto-partial PIECEs.
-#[allow(dead_code)] // ponytail: its callers, SplitDatatype::buildOutConcats (RuleSplitCopy/Load/Store) and the tree rewrite of RulePieceStructure (rules/typecleanup.rs, fails loudly), are not ported
+/// `Merge::registerProtoPartialRoot`: the PIECE defining the root of a CONCAT tree of
+/// proto-partial varnodes (`RulePieceStructure`; `SplitDatatype::buildOutConcats` is not ported).
 pub(crate) fn register_proto_partial_root(fd: &mut Funcdata, piece: OpId) {
     fd.highs.proto_partial.push(piece);
 }
 
-/// `Merge::groupPartials`: grouping the pieces needs `VariablePiece`, not ported, so a live
-/// registered root fails loudly.
-fn group_partials(fd: &Funcdata) -> Result<()> {
-    if fd.highs.proto_partial.iter().any(|&op| !fd.op(op).is_dead()) {
-        return err("groupPartials: proto-partial pieces need VariablePiece, not ported");
+/// Port of `Merge::groupPartials` (merge.cc:967-976).
+fn group_partials(fd: &mut Funcdata, arch: &Arch) -> Result<()> {
+    for op in fd.highs.proto_partial.clone() {
+        if fd.op(op).is_dead() || !fd.op(op).flags.has(OpFlags::PARTIAL_ROOT) {
+            continue;
+        }
+        let root = out_of(fd, op)?;
+        group_partial_root(fd, arch, root)?;
+    }
+    Ok(())
+}
+
+/// Port of `Merge::groupPartialRoot` (merge.cc:1375-1405): the varnodes of the CONCAT tree
+/// under the root `vn` become overlapping pieces of one variable, unless one of them lost its
+/// mark or merged with something; then the whole tree is unmarked.
+fn group_partial_root(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId) -> Result<()> {
+    let h = high(fd, vn)?;
+    let Some(def) = fd.vn(vn).def.filter(|_| fd.highs.get(h).inst.len() == 1) else { return Ok(()) };
+    // SymbolEntry::getOffset: the offset of a piece of a join symbol
+    let base_offset = match fd.mapentry.get(&vn) {
+        Some(&(sym, e)) => fd.symtab.symbol(sym).entries.get(e).and_then(|e| e.piece).unwrap_or(0) as i32,
+        None => 0,
+    };
+    let mut pieces = Vec::new();
+    gather_pieces(fd, arch, &mut pieces, vn, def, base_offset, base_offset)?;
+    let mut nodes = Vec::new();
+    for p in &pieces {
+        nodes.push((fd.input(p.op, p.slot)?, p.type_offset));
+    }
+    let mut throw_out = false;
+    for &(node, _) in &nodes {
+        let nh = high(fd, node)?;
+        if !fd.vn(node).has(VnFlags::PROTO_PARTIAL) || fd.highs.get(nh).inst.len() != 1 {
+            throw_out = true;
+            break;
+        }
+    }
+    for (node, off) in nodes {
+        if throw_out {
+            fd.vn_clear(node, VnFlags::PROTO_PARTIAL);
+        } else {
+            let nh = high(fd, node)?;
+            group_with(fd, nh, off - base_offset, h)?;
+        }
     }
     Ok(())
 }

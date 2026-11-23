@@ -192,17 +192,18 @@ pub(crate) fn cast_standard(
     }
     let cm = t.meta(curbase);
     match t.meta(reqbase) {
-        Meta::Unknown => return None,
+        // partial structs are stripped in the end: as undefined (cast.cc:340-342)
+        Meta::Unknown | Meta::PartialStruct => return None,
         m @ (Meta::Uint | Meta::Int) => {
             if !care_uint_int {
-                if matches!(cm, Meta::Unknown | Meta::Int | Meta::Uint | Meta::Bool) {
+                if matches!(cm, Meta::Unknown | Meta::Int | Meta::Uint | Meta::Bool | Meta::PartialStruct) {
                     return None;
                 }
             } else {
                 if cm == m || cm == Meta::Bool {
                     return None;
                 }
-                if isptr && cm == Meta::Unknown {
+                if isptr && matches!(cm, Meta::Unknown | Meta::PartialStruct) {
                     return None;
                 }
             }
@@ -277,13 +278,16 @@ fn mark_explicit_unsigned(fd: &mut Funcdata, op: OpId, slot: usize) -> Result<bo
         return Ok(false);
     }
     let dt = facing(fd, vn)?;
-    if !matches!(fd.types.meta(dt), Meta::Uint | Meta::Unknown) || fd.types.is_char_print(dt) || fd.types.is_enum(dt) {
+    if !matches!(fd.types.meta(dt), Meta::Uint | Meta::Unknown | Meta::PartialStruct)
+        || fd.types.is_char_print(dt)
+        || fd.types.is_enum(dt)
+    {
         return Ok(false);
     }
     if fd.op(op).ins.len() == 2 && !first_only {
         let other = input(fd, op, 1 - slot)?;
         let ot = facing(fd, other)?;
-        if matches!(fd.types.meta(ot), Meta::Uint | Meta::Unknown) {
+        if matches!(fd.types.meta(ot), Meta::Uint | Meta::Unknown | Meta::PartialStruct) {
             return Ok(false);
         }
     }
@@ -314,7 +318,7 @@ fn mark_explicit_long_size(fd: &mut Funcdata, op: OpId, slot: usize) -> Result<b
     }
     let ht = high_type(fd, vn)?;
     let meta = fd.types.meta(ht);
-    if !matches!(meta, Meta::Uint | Meta::Int | Meta::Unknown) {
+    if !matches!(meta, Meta::Uint | Meta::Int | Meta::Unknown | Meta::PartialStruct) {
         return Ok(false);
     }
     let limit = if meta == Meta::Int && signbit_negative(off, size) {
@@ -334,7 +338,7 @@ fn mark_explicit_long_size(fd: &mut Funcdata, op: OpId, slot: usize) -> Result<b
 fn local_extension_type(fd: &mut Funcdata, vn: VarnodeId) -> Result<i32> {
     let ft = facing(fd, vn)?;
     let natural = match fd.types.meta(ft) {
-        Meta::Uint | Meta::Bool | Meta::Unknown => UNSIGNED_EXTENSION,
+        Meta::Uint | Meta::Bool | Meta::Unknown | Meta::PartialStruct => UNSIGNED_EXTENSION,
         Meta::Int => SIGNED_EXTENSION,
         _ => return Ok(UNKNOWN_PROMOTION),
     };
@@ -988,13 +992,13 @@ pub(crate) fn is_extension_cast_implied(fd: &mut Funcdata, op: OpId, read_op: Op
 }
 
 /// Port of `CastStrategyC::isSubpieceCast`: a SUBPIECE of the low bytes that prints as a cast
-/// (the partial struct and union metatypes are not ported).
+/// (the partial union metatype is not ported).
 pub(crate) fn is_subpiece_cast(t: &TypeFactory, outtype: TypeId, intype: TypeId, offset: u64) -> bool {
     if offset != 0 {
         return false;
     }
     let inmeta = t.meta(intype);
-    if !matches!(inmeta, Meta::Int | Meta::Uint | Meta::Unknown | Meta::Ptr) {
+    if !matches!(inmeta, Meta::Int | Meta::Uint | Meta::Unknown | Meta::Ptr | Meta::PartialStruct) {
         return false;
     }
     let outmeta = t.meta(outtype);

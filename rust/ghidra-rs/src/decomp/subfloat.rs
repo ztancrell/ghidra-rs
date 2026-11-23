@@ -296,8 +296,9 @@ impl<'a> SubfloatFlow<'a> {
             return Ok(None);
         }
         // a locked varnode without a recorded type has the default one, of its own size
-        // (no partial-structure metatype is ported)
-        if v.has(VnFlags::TYPELOCK) && v.ty.map_or(v.size, |t| self.fd.types.size(t)) != self.precision {
+        if super::infertypes::locked_whole(self.fd, vn)
+            && v.ty.map_or(v.size, |t| self.fd.types.size(t)) != self.precision
+        {
             return Ok(None);
         }
         if v.is_input() && v.size != self.precision {
