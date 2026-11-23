@@ -180,6 +180,13 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   (`tools/decomp-ref.patch`) and ghidra-rs's copy of its read-only marking removed
   (`rust/README.md`, "The prelude path follows Java"). The PE prelude keeps no overrides for
   now: adding them changes every mercs2 baseline, which waits for the user.
+  Superseded (2026-11-23, branch `pe-overrides`): the PE prelude writes them too
+  (`console::prelude`), see the next entry.
+- 2026-11-23: The PE prelude carries the CALL_RETURN flow overrides as the ELF prelude does
+  (`factsout::call_returns`, the rule `--facts` writes its `override` records by). User's
+  decision. The rule is ghidra-rs's own on PE as on ELF, not a port of Java's set: against
+  Java's mercs2 facts `facts-diff.sh` measures the difference (`rust/README.md`, "The PE
+  prelude gets the flow overrides"). The mercs2 baselines move with the prelude.
 - 2026-11-23: A function whose name Java's data-type archive (`generic_clib_64`) has a
   definition for is written `underived` in the ELF facts, as the EXTERNAL block's functions
   are. The archive's prototypes are not ported now; only its names are read, to know which

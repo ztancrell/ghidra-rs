@@ -1158,8 +1158,9 @@ rust/tools/decomp-diff.sh --script <file>      # one script on both engines, ful
   of decoding the bound address in the slot, which made 0x40a110 fail), and `map function` for
   every function with its FID or export name. For mercs2: 30,262 `map function` lines (1,022 of
   them import slots), 1,022 `map externalref`.
-  For an ELF also `override flow <address> callreturn` after a function's `map function`, for
-  its CALL_RETURN flow overrides ("The prelude path follows Java" below).
+  Also `override flow <address> callreturn` after a function's `map function`, for its
+  CALL_RETURN flow overrides ("The prelude path follows Java" below; ELF first, PE since
+  branch `pe-overrides`: 3,369 such lines for mercs2).
 - `decompile -i` reads `load file`, `source`, `map function`, `map externalref`, `readonly`,
   `option`, `fixup apply`, `load function`, `load addr`, `break start`, `decompile`,
   `print raw`, `continue` and `quit`, and echoes them as `decomp_dbg -i` does. `decompile`
@@ -6781,7 +6782,9 @@ done:
 
 Limits of the overrides:
 - the PE prelude has none. Java has them on PE too, but they would change the mercs2 prelude
-  (its `cksum` is a `bars-queue.sh` check) and every baseline built on it; not done here;
+  (its `cksum` is a `bars-queue.sh` check) and every baseline built on it; not done here.
+  Superseded (branch `pe-overrides`): the PE prelude writes them, see "The PE prelude gets
+  the flow overrides" below;
 - they are ghidra-rs's own, not Java's: on Hatred `facts-diff.sh` has 31,356 `override`
   records equal, 2,507 only Java has and 3,972 only ghidra-rs has (0x16a0590, a function of
   one jump, is one);
@@ -6818,6 +6821,63 @@ prelude):
 Not checked: Java's own C for these functions (the facts path still fails loudly on a function
 in a namespace); the desktop's reference, which must be rebuilt (`tools/decomp-ref.sh`) before
 its next `decomp-diff.sh` or `bars-queue.sh` run, since the patch changed.
+
+#### The PE prelude gets the flow overrides (branch `pe-overrides`, 2026-11-23)
+
+The user's decision: the PE prelude writes the CALL_RETURN flow overrides as the ELF prelude
+does. `console::prelude` no longer asks for an ELF: after each function's `map function` it
+writes `override flow <address> callreturn` for the instructions of its body that
+`factsout::call_returns` gives. The mercs2 prelude: 35,185 lines (was 31,816), 3,369 of them
+overrides; without the `override` lines it is the old file, byte for byte. Superseded: "the
+mercs2 prelude is byte-identical (`cksum` 805048874 ...)" above, which holds for the prelude
+before this branch.
+
+The rule is ghidra-rs's own on PE too, not Java's set. Measured against the facts of the Java
+project (`$GHIDRA_REF/mercs2.facts`, Java 12.3 after the mercs2 pipeline, 3,365 `override`
+records, all CALL_RETURN):
+
+| ghidra-rs | records | equal | only Java | only ghidra-rs |
+|---|---|---|---|---|
+| `analyze --facts`, plain discovery (`tools/facts-own.sh`, `facts-diff.sh`) | 4,556 | 2,666 | 699 | 1,890 |
+| the prelude's lines (`analyze --decomp-prelude`, by address) | 3,369 | 1,650 | 1,715 | 1,719 |
+
+The two rows differ because `--facts` runs discovery with Create Address Tables and constant
+propagation and the prelude does not, and the prelude writes only the instructions of a
+function's body. What makes each record only Java's or only ghidra-rs's was not traced here
+(the function set and the no-return set both differ, see "The comparison"). The difference is
+not silent in the decompile checks: both engines read the same prelude. It is one more way the
+prelude path differs from Java's own decompile, which the facts path measures.
+
+Checks (desktop, the reference rebuilt in the worktree, old and new prelude from the same
+build):
+- `CORPORA=m8 tools/bars.sh`: 57 of 57 lines the same with the old and the new prelude, and
+  equal to the M8 lines of baseline `x64-13b1dffecf`; silent 0. One M8 function has an override
+  (0x9eec5e, at 0x9eec68);
+- M500: 39 of the 500 functions get an override line (39 lines; 21 of the addresses are
+  Java's too). An override belongs to its function (`Override` of the `Funcdata` in the C++,
+  `Console::call_returns` by entry here), so only these 39 read a different script. All 57
+  M500 checks on the 39 with the new prelude (`TIMEOUT=30`): 39 / 39 identical in each,
+  loud 0, silent 0, timeout 0. With the old prelude, on the 38 without 0x4c48d0: 38 / 38 in
+  54 checks, 35 / 38 in `r5slock` and `r5dtlocksv` (loud 3: 0x48c986, 0x608500, 0x7874d0) and
+  36 / 38 in `svlock` (loud 2: 0x48c986, 0x608500), all "a piece of a locked stack
+  parameter", a path not ported; with the override flow no longer runs past the overridden
+  instruction into that path, so the three checks gain these functions. 0x4c48d0 is the function the reference did not
+  finish in 120 s (`cs-r`, old prelude); with the overrides both engines finish it;
+- full M500 checks run with the new prelude (baseline `x64-13b1dffecf` -> now):
+  `pcd` 499 / 499, reference finished 499 / 500 -> 500 / 500 of 500; `r5dtlocksv` and
+  `r5slock` 469 / 499 (loud 30) -> 472 / 499 (loud 27, all "a piece of a locked stack
+  parameter"; the reference does not finish 0x6b21e0 in 120 s); silent 0, timeout 0 in each.
+  The three agree with the baseline plus the change on the 39 functions;
+- small ELF decompile corpus (`tools/elf64-decomp.sh`), 815 functions: identical 790, loud 23
+  (16 CONCAT tree, 5 type propagation, 1 partial struct, 1 jump table through a CALLOTHER),
+  silent 0, the reference ran 813: unchanged;
+- `cargo test --release` 203 passed, `cargo clippy --all-targets -- -D warnings` and
+  `cargo fmt --check` clean.
+
+Not run: the other 53 M500 checks in full (only their 39 functions with an override, above),
+the r5d-adc, switch and simple corpora, the Mac, Java's own C. Every baseline of a mercs2
+check moves with the prelude; `rust/target/baselines/pe-overrides-<hash>.summary` holds the
+new M8 lines.
 
 #### Archive prototypes are loud (branch `fix-prelude`, 2026-11-23)
 
