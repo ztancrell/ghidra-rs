@@ -757,8 +757,16 @@ pub struct Inputs<'a> {
     pub cspec: &'a str,
     /// the trigram model of Ghidra's ASCII Strings analyzer; without it that analyzer does not run
     pub strings: Option<&'a crate::strings::Model>,
-    /// ELF: the entries of the functions the DWARF importer (`crate::dwarf`) gives a signature
-    pub dwarf: &'a BTreeSet<u32>,
+    /// ELF: the functions the DWARF importer (`crate::dwarf`) gives a signature, by entry
+    pub dwarf: &'a BTreeMap<u32, DwarfFunc>,
+}
+
+/// What the facts take of a function the DWARF importer gives a signature.
+pub struct DwarfFunc {
+    /// its name with its namespaces (`a::b::f`)
+    pub name: String,
+    /// its plate comment (`crate::dwarf::Func::plate`)
+    pub plate: Result<Option<String>, ()>,
 }
 
 /// The bytes a call pops besides the return address, as Ghidra's stack analysis has them at a
@@ -955,16 +963,25 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         let cdecl = func.model == Some("__cdecl");
         // a function the DWARF importer gives a signature: Java's DWARF analyzer applies its types
         // and parameters, which are not written here
-        let dwarf = dwarf.contains(&f);
-        if dwarf || func.underived || (func.import.is_some() && !cdecl && !ex.protos.by_name.contains_key(&func.name)) {
+        let dw = dwarf.get(&f);
+        if dw.is_some()
+            || func.underived
+            || (func.import.is_some() && !cdecl && !ex.protos.by_name.contains_key(&func.name))
+        {
             ex.underived.insert((f, Underived::Function));
         }
-        // Function ID's plate comment, then the Demangler analyzer's; on ELF the GNU names'
-        // plate comments are not written (their functions are not derived)
-        let plate = match img.elf64 {
-            true if func.underived => Err(()),
-            true => Ok(None),
-            false => plate_comment(
+        // Function ID's plate comment, then the Demangler analyzer's; on ELF the DWARF importer's
+        // (it runs first). A GNU name's plate comment is not written: the demangler adds one
+        // (DemangledObject.applyTo, applyPlateCommentOnly) unless a symbol of its name in a
+        // namespace is at the address (isAlreadyDemangled, DemangledObject.java:400-420), as
+        // the DWARF importer's of a function in a namespace
+        let plate = match (img.elf64, dw) {
+            (true, Some(d)) if !func.underived || d.name.rsplit_once("::").is_some_and(|(_, n)| n == func.name) => {
+                d.plate.clone()
+            }
+            (true, _) if func.underived => Err(()),
+            (true, _) => Ok(None),
+            (false, _) => plate_comment(
                 fid.get(&f).map(|a| &a.comment),
                 exports.get(&f).copied().or(fid.get(&f).map(|a| a.name.as_str())),
             ),
