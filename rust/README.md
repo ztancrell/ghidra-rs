@@ -98,6 +98,8 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
 - `tools/decomp-diff.sh`: runs a corpus on both decompilers and compares; `tools/decomp-show.sh`,
   `tools/decomp-rank.sh`, `tools/decomp-bisect.sh`: the S2 debugging tools (verbose diff,
   easy-first order, first differing step; see "Debugging tools").
+- `tools/hatred-java-run.sh`: Java 12.3 on Hatred in one headless run, the facts and the C of a
+  function list ("Java's C of Hatred, for the full decompile comparison").
 - `tools/ghidra-diff.sh`, `tools/ghidra/DecompileRef.java`: the stage S10 check, `print C` against
   the C of Java Ghidra (see "Stage S10").
 - `tools/ghidra-facts.sh`, `tools/ghidra/ExportFacts.java`: the facts of the Java project for
@@ -6847,6 +6849,51 @@ none `underived`:
 - `_start` (`processEntry`).
 Also not covered: a second name of a function. `Image::elf_funcs` keeps one name per entry, so
 an alias only Java sees can still match the archive.
+
+#### Java's C of Hatred, for the full decompile comparison (branch `hatred-java-run`, 2026-11-23)
+
+`tools/hatred-java-run.sh [<list>]` is the Java side: one headless run of Ghidra 12.3 that
+imports Hatred, auto-analyzes it, writes the facts (`ExportFacts.java`, as before) and Java's C
+of every function of a list (`DecompileRef.java`), in the Linux container on the MacBook. The
+project is kept (docker volume `hatred-java2`), so a later run with another list, or after a
+failed script, skips the import and the analysis (`-process -noanalysis -readOnly`) and captures only
+the addresses without a file. The script's header lists its variables and output files.
+`DecompileRef.java` now also takes `@<file>` (a file of addresses) and `all` (every function
+Java has), adds one line per function to `<output directory>.status` (`ok`, `failed`,
+`timeout`, `nofunc`, and the milliseconds) and prints a progress line every 100 functions; a
+result is written when its function is done, none is held. Its decompiler calls are unchanged
+(no options sent, 60 s), so the C is that of `ghidra-diff.sh`'s Java side.
+
+The run, on the MacBook (docker reachable: `colima start`), and the comparison with ghidra-rs,
+which is `ghidra-diff.sh` with the run's output directory as `GHIDRA_REF` (every address of
+the list has a file there, so it starts no Java) and Java's facts as `FACTS`:
+
+```
+PATH=/usr/local/bin:$PATH caffeinate -i rust/tools/hatred-java-run.sh <list>
+H=~/ghidra-rs/rust/target/hatred-java2
+GHIDRA_REF=$H BIN=~/hatred/Hatred-Linux-Shipping FACTS=$H/Hatred-Linux-Shipping.java.facts \
+    PRELUDE=<Hatred's prelude> OUT=<directory> rust/tools/ghidra-diff.sh <list>
+```
+
+`<list>` is the same file on both sides (its name without `.txt` names `java/<list>/`). The
+summary line and `<list>.miss` are `ghidra-diff.sh`'s: identical, loud, silent, and `java
+failed` for a function Java did not finish. `PRELUDE` must be set: `ghidra-diff.sh` writes a
+missing prelude at its default path, which is mercs2's.
+
+Checked on the desktop without the container (`DOCKER=0`, Ghidra 12.3 of
+`rust/target/java123`), on the small corpus's `t1` (non-PIE): the import run with `all` wrote
+the facts and 32 functions (26 s); a second run with the 22 functions the prelude maps with
+code took the kept project (13 s, 22 `ok`) and a third had nothing to do. The 22 files are
+byte-identical (`cmp`) to those of the import run and to those of master's `DecompileRef.java`
+given the 22 addresses on the same project. `ghidra-diff.sh` on them: java finished 22 / 22,
+identical 12 (loud 10, silent 0). An address without a function is `nofunc` in the status
+file and `java failed` in `ghidra-diff.sh`. Not run: the container path (colima was stopped;
+on the MacBook the script was run only up to its docker check, bash 3.2), a timeout or a
+failed function, and Hatred itself, neither the Java run nor `ghidra-diff.sh` with its 1.1 GB
+facts (one `load facts` per function). The last Hatred run (import, analysis and facts) took
+7,721 s and 26.0 GB; the decompile step adds to that, by how much is not measured. No function
+list is in the repository: the list is whatever the ghidra-rs Hatred run used.
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The
