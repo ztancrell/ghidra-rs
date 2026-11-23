@@ -124,6 +124,8 @@ impl VnFlags {
     pub(crate) const MAPPED: VnFlags = VnFlags(1 << 32);
     /// `nolocalalias`: no pointer into the stack can reach the varnode (`ScopeLocal::markUnaliased`)
     pub(crate) const NOLOCALALIAS: VnFlags = VnFlags(1 << 33);
+    /// `proto_partial`: the varnode is being PIECEd together into a larger (unmapped) structure
+    pub(crate) const PROTO_PARTIAL: VnFlags = VnFlags(1 << 34);
 
     /// both sets of flags
     pub(crate) const fn with(self, f: VnFlags) -> VnFlags {

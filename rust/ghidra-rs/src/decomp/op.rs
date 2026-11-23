@@ -60,6 +60,8 @@ impl OpFlags {
     pub(crate) const ALIAS_UPDATE: OpFlags = OpFlags(1 << 21);
     /// `no_indirect_collapse`: an INDIRECT `opCollapseIndirectsForAlias` keeps (`protectSwitchPaths`)
     pub(crate) const NO_INDIRECT_COLLAPSE: OpFlags = OpFlags(1 << 22);
+    /// `concat_root` (`isPartialRoot`): the output is the root of a CONCAT tree
+    pub(crate) const PARTIAL_ROOT: OpFlags = OpFlags(1 << 23);
 
     pub(crate) fn has(self, f: OpFlags) -> bool {
         self.0 & f.0 != 0

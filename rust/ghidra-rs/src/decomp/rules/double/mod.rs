@@ -114,7 +114,7 @@ fn primitive_whole(fd: &Funcdata, ty: super::super::types::TypeId) -> Result<boo
     use super::super::types::Meta;
     match fd.types.meta(ty) {
         Meta::Array | Meta::Struct => err("isPrimitiveWhole of a struct or array not implemented in ghidra-rs yet"),
-        Meta::Union => Ok(false),
+        Meta::Union | Meta::PartialStruct => Ok(false),
         _ => Ok(true),
     }
 }

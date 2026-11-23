@@ -6,7 +6,8 @@
 //! console option here). Each of these fails with an error that names it:
 //! - a data-type that needs resolution (`getTypeReadFacing`: unionresolve.cc is not ported). So
 //!   the `ResolveCache` of the C++ is always empty here and left out;
-//! - a piece of a structure or array (`TypePartialStruct`, from `getExactPiece`);
+//! - a piece of a structure (`TypePartialStruct`, from `getExactPiece`; a piece of an array is
+//!   ported, superseded: "a piece of a structure or array");
 //! - the CONCAT of the split outputs (`buildOutConcats`: proto-partial varnodes and the partial
 //!   root need `VariablePiece`, which `Merge::groupPartials` does not have). A COPY or LOAD is
 //!   split only when nothing reads its output;
@@ -86,6 +87,10 @@ fn hole_size(t: &TypeFactory, id: TypeId, off: i32) -> i32 {
     if let Kind::Array { elem, .. } = t.get(id).kind {
         return hole_size(t, elem, off % (t.align_size(elem).max(1) as i32));
     }
+    // TypePartialStruct::getHoleSize (type.cc:2781-2790)
+    if let Kind::PartialStruct { container, offset, .. } = t.get(id).kind {
+        return hole_size(t, container, off + offset).min(t.size(id) as i32 - off);
+    }
     let Some(fs) = struct_fields(t, id) else { return 0 };
     // getLowerBoundField: the last field starting at or before the offset
     let lower = fs.iter().rposition(|f| f.1 as i32 <= off);
@@ -101,8 +106,9 @@ fn hole_size(t: &TypeFactory, id: TypeId, off: i32) -> i32 {
     }
 }
 
-/// Port of `TypeFactory::getExactPiece` at offset 0, up to the partial types.
-fn exact_piece(t: &TypeFactory, mut ct: TypeId, size: u32) -> Result<Option<TypeId>> {
+/// Port of `TypeFactory::getExactPiece` at offset 0 (type.cc:4607-4639); a piece of an array
+/// is a partial struct, a piece of a structure, union or enum is not ported.
+fn exact_piece(t: &mut TypeFactory, mut ct: TypeId, size: u32) -> Result<Option<TypeId>> {
     let mut cur_off = 0i64;
     let mut last = None;
     loop {
@@ -112,15 +118,18 @@ fn exact_piece(t: &TypeFactory, mut ct: TypeId, size: u32) -> Result<Option<Type
         if t.size(ct) == size {
             return Ok(Some(ct));
         }
-        last = Some(ct);
+        last = Some((ct, cur_off));
         match sub_type(t, ct, cur_off) {
             Some((sub, off)) => (ct, cur_off) = (sub, off),
             None => break,
         }
     }
     match last {
-        Some(l) if matches!(t.meta(l), Meta::Struct | Meta::Array | Meta::Union) || t.is_enum(l) => {
-            err("SplitDatatype: a piece of a structure, array, union or enum (getExactPiece, TypePartialStruct) is not implemented in ghidra-rs yet")
+        Some((l, o)) if matches!(t.meta(l), Meta::Array | Meta::PartialStruct) => {
+            Ok(Some(t.partial_struct(l, o as i32, size)))
+        }
+        Some((l, _)) if matches!(t.meta(l), Meta::Struct | Meta::Union) || t.is_enum(l) => {
+            err("SplitDatatype: a piece of a structure, union or enum (getExactPiece, TypePartialStruct) is not implemented in ghidra-rs yet")
         }
         _ => Ok(None),
     }
@@ -140,7 +149,7 @@ fn value_datatype(fd: &mut Funcdata, load_store: OpId, size: u32) -> Result<Opti
             return fd.types.array_of(res, size / align).map(Some).map_err(LowlevelError);
         }
     } else if matches!(meta, Meta::Struct | Meta::Array) {
-        return exact_piece(&fd.types, res, size);
+        return exact_piece(&mut fd.types, res, size);
     }
     Ok(None)
 }
@@ -289,6 +298,10 @@ impl RootPointer {
     /// backed up through the structures and arrays holding it.
     fn find(fd: &mut Funcdata, op: OpId, mut value_type: TypeId) -> Result<Option<RootPointer>> {
         let mut implied_base = None;
+        // a partial is stripped to the structure or array holding it (subflow.cc:2146-2147)
+        if let Kind::PartialStruct { container, .. } = fd.types.get(value_type).kind {
+            value_type = container;
+        }
         if let Kind::Array { elem, .. } = fd.types.get(value_type).kind {
             value_type = elem;
             implied_base = Some(elem); // an implied array (a pointer to the element) matches
@@ -357,6 +370,15 @@ impl Split {
     /// Port of `SplitDatatype::categorizeDatatype`: -1 not splittable, 0 a structure, 1 an
     /// array, 2 a primitive that can be split any way.
     fn categorize(t: &TypeFactory, ct: TypeId) -> i32 {
+        // a piece is categorized as the structure or array holding it (subflow.cc:2258-2272)
+        let ct = match t.get(ct).kind {
+            Kind::PartialStruct { container, .. } => match t.meta(container) {
+                Meta::Array => container,
+                Meta::Struct => return 0,
+                _ => return -1,
+            },
+            _ => ct,
+        };
         match t.get(ct).kind {
             Kind::Array { elem, .. } => {
                 // an array of unknown1 acts as a (large) primitive
@@ -791,7 +813,7 @@ impl Split {
 pub(super) fn split_copy(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
     let in_type = facing(fd, inp(fd, op, 0)?)?;
     let out_type = facing(fd, out(fd, op)?)?;
-    let splittable = |t: TypeId| matches!(fd.types.meta(t), Meta::Array | Meta::Struct);
+    let splittable = |t: TypeId| matches!(fd.types.meta(t), Meta::Array | Meta::Struct | Meta::PartialStruct);
     if !splittable(in_type) && !splittable(out_type) {
         return Ok(0);
     }
@@ -802,7 +824,7 @@ pub(super) fn split_copy(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
 pub(super) fn split_load(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
     let size = sz(fd, out(fd, op)?);
     let Some(in_type) = value_datatype(fd, op, size)? else { return Ok(0) };
-    if !matches!(fd.types.meta(in_type), Meta::Struct | Meta::Array) {
+    if !matches!(fd.types.meta(in_type), Meta::Struct | Meta::Array | Meta::PartialStruct) {
         return Ok(0);
     }
     Ok(i32::from(Split::default().split_load(fd, op, in_type)?))
@@ -812,7 +834,7 @@ pub(super) fn split_load(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
 pub(super) fn split_store(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
     let size = sz(fd, inp(fd, op, 2)?);
     let Some(out_type) = value_datatype(fd, op, size)? else { return Ok(0) };
-    if !matches!(fd.types.meta(out_type), Meta::Struct | Meta::Array) {
+    if !matches!(fd.types.meta(out_type), Meta::Struct | Meta::Array | Meta::PartialStruct) {
         return Ok(0);
     }
     Ok(i32::from(Split::default().split_store(fd, op, out_type)?))

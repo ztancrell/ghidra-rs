@@ -19,9 +19,11 @@
 //! - a load or store guard whose pointer has a data-type needing resolution (`getTypeReadFacing`)
 //!   or points to a union,
 //! - a structure or union among the hints (`TypeStruct::getSubType`, partial structures),
-//! - a locked prototype with parameters (its symbols are not in the scope),
-//! - a piece of an array symbol as a data-type (`getTypePartialStruct`, in
-//!   `ActionMappedLocalSync`).
+//! - a locked prototype with parameters (its symbols are not in the scope).
+//!
+//! A piece of an array symbol is a partial struct (`getTypePartialStruct`, in
+//! `ActionMappedLocalSync`), which `MapState::addFixedType` turns into an open hint of the
+//! element. (Superseded: "a piece of an array symbol as a data-type ... fails".)
 //!
 //! The load and store guards give open hints (`MapState::addGuard`, with the value-set ranges
 //! of `heritage_guard.rs`). (Superseded: "a valid load or store guard ... not ported".)
@@ -506,12 +508,35 @@ fn is_read_active(fd: &Funcdata, vn: VarnodeId) -> bool {
     })
 }
 
-/// Port of `MapState::gatherVarnodes` (`addFixedType`; no partial structure or union exists):
-/// a fixed hint, with the varnode's data-type, for each stack varnode something writes or
-/// reads other than by copying within its storage.
+/// Port of `MapState::addFixedType` (varmap.cc:1052-1082): a fixed hint of the data-type; for
+/// a piece of an array (a partial struct) an open hint of the element instead, unless it is
+/// unknown, and a fixed hint of the undefined type when a constant is copied there. Partial
+/// unions do not exist here.
+fn add_fixed_type(fd: &mut Funcdata, out: &mut Vec<RawHint>, st: u64, ty: TypeId, fl: u32) {
+    let fixed = |ty: TypeId| RawHint { st, ty: Some(ty), fl, rt: RangeType::Fixed, hi: -1 };
+    let Kind::PartialStruct { container, offset, stripped } = fd.types.get(ty).kind else {
+        out.push(fixed(ty));
+        return;
+    };
+    let open = match fd.types.get(container).kind {
+        // the first fields of a structure moved here
+        Kind::Fields(_) if fd.types.meta(container) == Meta::Struct && offset == 0 => Some(container),
+        // elements of an array moved here
+        Kind::Array { elem, .. } if fd.types.meta(elem) != Meta::Unknown => Some(elem),
+        _ => None,
+    };
+    if let Some(t) = open {
+        out.push(RawHint { st, ty: Some(t), fl: 0, rt: RangeType::Open, hi: -1 });
+    }
+    if fl != 0 {
+        out.push(fixed(stripped));
+    }
+}
+
+/// Port of `MapState::gatherVarnodes`: a hint (`addFixedType`), with the varnode's data-type,
+/// for each stack varnode something writes or reads other than by copying within its storage.
 fn gather_varnodes(fd: &mut Funcdata, out: &mut Vec<RawHint>) {
     let mask = fd.localmap.highest();
-    let fixed = |st: u64, ty: TypeId, fl: u32| RawHint { st, ty: Some(ty), fl, rt: RangeType::Fixed, hi: -1 };
     for vn in fd.loc_space(Space::Stack) {
         if fd.vn(vn).is_free() {
             continue;
@@ -522,7 +547,7 @@ fn gather_varnodes(fd: &mut Funcdata, out: &mut Vec<RawHint>) {
         let differs = |fd: &Funcdata, o: VarnodeId, off: u64| fd.vn(o).space != Space::Stack || fd.vn(o).offset != off;
         let Some(def) = v.def else {
             if is_read_active(fd, vn) {
-                out.push(fixed(offset, ty, 0));
+                add_fixed_type(fd, out, offset, ty, 0);
             }
             continue;
         };
@@ -538,7 +563,7 @@ fn gather_varnodes(fd: &mut Funcdata, out: &mut Vec<RawHint>) {
                 for (piece, off) in [(first, offset), (second, second_off)] {
                     if differs(fd, piece, off) {
                         let pty = vn_type(fd, piece);
-                        out.push(fixed(off, pty, 0));
+                        add_fixed_type(fd, out, off, pty, 0);
                     }
                 }
                 is_read_active(fd, vn)
@@ -556,7 +581,7 @@ fn gather_varnodes(fd: &mut Funcdata, out: &mut Vec<RawHint>) {
             _ => true,
         };
         if add {
-            out.push(fixed(offset, ty, flags));
+            add_fixed_type(fd, out, offset, ty, flags);
         }
     }
 }
@@ -921,10 +946,10 @@ impl Funcdata {
         }
     }
 
-    /// Port of `TypeFactory::getExactPiece`: the data-type of the `size` bytes at `off` in
-    /// `ct`. A piece of an array, structure, union or enumeration is a partial type, which is
-    /// not ported.
-    pub(crate) fn exact_piece(&self, ct: TypeId, off: i64, size: u32) -> Result<Option<TypeId>> {
+    /// Port of `TypeFactory::getExactPiece` (type.cc:4607-4639): the data-type of the `size`
+    /// bytes at `off` in `ct`; a piece of an array is a partial struct. A piece of a
+    /// structure, union or enumeration is not ported.
+    pub(crate) fn exact_piece(&mut self, ct: TypeId, off: i64, size: u32) -> Result<Option<TypeId>> {
         let (mut cur, mut curoff, mut last) = (Some(ct), off, None);
         while let Some(c) = cur {
             if i64::from(self.types.size(c)) < i64::from(size) + curoff {
@@ -933,15 +958,18 @@ impl Funcdata {
             if self.types.size(c) == size {
                 return Ok(Some(c));
             }
-            last = Some(c);
+            last = Some((c, curoff));
             cur = self.types.sub_type(c, curoff).map(|(n, o)| {
                 curoff = o;
                 n
             });
         }
         match last {
-            Some(l) if matches!(self.types.meta(l), Meta::Struct | Meta::Array | Meta::Union) || self.types.is_enum(l) => {
-                err("getExactPiece: a piece of an array, structure, union or enumeration as a data-type (getTypePartialStruct) is not ported")
+            Some((l, o)) if matches!(self.types.meta(l), Meta::Array | Meta::PartialStruct) => {
+                Ok(Some(self.types.partial_struct(l, o as i32, size)))
+            }
+            Some((l, _)) if matches!(self.types.meta(l), Meta::Struct | Meta::Union) || self.types.is_enum(l) => {
+                err("getExactPiece: a piece of a structure, union or enumeration as a data-type is not ported")
             }
             _ => Ok(None),
         }

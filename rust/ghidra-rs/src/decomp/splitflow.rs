@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use super::op::OpId;
 use super::opcode::Opcode;
 use super::transform::{LaneDescription, TOpId, TVarId, TransformManager, INSERT_BEFORE};
-use super::varnode::{VarnodeId, VnFlags};
+use super::varnode::VarnodeId;
 use super::{Funcdata, Result};
 
 /// Port of `SplitFlow`.
@@ -42,7 +42,7 @@ impl<'a> SplitFlow<'a> {
             return self.tm.get_split(fd, vn, &self.desc, 2, 0).map(Some);
         }
         let v = fd.vn(vn);
-        if v.has(VnFlags::TYPELOCK) || v.is_input() || (v.is_free() && !v.is_constant()) {
+        if super::infertypes::locked_whole(fd, vn) || v.is_input() || (v.is_free() && !v.is_constant()) {
             return Ok(None);
         }
         let res = self.tm.new_split(fd, vn, &self.desc, 2, 0)?;
