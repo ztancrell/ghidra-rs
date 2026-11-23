@@ -6394,6 +6394,31 @@ both 180,025, Java only 13, ghidra-rs only 2; bodies different 105, unchanged); 
 `after="defined"` match counted. The 14 small binaries: every record count unchanged, none
 counted.
 
+#### GCC exception tables: not ported (read 2026-11-23, branch `fix-hatred-analysis`)
+
+GccExceptionAnalyzer (`.eh_frame_hdr`, `.eh_frame`, `.gcc_except_table`) is not ported; the
+facts keep every DWARF plate comment `underived` on an image with a non-empty
+`.gcc_except_table` (above). What a port has to do, read from Java 12.3's source
+(`Ghidra/Features/Base/.../exceptionhandlers/gcc`, 6,751 lines), none of it measured here:
+- it runs early (FORMAT_ANALYSIS.after().after()) and makes no function;
+- per FDE: a DATA reference to PcBegin, and PcBegin disassembled where no function starts
+  there (FrameDescriptionEntry.java:252-286, 474-477); a pointer of 8 bytes is read for
+  PcRange (createPcRange, FrameDescriptionEntry.java:288-346);
+- per call-site record with a landing pad: the call site's start and the landing pad are
+  disassembled where they are not (GccExceptionAnalyzer.java:210-239, 272-290), DATA
+  references to both (LSDACallSiteRecord.java:104-112), a PRE comment `try { // try from A to
+  B has its CatchHandler @ L` at the start, a POST comment `} // end try from A to B` at the
+  code unit holding the last address, a PRE comment `catch(type#N @ T, ...) { ... } // from
+  try @ A with catch @ L` at the landing pad (GccExceptionAnalyzer.java:292-345);
+- labels (`cie_<address>`, `lsda_exception_table_<address>`, the FDE's), plate and EOL comments and data in
+  the three sections (AbstractFrameSection.java:141-181, LSDAHeader.java:228-246, and the
+  `create*` methods of Cie, FrameDescriptionEntry and the LSDA classes).
+Java's Hatred facts have a `try {` comment in 1,275 `comments` records (3,831 comments).
+The `underived` mark can be lifted from a function once the call-site records are read: it
+is needed only where a call-site start, the unit of its last address or a landing pad lies in
+the function's body. A function without a DWARF plate that has such a comment has no
+`comments` record and no `underived` mark today: silent.
+
 The PE path: `cargo test --release` 178 passed, 0 failed; `cargo fmt --check` and `cargo clippy
 --release --all-targets -- -D warnings` clean; M8 bars (`CORPORA=m8 bars.sh`, the 12.3 `x86.sla`,
 a new prelude: cksum 3963700924, 29,768 functions, as `int8`'s) all 57 lines equal those of
