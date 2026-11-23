@@ -877,14 +877,14 @@ pub(crate) fn return_recovery(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
     let model = fd.proto.model.ok_or_else(|| LowlevelError("return recovery without a model".into()))?;
     arch.spec.models.get(model).output.fillin_map_output(&mut active);
     for &op in &returns {
-        build_return_output(fd, &active, op)?;
+        build_return_output(fd, arch, &active, op)?;
     }
     fd.proto.output = active.trials.iter().find(|t| t.is_used()).map(|t| (t.space, t.off, t.size));
     Ok(count + 1)
 }
 
 /// Port of `ActionReturnRecovery::buildReturnOutput`.
-fn build_return_output(fd: &mut Funcdata, active: &ParamActive, retop: OpId) -> Result<()> {
+fn build_return_output(fd: &mut Funcdata, arch: &Arch, active: &ParamActive, retop: OpId) -> Result<()> {
     let mut newparam = vec![fd.input(retop, 0)?];
     for t in &active.trials {
         if !t.is_used() || t.slot >= fd.op(retop).ins.len() {
@@ -907,12 +907,12 @@ fn build_return_output(fd: &mut Funcdata, active: &ParamActive, retop: OpId) -> 
             _ => err("a return value piece outside a SLEIGH space"),
         })
         .collect::<Result<_>>()?;
-    let whole = fd.join_pieces(pieces)?;
+    let (wspace, whole) = fd.join_address(arch, pieces)?;
     let (lo, hi) = (newparam[1], newparam[2]);
     let size = fd.vn(lo).size + fd.vn(hi).size;
     let addr = fd.op(retop).seq.addr;
     let newop = fd.new_op(Opcode::Piece, addr);
-    let newout = fd.new_varnode_out(size, Space::Join, whole, newop);
+    let newout = fd.new_varnode_out(size, wspace, whole, newop);
     fd.vn_set(newout, VnFlags::WRITEMASK);
     fd.op_set_input(newop, hi, 0)?;
     fd.op_set_input(newop, lo, 1)?;
@@ -963,7 +963,7 @@ pub(crate) fn active_return(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         if let Some(m) = fd.call(c).proto.model {
             arch.spec.models.get(m).output.fillin_map_output(&mut active);
         }
-        build_output_from_trials(fd, c, &mut active, &trialvn)?;
+        build_output_from_trials(fd, arch, c, &mut active, &trialvn)?;
         count += 1;
     }
     Ok(count)
@@ -972,6 +972,7 @@ pub(crate) fn active_return(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
 /// Port of `FuncCallSpecs::buildOutputFromTrials`.
 fn build_output_from_trials(
     fd: &mut Funcdata,
+    arch: &Arch,
     c: CallId,
     active: &mut ParamActive,
     trialvn: &[Option<VarnodeId>],
@@ -1003,8 +1004,8 @@ fn build_output_from_trials(
             deleted.push(fd.vn(vn).def.ok_or_else(|| LowlevelError("output trial without its INDIRECT".into()))?);
         }
         let size = pieces.iter().map(|p| p.2).sum();
-        let whole = fd.join_pieces(pieces)?;
-        let finalout = fd.new_varnode(size, Space::Join, whole);
+        let (wspace, whole) = fd.join_address(arch, pieces)?;
+        let finalout = fd.new_varnode(size, wspace, whole);
         fd.op_set_output(op, finalout)?;
         let addr = fd.op(op).seq.addr;
         let mut trunc = 0u64;
@@ -2514,28 +2515,90 @@ fn trace_trash(fd: &Funcdata, vn: VarnodeId) -> Option<Vec<OpId>> {
     Some(indlist)
 }
 
-/// Port of `ActionUnjustifiedParams::apply`: an input that sits in a parameter entry but not
-/// justified would be widened (`adjustInputVarnodes`), which is not ported; it fails loudly.
-/// A stack input counts too (0x581bf6: one byte in the middle of a parameter slot; it was
-/// passed over without a word, which the check `pmd` showed).
+/// Port of `ActionUnjustifiedParams::apply` (coreaction.cc:5179-5223): an input that sits in a
+/// parameter's storage, not justified, is widened to the storage (with the inputs overlapping
+/// its start, until the container is justified); the old inputs become SUBPIECEs of the new one.
 pub(crate) fn unjustified_params(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
-    let Some(m) = fd.proto.model else { return Ok(0) };
-    let list = &arch.spec.models.get(m).input;
-    for vn in fd.loc_all() {
-        let v = fd.vn(vn);
-        if !v.is_input() {
-            continue;
+    let mut inputs = fd.input_list();
+    let mut i = 0;
+    while i < inputs.len() {
+        let v = fd.vn(inputs[i]);
+        i += 1;
+        let Some(mut c) = fd.proto.unjustified_input_param(arch, v.space, v.offset, v.size)? else { continue };
+        loop {
+            let mut overlaps = false;
+            for &o in inputs[..i].iter().rev() {
+                let w = fd.vn(o);
+                if w.space != c.0 {
+                    continue;
+                }
+                let last = w.offset.wrapping_add(u64::from(w.size)).wrapping_sub(1);
+                if last >= c.1 && w.offset < c.1 {
+                    // an overlap that extends the container
+                    overlaps = true;
+                    let endpoint = c.1.wrapping_add(u64::from(c.2));
+                    c.1 = w.offset;
+                    c.2 = endpoint.wrapping_sub(c.1) as u32;
+                }
+            }
+            if !overlaps {
+                break;
+            }
+            // with the overlaps, the container may no longer be justified
+            match fd.proto.unjustified_input_param(arch, c.0, c.1, c.2)? {
+                Some(n) => c = n,
+                None => break,
+            }
         }
-        // unjustifiedInputParam: an entry contains it, not at the justified offset
-        let unjustified = (0..list.entries.len()).any(|i| {
-            list.justified_contain(i, v.space, v.offset, v.size).is_some_and(|o| o != 0)
-                && !(0..list.entries.len()).any(|j| list.justified_contain(j, v.space, v.offset, v.size) == Some(0))
-        });
-        if unjustified {
-            return err("unjustified input parameter: adjustInputVarnodes is not implemented in ghidra-rs yet");
-        }
+        adjust_input_varnodes(fd, arch, c)?;
+        // `beginDef(Varnode::input, addr)`: on from the first input at the container's address
+        inputs = fd.input_list();
+        i = inputs.partition_point(|&x| (fd.vn(x).space.index(), fd.vn(x).offset) < (c.0.index(), c.1));
     }
     Ok(0)
+}
+
+/// Port of `Funcdata::adjustInputVarnodes` (funcdata_varnode.cc:508-549, little endian): one
+/// input of the whole range `(space, offset, size)` replaces the inputs inside it, each of which
+/// becomes a SUBPIECE of it at the start of the function.
+fn adjust_input_varnodes(fd: &mut Funcdata, arch: &Arch, (space, off, size): (Space, u64, u32)) -> Result<()> {
+    let end = off.wrapping_add(u64::from(size) - 1);
+    let inlist: Vec<VarnodeId> = fd
+        .input_list()
+        .into_iter()
+        .filter(|&x| fd.vn(x).space == space && (off..=end).contains(&fd.vn(x).offset))
+        .collect();
+    if inlist.iter().any(|&x| fd.vn(x).offset.wrapping_add(u64::from(fd.vn(x).size) - 1) > end) {
+        return err("Cannot properly adjust input varnodes");
+    }
+    let bl = *fd.blocks.list.first().ok_or_else(|| LowlevelError("no blocks".into()))?;
+    let mut subs = Vec::new();
+    for vn in inlist {
+        let v = fd.vn(vn);
+        let (voff, vsize) = (v.offset, v.size);
+        if !v.is_input() || size <= vsize {
+            return err("Bad adjustment to input varnode");
+        }
+        let subop = fd.new_op(Opcode::Subpiece, fd.entry);
+        // Address::justifiedContain: how far the old input starts into the range
+        let sa = fd.new_constant(4, voff - off);
+        let newvn = fd.new_varnode_out(vsize, space, voff, subop);
+        // newvn must not be free to take all of vn's readers
+        fd.op_insert_begin(subop, bl);
+        fd.total_replace(vn, newvn)?;
+        // the old input goes before the new one is made
+        fd.delete_varnode(vn);
+        subs.push((subop, sa));
+    }
+    let invn = fd.new_varnode(size, space, off);
+    let invn = fd.set_input_varnode(invn, arch)?;
+    // the whole range counts as heritaged already
+    super::heritage::mark_range_heritaged(fd, arch, space, off, size);
+    for (subop, sa) in subs {
+        fd.op_set_input(subop, invn, 0)?;
+        fd.op_set_input(subop, sa, 1)?;
+    }
+    Ok(())
 }
 
 /// `ActionNodeJoin`: ported in [`super::nodejoin`] (stage S8).
