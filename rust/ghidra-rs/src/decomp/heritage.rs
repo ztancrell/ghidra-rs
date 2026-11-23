@@ -10,7 +10,7 @@
 //! Ported: the passes over the register and unique spaces (pass 0, the one `break start
 //! paramdouble` first shows). Spaces heritaged in later passes (ram, the stack) need the
 //! main loop's other actions to be reached and fail loudly here, as do the paths only they use
-//! (stack placeholders, revisited markers, overlapping parameter guards).
+//! (stack placeholders, revisited markers).
 
 use super::block::BlockId;
 use super::fspec::{Containment, EffectKind};
@@ -829,6 +829,153 @@ fn normalize_write_size(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, range: &M
     Ok(bigout)
 }
 
+/// `addr + diff` of the C++ guards: the offset an entry of the callee's side (`entry`, in the
+/// range starting at `toff` there) has on the caller's side, where the range starts at
+/// `range.off`. The difference is an `int4`, as in the C++.
+fn caller_side(range: &MemRange, toff: u64, entry: u64) -> u64 {
+    let diff = entry.wrapping_sub(toff) as i32;
+    range.off.wrapping_add(i64::from(diff) as u64) & range.mask
+}
+
+/// Port of `Heritage::guardCallOverlappingInput` (heritage.cc:1211-1236): the range is larger
+/// than any parameter of the call, so a SUBPIECE before the call pulls the biggest possible
+/// parameter out of it, as a trial and an extra input of the call.
+fn guard_call_overlapping_input(
+    fd: &mut Funcdata,
+    arch: &Arch,
+    c: super::funcdata::CallId,
+    range: &MemRange,
+    toff: u64,
+) -> Result<()> {
+    let (space, off, size) = (range.space, range.off, range.size);
+    let call = fd.call(c);
+    let op = call.op;
+    let Some((eoff, esize)) = call.proto.biggest_contained_input(arch, space, toff, size)? else { return Ok(()) };
+    let trunc = caller_side(range, toff, eoff);
+    if call.active_input.as_ref().is_none_or(|a| a.has_trial(space, trunc, size)) {
+        return Ok(());
+    }
+    // Address::justifiedContain, little endian: how far the parameter starts into the range
+    let end = off.wrapping_add(u64::from(size) - 1);
+    let contained = trunc >= off && trunc.wrapping_add(u64::from(esize) - 1) <= end;
+    let truncate = if contained { trunc - off } else { 0xffff_ffff };
+    let subpiece = fd.new_op(Opcode::Subpiece, fd.op(op).seq.addr);
+    let whole = fd.new_varnode(size, space, off);
+    fd.vn_set(whole, VnFlags::ACTIVE_HERITAGE);
+    fd.op_set_input(subpiece, whole, 0)?;
+    let amount = fd.new_constant(4, truncate);
+    fd.op_set_input(subpiece, amount, 1)?;
+    let vn = fd.new_varnode_out(esize, space, trunc, subpiece);
+    fd.op_insert_before(subpiece, op)?;
+    if let Some(active) = &mut fd.call_mut(c).active_input {
+        active.register_trial(space, trunc, esize);
+    }
+    let slot = fd.op(op).ins.len();
+    fd.op_insert_input(op, vn, slot)
+}
+
+/// Port of `Heritage::guardOutputOverlap` (heritage.cc:1249-1283): the range properly holds the
+/// possible return storage `ret_off`, `ret_size` of the call. The return storage and the one or
+/// two pieces around it are each an INDIRECT creation, concatenated after the call into a
+/// varnode of the whole range. (Little endian: the piece in front is the less significant.)
+fn guard_output_overlap(
+    fd: &mut Funcdata,
+    call_op: OpId,
+    range: &MemRange,
+    ret_off: u64,
+    ret_size: u32,
+    write: &mut Vec<VarnodeId>,
+) -> Result<()> {
+    let (space, off, size) = (range.space, range.off, range.size);
+    let out =
+        |fd: &Funcdata, op: OpId| fd.op(op).out.ok_or_else(|| super::LowlevelError("INDIRECT without output".into()));
+    let size_front = ret_off.wrapping_sub(off) as u32;
+    let size_back = size.wrapping_sub(ret_size).wrapping_sub(size_front);
+    let ind = fd.new_indirect_creation(call_op, space, ret_off, ret_size, true)?;
+    let addr = fd.op(ind).seq.addr;
+    let mut collect = out(fd, ind)?;
+    let mut insert_point = call_op;
+    if size_front != 0 {
+        // the C++ passes the first INDIRECT here, not the call
+        let ind_front = fd.new_indirect_creation(ind, space, off, size_front, false)?;
+        let front = out(fd, ind_front)?;
+        let concat = fd.new_op(Opcode::Piece, addr);
+        fd.op_set_input(concat, collect, 0)?;
+        fd.op_set_input(concat, front, 1)?;
+        collect = fd.new_varnode_out(size_front + ret_size, space, off, concat);
+        fd.op_insert_after(concat, insert_point)?;
+        insert_point = concat;
+    }
+    if size_back != 0 {
+        let back_off = ret_off.wrapping_add(u64::from(ret_size)) & range.mask;
+        let ind_back = fd.new_indirect_creation(call_op, space, back_off, size_back, false)?;
+        let back = out(fd, ind_back)?;
+        let concat = fd.new_op(Opcode::Piece, addr);
+        fd.op_set_input(concat, back, 0)?;
+        fd.op_set_input(concat, collect, 1)?;
+        collect = fd.new_varnode_out(size, space, off, concat);
+        fd.op_insert_after(concat, insert_point)?;
+    }
+    fd.vn_set(collect, VnFlags::ACTIVE_HERITAGE);
+    write.push(collect);
+    Ok(())
+}
+
+/// Port of `Heritage::tryOutputOverlapGuard` (heritage.cc:1293-1310): whether the range, larger
+/// than the possible return storage of the call, got its INDIRECTs.
+fn try_output_overlap_guard(
+    fd: &mut Funcdata,
+    arch: &Arch,
+    c: super::funcdata::CallId,
+    range: &MemRange,
+    toff: u64,
+    write: &mut Vec<VarnodeId>,
+) -> Result<bool> {
+    let (space, size) = (range.space, range.size);
+    let call = fd.call(c);
+    let op = call.op;
+    let Some((eoff, esize)) = call.proto.biggest_contained_output(arch, space, toff, size)? else {
+        return Ok(false);
+    };
+    let trunc = caller_side(range, toff, eoff);
+    if call.active_output.as_ref().is_none_or(|a| a.has_trial(space, trunc, size)) {
+        return Ok(false);
+    }
+    guard_output_overlap(fd, op, range, trunc, esize, write)?;
+    if let Some(active) = &mut fd.call_mut(c).active_output {
+        active.register_trial(space, trunc, esize);
+    }
+    Ok(true)
+}
+
+/// Port of `Heritage::guardReturnsOverlapping` (heritage.cc:1610-1637): the range is larger
+/// than the possible return storage, so a SUBPIECE before each RETURN pulls the biggest possible
+/// return value out of it, as a trial and an extra input of the RETURN. (Little endian.)
+fn guard_returns_overlapping(fd: &mut Funcdata, arch: &Arch, range: &MemRange) -> Result<()> {
+    let (space, off, size) = (range.space, range.off, range.size);
+    let Some((eoff, esize)) = fd.proto.biggest_contained_output(arch, space, off, size)? else { return Ok(()) };
+    if let Some(active) = &mut fd.active_output {
+        active.register_trial(space, eoff, esize);
+    }
+    let offset = u64::from(eoff.wrapping_sub(off) as u32);
+    for op in fd.ops_created_with(Opcode::Return) {
+        if fd.op(op).is_dead() || fd.op(op).halt.is_some() {
+            continue;
+        }
+        let invn = fd.new_varnode(size, space, off);
+        let subpiece = fd.new_op(Opcode::Subpiece, fd.op(op).seq.addr);
+        fd.op_set_input(subpiece, invn, 0)?;
+        let amount = fd.new_constant(4, offset);
+        fd.op_set_input(subpiece, amount, 1)?;
+        fd.op_insert_before(subpiece, op)?;
+        let retval = fd.new_varnode_out(esize, space, eoff, subpiece);
+        fd.vn_set(invn, VnFlags::ACTIVE_HERITAGE);
+        let slot = fd.op(op).ins.len();
+        fd.op_insert_input(op, retval, slot)?;
+    }
+    Ok(())
+}
+
 /// Port of `Heritage::guardCalls` for unlocked call prototypes: each call that may change the
 /// range gets an INDIRECT (`r = r [] call`), or an INDIRECT creation when it kills it; a
 /// range that may be a return value or a parameter becomes a trial, and a possible
@@ -868,14 +1015,16 @@ fn guard_calls(
         if call.active_output.is_some() && tryregister {
             match call.proto.characterize_as_output(arch, space, toff, size) {
                 Containment::None => {}
-                Containment::ContainedBy => {
-                    return err("heritage: guarding an output overlap is not implemented in ghidra-rs yet");
-                }
-                _ => {
+                character => {
                     if effect != Some(EffectKind::KilledByCall) && call.proto.is_auto_killed_by_call(arch) {
                         effect = Some(EffectKind::KilledByCall);
                     }
-                    if let Some(active) = &mut fd.call_mut(c).active_output {
+                    if character == Containment::ContainedBy {
+                        if try_output_overlap_guard(fd, arch, c, range, toff, write)? {
+                            // the range is handled: no more guarding
+                            effect = Some(EffectKind::Unaffected);
+                        }
+                    } else if let Some(active) = &mut fd.call_mut(c).active_output {
                         if !active.has_trial(space, toff, size) {
                             active.register_trial(space, toff, size);
                             possibleoutput = true;
@@ -915,9 +1064,7 @@ fn guard_calls(
                         fd.op_insert_input(op, vn, slot)?;
                     }
                 }
-                Containment::ContainedBy => {
-                    return err("heritage: guarding an overlapping parameter is not implemented in ghidra-rs yet");
-                }
+                Containment::ContainedBy => guard_call_overlapping_input(fd, arch, c, range, toff)?,
                 _ => {}
             }
         }
@@ -1011,9 +1158,7 @@ fn guard_return_trials(fd: &mut Funcdata, arch: &Arch, range: &MemRange) -> Resu
     let (space, off, size) = (range.space, range.off, range.size);
     match fd.proto.characterize_as_output(arch, space, off, size) {
         Containment::None => {}
-        Containment::ContainedBy => {
-            return err("heritage: guarding an overlapping return value is not implemented in ghidra-rs yet")
-        }
+        Containment::ContainedBy => guard_returns_overlapping(fd, arch, range)?,
         _ => {
             if let Some(active) = &mut fd.active_output {
                 active.register_trial(space, off, size);
@@ -1374,6 +1519,15 @@ fn rename_block(fd: &mut Funcdata, arch: &Arch, stacks: &mut VarStack, i: usize)
         }
     }
     Ok(writelist)
+}
+
+/// Port of `Heritage::markRangeHeritaged` (heritage.cc:2850-2856): the range counts as heritaged
+/// in the pass before this one.
+pub(crate) fn mark_range_heritaged(fd: &mut Funcdata, arch: &Arch, space: Space, off: u64, size: u32) {
+    let pass = fd.heritage.pass;
+    if pass > 0 {
+        fd.heritage.globaldisjoint.add(space, space_mask(arch, space), off, size, pass - 1);
+    }
 }
 
 #[cfg(test)]
