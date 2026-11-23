@@ -7136,7 +7136,9 @@ what Java has (each with the reason in `dwarf::Func::storage`'s error):
 - a `.conflict` data type name anywhere under the prototype (the order Java resolves conflicts
   in is not kept everywhere), an array of no length, a bit field in a union, a built-in type
   without a core type, storage past the 500 bytes of the stack entry;
-- a name the data-type archive has, a thunk (as before).
+- a thunk (as before), and a DWARF function that takes a prototype of the archive or of the
+  function it jumps to (Hatred's `SDL_ThreadID_REAL`, one `JMP pthread_self`: Java keeps the
+  DWARF signature there; the rule was not traced).
 
 Measured against Java 12.3 (MacBook; master 3a5ba15656 and the branch before master
 fe4043a333, `fix-hatred-archives`, was merged into it, on the same inputs;
@@ -7163,7 +7165,20 @@ symbols (vtables, statics) and of functions ghidra-rs names otherwise; the 48 ex
 traced. `type` records are keyed by name in `facts-diff.sh`, so types of one name in two
 categories show as different.
 
-The guards cost most of the possible gain, and what they hide is measured. With a location
+After master fe4043a333 (`fix-hatred-archives`) was merged into the branch, against that master
+on the same inputs (MacBook): small corpus func 333 -> 339 / 1,112, ns 0 -> 190 / 295, type 65
+-> 67, silent func 15 -> 15 (the same); Hatred func 9,098 -> 9,582 / 180,433, ns 0 -> 22,813 /
+44,952 (48 extra), type 933 -> 1,282 / 38,393, `underived ... function` 171,269 -> 170,854,
+silent func 131 -> 131 (the same), label and data as in the table. `cargo test --release` 206
+passed; fmt and clippy clean; mercs2 M500 with Java facts 488 -> 489 identical of 499 (loud 11
+-> 10, silent 0); `CORPORA=m8 tools/bars.sh` 57 lines equal to that master's; the PE facts of
+mercs2 byte-identical (before the last ELF-only guard). Not obtained: `tools/elf64-decomp.sh`
+(it stopped at the first binary in this worktree's setup on the MacBook; not diagnosed), and
+the loud / silent split of the Hatred camera corpus (identical 46 of 50, the reference ran 50;
+that master's own count was not taken).
+
+The guards cost most of the possible gain,
+ and what they hide is measured. With a location
 list (`DW_FORM_data4`/`data8`) taken as "no storage", Hatred's equal `func` records were
 63,423 (type 26,562), with 2,063 new silent ones: 1,691 the locked `__stdcall` of functions
 without `this`, about 150 a `join` of more than 16 bytes (fixed: the rule's `maxsize`), about

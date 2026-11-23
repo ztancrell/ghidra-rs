@@ -1309,8 +1309,10 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         let proto = sig.as_ref().and_then(|s| s.as_ref().ok()).copied();
         let noreturn = noreturn || proto.is_some_and(|p| p.0.noreturn);
         let xml = ex.function_xml(&shown, f, size, purge, noreturn, &locals, archive_proto, proto);
-        // a prototype naming a data type that is not ported is not derived
-        let dwarf_ok = proto.is_some() && ex.note_types(&xml);
+        // a prototype naming a data type that is not ported is not derived; neither is a DWARF
+        // function that takes a prototype of the archive or of the function it jumps to (which
+        // of the two Java keeps was seen once, DWARF's on Hatred's SDL_ThreadID_REAL, not traced)
+        let dwarf_ok = proto.is_some() && archive_proto.is_none() && via.is_none() && ex.note_types(&xml);
         // Java's Variadic Function Signature Override analyzer (FormatStringAnalyzer) writes a
         // prototype override at a call of a function with a variable argument list that takes a
         // format string. Not ported: a function that calls one the archive gives such a list
