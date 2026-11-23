@@ -645,19 +645,23 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
                 let ar = ghidra_rs::gdt::Archive::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
                 let names: Result<std::collections::HashSet<String>, _> =
                     ar.function_defs.iter().map(|&f| ar.get(f).map(|t| t.name.clone())).collect();
-                Some(names.map_err(|e| format!("{}: {e}", path.display()))?)
+                // and the prototypes of its definitions, as applied to an x86-64 gcc program
+                let text = ghidra_rs::gdt::protos::export_elf64(&ar).map_err(|e| format!("{}: {e}", path.display()))?;
+                let applied =
+                    ghidra_rs::factsout::Protos::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+                Some((names.map_err(|e| format!("{}: {e}", path.display()))?, applied))
             } else {
                 None
             };
             let inputs = ghidra_rs::factsout::Inputs {
                 fid: &fid,
-                protos: protos.as_ref(),
+                protos: archive.as_ref().map(|a| &a.1).or(protos.as_ref()),
                 analyzed: plain.as_ref().map(|p| &p.0),
                 purges: &callee_purges,
                 cspec: &cspec,
                 strings: Some(&strings),
                 dwarf: &dwarf,
-                archive: archive.as_ref(),
+                archive: archive.as_ref().map(|a| &a.0),
             };
             // the stack analysis goes by the purges Ghidra has at a call site
             let purges = ghidra_rs::factsout::call_purges(&img, &an, &inputs);
