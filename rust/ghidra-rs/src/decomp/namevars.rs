@@ -16,12 +16,15 @@
 //!   reference included. Superseded: "`PTRSUB(#0, offset)` into a global only marks the offset".
 //! - Name recommendations (`recoverNameRecommendationsForSymbols`): the scope collects them
 //!   from name-locked symbols when it is cleared, and it holds none.
-//! - CAST ops (`setcasts` runs after this action) and proto-partial varnodes do not exist.
-//! - `VariablePiece` groups (`isSameGroup`) are not ported; merging fails loudly on them.
-//! - `finalizeDatatype` of a piece of a symbol that is a partial type (a partial struct, array,
-//!   union or enum piece: `getTypePartialStruct`) fails loudly in `getExactPiece`
-//!   (`infertypes.rs`). (Superseded: "of a piece of a symbol (`getExactPiece`) fails loudly",
-//!   "giving a variable a data-type other than its own fails loudly".)
+//! - CAST ops do not exist (`setcasts` runs after this action).
+//! - A proto-partial varnode takes the symbol of the root of its CONCAT tree
+//!   (`Funcdata::linkProtoPartial`), at the offset its `VariablePiece` group gives it.
+//!   (Superseded: "proto-partial varnodes do not exist", "`VariablePiece` groups
+//!   (`isSameGroup`) are not ported".)
+//! - `finalizeDatatype` of a piece of a structure, union or enum symbol fails loudly in
+//!   `getExactPiece` (`infertypes.rs`); a piece of an array is a partial struct. (Superseded:
+//!   "of a piece of a symbol (`getExactPiece`) fails loudly", "giving a variable a data-type
+//!   other than its own fails loudly", "a partial type ... fails loudly".)
 
 use std::collections::BTreeMap;
 
@@ -29,7 +32,10 @@ use super::funcdata::Funcdata;
 use super::opcode::Opcode;
 use super::scope::{NameFlags, NameRequest, StackNaming, SymbolEntry, SymbolId, UseLimit, GLOBAL, LOCAL};
 use super::types::{Kind, Meta, TypeId};
-use super::variable::{h_is, h_type, high, input_varnode, is_internal, vn_has_cover, HighId};
+use super::variable::{
+    establish_group_symbol_offset, group_symbol_offset, h_is, h_type, high, input_varnode, is_internal, piece_of,
+    vn_has_cover, HighId,
+};
 use super::varnode::{Space, VarnodeId, VnFlags, CONST_SPACE};
 use super::{err, Arch, LowlevelError, Result};
 
@@ -108,10 +114,30 @@ pub(crate) fn high_symbol(fd: &Funcdata, h: HighId) -> Option<(SymbolId, usize, 
 
 /// `HighVariable::getSymbolOffset` (`setSymbol`): -1 when the linked member is the whole symbol,
 /// else its offset into it (`Address::overlapJoin` from the entry, plus the entry's own offset
-/// when it maps a piece of a join).
+/// when it maps a piece of a join). A proto-partial member of a group is at its offset in the
+/// group plus the group's in the symbol (variable.cc:258-260).
 pub(crate) fn symbol_offset(fd: &Funcdata, arch: &Arch, h: HighId) -> Result<i32> {
+    symbol_offset_masked(fd, h, |space| super::heritage::space_mask(arch, space))
+}
+
+/// Whether a structure, union or array symbol backs the variable as a piece of it (`symbol !=
+/// 0 && symboloffset != -1` with such a symbol type, `HighVariable::stripType`,
+/// variable.cc:310-316). Without the architecture the distance from the symbol's start is not
+/// wrapped to the space; it differs only for a symbol as large as its address space.
+pub(crate) fn piece_of_structured_symbol(fd: &Funcdata, h: HighId) -> bool {
+    let Some((sym, _, _)) = high_symbol(fd, h) else { return false };
+    let structured = |t| matches!(fd.types.meta(t), Meta::Struct | Meta::Union | Meta::Array);
+    fd.symtab.symbol(sym).ty.is_some_and(structured) && symbol_offset_masked(fd, h, |_| u64::MAX).is_ok_and(|o| o != -1)
+}
+
+fn symbol_offset_masked(fd: &Funcdata, h: HighId, mask: impl Fn(Space) -> u64) -> Result<i32> {
     let Some((sym, e, vn)) = high_symbol(fd, h) else { return Ok(-1) };
     let (s, v) = (fd.symtab.symbol(sym), fd.vn(vn));
+    if v.has(VnFlags::PROTO_PARTIAL) {
+        if let Some((group, off, _)) = piece_of(fd, h) {
+            return Ok(off + group_symbol_offset(fd, group));
+        }
+    }
     let entry =
         s.entries.get(e).ok_or_else(|| LowlevelError("namevars: a varnode mapped to a missing entry".into()))?;
     let size = s.ty.map_or(0, |t| fd.types.size(t));
@@ -123,7 +149,7 @@ pub(crate) fn symbol_offset(fd: &Funcdata, arch: &Arch, h: HighId) -> Result<i32
     }
     // AddrSpace::overlapJoin: the distance from the entry's start wrapped to the space
     // (`wrapOffset`), within the symbol's size
-    let dist = v.offset.wrapping_sub(entry.offset) & super::heritage::space_mask(arch, entry.space);
+    let dist = v.offset.wrapping_sub(entry.offset) & mask(entry.space);
     let overlap = if entry.space != v.space || dist >= u64::from(size) { -1 } else { dist as i32 };
     Ok(overlap.wrapping_add(entry.piece.unwrap_or(0) as i32))
 }
@@ -142,7 +168,7 @@ fn compare_name(fd: &Funcdata, vn1: VarnodeId, vn2: VarnodeId) -> bool {
         return true;
     }
     let (a, b) = (fd.vn(vn1), fd.vn(vn2));
-    for f in [VnFlags::UNAFFECTED, VnFlags::PERSIST, VnFlags::INPUT, VnFlags::ADDRTIED] {
+    for f in [VnFlags::UNAFFECTED, VnFlags::PERSIST, VnFlags::INPUT, VnFlags::ADDRTIED, VnFlags::PROTO_PARTIAL] {
         if a.has(f) != b.has(f) {
             return b.has(f);
         }
@@ -236,10 +262,40 @@ fn detect_symbol_conflicts(fd: &mut Funcdata, vn: VarnodeId, h: HighId) -> Resul
     Ok(false)
 }
 
+/// Port of `Funcdata::linkProtoPartial` (funcdata_varnode.cc:1197-1214): a varnode PIECEd into
+/// a larger whole takes the symbol of the whole (the root of its CONCAT tree), which is linked
+/// first, unless it merged with something else or has no root in its group.
+fn link_proto_partial(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId) -> Result<()> {
+    let h = high(fd, vn)?;
+    if high_symbol(fd, h).is_some() {
+        return Ok(());
+    }
+    let root = super::merge::piece_root(fd, vn)?;
+    if root == vn {
+        return Ok(());
+    }
+    let root_high = high(fd, root)?;
+    // HighVariable::isSameGroup
+    match (piece_of(fd, root_high), piece_of(fd, h)) {
+        (Some((a, _, _)), Some((b, _, _))) if a == b => {}
+        _ => return Ok(()),
+    }
+    let name_rep = name_representative(fd, root_high)?;
+    let Some(sym) = link_symbol(fd, arch, name_rep)? else { return Ok(()) };
+    let off = symbol_offset(fd, arch, root_high)?;
+    establish_group_symbol_offset(fd, root_high, off)?;
+    // Symbol::getFirstWholeMap
+    fd.mapentry.insert(vn, (sym, 0));
+    Ok(())
+}
+
 /// Port of `Funcdata::linkSymbol`: the symbol of `vn`'s high, an entry of the local scope
 /// holding its first byte at its use point, or a new local symbol. For a persistent varnode, the
 /// global data symbol holding its first byte, `None` otherwise (see the module comment).
 fn link_symbol(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId) -> Result<Option<SymbolId>> {
+    if fd.vn(vn).has(VnFlags::PROTO_PARTIAL) {
+        link_proto_partial(fd, arch, vn)?;
+    }
     let h = high(fd, vn)?;
     if let Some((sym, _, _)) = high_symbol(fd, h) {
         return Ok(Some(sym));
@@ -426,8 +482,10 @@ fn link_spacebase_symbol(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId, namerec:
 /// Port of `HighVariable::finalizeDatatype`: the piece of the symbol's data-type the variable
 /// covers (`getExactPiece`, `infertypes.rs`; the whole type for a whole symbol) becomes the
 /// variable's, when there is one and it is not unknown. It stays (`type_finalized`, read by
-/// `variable::h_type`). A piece that is a partial type fails. (Superseded: "Nothing ported
-/// reads `type_finalized`, so a type that would change, or a piece of the symbol, fails".)
+/// `variable::h_type`). A piece of an array is a partial struct, which the `stripType` that
+/// follows in the C++ keeps (the symbol is structured and the variable a piece of it). (Superseded:
+/// "Nothing ported reads `type_finalized`, so a type that would change, or a piece of the
+/// symbol, fails", "A piece that is a partial type fails".)
 fn finalize_datatype(fd: &mut Funcdata, arch: &Arch, h: HighId, sym: SymbolId) -> Result<()> {
     let Some(cur) = fd.symtab.symbol(sym).ty else { return Ok(()) };
     let sz = fd.vn(fd.highs.get(h).inst[0]).size;
@@ -469,6 +527,7 @@ fn link_symbols(fd: &mut Funcdata, arch: &Arch, namerec: &mut Vec<Rec>) -> Resul
         if s.flags.size_type_locked && s.ty.is_some_and(|t| fd.types.size(t) == fd.vn(vn).size) {
             let old = s.ty;
             let ty = h_type(fd, h).0;
+            let ty = fd.types.stripped(ty).unwrap_or(ty); // ScopeInternal::retypeSymbol (database.cc:2320)
             let same = old.is_some_and(|t| fd.types.size(t) == fd.types.size(ty));
             fd.symtab.override_size_lock_type(sym, ty, same)?;
         }

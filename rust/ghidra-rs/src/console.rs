@@ -30,11 +30,10 @@ fn token(name: &str) -> String {
 ///   external reference from the slot to it, so `CALL [slot]` becomes a call to the import
 ///   instead of a decode of the bound address the slot holds;
 /// - `map function` for every function, with its FID name or export name when it has one;
-/// - ELF only: after a function's `map function` (which makes it the current function, as in the
+/// - after a function's `map function` (which makes it the current function, as in the
 ///   datatests), `override flow <address> callreturn` for each instruction of its body with a
 ///   CALL_RETURN override in the facts (`factsout::call_returns`: Shared Return Calls and calls
-///   that do not return), so flow stops at a tail jump to another function, as in Ghidra. The
-///   PE prelude has none: it and the checks built on it (bars.sh) stay as they are.
+///   that do not return), so flow stops at a tail jump to another function, as in Ghidra.
 pub fn prelude(img: &Image, an: &Analysis, fid: &BTreeMap<u32, crate::fid::Applied>) -> String {
     let mut s = String::from("option readonly on\n");
     // a PIE linked at 0: bfd's sections move where ghidra-rs's image has them (IfcAdjustVma);
@@ -59,7 +58,7 @@ pub fn prelude(img: &Image, an: &Analysis, fid: &BTreeMap<u32, crate::fid::Appli
         let _ = writeln!(s, "map externalref 0x{slot:08x} 0x{slot:08x} {name}");
     }
     let exports: BTreeMap<u32, &str> = img.exports.iter().map(|(a, n)| (*a, n.as_str())).collect();
-    let overrides = if img.elf64 { crate::factsout::call_returns(img, an, fid) } else { Default::default() };
+    let overrides = crate::factsout::call_returns(img, an, fid);
     for &f in &an.funcs {
         let name = fid.get(&f).map(|a| a.name.as_str()).or_else(|| exports.get(&f).copied());
         let _ = writeln!(s, "map function 0x{f:08x}{}", name.map(|n| format!(" {}", token(n))).unwrap_or_default());

@@ -6,20 +6,22 @@
 //!
 //! `RulePtrsubCharConstant` came with stage S10 (the strings of the facts, `load facts`); the
 //! option files of the checks against `decomp_dbg` switch it off, so none of them runs it.
-//! Failing loudly where reached: the tree rewrite of
-//! `RulePieceStructure` (`PieceNode::gatherPieces` onward: proto-partial varnodes, which only
-//! `VariablePiece` groups); join addresses in `RuleAndStructure`; struct sub-types (`TypeStruct::getSubType`, through
-//! `infertypes::sub_type`); unions. Symbols are not modelled, so a varnode's symbol entry is
-//! always null: no equate stops `RuleAddUnsigned`, and `getStructuredType` is the varnode's type.
+//! `RulePieceStructure` rewrites the CONCAT tree of a structured value into proto-partial
+//! pieces at the storage of the whole (`PieceNode` and `Merge::groupPartials` are in merge.rs).
+//! (Superseded: "Failing loudly where reached: the tree rewrite of `RulePieceStructure`".)
+//! Failing loudly where reached: join addresses in `RulePieceStructure` and `RuleAndStructure`;
+//! struct sub-types (`TypeStruct::getSubType`, through `infertypes::sub_type`); unions. No equate
+//! symbol exists, so none stops `RuleAddUnsigned`.
 
 use super::*;
-use crate::decomp::infertypes::{sub_type, vn_type};
+use crate::decomp::infertypes::{exact_piece, sub_type, update_type, vn_type};
+use crate::decomp::merge::{addr_add, gather_pieces, register_proto_partial_root, PieceNode};
 use crate::decomp::types::{Kind, Meta, TypeId};
 use crate::decomp::varnode::overlap;
 
-/// `Datatype::isPieceStructured`: metatype at most `TYPE_ARRAY` (array, struct, union).
+/// `Datatype::isPieceStructured`.
 fn piece_structured(fd: &Funcdata, t: TypeId) -> bool {
-    matches!(fd.types.meta(t), Meta::Array | Meta::Struct | Meta::Union)
+    fd.types.is_piece_structured(t)
 }
 
 /// `Funcdata::newUnique(size, ct)` before `assignhigh` (no high to give it).
@@ -314,7 +316,7 @@ pub(super) fn expand_load(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> 
         return Ok(0);
     }
     let meta = fd.types.meta(el);
-    if matches!(meta, Meta::Unknown | Meta::Struct | Meta::Array | Meta::Union) {
+    if matches!(meta, Meta::Unknown | Meta::Struct | Meta::Array | Meta::Union | Meta::PartialStruct) {
         return Ok(0);
     }
     let add_form = check_and_comparison(fd, out_vn)?;
@@ -454,16 +456,120 @@ pub(super) fn extension_push(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i3
     Ok(1)
 }
 
-/// Port of `RulePieceStructure`, up to the tree rewrite, which is not ported. With no symbols,
-/// `getStructuredType` is the varnode's own type, so the varnode is never a partial.
-pub(super) fn piece_structure(fd: &mut Funcdata, op: OpId, arch: &Arch) -> Result<i32> {
-    let outvn = out(fd, op)?;
-    let ct = vn_type(fd, outvn);
-    if !piece_structured(fd, ct) {
-        return Ok(0);
+/// Port of `Varnode::getStructuredType` (varnode.cc:1138-1149): the structure, array or union
+/// `vn` is a piece of: its symbol's data-type when it is linked to one, else its own.
+fn structured_type(fd: &mut Funcdata, vn: VarnodeId) -> Option<TypeId> {
+    let ct = match fd.mapentry.get(&vn) {
+        Some(&(sym, _)) => fd.symtab.symbol(sym).ty?,
+        None => vn_type(fd, vn),
+    };
+    piece_structured(fd, ct).then_some(ct)
+}
+
+/// Port of `RulePieceStructure::determineDatatype` (ruleaction.cc:7369-7400): the structured
+/// data-type `vn` is part of and the offset of `vn` in it, or `None`.
+fn determine_datatype(fd: &mut Funcdata, arch: &Arch, vn: VarnodeId) -> Result<Option<(TypeId, i32)>> {
+    let Some(ct) = structured_type(fd, vn) else { return Ok(None) };
+    let (v, size) = (fd.vn(vn), sz(fd, vn));
+    if fd.types.size(ct) == size {
+        return Ok(Some((ct, 0)));
     }
+    // vn is a piece of its symbol
+    let entry = fd.mapentry.get(&vn).and_then(|&(sym, e)| fd.symtab.symbol(sym).entries.get(e));
+    let Some(entry) = entry else {
+        return err("RulePieceStructure: a structured data-type of another size without a symbol entry");
+    };
+    if entry.space == Space::Join || v.space == Space::Join {
+        return err("RulePieceStructure: a piece of a symbol in the join space is not implemented in ghidra-rs yet");
+    }
+    let mask = crate::decomp::heritage::space_mask(arch, entry.space);
+    let Some(over) = overlap(v.space, v.offset, entry.space, entry.offset, fd.types.size(ct), mask) else {
+        return Ok(None);
+    };
+    let base_offset = over as i32 + entry.piece.unwrap_or(0) as i32;
+    // the concrete sub-type of the varnode's size
+    let (mut sub, mut sub_off) = (Some(ct), i64::from(base_offset));
+    while let Some(t) = sub.filter(|&t| fd.types.size(t) > size) {
+        sub = sub_type(fd, arch, t, sub_off)?.map(|(s, o)| {
+            sub_off = o;
+            s
+        });
+    }
+    if sub.is_some_and(|t| fd.types.size(t) == size && sub_off == 0 && !piece_structured(fd, t)) {
+        return Ok(None); // a CONCAT forming one unstructured component is not split out
+    }
+    Ok(Some((ct, base_offset)))
+}
+
+/// Port of `RulePieceStructure::spanningRange` (ruleaction.cc:7409-7421): true unless the range
+/// falls within a single element that is not structured.
+fn spanning_range(fd: &mut Funcdata, arch: &Arch, mut ct: TypeId, offset: i32, size: i32) -> Result<bool> {
+    if offset + size > fd.types.size(ct) as i32 {
+        return Ok(false);
+    }
+    let mut new_off = i64::from(offset);
+    loop {
+        let Some((sub, off)) = sub_type(fd, arch, ct, new_off)? else { return Ok(true) };
+        (ct, new_off) = (sub, off);
+        if new_off + i64::from(size) > i64::from(fd.types.size(ct)) {
+            return Ok(true);
+        }
+        if !piece_structured(fd, ct) {
+            return Ok(false);
+        }
+    }
+}
+
+/// Port of `RulePieceStructure::findReplaceZext` (ruleaction.cc:7464-7480): a leaf of the
+/// CONCAT tree that is a zero extension across several fields becomes a PIECE.
+fn find_replace_zext(fd: &mut Funcdata, arch: &Arch, stack: &[PieceNode], ct: TypeId) -> Result<bool> {
+    let mut change = false;
+    for node in stack.iter().filter(|n| n.leaf) {
+        let vn = inp(fd, node.op, node.slot)?;
+        let Some(zext) = def(fd, vn).filter(|&d| code(fd, d) == IntZext) else { continue };
+        if !spanning_range(fd, arch, ct, node.type_offset, sz(fd, vn) as i32)? {
+            continue;
+        }
+        if convert_zext_to_piece(fd, arch, zext, ct, i64::from(node.type_offset))? {
+            change = true;
+        }
+    }
+    Ok(change)
+}
+
+/// Port of `RulePieceStructure::separateSymbol` (ruleaction.cc:7488-7501): whether the leaf
+/// belongs to another symbol than the root of its CONCAT tree.
+fn separate_symbol(fd: &mut Funcdata, root: VarnodeId, leaf: VarnodeId) -> bool {
+    if fd.mapentry.get(&root) != fd.mapentry.get(&leaf) {
+        return true;
+    }
+    if fd.vn(root).has(VnFlags::ADDRTIED) {
+        return false;
+    }
+    let Some(d) = def(fd, leaf) else { return true };
+    if fd.vn(leaf).has(VnFlags::PROTO_PARTIAL) || fd.op(d).is_marker() {
+        return true; // already in another tree, or not defined locally
+    }
+    if code(fd, d) != Piece {
+        return false;
+    }
+    let t = vn_type(fd, leaf);
+    piece_structured(fd, t) // it would be a root of its own
+}
+
+/// Port of `RulePieceStructure` (ruleaction.cc:7515-7607): the CONCAT tree making a structured
+/// value is laid out at the storage of the value, each piece at its offset, so that it prints
+/// as one assignment per piece: a leaf elsewhere is copied into place, an inner varnode is
+/// moved there, and the varnodes that are not address-tied are marked proto-partial.
+pub(super) fn piece_structure(fd: &mut Funcdata, op: OpId, arch: &Arch) -> Result<i32> {
+    if fd.op(op).flags.has(OpFlags::PARTIAL_ROOT) {
+        return Ok(0); // the tree was visited
+    }
+    let outvn = out(fd, op)?;
+    let Some((ct, base_offset)) = determine_datatype(fd, arch, outvn)? else { return Ok(0) };
     if code(fd, op) == IntZext {
-        return convert_zext_to_piece(fd, arch, op, ct, 0).map(i32::from);
+        let t = vn_type(fd, outvn);
+        return convert_zext_to_piece(fd, arch, op, t, 0).map(i32::from);
     }
     if let Some(z) = lone_descend(fd, outvn) {
         match code(fd, z) {
@@ -475,7 +581,70 @@ pub(super) fn piece_structure(fd: &mut Funcdata, op: OpId, arch: &Arch) -> Resul
             _ => {}
         }
     }
-    err("RulePieceStructure: the CONCAT tree rewrite (PieceNode, proto-partials) is not implemented in ghidra-rs yet")
+    let mut stack = Vec::new();
+    loop {
+        gather_pieces(fd, arch, &mut stack, outvn, op, base_offset, base_offset)?;
+        if !find_replace_zext(fd, arch, &stack, ct)? {
+            break;
+        }
+        stack.clear(); // some leaves became PIECEs: the tree again
+    }
+    fd.op_mut(op).flags.set(OpFlags::PARTIAL_ROOT);
+    let tied = |fd: &Funcdata, vn: VarnodeId| fd.vn(vn).has(VnFlags::ADDRTIED);
+    let mut any_tied = tied(fd, outvn);
+    let (root_space, root_off) = (fd.vn(outvn).space, fd.vn(outvn).offset);
+    for node in stack {
+        let vn = inp(fd, node.op, node.slot)?;
+        let size = sz(fd, vn);
+        // baseAddr + the offset, renormalized: in a join, the piece or pieces holding the range
+        let rel = i64::from(node.type_offset - base_offset);
+        let (space, addr) = match root_space {
+            Space::Join => fd.renormalize_join(root_off, rel, size)?,
+            _ => (root_space, addr_add(arch, root_space, root_off, rel)),
+        };
+        if (fd.vn(vn).space, fd.vn(vn).offset) == (space, addr) && (!node.leaf || !separate_symbol(fd, outvn, vn)) {
+            // already at its place and of the same symbol as the root: no COPY, no new storage
+            if !tied(fd, vn) {
+                fd.vn_set(vn, VnFlags::PROTO_PARTIAL);
+            }
+            any_tied |= tied(fd, vn);
+            continue;
+        }
+        let vt = vn_type(fd, vn);
+        let new_vn = if node.leaf {
+            let copy_op = fd.new_op(Copy, op_addr(fd, node.op));
+            let new_vn = fd.new_varnode_out(size, space, addr, copy_op);
+            any_tied |= tied(fd, new_vn); // the new varnode may be address-tied where vn is not
+            let new_type = exact_piece(fd, arch, ct, node.type_offset as u64, size)?.unwrap_or(vt);
+            update_type(fd, new_vn, new_type, false, false);
+            fd.op_set_input(copy_op, vn, 0)?;
+            fd.op_set_input(node.op, new_vn, node.slot)?;
+            fd.op_insert_before(copy_op, node.op)?;
+            if fd.types.needs_resolution(vt) || fd.types.needs_resolution(new_type) {
+                return err("RulePieceStructure: union resolution not implemented in ghidra-rs yet");
+            }
+            new_vn
+        } else {
+            // not address-tied, with one reader: the varnode is replaced by one at the right storage
+            let (Some(def_op), Some(lone_op)) = (def(fd, vn), lone_descend(fd, vn)) else {
+                return err("RulePieceStructure: an inner varnode of a CONCAT tree without its PIECEs");
+            };
+            let slot = fd.slot_of(lone_op, vn).ok_or_else(|| LowlevelError("RulePieceStructure: slot".into()))?;
+            let new_vn = fd.new_varnode(size, space, addr);
+            fd.vn_mut(new_vn).ty = Some(vt);
+            fd.op_set_output(def_op, new_vn)?;
+            fd.op_set_input(lone_op, new_vn, slot)?;
+            fd.delete_varnode(vn);
+            new_vn
+        };
+        if !tied(fd, new_vn) {
+            fd.vn_set(new_vn, VnFlags::PROTO_PARTIAL);
+        }
+    }
+    if !any_tied {
+        register_proto_partial_root(fd, op);
+    }
+    Ok(1)
 }
 
 /// Port of `RulePieceStructure::convertZextToPiece`.
@@ -538,7 +707,7 @@ pub(super) fn and_structure(fd: &mut Funcdata, op: OpId, arch: &Arch) -> Result<
     let vn = inp(fd, op, 0)?;
     let base = vn_type(fd, vn);
     let meta = fd.types.meta(base);
-    if !matches!(meta, Meta::Struct | Meta::Array) {
+    if !matches!(meta, Meta::Struct | Meta::PartialStruct | Meta::Array) {
         return Ok(0);
     }
     let offv = off(fd, cvn);

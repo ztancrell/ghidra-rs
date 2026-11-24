@@ -7,10 +7,12 @@
 //! sizes in `mergeAddrTied`) are a piece on the high and a list of member highs in [`Highs`].
 //! (Superseded: "Not ported: `VariablePiece`/`VariableGroup`", before print slice 5.)
 //!
-//! Not ported: the group symbol offset (`establishGroupSymbolOffset`, for proto-partial PIECEs,
-//! which no ported rule makes: `groupPartials` fails loudly), symbols (the local scope holds only the locked parameters, which `merge.rs`
-//! reads from the prototype in `high_symbol`; `localrecovery` is not ported), and
-//! `stripType` (no ported data-type has a stripped form).
+//! The group symbol offset (`establishGroupSymbolOffset`, for the proto-partial PIECEs of
+//! `RulePieceStructure`) is kept on the group. (Superseded: "Not ported: the group symbol
+//! offset", "`stripType` (no ported data-type has a stripped form)".)
+//!
+//! Not ported: symbols in the merge tests (the local scope holds only the locked parameters,
+//! which `merge.rs` reads from the prototype in `high_symbol`).
 
 use std::collections::BTreeMap;
 
@@ -48,6 +50,10 @@ pub(crate) struct HighVariable {
     extend_dirty: bool,
     /// `type_finalized`: the data-type `finalizeDatatype` took from the variable's symbol
     pub(crate) type_finalized: Option<TypeId>,
+    /// what `stripType` did when the C++ last computed its cached `type` (`None`: `typedirty`),
+    /// the one part of that cache the members do not give back: whether a partial struct was
+    /// stripped depends on the symbol the variable had then
+    stripped: Option<bool>,
 }
 
 /// Port of `VariablePiece`: a high as a piece of a `VariableGroup`.
@@ -70,6 +76,8 @@ struct VariablePiece {
 struct VariableGroup {
     pieces: Vec<HighId>,
     size: i32,
+    /// `symbolOffset`: the byte offset of the group within its symbol
+    symbol_offset: i32,
 }
 
 impl HighVariable {
@@ -280,15 +288,43 @@ fn type_representative(fd: &mut Funcdata, h: HighId) -> VarnodeId {
 }
 
 /// Port of `HighVariable::updateType` / `getType` and `isTypeLock`: the representative's type
-/// and lock, or the finalized type. ponytail: `stripType` is left out, no ported type has a
-/// stripped form.
+/// and lock, or the finalized type, with `stripType` (variable.cc:304-322): a partial struct
+/// becomes the undefined type of its size unless a bigger structured symbol backs the variable.
+/// The C++ caches the type until it is dirty (a merge, a member removed or retyped) and does
+/// not recompute it when a symbol is linked, so the decision is kept the same way
+/// (`HighVariable::stripped`): a piece whose type was asked for before `ActionNameVars` (in
+/// `mergeTestRequired`) stays stripped.
 pub(crate) fn h_type(fd: &mut Funcdata, h: HighId) -> (TypeId, bool) {
     let rep = type_representative(fd, h);
     let ty = match fd.highs.get(h).type_finalized {
         Some(t) => t,
-        None => super::infertypes::vn_type(fd, rep),
+        None => {
+            let ty = super::infertypes::vn_type(fd, rep);
+            match fd.types.stripped(ty) {
+                Some(stripped) => {
+                    let strip = match fd.highs.get(h).stripped {
+                        Some(s) => s,
+                        None => !super::namevars::piece_of_structured_symbol(fd, h),
+                    };
+                    fd.highs.get_mut(h).stripped = Some(strip);
+                    if strip {
+                        stripped
+                    } else {
+                        ty
+                    }
+                }
+                None => ty,
+            }
+        }
     };
     (ty, fd.vn(rep).has(VnFlags::TYPELOCK))
+}
+
+/// `HighVariable::typeDirty`: the cached data-type is recomputed when next asked for.
+pub(crate) fn h_type_dirty(fd: &mut Funcdata, vn: VarnodeId) {
+    if let Some(h) = fd.highs.of(vn) {
+        fd.highs.get_mut(h).stripped = None;
+    }
 }
 
 /// `HighVariable::getTiedVarnode`
@@ -336,6 +372,7 @@ pub(crate) fn high_remove(fd: &mut Funcdata, vn: VarnodeId) {
     let start = inst.partition_point(|&v| loc_key(fd, v) < key);
     if let Some(p) = inst[start..].iter().position(|&v| v == vn) {
         let hv = fd.highs.get_mut(h);
+        hv.stripped = None; // typedirty (variable.cc:526)
         hv.inst.remove(start + p);
         let unattached = hv.inst.is_empty();
         h_cover_dirty(fd, h);
@@ -422,6 +459,7 @@ pub(crate) fn high_merge(fd: &mut Funcdata, h1: HighId, h2: HighId, cache: bool,
 
 /// Port of `HighVariable::mergeInternal`: `h2`'s members join `h1`.
 fn merge_internal(fd: &mut Funcdata, h1: HighId, h2: HighId, speculative: bool) -> Result<()> {
+    fd.highs.get_mut(h1).stripped = None; // typedirty (variable.cc:646)
     let (c1, c2) = (fd.highs.get(h1).merge_classes, fd.highs.get(h2).merge_classes);
     if speculative {
         fd.highs.get_mut(h1).merge_classes = c1 + c2;
@@ -566,6 +604,25 @@ fn transfer_group(fd: &mut Funcdata, h: HighId, from: u32, to: u32) -> Result<()
 /// The group, the offset in it and the size of the piece of `h` (`HighVariable::piece`).
 pub(crate) fn piece_of(fd: &Funcdata, h: HighId) -> Option<(u32, i32, i32)> {
     fd.highs.get(h).piece.as_ref().map(|p| (p.group, p.offset, p.size))
+}
+
+/// `VariableGroup::getSymbolOffset`
+pub(crate) fn group_symbol_offset(fd: &Funcdata, group: u32) -> i32 {
+    fd.highs.groups[group as usize].symbol_offset
+}
+
+/// Port of `HighVariable::establishGroupSymbolOffset` (variable.cc:625-636): the group of `h`
+/// takes its offset within the symbol from `h`, whose symbol offset is `symbol_offset`.
+pub(crate) fn establish_group_symbol_offset(fd: &mut Funcdata, h: HighId, symbol_offset: i32) -> Result<()> {
+    let Some((group, piece_off, _)) = piece_of(fd, h) else {
+        return err("establishGroupSymbolOffset: a variable without a piece");
+    };
+    let off = symbol_offset.max(0) - piece_off;
+    if off < 0 {
+        return err("Symbol offset is incompatible with VariableGroup");
+    }
+    fd.highs.groups[group as usize].symbol_offset = off;
+    Ok(())
 }
 
 /// `VariableGroup::getSize`

@@ -1,9 +1,10 @@
 //! Data-types (stage S6): a port of the parts of `type.cc` that type inference reaches with the
 //! rules off — base types, pointers, `code`, the space-base type of a stack or global space,
 //! arrays — plus structs, unions, enums and typedefs as `parse line` defines them (layout by
-//! `TypeStruct::assignFieldOffsets` and the `.cspec`'s alignment map). Partial types,
+//! `TypeStruct::assignFieldOffsets` and the `.cspec`'s alignment map), and `TypePartialStruct`,
+//! the piece of an array or structure `getExactPiece` makes. Partial unions and enums,
 //! `TypePointerRel` and descending into structs, unions and enums during inference are not
-//! ported yet (inference fails loudly there).
+//! ported yet (inference fails loudly there). (Superseded: "Partial types ... are not ported".)
 //!
 //! Types live in an arena in [`TypeFactory`], addressed by [`TypeId`], and are hash-consed the
 //! way `TypeFactory::findAdd` dedups them, so two equal types are always the same id (the C++
@@ -30,6 +31,8 @@ pub(crate) enum Meta {
     Array,
     Struct,
     Union,
+    /// `TYPE_PARTIALSTRUCT`: part of a structure or array, stored apart from the whole
+    PartialStruct,
 }
 
 /// `sub_metatype` values (type.hh), which order types in `Datatype::compare`.
@@ -37,6 +40,7 @@ mod sub {
     pub(super) const VOID: u8 = 23;
     pub(super) const SPACEBASE: u8 = 22;
     pub(super) const UNKNOWN: u8 = 21;
+    pub(super) const PARTIALSTRUCT: u8 = 20;
     pub(super) const INT_CHAR: u8 = 19;
     pub(super) const INT_PLAIN: u8 = 17;
     pub(super) const UINT_PLAIN: u8 = 16;
@@ -66,6 +70,7 @@ fn base2sub(m: Meta) -> u8 {
         Meta::Array => sub::ARRAY,
         Meta::Struct => sub::STRUCT,
         Meta::Union => sub::UNION,
+        Meta::PartialStruct => sub::PARTIALSTRUCT,
     }
 }
 
@@ -85,6 +90,9 @@ pub(crate) enum Kind {
     Fields(Vec<(String, u32, TypeId)>),
     /// `TypeEnum`: the named values, from `parse line`
     Enum(Vec<(String, u64)>),
+    /// `TypePartialStruct`: `size` bytes at `offset` of the array or structure `container`;
+    /// `stripped` is the undefined type of that size, for formal use
+    PartialStruct { container: TypeId, offset: i32, stripped: TypeId },
 }
 
 /// The scope id of the global scope (`Database::getGlobalScope`, id 0 in the console).
@@ -230,6 +238,8 @@ impl TypeFactory {
         match t.kind {
             // the size is already a multiple of the alignment (calcAlignSize, n * element)
             Kind::Array { .. } | Kind::Fields(_) | Kind::Spacebase { .. } => t.size,
+            // Datatype(sz, 1, TYPE_PARTIALSTRUCT): alignSize is the size (type.cc:140)
+            Kind::PartialStruct { .. } => t.size,
             _ if t.meta == Meta::Code => t.size,
             _ => self.primitive_align_size(t.size),
         }
@@ -285,8 +295,54 @@ impl TypeFactory {
         })
     }
 
-    /// Port of `TypeFactory::getTypePointer`.
+    /// Port of `TypeFactory::getTypePartialStruct` with the `TypePartialStruct` constructor
+    /// (type.cc:2722-2741, 4431-4437): the piece of `size` bytes at `off` of the array or
+    /// structure `contain`; a piece of a piece is a piece of the first one's parent.
+    pub(crate) fn partial_struct(&mut self, mut contain: TypeId, mut off: i32, size: u32) -> TypeId {
+        let stripped = self.base(size, Meta::Unknown);
+        if let Kind::PartialStruct { container, offset, .. } = self.get(contain).kind {
+            contain = container;
+            off += offset;
+        }
+        self.intern(Datatype {
+            meta: Meta::PartialStruct,
+            submeta: sub::PARTIALSTRUCT,
+            size,
+            name: None,
+            kind: Kind::PartialStruct { container: contain, offset: off, stripped },
+        })
+    }
+
+    /// `Datatype::hasStripped` and `getStripped`: the undefined type a partial struct stands
+    /// for in formal use, `None` for a type without a stripped form.
+    pub(crate) fn stripped(&self, id: TypeId) -> Option<TypeId> {
+        match self.get(id).kind {
+            Kind::PartialStruct { stripped, .. } => Some(stripped),
+            _ => None,
+        }
+    }
+
+    /// `Datatype::isPieceStructured` (type.hh:989-995): an array, structure, union or partial
+    /// struct, put together by separate assignments.
+    pub(crate) fn is_piece_structured(&self, id: TypeId) -> bool {
+        matches!(self.meta(id), Meta::Array | Meta::Struct | Meta::Union | Meta::PartialStruct)
+    }
+
+    /// Port of `TypePartialStruct::getComponentForPtr` (type.cc:2747-2756): the element of the
+    /// parent array when the piece starts at one and it is not unknown, else the stripped type.
+    pub(crate) fn component_for_ptr(&self, id: TypeId) -> TypeId {
+        let Kind::PartialStruct { container, offset, stripped } = self.get(id).kind else { return id };
+        if let Kind::Array { elem, .. } = self.get(container).kind {
+            if self.meta(elem) != Meta::Unknown && offset % (self.align_size(elem).max(1) as i32) == 0 {
+                return elem;
+            }
+        }
+        stripped
+    }
+
+    /// Port of `TypeFactory::getTypePointer` (a partial struct is stripped first, type.cc:4372).
     pub(crate) fn pointer(&mut self, size: u32, to: TypeId, wordsize: u32) -> TypeId {
+        let to = self.stripped(to).unwrap_or(to);
         // TypePointer::calcSubmeta: a pointer to a struct (unless it needs resolution) or to a
         // union compares as a pointer into a struct
         let submeta = match self.meta(to) {
@@ -299,6 +355,7 @@ impl TypeFactory {
 
     /// Port of `TypeFactory::getTypePointerStripArray`.
     pub(crate) fn pointer_strip_array(&mut self, size: u32, to: TypeId, wordsize: u32) -> TypeId {
+        let to = self.stripped(to).unwrap_or(to); // type.cc:4354
         let to = match self.get(to).kind {
             Kind::Array { elem, .. } => elem,
             _ => to,
@@ -328,6 +385,18 @@ impl TypeFactory {
         match self.get(id).kind {
             Kind::Array { elem, .. } if off >= 0 && off < i64::from(self.size(id)) => {
                 Some((elem, off % i64::from(self.align_size(elem).max(1))))
+            }
+            // TypePartialStruct::getSubType (type.cc:2765-2779): the parent's component, a level
+            // further down while it reaches past the end of the piece
+            Kind::PartialStruct { container, offset, .. } => {
+                let size_left = i64::from(self.size(id)) - off;
+                let (mut ct, mut off) = (container, off + i64::from(offset));
+                loop {
+                    (ct, off) = self.sub_type(ct, off)?;
+                    if i64::from(self.size(ct)) - off <= size_left {
+                        return Some((ct, off));
+                    }
+                }
             }
             _ => None,
         }
@@ -375,6 +444,19 @@ impl TypeFactory {
                 }
                 (*ca).cmp(cb) as i32
             }
+            // TypePartialStruct::compare (type.cc:2792-2806)
+            (
+                Kind::PartialStruct { container: ca, offset: oa, .. },
+                Kind::PartialStruct { container: cb, offset: ob, .. },
+            ) => {
+                if oa != ob {
+                    return if oa < ob { -1 } else { 1 };
+                }
+                if level - 1 < 0 {
+                    return a.cmp(&b) as i32;
+                }
+                deeper(*ca, *cb)
+            }
             _ => 0,
         }
     }
@@ -396,6 +478,9 @@ impl TypeFactory {
         match t.kind {
             Kind::Pointer { to, .. } => format!("{} *", self.print_raw(to)),
             Kind::Array { elem, count } => format!("{} [{count}]", self.print_raw(elem)),
+            Kind::PartialStruct { container, offset, .. } => {
+                format!("{}[off={offset},sz={}]", self.print_raw(container), t.size)
+            }
             _ if t.meta == Meta::Code => format!("{}()", t.name.as_deref().unwrap_or("funcptr")),
             _ => t.name.clone().unwrap_or_else(|| format!("unkbyte{}", t.size)),
         }
@@ -453,6 +538,7 @@ impl TypeFactory {
 
     /// `TypeFactory::getTypeArray`: `count` elements of the element's align size.
     pub(crate) fn array_of(&mut self, elem: TypeId, count: u32) -> Result<TypeId, String> {
+        let elem = self.stripped(elem).unwrap_or(elem); // type.cc:4407
         let size = self.align_size(elem).checked_mul(count).ok_or("array too large")?;
         Ok(self.intern(Datatype {
             meta: Meta::Array,
@@ -471,7 +557,7 @@ impl TypeFactory {
         match &t.kind {
             Kind::Array { elem, .. } => self.alignment(*elem),
             Kind::Fields(fs) => fs.iter().map(|f| self.alignment(f.2)).max().unwrap_or(1),
-            Kind::Spacebase { .. } => 1,
+            Kind::Spacebase { .. } | Kind::PartialStruct { .. } => 1,
             _ if t.meta == Meta::Code => 1,
             // findAdd: alignment = getAlignment(getPrimitiveAlignSize(size))
             _ => self.align_of_size(self.primitive_align_size(t.size)),
@@ -635,6 +721,27 @@ mod tests {
         let p = f.pointer(4, s1, 1);
         let pp = f.pointer(4, p, 1);
         assert!(f.needs_resolution(p) && !f.needs_resolution(pp));
+    }
+
+    /// TypePartialStruct: a piece of a piece is a piece of the parent, its components are the
+    /// parent's, a pointer to it points at the stripped type.
+    #[test]
+    fn partial_struct() {
+        let mut f = TypeFactory::new();
+        let (i4, x16) = (f.base(4, Meta::Int), f.base(16, Meta::Unknown));
+        let arr = f.array_of(i4, 4).unwrap();
+        let p = f.partial_struct(arr, 4, 8);
+        assert_eq!(f.print_raw(p), "int4 [4][off=4,sz=8]");
+        assert_eq!((f.sub_type(p, 0), f.sub_type(p, 5), f.sub_type(p, 8)), (Some((i4, 0)), Some((i4, 1)), None));
+        let pp = f.partial_struct(p, 4, 4);
+        assert_eq!(f.print_raw(pp), "int4 [4][off=8,sz=4]");
+        assert_eq!((f.component_for_ptr(p), f.stripped(p)), (i4, Some(f.base(8, Meta::Unknown))));
+        let px = f.partial_struct(x16, 8, 8);
+        assert_eq!(f.component_for_ptr(px), f.base(8, Meta::Unknown));
+        let ptr = f.pointer(8, px, 1);
+        assert_eq!(f.ptr_to(ptr), Some(f.base(8, Meta::Unknown)));
+        assert!(f.is_piece_structured(p) && !f.needs_resolution(p) && f.order(p, x16) > 0);
+        assert_eq!((f.align_size(p), f.alignment(p)), (8, 1));
     }
 
     #[test]

@@ -6,6 +6,7 @@
 //! Not ported: line tables beyond the file names, local and global variables, storage and
 //! location expressions, source maps, macros, comments and bookmarks, Go and Rust special cases.
 pub mod dtm;
+pub mod pcode;
 pub mod read;
 
 use dtm::{Composite, Dtm, Handler, Id, Kind, Param, B};
@@ -94,6 +95,24 @@ pub struct Func {
     /// PRE comment may go there), a body of more than one range, or another DIE at its address
     /// (`decorateFunctionWithAlternateInfo`)
     pub plate: std::result::Result<Option<String>, ()>,
+    /// its namespaces, the outermost first (`DWARFName.getParentNamespace`)
+    pub ns: Vec<String>,
+    /// its name without them
+    pub base: String,
+    /// the first parameter is the `__return_storage_ptr__` of a `hidden_return`
+    pub hidden_ret: bool,
+    /// the storage of the parameters and of the return value from the calling convention
+    /// (`FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS`); `Err` names what is not ported
+    pub storage: std::result::Result<(Vec<Vec<Piece>>, Vec<Piece>), String>,
+}
+
+/// One piece of a variable's storage, the least significant first: on the stack or in a
+/// register, its offset there, its bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Piece {
+    pub stack: bool,
+    pub offset: u64,
+    pub size: i32,
 }
 
 /// The import's result: the program's data types and the functions with signatures.
@@ -1770,13 +1789,20 @@ impl<'a> Prog<'a> {
         let t = self.type_ref(g);
         let ret = self.data_type_for_variable(t.as_ref())?;
         let mut params = Vec::new();
+        let mut located = false;
         for (i, p) in self.param_list(g).into_iter().enumerate() {
             let pd = self.get_name(&p)?;
             let t = self.type_ref(&p);
             let ty = self.data_type_for_variable(t.as_ref())?;
             let this = i == 0 && self.is_this_param(&p);
+            // a parameter with a storage: the commit mode may be STORAGE
+            // (StorageVerificationDWARFFunctionFixup.java:36-58), and one on the stack among the
+            // locals becomes a local `<name>_local` (ParamSpillDWARFFunctionFixup.java:33-56)
+            located |= self.may_have_storage(&p);
             params.push((pd, ty, this));
         }
+        // without one the commit mode is FORMAL
+        let formal = !located;
         let varargs = !self.children(g, DW_TAG_UNSPECIFIED_PARAMETERS).is_empty();
         if !addrs.insert(addr) {
             dups.insert(addr);
@@ -1889,43 +1915,146 @@ impl<'a> Prog<'a> {
                 p.0 = format!("param_{}", i - autos + 1);
             }
         }
-        Ok(Some(Func { addr, name: qual.join("::"), cc, ret, params: fparams, varargs, noreturn, plate }))
+        let hidden_ret = fparams.first().is_some_and(|p| p.0 == "__return_storage_ptr__");
+        // DWARFFunction.updateFunctionSignature (DWARFFunction.java:457-492): FORMAL gives every
+        // parameter the storage of the calling convention; STORAGE the one DWARF's location
+        // expressions give (DWARFVariable.readStorage), which are not evaluated here
+        let storage = if !formal {
+            Err("the storage DWARF's location expressions give a parameter (STORAGE commit mode, parameter spill)"
+                .into())
+        } else if self.located_variable_below(g[0]) {
+            // DWARFFunctionImporter.java:205-212: a local variable with storage becomes a variable
+            // of the function (DWARFFunction.commitLocalVariable)
+            Err("the local variables of the DWARF import (commitLocalVariable)".into())
+        } else if cc.is_none() && (qual.len() > 1 || !fparams.is_empty()) {
+            // Java has the default model's name locked (`__stdcall`) on most such functions (a
+            // static method, Hatred's C functions with parameters) and `unknown` on others
+            // (`main`, libstdc++'s sort helpers); what sets it was not traced
+            Err("the calling convention of a function without `this` that has parameters or a namespace".into())
+        } else {
+            self.assign_storage(&fparams, ret, void, hidden_ret)
+        };
+        let name = qual.join("::");
+        let base = qual.pop().unwrap_or_default();
+        Ok(Some(Func {
+            addr,
+            name,
+            cc,
+            ret,
+            params: fparams,
+            varargs,
+            noreturn,
+            plate,
+            ns: qual,
+            base,
+            hidden_ret,
+            storage,
+        }))
     }
 
-    /// `MultiSlotDualAssign.assignAddress` for x86-64-gcc.cspec's output (MultiSlotDualAssign.java:236-304:
-    /// tiles of 8 bytes, RAX/RDX and XMM0_Qa/XMM1_Qa, no stack, not `fillalternate`): whether a
-    /// return of up to 16 bytes binds to registers. With two registers of each class and at most
-    /// two tiles, it fails only on the primitives: invalid, none, holes, or a tile no primitive
-    /// fits (`getTileClass`).
+    /// `ParamListStandard.assignMap` (ParamListStandard.java:192-209) with x86-64-gcc.cspec's
+    /// default prototype (x86-64-gcc.cspec:36-112; `__thiscall` is not in it): each parameter by
+    /// `join_dual_class` from RDI, RSI, RDX, RCX, R8, R9 and XMM0-XMM7, else `goto_stack`
+    /// (GotoStack.java, the stack entry from offset 8 in slots of 8, ParamEntry.java:360-420); the
+    /// return by `join_dual_class` from RAX, RDX and XMM0, XMM1, a hidden return's pointer in RAX.
+    fn assign_storage(
+        &self,
+        params: &[(String, Id)],
+        ret: Id,
+        void: bool,
+        hidden_ret: bool,
+    ) -> std::result::Result<(Vec<Vec<Piece>>, Vec<Piece>), String> {
+        const GENERAL: [u64; 6] = [0x38, 0x30, 0x10, 0x8, 0x80, 0x88];
+        const FLOAT: [u64; 8] = [0x1200, 0x1240, 0x1280, 0x12c0, 0x1300, 0x1340, 0x1380, 0x13c0];
+        let (mut g, mut f, mut slot) = (0, 0, 0i32);
+        let mut out = Vec::new();
+        for (name, ty) in params {
+            let (len, align) = (self.dtm.len(*ty), self.dtm.alignment(*ty));
+            // the rule's filter: `<datatype name="any" maxsize="16"/>` (x86-64-gcc.cspec:83-86)
+            if let Some(p) = (len <= 16).then(|| self.dual_assign(*ty, &GENERAL, &FLOAT, &mut g, &mut f)).flatten() {
+                out.push(p);
+                continue;
+            }
+            if len < 1 {
+                return Err(format!("the storage of parameter {name} of {len} bytes"));
+            }
+            if align > 8 && (slot * 8) % align != 0 {
+                slot += (align - (slot * 8) % align) / 8;
+            }
+            let used = (len + 7) / 8;
+            // 500 bytes of stack parameters (x86-64-gcc.cspec:81): past them Java leaves the
+            // storage unassigned
+            if slot + used > 500 / 8 {
+                return Err(format!("the storage of parameter {name} past the stack entry"));
+            }
+            out.push(vec![Piece { stack: true, offset: 8 + slot as u64 * 8, size: len }]);
+            slot += used;
+        }
+        let r = if void {
+            Vec::new()
+        } else if hidden_ret {
+            vec![Piece { stack: false, offset: 0, size: 8 }]
+        } else {
+            self.dual_assign(ret, &[0, 0x10], &FLOAT[..2], &mut 0, &mut 0)
+                .ok_or_else(|| "the storage of the return value".to_string())?
+        };
+        Ok((out, r))
+    }
+
+    /// `MultiSlotDualAssign.assignAddress` for x86-64-gcc.cspec's output (RAX/RDX and
+    /// XMM0_Qa/XMM1_Qa): whether a return of up to 16 bytes binds to registers. With two registers
+    /// of each class and at most two tiles, it fails only on the primitives: invalid, none, holes,
+    /// or a tile no primitive fits (`getTileClass`).
     fn join_dual_class(&self, dt: Id) -> bool {
-        let Some(prims) = self.primitives(dt, 0, 1024) else { return false };
+        self.dual_assign(dt, &[0, 0x10], &[0x1200, 0x1240], &mut 0, &mut 0).is_some()
+    }
+
+    /// `MultiSlotDualAssign.assignAddress` (MultiSlotDualAssign.java:236-304; tiles of 8 bytes, no
+    /// stack, not `fillalternate`, little endian): a register of `base` for each tile holding a
+    /// primitive that is no float, one of `alt` for a tile of floats (`getTileClass`,
+    /// MultiSlotDualAssign.java:181-216), from the first unused (`g`, `f`). The last piece is cut
+    /// to the type's size (`justifyPieces`). `None`: the action fails and uses nothing.
+    fn dual_assign(&self, dt: Id, base: &[u64], alt: &[u64], g: &mut usize, f: &mut usize) -> Option<Vec<Piece>> {
+        let prims = self.primitives(dt, 0, 1024)?;
         if prims.p.is_empty() || prims.holes {
-            return false;
+            return None;
         }
         let (size, tile) = (self.dtm.len(dt), 8);
-        let (mut left, mut i) = (size, 0);
+        let (mut left, mut i, mut used, mut pieces) = (size, 0, (*g, *f), Vec::new());
         while left > 0 {
-            // getTileClass (MultiSlotDualAssign.java:181-216)
-            let (off, mut count) = (size - left, 0);
+            let (off, mut count, mut float) = (size - left, 0, true);
             while let Some(e) = prims.p.get(i) {
                 if e.off < off {
-                    return false;
+                    return None;
                 }
                 if e.off >= off + tile {
                     break;
                 }
                 if e.off + e.len > off + tile {
-                    return false;
+                    return None;
                 }
+                float &= e.float;
                 count += 1;
                 i += 1;
             }
             if count == 0 {
-                return false;
+                return None;
             }
+            let offset = if float {
+                used.1 += 1;
+                *alt.get(used.1 - 1)?
+            } else {
+                used.0 += 1;
+                *base.get(used.0 - 1)?
+            };
+            pieces.push(Piece { stack: false, offset, size: tile });
             left -= tile;
         }
-        true
+        if let Some(last) = pieces.last_mut() {
+            last.size += left;
+        }
+        (*g, *f) = used;
+        Some(pieces)
     }
 
     /// `PrimitiveExtractor(dt, false, false, offset, max)` (PrimitiveExtractor.java): `None` =
@@ -2045,6 +2174,26 @@ impl<'a> Prog<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Whether Java may read a storage for a parameter or variable (DWARFVariable.readParamStorage
+    /// and readLocalVariableStorage, DWARFVariable.java:258-290): it has a `DW_AT_location`.
+    /// Neither the expressions nor the location lists are evaluated here (DIEAggregate.getLocation
+    /// takes the list entry holding the function's entry), so a function with one is not derived.
+    fn may_have_storage(&self, g: &Agg) -> bool {
+        self.has(g, DW_AT_LOCATION)
+    }
+
+    /// Whether a `DW_TAG_variable` below `die` may have a storage (`may_have_storage`).
+    fn located_variable_below(&self, die: u32) -> bool {
+        let mut stack: Vec<u32> = self.dw.children(die).collect();
+        while let Some(c) = stack.pop() {
+            if self.dw.tags[c as usize] == DW_TAG_VARIABLE && self.may_have_storage(&self.agg(c)) {
+                return true;
+            }
+            stack.extend(self.dw.children(c));
+        }
+        false
     }
 
     /// Whether a DIE below `die` has one of `tags`.

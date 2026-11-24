@@ -59,7 +59,15 @@ pub(crate) fn update_type(fd: &mut Funcdata, vn: VarnodeId, ct: TypeId, mut lock
         v.flags.set(VnFlags::TYPELOCK);
     }
     v.ty = Some(ct);
+    super::variable::h_type_dirty(fd, vn); // high->typeDirty() (varnode.cc:494)
     true
+}
+
+/// `vn->isTypeLock() && vn->getType()->getMetatype() != TYPE_PARTIALSTRUCT` (subflow.cc:103,
+/// 114, 1757, 3248): a type lock that also fixes how the value may be split.
+pub(crate) fn locked_whole(fd: &Funcdata, vn: VarnodeId) -> bool {
+    let v = fd.vn(vn);
+    v.has(VnFlags::TYPELOCK) && v.ty.is_none_or(|t| fd.types.meta(t) != Meta::PartialStruct)
 }
 
 /// The output and input metatypes of the `TypeOpBinary`, `TypeOpUnary` and `TypeOpFunc` ops
@@ -208,9 +216,14 @@ fn skipped(fd: &Funcdata, vn: VarnodeId) -> bool {
     v.is_annotation() || (!v.is_written() && v.descend.is_empty())
 }
 
-/// Port of `TypeOp::propagateToPointer`.
+/// Port of `TypeOp::propagateToPointer` (a pointer to a piece of an array points at the
+/// element, typeop.cc:195-197).
 fn to_pointer(fd: &mut Funcdata, dt: TypeId, size: u32) -> TypeId {
-    let dt = if fd.types.meta(dt) == Meta::Ptr { fd.types.base(fd.types.size(dt), Meta::Unknown) } else { dt };
+    let dt = match fd.types.meta(dt) {
+        Meta::Ptr => fd.types.base(fd.types.size(dt), Meta::Unknown),
+        Meta::PartialStruct => fd.types.component_for_ptr(dt),
+        _ => dt,
+    };
     fd.types.pointer(size, dt, WS)
 }
 
@@ -815,8 +828,10 @@ fn propagate_across_returns(fd: &mut Funcdata, arch: &Arch, st: &mut Infer) -> R
     Ok(())
 }
 
-/// Port of `TypeFactory::getExactPiece`: the piece of `ct` at `offset` of exactly `size` bytes.
-/// Partial structs, unions and enums are not ported (`sub_type` fails on their parents).
+/// Port of `TypeFactory::getExactPiece` (type.cc:4607-4639): the piece of `ct` at `offset` of
+/// exactly `size` bytes; a range inside an array, crossing its elements or part of one, is a
+/// partial struct. Structures, unions and enums are not ported (`sub_type` fails on them).
+/// (Superseded: "Partial structs ... are not ported".)
 pub(crate) fn exact_piece(
     fd: &mut Funcdata,
     arch: &Arch,
@@ -833,16 +848,19 @@ pub(crate) fn exact_piece(
         if fd.types.size(ct) == size {
             return Ok(Some(ct));
         }
-        last = Some(ct);
+        last = Some((ct, cur));
         match sub_type(fd, arch, ct, cur)? {
             Some((t, o)) => (ct, cur) = (t, o),
             None => break,
         }
     }
-    if last.is_some_and(|t| matches!(fd.types.meta(t), Meta::Struct | Meta::Array | Meta::Union)) {
-        return err("a partial struct, array or union (getExactPiece): not implemented in ghidra-rs yet");
+    match last.map(|(t, o)| (t, o, fd.types.meta(t))) {
+        Some((t, o, Meta::Array | Meta::PartialStruct)) => Ok(Some(fd.types.partial_struct(t, o as i32, size))),
+        Some((_, _, Meta::Struct | Meta::Union)) => {
+            err("a piece of a struct or union (getExactPiece): not implemented in ghidra-rs yet")
+        }
+        _ => Ok(None),
     }
-    Ok(None)
 }
 
 /// Port of `ActionInferTypes::propagateRef`: the type `vn` points to goes to the stack varnodes

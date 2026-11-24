@@ -1158,8 +1158,9 @@ rust/tools/decomp-diff.sh --script <file>      # one script on both engines, ful
   of decoding the bound address in the slot, which made 0x40a110 fail), and `map function` for
   every function with its FID or export name. For mercs2: 30,262 `map function` lines (1,022 of
   them import slots), 1,022 `map externalref`.
-  For an ELF also `override flow <address> callreturn` after a function's `map function`, for
-  its CALL_RETURN flow overrides ("The prelude path follows Java" below).
+  Also `override flow <address> callreturn` after a function's `map function`, for its
+  CALL_RETURN flow overrides ("The prelude path follows Java" below; ELF first, PE since
+  branch `pe-overrides`: 3,369 such lines for mercs2).
 - `decompile -i` reads `load file`, `source`, `map function`, `map externalref`, `readonly`,
   `option`, `fixup apply`, `load function`, `load addr`, `break start`, `decompile`,
   `print raw`, `continue` and `quit`, and echoes them as `decomp_dbg -i` does. `decompile`
@@ -4428,7 +4429,8 @@ strings excepted); struct, union or array symbols near an address `RulePtrArith`
 (`TypeSpacebase::nearestArrayedComponent`); a string that is not plain ASCII, or of wide
 characters (Java reads strings with the listing's character sets, `getStringData`); a function
 data-type with a prototype used for an indirect call (`forceSet`); the decompile of a function
-in a namespace; a prototype with only its inputs or only its output locked, an unlocked
+in a namespace (superseded, 2026-11-23, branch `fix-hatred-facts`: it is ported, see "Namespaces
+and DWARF prototypes in the ELF facts"); a prototype with only its inputs or only its output locked, an unlocked
 varargs prototype, custom storage, hidden return parameters, `inline`, prototype and
 jump-table overrides; names recommended for register variables; locked local variables;
 every flow override but `CALL_RETURN` on a jump or a call; volatile memory; signed
@@ -6621,7 +6623,9 @@ ran 805; 10 it did not finish, 5 of them timed out at 120 s); Hatred camera iden
   not run on x86-64);
 - names from the symbol tables, local ones too.
 
-Not ported, written as `underived ... function`, which the loader fails on:
+Superseded in part (2026-11-23, branch `fix-hatred-facts`, "Namespaces and DWARF prototypes in
+the ELF facts" below): namespaces are written, and the DWARF prototype where its storage is
+known. Not ported, written as `underived ... function`, which the loader fails on:
 - a GNU-mangled name (`gnudemangle::gnu_demangle`, picked by the program format as
   `DemanglerAnalyzer` does): Java puts the function in its namespaces and gives it the
   mangling's signature; its plate comment is `underived ... comments`;
@@ -6644,6 +6648,8 @@ Prototypes from the 64-bit data-type archives (Java gives `_init` `int _init(EVP
 are not read.
 Superseded in part (2026-11-23, branch `fix-prelude`): still not applied, but a function the
 archive names is `underived ... function` ("Archive prototypes are loud" below).
+Superseded (2026-11-23, branch `fix-hatred-archives`): applied where ported ("Archive prototypes
+applied" below).
 
 The EXTERNAL block and the GOT (branch `x64-facts`, 2026-11-22), in the facts only (the
 analysis and the decompiler have no block there). Superseded (2026-11-22, branch
@@ -6656,7 +6662,8 @@ hold the entries' addresses now (see "The GOT import slots in the image" below):
   1685-1713, 1945-2041). The block record is writable. It matched Java's on all 14 binaries;
 - a one-byte function at each STT_FUNC entry (ElfProgramBuilder.java:2140-2152), with the
   default model's extrapop and the no-return analyzers' mark: its prototype comes from the
-  archives, so each is `underived ... function`;
+  archives, so each is `underived ... function`. Superseded (2026-11-23, branch
+  `fix-hatred-archives`): only a GNU name or a definition that is not ported is;
 - GLOB_DAT and JUMP_SLOT slots of an undefined symbol hold its entry plus the addend
   (X86_64_ElfRelocationHandler.java:168-171), and every word of a `.got*` block is a pointer
   (ElfDefaultGotPltMarkup.java:78-93, 360-415), named `PTR_<pointee>_<address>`, or
@@ -6764,7 +6771,8 @@ ghidra-rs writes 351,303 `underived` records. Known limits, not fixed:
   cause is a function ghidra-rs does not find (0x3582f90);
 - `func_children` drops the DWARF function process_subprogram makes for a call site; it may be
   silent;
-- not ported: DWARF and demangled function signatures, parameter storage, namespaces (`ns`
+- superseded in part (branch `fix-hatred-facts`, below): namespaces and some DWARF prototypes
+  are written. Was: not ported: DWARF and demangled function signatures, parameter storage, namespaces (`ns`
   records).
 
 #### The GOT import slots in the image (branch `fix-gotslots`, 2026-11-22)
@@ -6882,7 +6890,9 @@ done:
 
 Limits of the overrides:
 - the PE prelude has none. Java has them on PE too, but they would change the mercs2 prelude
-  (its `cksum` is a `bars-queue.sh` check) and every baseline built on it; not done here;
+  (its `cksum` is a `bars-queue.sh` check) and every baseline built on it; not done here.
+  Superseded (branch `pe-overrides`): the PE prelude writes them, see "The PE prelude gets
+  the flow overrides" below;
 - they are ghidra-rs's own, not Java's: on Hatred `facts-diff.sh` has 31,356 `override`
   records equal, 2,507 only Java has and 3,972 only ghidra-rs has (0x16a0590, a function of
   one jump, is one);
@@ -6920,6 +6930,63 @@ Not checked: Java's own C for these functions (the facts path still fails loudly
 in a namespace); the desktop's reference, which must be rebuilt (`tools/decomp-ref.sh`) before
 its next `decomp-diff.sh` or `bars-queue.sh` run, since the patch changed.
 
+#### The PE prelude gets the flow overrides (branch `pe-overrides`, 2026-11-23)
+
+The user's decision: the PE prelude writes the CALL_RETURN flow overrides as the ELF prelude
+does. `console::prelude` no longer asks for an ELF: after each function's `map function` it
+writes `override flow <address> callreturn` for the instructions of its body that
+`factsout::call_returns` gives. The mercs2 prelude: 35,185 lines (was 31,816), 3,369 of them
+overrides; without the `override` lines it is the old file, byte for byte. Superseded: "the
+mercs2 prelude is byte-identical (`cksum` 805048874 ...)" above, which holds for the prelude
+before this branch.
+
+The rule is ghidra-rs's own on PE too, not Java's set. Measured against the facts of the Java
+project (`$GHIDRA_REF/mercs2.facts`, Java 12.3 after the mercs2 pipeline, 3,365 `override`
+records, all CALL_RETURN):
+
+| ghidra-rs | records | equal | only Java | only ghidra-rs |
+|---|---|---|---|---|
+| `analyze --facts`, plain discovery (`tools/facts-own.sh`, `facts-diff.sh`) | 4,556 | 2,666 | 699 | 1,890 |
+| the prelude's lines (`analyze --decomp-prelude`, by address) | 3,369 | 1,650 | 1,715 | 1,719 |
+
+The two rows differ because `--facts` runs discovery with Create Address Tables and constant
+propagation and the prelude does not, and the prelude writes only the instructions of a
+function's body. What makes each record only Java's or only ghidra-rs's was not traced here
+(the function set and the no-return set both differ, see "The comparison"). The difference is
+not silent in the decompile checks: both engines read the same prelude. It is one more way the
+prelude path differs from Java's own decompile, which the facts path measures.
+
+Checks (desktop, the reference rebuilt in the worktree, old and new prelude from the same
+build):
+- `CORPORA=m8 tools/bars.sh`: 57 of 57 lines the same with the old and the new prelude, and
+  equal to the M8 lines of baseline `x64-13b1dffecf`; silent 0. One M8 function has an override
+  (0x9eec5e, at 0x9eec68);
+- M500: 39 of the 500 functions get an override line (39 lines; 21 of the addresses are
+  Java's too). An override belongs to its function (`Override` of the `Funcdata` in the C++,
+  `Console::call_returns` by entry here), so only these 39 read a different script. All 57
+  M500 checks on the 39 with the new prelude (`TIMEOUT=30`): 39 / 39 identical in each,
+  loud 0, silent 0, timeout 0. With the old prelude, on the 38 without 0x4c48d0: 38 / 38 in
+  54 checks, 35 / 38 in `r5slock` and `r5dtlocksv` (loud 3: 0x48c986, 0x608500, 0x7874d0) and
+  36 / 38 in `svlock` (loud 2: 0x48c986, 0x608500), all "a piece of a locked stack
+  parameter", a path not ported; with the override flow no longer runs past the overridden
+  instruction into that path, so the three checks gain these functions. 0x4c48d0 is the function the reference did not
+  finish in 120 s (`cs-r`, old prelude); with the overrides both engines finish it;
+- full M500 checks run with the new prelude (baseline `x64-13b1dffecf` -> now):
+  `pcd` 499 / 499, reference finished 499 / 500 -> 500 / 500 of 500; `r5dtlocksv` and
+  `r5slock` 469 / 499 (loud 30) -> 472 / 499 (loud 27, all "a piece of a locked stack
+  parameter"; the reference does not finish 0x6b21e0 in 120 s); silent 0, timeout 0 in each.
+  The three agree with the baseline plus the change on the 39 functions;
+- small ELF decompile corpus (`tools/elf64-decomp.sh`), 815 functions: identical 790, loud 23
+  (16 CONCAT tree, 5 type propagation, 1 partial struct, 1 jump table through a CALLOTHER),
+  silent 0, the reference ran 813: unchanged;
+- `cargo test --release` 203 passed, `cargo clippy --all-targets -- -D warnings` and
+  `cargo fmt --check` clean.
+
+Not run: the other 53 M500 checks in full (only their 39 functions with an override, above),
+the r5d-adc, switch and simple corpora, the Mac, Java's own C. Every baseline of a mercs2
+check moves with the prelude; `rust/target/baselines/pe-overrides-<hash>.summary` holds the
+new M8 lines.
+
 #### Archive prototypes are loud (branch `fix-prelude`, 2026-11-23)
 
 Java's Apply Data Archives analyzer gives a function the prototype of a function definition
@@ -6953,6 +7020,99 @@ none `underived`:
 - `_start` (`processEntry`).
 Also not covered: a second name of a function. `Image::elf_funcs` keeps one name per entry, so
 an alias only Java sees can still match the archive.
+Superseded (2026-11-23, branch `fix-hatred-archives`): the prototypes are applied, the 236 are
+traced in part and every name of a function counts ("Archive prototypes applied" below).
+#### Archive prototypes applied (branch `fix-hatred-archives`, 2026-11-23)
+
+`analyze <elf64> --facts` applies the function definitions of `generic_clib_64.gdt` as Java's
+Apply Data Archives analyzer does (ApplyDataArchiveAnalyzer, ApplyFunctionDataTypesCmd,
+ApplyFunctionSignatureCmd), where it wrote `underived ... function` for every function the
+archive names. What is ported:
+- which definition goes where (`factsout::archive_applied`): symbols are looked up by the last
+  identifier of their name, under the definition's name, or with one `_` before it when no
+  symbol has the name itself. The symbols are every named symbol of the symbol tables
+  (`Image::elf_symbols`, so a second name of a function counts), the entries and the EXTERNAL
+  block's. Superseded: "`Image::elf_funcs` keeps one name per entry, so an alias only Java sees
+  can still match the archive";
+- the source priority: the analyzer applies with `SourceType.IMPORTED` to a function whose
+  signature has a lower source. A function the DWARF importer gave a signature (`IMPORTED`)
+  keeps it. A GNU name is still mangled when the analyzer runs (the demangler comes later), so
+  it matches no definition; a thunk is skipped and shows the prototype of its target;
+- the prototype (`gdt::protos::export_elf64`, the exporter of the 32-bit archive with the
+  x86-64 gcc data organization): return type, parameters, varargs, the storage of
+  `x86-64-gcc.cspec`'s `__stdcall` for integers, pointers and enums up to 8 bytes (RDI, RSI,
+  RDX, RCX, R8, R9, then the stack from 8; RAX), a register parameter's range from the address
+  before the entry, the `type` records of the types named. The function keeps its name and
+  its stack locals;
+- Java's Call Convention ID analyzer after it (DecompilerCallConventionAnalyzer): a function
+  in memory with a parameter of a defined type gets `__stdcall`, locked; a function of the
+  EXTERNAL block and a thunk of one keep `unknown`;
+- the EXTERNAL block's functions and the thunks through a GOT slot are written without
+  `underived` when their name is no GNU mangling: with the archive's prototype, or plain;
+- a function with a symbol whose body is one jump to another function has the prototype of
+  that function (Java makes it a thunk, as one without a symbol);
+- the entry function has `processEntry`, locked, extrapop 0 (ElfProgramBuilder.java:651-668:
+  an executable or shared object whose OS/ABI is Linux or none; `Image::elf_process_entry`).
+
+Still `underived ... function` (loud):
+- a definition with a float, a composite, a type over 8 bytes or an `undefined` type in its
+  prototype (the cspec's `<rule>`s and XMM storage are not ported), one whose types fail to
+  encode, and a name two definitions have (Java applies one of two equivalent definitions and
+  neither of two others; `isEquivalent` is not ported);
+- an address two definitions reach (Java applies the first of a `HashMap`'s order);
+- a match through the `_` form on an image with DWARF: the DWARF importer's labels are
+  symbols too, and one named as the definition takes it from the `_` form (Hatred's `_init`
+  has no prototype in Java);
+- a function with a call fixup, and a thunk that itself has a symbol the archive names;
+- a function that calls one the archive gives a variable argument list: Java's Variadic
+  Function Signature Override analyzer (FormatStringAnalyzer) writes a prototype override at
+  such calls, which is not ported.
+
+Known limits, silent:
+- Call Convention ID is taken to succeed. Java runs the decompiler on the function (60 s limit)
+  and leaves `unknown` where that fails. On Hatred all 2,602 such functions got `__stdcall`.
+  A function Java's decompiler fails on would differ silently;
+- a parameter is written name-locked whatever its name, as Java's facts have it (`param_1` of
+  `isspace`); the rule in Java was not traced;
+- a symbol of the archive at an address with no function: Java may make a function there
+  (ApplyFunctionDataTypesCmd.java:218-262); ghidra-rs does not, and writes no record.
+
+Hatred, `facts-diff.sh` against Java's facts, before (master 3a5ba15656, measured again) and
+after: func equal 5,623 -> 9,098 of 180,433; silent func 236 -> 131; `underived` records
+354,311 -> 350,871 (`function` 174,709 -> 171,269); type 1 -> 933 equal (1 different, `fn`:
+the two sides have
+different function types of that name; 3 only ghidra-rs has: `double`, `undefined1`, `wchar_t`); every other
+row unchanged. `--facts` took 427 s, maximum RSS 7.25 GB. Small corpus (14 binaries): func equal
+209 -> 333 of 1,112; silent 33 -> 15; `underived` 1,509 -> 1,315.
+
+Of the 236 silent before: 21 are equal now, 106 are `underived` (the callers of functions with
+a variable argument list among them), 109 are still silent. The 131 silent now, by what differs:
+- 119 stack locals (100 of the 236, 19 in functions that were `underived` before): locals only
+  one side has, or of another size. Not traced;
+- 5 with a prototype override in Java at a call the rule above does not reach (`ENGINE_ctrl`,
+  `GENERAL_NAME_print`, `i2v_GENERAL_NAME`, `long_print`, `dump_value_LHASH_DOALL_ARG`; one of
+  them with other locals too): 2 of the 236, 3 new;
+- 3 thunks of more than one instruction (`default_malloc_ex`, `default_realloc_ex`,
+  `default_malloc_locked_ex`: 9 bytes, Java's CreateThunkFunctionCmd takes them, ghidra-rs's
+  one-jump rule does not);
+- 3 names: `__fstat` where Java has `fstat` (the primary symbol of two), `FUN_034924a1` and
+  `FUN_03492be7` where Java has the names of symbols that are no STT_FUNC
+  (`_vpaes_schedule_low_round`, `_bsaes_encrypt8_bitslice`);
+- 1 type of a local (`undefined1` where Java has `undefined`, `uloc_toLanguageTag_53`).
+Premise found wrong: the 104 "with a locked prototype in Java and no archive name" were not shown
+to be callbacks typed from archive parameters. The ones traced are a thunk with a symbol
+(`default_malloc_ex`: `malloc`'s prototype) and callers with a prototype override; the 21 now
+equal and the 106 now `underived` were not looked at one by one.
+The 22 newly silent records (loud before, derived now, different for causes older than this
+branch): 19 stack locals (the cause of the 100 older ones, `factsout::locals`), 2 prototype
+overrides and 1 more with other locals too (the cause of the 2 older ones, and of the small
+corpus's `main`). They do not block the merge: the user's decision of 2026-11-16 ("progress that
+exposes bugs", DESIGN.md), applied here by the coordinating session. The addresses are in
+`rust/target/baselines/archives-131.txt`.
+The small corpus's 15 silent: 7 in each `-cet` build (`.plt.sec` thunks, which ghidra-rs names
+`FUN_` and Java after the external, seen at `t1-cet` 0x1010c0; the others not looked at one by
+one) and `__clang_call_terminate` of `cpp2-clang` (a no-return flag Java sets).
+
 
 #### Hatred's loud stops: heritage overlaps, contiguous joins, unjustified inputs, `&` casts (branch `fix-hatred-rules`, 2026-11-23)
 
@@ -6994,7 +7154,8 @@ tests (merge.cc:136-146, 261), `Merge::groupPartials` (merge.cc:967-976, 1375-14
 `ActionMarkExplicit::baseExplicit` (coreaction.cc:3205-3231), `Funcdata::linkProtoPartial`
 (funcdata_varnode.cc:1197-1214) and `HighVariable::setSymbol`'s group offset
 (variable.cc:258-260). It stays loud, and so does the partial struct on its own
-("getExactPiece: ... (getTypePartialStruct) is not ported").
+("getExactPiece: ... (getTypePartialStruct) is not ported"). Superseded: ported on branch
+`fix-concat` (the section after this one).
 
 `tools/decomp-status.sh` runs ghidra-rs alone (`decompile`, `print C`, default options) on a
 list of functions and writes a status table by cause. Hatred's module here is the 9,994
@@ -7045,6 +7206,100 @@ Checks:
 Kept from before, not this branch's: `ParamActive::which_trial` tests every trial for a
 one-byte range, where the C++ returns after the first (fspec.cc:1981-1991).
 
+#### `RulePieceStructure`'s CONCAT tree, partial structs and proto-partial pieces (branch `fix-concat`, 2026-11-23)
+
+The largest of Hatred's loud stops is ported, with what it needs. A value put together by
+PIECEs whose data-type is an array, structure or union (every 16-byte XMM value is
+`undefined1[16]`) now prints as one assignment per piece (`axVar11._4_4_ = ...;`), as the C++
+prints it.
+
+- `TypePartialStruct` (type.cc:2714-2817, `getTypePartialStruct` 4431-4437): a piece of an
+  array, in types.rs (`Meta::PartialStruct`, `Kind::PartialStruct`: the parent, the offset, the
+  stripped type), with `getSubType`, `compare`, `printRaw`, `getComponentForPtr`,
+  `getHoleSize` (split.rs), `isPieceStructured`, and the strip of a partial in
+  `getTypePointer`, `getTypePointerStripArray` and `getTypeArray`. `getExactPiece`
+  (type.cc:4607-4639) makes one in its three ports (`infertypes::exact_piece`,
+  `Funcdata::exact_piece` in mapstate.rs, split.rs). Only a piece of an array: a piece of a
+  structure, union or enum still fails loudly (`TypeStruct::getSubType` is not in types.rs);
+- what reads the metatype: the cast rules (cast.cc:49-56, 90, 146, 341-374, 417),
+  `TypeOp::propagateToPointer` (typeop.cc:195-197), `MapState::addFixedType`
+  (varmap.cc:1052-1082: an open hint of the element, a fixed undefined one for a copied
+  constant), `SplitDatatype` (`categorizeDatatype`, `RootPointer::find` and the tests of the
+  three rules, subflow.cc:2146, 2258-2272, 2967-3011), the type-lock tests of `SubvariableFlow`,
+  `SplitFlow` and `SubfloatFlow` (subflow.cc:103, 114, 1757, 3248), `RuleAndStructure`,
+  `RuleExpandLoad`, `isPrimitiveWhole`, `ScopeInternal::retypeSymbol`;
+- `HighVariable::stripType` (variable.cc:304-322) in `variable::h_type`: a partial struct is
+  the undefined type of its size unless a structured symbol backs the variable as a piece. The
+  C++ caches a variable's type and does not recompute it when a symbol is linked, so what
+  `stripType` did is cached the same way (`HighVariable::stripped`, dirtied by a merge, a
+  removed member and `Varnode::updateType`), and `mergeTestRequired` asks for the type of its
+  second variable only when the first is locked, as the C++ does (merge.cc:107-109);
+- `RulePieceStructure` (ruleaction.cc:7369-7607): `determineDatatype` (with
+  `Varnode::getStructuredType`), `spanningRange`, `findReplaceZext`, `separateSymbol` and the
+  tree rewrite of `applyOp`: each piece of the tree goes to its offset in the storage of the
+  whole, a leaf elsewhere through a COPY, an inner varnode by a new varnode, and the pieces
+  that are not address-tied are marked proto-partial (`Varnode::proto_partial`,
+  `PcodeOp::concat_root`);
+- `PieceNode` (op.cc:843-918) in merge.rs: `isLeaf`, `gatherPieces`, and `findRoot` through
+  proto-partial varnodes;
+- `Address::renormalize` for a tree in the join space (`renormalizeJoinAddress` with
+  `JoinRecord::getEquivalentAddress`, translate.cc:145-175, 908-953; `Funcdata::renormalize_join`):
+  a piece of a join is its register, a range over several pieces their join. A join with a
+  constant piece fails loudly;
+- the proto-partial flag in `mergeTestRequired` and `mergeTestBasic` (merge.cc:136-146, 261),
+  `Merge::groupPartials` and `groupPartialRoot` (merge.cc:967-976, 1375-1405);
+- `ActionMarkExplicit::baseExplicit` (coreaction.cc:3204-3231): the pieces of a partial root
+  and the base of its PIECEs are explicit;
+- `Funcdata::linkProtoPartial` (funcdata_varnode.cc:1197-1214), `HighVariable::setSymbol`'s
+  group offset (variable.cc:258-260), `establishGroupSymbolOffset` (625-636) and the
+  proto-partial preference of `compareName` (472-473).
+
+Superseded: "Not ported: the CONCAT tree rewrite of `RulePieceStructure`" and "the partial
+struct on its own" (the section above); "`groupPartials` fails loudly on a registered
+proto-partial root" and "`stripType`" in the not-ported list of stage S7; "the CONCAT tree
+rewrite of `piecestructure`" (R5 slice 4); "a piece of an array symbol as a data-type
+(`getTypePartialStruct`)" ("Local symbols"); "a partial struct, array" in `finalizeDatatype`;
+"a piece of a structure or array (`TypePartialStruct`...)" in the split rules, for arrays.
+
+Still loud:
+- type propagation into an array (`TypePointer::downChain`): its callers make a
+  `TypePointerRel` of the parent (`propagateAddIn2Out`, typeop.cc), a data-type ghidra-rs does
+  not have, with its own printing and pointer arithmetic. Not a small step; left as it is;
+- a constant that is a piece of a structured symbol (`PrintC::pushConstant` of a partial
+  struct: a cast to the type);
+- `SplitDatatype::buildOutConcats` (the other maker of proto-partials), partial unions and
+  enums, a piece of a structure, a join with a constant piece.
+
+The first 3,128 functions of Hatred's module (the list and prelude of the section above:
+`0x169e020`-`0x17562f0`, 34,932 flow overrides), `tools/decomp-status.sh`:
+
+| | master f91fd31ed2 (desktop) | this branch on fe4043a333 (desktop) |
+|---|---|---|
+| ok | 3,009 | 3,113 |
+| loud | 119 | 15 |
+| timeout (120 s) | 0 | 0 |
+
+Loud on master, by cause, and how many print now: CONCAT tree 83 (83), partial struct 21
+(21), `downChain` 11 (0), heritage after dead-code removal in the stack space 2 (0), jump
+table through a CALLOTHER 2 (0). The 15 still loud: 11 `downChain`, 2 heritage after dead-code removal, 2 CALLOTHER jump tables. The 3,009 ok on master are ok still.
+
+Checks:
+- against the reference (decomp_dbg with this branch's patch, `print C`), all 119 functions
+  loud on master: the reference ran 119, identical 104 (every one that prints), loud 15 (the 15 above), silent 0. Run on the MacBook, after 0x16a27b0 and 0x16e38f0 gave the same bytes there as on the desktop, on both engines; with the branch before it was moved onto fe4043a333, whose changes touch no decompiler source;
+- small ELF decompile corpus, 815 functions: identical 807 (was 790), loud 6 (was 23:
+  5 `downChain`, 1 jump table through a CALLOTHER left), silent 0; the reference ran 813 (the 2 it cannot load decompile in ghidra-rs,
+  with nothing to compare them to);
+- Hatred camera corpus, 50 functions: identical 49 (was 47), loud 1 (was 3; `downChain` left), silent 0;
+- `CORPORA=m8 tools/bars.sh` (desktop, reference rebuilt): 57 of 57 lines equal to the baseline (`x64-13b1dffecf.summary`); `simple`: pc-r, pc-t, pcc-r, pcc-t 194 / 194, pcd 198 / 200, pmd 199 / 200; `r5d-adc`: r5d, r5dt, r5dtlock 215 / 215, r5dtlocksv 202 / 215, all as before. No M500 check was run;
+- `cargo test --release` 206 passed (two of them new: `partial_struct`, `join_ranges`),
+  `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` clean.
+
+Not measured: the other 6,866 functions of the module. Not looked for in the compared functions,
+so possibly never run: a tree in the join space over more than two pieces, a zero extension
+inside a tree (`findReplaceZext`), a piece of a symbol with an entry (`determineDatatype`'s
+partial case: no symbol is linked before `ActionNameVars`), a stripped type cached before the
+symbol was linked.
+
 #### Java's C of Hatred, for the full decompile comparison (branch `hatred-java-run`, 2026-11-23)
 
 `tools/hatred-java-run.sh [<list>]` is the Java side: one headless run of Ghidra 12.3 that
@@ -7088,6 +7343,116 @@ failed function, and Hatred itself, neither the Java run nor `ghidra-diff.sh` wi
 facts (one `load facts` per function). The last Hatred run (import, analysis and facts) took
 7,721 s and 26.0 GB; the decompile step adds to that, by how much is not measured. No function
 list is in the repository: the list is whatever the ghidra-rs Hatred run used.
+
+#### Namespaces and DWARF prototypes in the ELF facts (branch `fix-hatred-facts`, 2026-11-23)
+
+What Java's decompiler gets for a C++ ELF, in three parts.
+
+**Namespaces.** A `func` record is in the namespaces of Java's primary symbol (`<doc id>`,
+`<parent id>`), and each namespace a record is in has its `ns` record (`getNamespacePath`):
+- a function of the DWARF import: the DWARF name and its namespaces. The importer's label is
+  made primary (DWARFFunction.java:389-395); the Demangler analyzer's name is then only one
+  more symbol (AbstractDemanglerAnalyzer.java:157-177, DemangledFunction.java:466-474);
+- a GNU name without DWARF: the demangler's namespaces (DemangledObject.createNamespace,
+  DemangledObject.java:600-660; a name over 2,000 UTF-16 units cut by `ensureNameLength`). Its
+  signature is still not written, so the record stays `underived ... function`;
+- a thunk takes the namespaces of its end with its name.
+The `label` record of a DWARF function has the DWARF name.
+
+**Functions in a namespace on the facts path** (`load facts`). The loader no longer fails on
+"the decompile of a function in a namespace". The declaration prints every namespace
+(`emitSymbolScope` with no current scope); after it a name prints the scopes of its symbol from
+the first one the function is not in (`Symbol::getResolutionDepth`,
+`Scope::findDistinguishingScope`; `Facts::scoped_name`). Where the first printed name (the
+symbol's own when no scope is printed) is the name of a namespace, function or data symbol in a
+namespace between the function and the shared scope, Java prints one more scope
+(`DecompileCallback.isNameUsed`): that fails loudly ("is hidden by a name of the namespace").
+Two namespaces whose `ns` texts are equal fail loudly too. Not looked for, as before: a local
+variable of that name.
+
+**DWARF prototypes** (`dwarf/pcode.rs`, `dwarf::Func::storage`). The prototype the DWARF
+import gives a function is written as Java's `HighFunction` sends it: each parameter a locked
+`cat="0"` symbol with its data type and storage (`this` and `__return_storage_ptr__` as
+auto-parameters), the locked return value, `__thiscall` locked or `unknown`, `voidlock`,
+`dotdotdot`. Storage is the calling convention's (FORMAL commit mode,
+`ParamListStandard.assignMap` with x86-64-gcc.cspec: `join_dual_class` up to 16 bytes from RDI,
+RSI, RDX, RCX, R8, R9 and XMM0-7, else the stack from offset 8; the return from RAX/RDX and
+XMM0/XMM1, a hidden return's pointer in RAX). The data types the prototypes name are `type`
+records (`PcodeDataTypeManager.encodeType`: structures with bit fields, unions, enums,
+typedefs, pointers, arrays, function definitions).
+
+A function of the DWARF import stays `underived ... function` where the port does not know
+what Java has (each with the reason in `dwarf::Func::storage`'s error):
+- a parameter, or a variable below the function, with a `DW_AT_location`: Java may read a
+  storage from it (STORAGE commit mode and custom storage, a `<name>_local` parameter spill, a
+  local variable of the function). Location expressions and lists are not evaluated;
+- no `this` and a parameter or a namespace: Java has the default model's name locked
+  (`__stdcall`) on most of these and `unknown` on others. The setter is likely Java's Call
+  Convention ID analyzer ("Archive prototypes applied" above), which decompiles the function;
+  when it leaves `unknown` (`main`, libstdc++'s sort helpers) was not traced;
+- a GNU name at the entry whose demangled name is not the DWARF name in a namespace
+  (`isAlreadyDemangled` false): the demangler goes on to its calling convention and signature;
+- a `.conflict` data type name anywhere under the prototype (the order Java resolves conflicts
+  in is not kept everywhere), an array of no length, a bit field in a union, a built-in type
+  without a core type, storage past the 500 bytes of the stack entry;
+- a thunk (as before), and a DWARF function that takes a prototype of the archive or of the
+  function it jumps to (Hatred's `SDL_ThreadID_REAL`, one `JMP pthread_self`: Java keeps the
+  DWARF signature there; the rule was not traced).
+
+Measured against Java 12.3 (MacBook; master 3a5ba15656 and the branch before master
+fe4043a333, `fix-hatred-archives`, was merged into it, on the same inputs;
+`tools/facts-diff.sh`, equal / Java's records):
+
+| | record | master | branch |
+|---|---|---|---|
+| small corpus (14) | func | 209 / 1,112 | 213 / 1,112 |
+| | ns | 0 / 295 | 189 / 295 |
+| | type | 14 / 1,107 | 16 / 1,107 |
+| | label | 4,645 / 7,315 | 4,648 / 7,315 |
+| | silent func | 33 | 33, the same ones |
+| Hatred | func | 5,623 / 180,433 | 6,108 / 180,433 |
+| | ns | 0 / 44,952 | 22,814 / 44,952 (48 extra) |
+| | type | 1 / 38,393 | 358 / 38,393 (3 different) |
+| | label | 711,278 / 883,411 | 714,835 / 883,411 |
+| | data | 492,177 / 2,076,322 | 496,778 / 2,076,322 |
+| | `underived ... function` | 174,709 | 174,292 |
+| | silent func | 236 | 236, the same ones |
+
+Every other row of both tables is unchanged. Superseded: the `ns` rows 0 / 295 and 0 / 44,952
+and the func rows of the tables above. The `ns` records still missing are those of data
+symbols (vtables, statics) and of functions ghidra-rs names otherwise; the 48 extra were not
+traced. `type` records are keyed by name in `facts-diff.sh`, so types of one name in two
+categories show as different.
+
+After master fe4043a333 (`fix-hatred-archives`) was merged into the branch, against that master
+on the same inputs (MacBook): small corpus func 333 -> 339 / 1,112, ns 0 -> 190 / 295, type 65
+-> 67, silent func 15 -> 15 (the same); Hatred func 9,098 -> 9,582 / 180,433, ns 0 -> 22,813 /
+44,952 (48 extra), type 933 -> 1,282 / 38,393, `underived ... function` 171,269 -> 170,854,
+silent func 131 -> 131 (the same), label and data as in the table. `cargo test --release` 206
+passed; fmt and clippy clean; mercs2 M500 with Java facts 488 -> 489 identical of 499 (loud 11
+-> 10, silent 0); `CORPORA=m8 tools/bars.sh` 57 lines equal to that master's; the PE facts of
+mercs2 byte-identical (before the last ELF-only guard). Not obtained: `tools/elf64-decomp.sh`
+(it stopped at the first binary in this worktree's setup on the MacBook; not diagnosed), and
+the loud / silent split of the Hatred camera corpus (identical 46 of 50, the reference ran 50;
+that master's own count was not taken).
+
+The guards cost most of the possible gain,
+ and what they hide is measured. With a location
+list (`DW_FORM_data4`/`data8`) taken as "no storage", Hatred's equal `func` records were
+63,423 (type 26,562), with 2,063 new silent ones: 1,691 the locked `__stdcall` of functions
+without `this`, about 150 a `join` of more than 16 bytes (fixed: the rule's `maxsize`), about
+95 `.conflict` names, and about 70 with Java's DWARF locals or `_local` spills. With the
+entry looked up in `.debug_loc` (unit base `DW_AT_low_pc`, as DWARFLocationList.readV4) the
+count fell to 9,283 and 21 of the locals were still silent, so that reading does not match
+Java's and was dropped. Open: port DWARFVariable.readStorage with DWARFExpressionEvaluator
+(which lists give a storage at the entry), and Call Convention ID on DWARF functions.
+
+mercs2 with Java's facts against Java's C (`ghidra-diff.sh m500`, MacBook, the desktop's
+12.3 facts and captured C): identical 488 -> 489 of 499, loud 11 -> 10, silent 0 -> 0. A
+function in a namespace now decompiles.
+
+Not ported (item 4 of the task, not started): DWARF types on the prelude path (0x16e1920 still
+prints `xunknown4` at `param_1+0x9c` there).
 
 ## Speed
 
