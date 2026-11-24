@@ -47,6 +47,7 @@ pub const DW_TAG_GNU_CALL_SITE: u16 = 0x4109;
 pub const DW_TAG_APPLE_PTRAUTH: u16 = 0x4300;
 
 pub const DW_AT_LOCATION: u16 = 0x02;
+pub const DW_AT_FRAME_BASE: u16 = 0x40;
 pub const DW_AT_NAME: u16 = 0x03;
 pub const DW_AT_BYTE_SIZE: u16 = 0x0b;
 pub const DW_AT_STMT_LIST: u16 = 0x10;
@@ -173,6 +174,8 @@ pub struct Dwarf<'a> {
     strs: &'a [u8],
     line: &'a [u8],
     ranges: &'a [u8],
+    /// `.debug_loc` (DWARF 4 location lists)
+    pub loc: &'a [u8],
     abbrev_tables: Vec<HashMap<u64, Abbrev>>,
     pub cus: Vec<Cu>,
     /// per DIE, by index: offset, parent index (-1 at a unit's root), next sibling index, tag
@@ -273,6 +276,7 @@ impl<'a> Dwarf<'a> {
             strs,
             line,
             ranges,
+            loc: &[],
             abbrev_tables: Vec::new(),
             cus: Vec::new(),
             offsets: Vec::new(),
@@ -548,6 +552,38 @@ impl<'a> Dwarf<'a> {
             }
             out.push((base.wrapping_add(a), base.wrapping_add(b)));
         }
+    }
+}
+
+/// A location list entry: its address range and expression
+pub type LocEntry<'a> = ((u64, u64), &'a [u8]);
+
+impl<'a> Dwarf<'a> {
+    /// `DWARFLocationList.readV4` (DWARFLocationList.java:56-92): the entries at a `.debug_loc`
+    /// offset, from the unit's base; an empty range is left out.
+    pub fn loclist_v4(&self, off: u64, cu: usize) -> Result<Vec<LocEntry<'a>>> {
+        let cuh = &self.cus[cu];
+        let asz = cuh.addr_size as usize;
+        let mut c = Cursor::new(self.loc, usize::try_from(off).unwrap_or(usize::MAX));
+        let mut base = cuh.low_pc;
+        let max = if asz == 4 { 0xffff_ffff } else { u64::MAX };
+        let mut out = Vec::new();
+        while c.p < self.loc.len() {
+            let (a, b) = (c.uint(asz)?, c.uint(asz)?);
+            if a == 0 && b == 0 {
+                break;
+            }
+            if a == max {
+                base = b;
+                continue;
+            }
+            let n = c.uint(2)? as usize;
+            let expr = c.bytes(n)?;
+            if a != b {
+                out.push(((base.wrapping_add(a), base.wrapping_add(b)), expr));
+            }
+        }
+        Ok(out)
     }
 }
 

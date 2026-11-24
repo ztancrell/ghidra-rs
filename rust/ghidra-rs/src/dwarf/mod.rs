@@ -6,6 +6,7 @@
 //! Not ported: line tables beyond the file names, local and global variables, storage and
 //! location expressions, source maps, macros, comments and bookmarks, Go and Rust special cases.
 pub mod dtm;
+pub mod expr;
 pub mod pcode;
 pub mod read;
 
@@ -123,6 +124,9 @@ pub struct Import {
     pub units: usize,
     /// what Java logs and skips (`Msg.error`): unit rests, types and functions that failed
     pub warnings: Vec<String>,
+    /// the `Unresolved local var: ` PRE comments of the import, in Java's order: the address
+    /// and the comment, `None` where its text is not known
+    pub unresolved: Vec<(u64, Option<String>)>,
 }
 
 /// The aggregate of a DIE (`DIEAggregate.createFromHead`): fragments, head first.
@@ -145,7 +149,31 @@ struct Prog<'a> {
     fixup: u64,
     /// the depth of `dwarf_name` calls
     name_depth: u32,
+    /// `Import::unresolved`
+    unresolved: Vec<(u64, Option<String>)>,
 }
+
+/// Where the DWARF import puts a parameter or a local variable (DWARFVariable's storage)
+#[derive(Clone, Copy, PartialEq)]
+enum Store {
+    /// no storage (`isMissingStorage`)
+    Missing,
+    /// on the stack, at this offset (`isStackStorage`)
+    Stack(i64),
+    /// at a memory address (`isRamStorage`)
+    Ram,
+    /// in a register
+    Reg,
+    /// what the port does not know
+    Unported(&'static str),
+}
+
+/// A location (`DWARFLocation`): its range (`None`: the whole function) and expression
+type Loc<'a> = (Option<(u64, u64)>, &'a [u8]);
+
+/// A function's frame base at its entry and the range it holds for; `Ok(None)`: none (no
+/// attribute, or it failed); `Err`: not ported
+type FrameBase<'a> = std::result::Result<Option<(Option<(u64, u64)>, expr::Vn)>, &'static str>;
 
 /// The bound of `dwarf_name`'s recursion (far above real nesting)
 const NAME_DEPTH: u32 = 256;
@@ -1784,33 +1812,66 @@ impl<'a> Prog<'a> {
             return Ok(None);
         };
         let addr = first.wrapping_add(self.fixup);
+        // DWARFFunction.read (DWARFFunction.java:97-119): the frame base at the entry
+        let fb = self.frame_base(g, first)?;
         let dni = self.get_name(g)?;
         let noreturn = self.get_bool(g, DW_AT_NORETURN);
         let t = self.type_ref(g);
         let ret = self.data_type_for_variable(t.as_ref())?;
         let mut params = Vec::new();
-        let mut located = false;
+        let mut stores = Vec::new();
+        let mut valid_on_entry = true;
         for (i, p) in self.param_list(g).into_iter().enumerate() {
             let pd = self.get_name(&p)?;
             let t = self.type_ref(&p);
             let ty = self.data_type_for_variable(t.as_ref())?;
             let this = i == 0 && self.is_this_param(&p);
-            // a parameter with a storage: the commit mode may be STORAGE
-            // (StorageVerificationDWARFFunctionFixup.java:36-58), and one on the stack among the
-            // locals becomes a local `<name>_local` (ParamSpillDWARFFunctionFixup.java:33-56)
-            located |= self.may_have_storage(&p);
+            // DWARFVariable.readParamStorage (DWARFVariable.java:258-276)
+            // a zero-length one: Java's readParamStorage leaves it without storage
+            // (usesZeroLengthComponent); on cpp3-clang's `_Scanner` (a `std::locale` not yet defined)
+            // Java has no locked prototype at all, which was not traced
+            stores.push(if self.dtm.zero_len(ty) {
+                Store::Unported("a zero-length parameter")
+            } else {
+                match self.location(&p, DW_AT_LOCATION, first) {
+                    Err(Some(r)) => Store::Unported(r),
+                    Err(None) | Ok(None) => Store::Missing,
+                    Ok(Some(loc)) => {
+                        let (st, lexical, _) = self.read_storage(&p, loc, first, addr, &fb, false);
+                        // isLocationValidOnEntry
+                        valid_on_entry &= lexical == 0;
+                        st
+                    }
+                }
+            });
             params.push((pd, ty, this));
         }
-        // without one the commit mode is FORMAL
-        let formal = !located;
         let varargs = !self.children(g, DW_TAG_UNSPECIFIED_PARAMETERS).is_empty();
         if !addrs.insert(addr) {
             dups.insert(addr);
             self.mark_children(g[0], done);
             return Ok(None);
         }
-        // processFuncChildren: only call sites start other functions; locals are not ported
-        self.func_children(g[0], done, addrs, dups)?;
+        // processFuncChildren: the local variables, their `Unresolved local var` comments, and
+        // the call sites, which start other functions
+        let mut locals = Vec::new();
+        self.func_children(g[0], (addr, first, &fb), &mut locals, done, addrs, dups)?;
+        // ParamSpillDWARFFunctionFixup.java:33-56: a parameter on the stack among the locals
+        // (below 0) becomes a local `<name>_local` unless a local is at its offset, and has no
+        // storage then
+        for s in &mut stores {
+            if let Store::Stack(o) = *s {
+                if o < 0 {
+                    if !locals.contains(&Store::Stack(o)) {
+                        locals.push(Store::Stack(o));
+                    }
+                    *s = Store::Missing;
+                }
+            }
+        }
+        // StorageVerificationDWARFFunctionFixup.java:33-64: STORAGE when every parameter has a
+        // storage valid at the entry (no parameter: FORMAL); a missing one makes it FORMAL
+        let formal = stores.is_empty() || !valid_on_entry || stores.contains(&Store::Missing);
         if !self.is_exec(addr) {
             return Ok(None);
         }
@@ -1846,7 +1907,7 @@ impl<'a> Prog<'a> {
         // decorateFunctionWithDWARFInfo (DWARFFunctionImporter.java:238-323) with the default
         // options: the original name if it changed, the original prototype if the fixups changed
         // it, and the body ranges of a function of more than one (not written here)
-        let plate = if body.len() > 1 || self.has_below(g[0], &[DW_TAG_VARIABLE, DW_TAG_LABEL]) {
+        let plate = if body.len() > 1 {
             Err(())
         } else {
             let name = self.dni_name(&dni).to_string();
@@ -1919,12 +1980,17 @@ impl<'a> Prog<'a> {
         // DWARFFunction.updateFunctionSignature (DWARFFunction.java:457-492): FORMAL gives every
         // parameter the storage of the calling convention; STORAGE the one DWARF's location
         // expressions give (DWARFVariable.readStorage), which are not evaluated here
-        let storage = if !formal {
-            Err("the storage DWARF's location expressions give a parameter (STORAGE commit mode, parameter spill)"
-                .into())
-        } else if self.located_variable_below(g[0]) {
+        let unported = stores.iter().chain(&locals).find_map(|s| match s {
+            Store::Unported(r) => Some(*r),
+            _ => None,
+        });
+        let storage = if let Some(r) = unported {
+            Err(format!("a DWARF location: {r}"))
+        } else if !formal {
+            Err("the storage DWARF's location expressions give every parameter (STORAGE commit mode)".into())
+        } else if locals.iter().any(|s| *s != Store::Ram) {
             // DWARFFunctionImporter.java:205-212: a local variable with storage becomes a variable
-            // of the function (DWARFFunction.commitLocalVariable)
+            // of the function (DWARFFunction.commitLocalVariable); a static one is a global
             Err("the local variables of the DWARF import (commitLocalVariable)".into())
         } else if cc.is_none() && (qual.len() > 1 || !fparams.is_empty()) {
             // Java has the default model's name locked (`__stdcall`) on most such functions (a
@@ -2140,27 +2206,78 @@ impl<'a> Prog<'a> {
         }
     }
 
-    /// `processFuncChildren` with `processLexicalBlock` / `processInlinedSubroutine`, in Java's
-    /// order (Java recurses per nesting level; iterated here). A call site's failure fails the
-    /// enclosing function, as Java's exception does.
+    /// `processFuncChildren` (DWARFFunctionImporter.java:330-383) with `processLexicalBlock` and
+    /// `processInlinedSubroutine`: each local variable with a storage goes to `locals`, one
+    /// without is an `Unresolved local var` PRE comment at the start of its block (none for a
+    /// block without a body), and a call site starts another function. `f`: the function's
+    /// address, its DWARF entry and its frame base.
     fn func_children(
         &mut self,
         die: u32,
+        f: (u64, u64, &FrameBase<'a>),
+        locals: &mut Vec<Store>,
         done: &mut HashSet<u32>,
         addrs: &mut HashSet<u64>,
         dups: &mut HashSet<u64>,
     ) -> Result<()> {
-        let mut stack = vec![(die, self.dw.children(die).collect::<Vec<_>>().into_iter())];
-        while let Some((parent, it)) = stack.last_mut() {
-            let parent = *parent;
+        let (addr, entry, fb) = f;
+        let mut stack = vec![(die, 0i64, self.dw.children(die).collect::<Vec<_>>().into_iter())];
+        while let Some((parent, offset, it)) = stack.last_mut() {
+            let (parent, offset) = (*parent, *offset);
             let Some(c) = it.next() else {
                 stack.pop();
                 continue;
             };
             match self.dw.tags[c as usize] {
-                DW_TAG_LEXICAL_BLOCK | DW_TAG_INLINED_SUBROUTINE => {
+                DW_TAG_VARIABLE if offset >= 0 => {
+                    // DWARFVariable.readLocalVariable / readLocalVariableStorage (DWARFVariable.java:278-299)
+                    let g = self.agg(c);
+                    let pd = self.get_name(&g)?;
+                    let t = self.type_ref(&g);
+                    let ty = self.data_type_for_variable(t.as_ref())?;
+                    let (st, comment) = match self.location(&g, DW_AT_LOCATION, entry) {
+                        Err(Some(r)) => (Store::Unported(r), None),
+                        Err(None) | Ok(None) => (Store::Missing, None),
+                        Ok(Some(loc)) => {
+                            let (st, _, comment) = self.read_storage(&g, loc, entry, addr, fb, true);
+                            (st, comment)
+                        }
+                    };
+                    match st {
+                        Store::Missing => {
+                            let tn = self.dtm.name(ty);
+                            let s = format!(
+                                "{tn} {}@[{}]",
+                                self.dni_name(&pd),
+                                comment.as_deref().filter(|c| !c.is_empty()).unwrap_or("???")
+                            );
+                            // a name with a `.conflict` twin: which one Java's type is was not
+                            // traced (Hatred's FT_Module, see the plate)
+                            let s = (!self.dtm.has_conflict(ty)).then_some(s);
+                            self.unresolved.push((addr.wrapping_add(offset as u64), s));
+                        }
+                        Store::Unported(_) => {
+                            self.unresolved.push((addr.wrapping_add(offset as u64), None));
+                            locals.push(st);
+                        }
+                        _ => locals.push(st),
+                    }
+                }
+                DW_TAG_LEXICAL_BLOCK => {
                     if done.insert(c) {
-                        stack.push((c, self.dw.children(c).collect::<Vec<_>>().into_iter()));
+                        // blockStart: the first range's start; -1 without one
+                        let r = self.pc_ranges(&self.agg(c))?;
+                        let o = r.first().map_or(-1, |&(s, _)| s.wrapping_add(self.fixup).wrapping_sub(addr) as i64);
+                        stack.push((c, o, self.dw.children(c).collect::<Vec<_>>().into_iter()));
+                    }
+                }
+                DW_TAG_INLINED_SUBROUTINE => {
+                    // getFuncBody(diea, true): the lowest start; no body, no children
+                    if done.insert(c) {
+                        if let Some(&(s, _)) = self.pc_ranges(&self.agg(c))?.iter().min() {
+                            let o = s.wrapping_add(self.fixup).wrapping_sub(addr) as i64;
+                            stack.push((c, o, self.dw.children(c).collect::<Vec<_>>().into_iter()));
+                        }
                     }
                 }
                 DW_TAG_CALL_SITE | DW_TAG_GNU_CALL_SITE => {
@@ -2176,36 +2293,99 @@ impl<'a> Prog<'a> {
         Ok(())
     }
 
-    /// Whether Java may read a storage for a parameter or variable (DWARFVariable.readParamStorage
-    /// and readLocalVariableStorage, DWARFVariable.java:258-290): it has a `DW_AT_location`.
-    /// Neither the expressions nor the location lists are evaluated here (DIEAggregate.getLocation
-    /// takes the list entry holding the function's entry), so a function with one is not derived.
-    fn may_have_storage(&self, g: &Agg) -> bool {
-        self.has(g, DW_AT_LOCATION)
+    /// `DIEAggregate.getLocation(attr, pc)` (DIEAggregate.java:687-690, DIEContainer.java:751-797):
+    /// the location holding `pc`. `Err(None)`: Java's IOException; `Err(Some)`: not ported.
+    fn location(&self, g: &Agg, at: u16, pc: u64) -> std::result::Result<Option<Loc<'a>>, Option<&'static str>> {
+        Ok(self.location_list(g, at)?.into_iter().find(|(r, _)| r.is_none_or(|(s, e)| s <= pc && pc < e)))
     }
 
-    /// Whether a `DW_TAG_variable` below `die` may have a storage (`may_have_storage`).
-    fn located_variable_below(&self, die: u32) -> bool {
-        let mut stack: Vec<u32> = self.dw.children(die).collect();
-        while let Some(c) = stack.pop() {
-            if self.dw.tags[c as usize] == DW_TAG_VARIABLE && self.may_have_storage(&self.agg(c)) {
-                return true;
+    /// `DIEContainer.getLocationList`: a block is one location for the whole function; a
+    /// section offset a list in `.debug_loc` (DWARF 4)
+    fn location_list(&self, g: &Agg, at: u16) -> std::result::Result<Vec<Loc<'a>>, Option<&'static str>> {
+        let Some(a) = self.find(g, at) else { return Ok(Vec::new()) };
+        match a.val {
+            Val::Blob(b) => Ok(vec![(None, b)]),
+            Val::Num { .. } => {
+                let cu = self.dw.cu_of(a.die);
+                match a.form {
+                    // DW_FORM_sec_offset, data2, data4, data8
+                    0x17 | 0x05 | 0x06 | 0x07 if self.dw.cus[cu].version < 5 => {
+                        let off = a.val.unsigned().unwrap_or(0);
+                        let l = self.dw.loclist_v4(off, cu).map_err(|_| None)?;
+                        Ok(l.into_iter().map(|(r, e)| (Some(r), e)).collect())
+                    }
+                    0x17 | 0x05 | 0x06 | 0x07 | 0x22 if self.dw.cus[cu].version >= 5 || a.form == 0x22 => {
+                        Err(Some("a DWARF 5 location list"))
+                    }
+                    _ => Err(None),
+                }
             }
-            stack.extend(self.dw.children(c));
+            _ => Err(None),
         }
-        false
     }
 
-    /// Whether a DIE below `die` has one of `tags`.
-    fn has_below(&self, die: u32, tags: &[u16]) -> bool {
-        let mut stack: Vec<u32> = self.dw.children(die).collect();
-        while let Some(c) = stack.pop() {
-            if tags.contains(&self.dw.tags[c as usize]) {
-                return true;
+    /// The frame base of DWARFFunction.read (DWARFFunction.java:97-119): the entry's location of
+    /// `DW_AT_frame_base`, evaluated; `None` where it fails (DW_OP_fbreg then fails too).
+    fn frame_base(&self, g: &Agg, entry: u64) -> Result<FrameBase<'a>> {
+        let l = match self.location_list(g, DW_AT_FRAME_BASE) {
+            Ok(l) => l,
+            Err(None) => return Err(Error::Dwarf("the frame base's location list".into())),
+            Err(Some(r)) => return Ok(Err(r)),
+        };
+        let Some(&(range, e)) = l.iter().find(|(r, _)| r.is_none_or(|(s, e)| s <= entry && entry < e)) else {
+            return Ok(Ok(None));
+        };
+        let cu = &self.dw.cus[self.dw.cu_of(g[0])];
+        Ok(match expr::Expr::read(e, cu.addr_size, cu.int_size).and_then(|x| x.eval(None, self.fixup)) {
+            Ok(v) => Ok(Some((range, v))),
+            Err(expr::Fail::Unported(r)) => Err(r),
+            Err(_) => Ok(None),
+        })
+    }
+
+    /// DWARFVariable.readStorage (DWARFVariable.java:331-375): the storage, the offset from the
+    /// function's address where it starts (`lexicalOffset`) and the comment a register read
+    /// leaves (`DWARFExpressionValueException`: the expression's text).
+    fn read_storage(
+        &self,
+        g: &Agg,
+        loc: Loc<'a>,
+        entry: u64,
+        addr: u64,
+        fb: &FrameBase<'a>,
+        allow_deref: bool,
+    ) -> (Store, i64, Option<String>) {
+        let lexical = loc.0.map_or(0, |(s, _)| s.wrapping_sub(addr) as i64);
+        let fbv = match fb {
+            Err(r) => return (Store::Unported(r), lexical, None),
+            Ok(Some((r, v)))
+                if r.is_none_or(|(s, e)| {
+                    let pc = entry.wrapping_add(lexical as u64);
+                    s <= pc && pc < e
+                }) =>
+            {
+                Some(*v)
             }
-            stack.extend(self.dw.children(c));
-        }
-        false
+            Ok(_) => None,
+        };
+        let cu = &self.dw.cus[self.dw.cu_of(g[0])];
+        let x = match expr::Expr::read(loc.1, cu.addr_size, cu.int_size) {
+            Ok(x) if !x.is_empty() => x,
+            _ => return (Store::Missing, lexical, None),
+        };
+        let vn = match x.eval(fbv, self.fixup) {
+            Ok(v) => v,
+            Err(expr::Fail::Deref(v)) if allow_deref => v,
+            Err(expr::Fail::Value) => return (Store::Missing, lexical, Some(x.text())),
+            Err(expr::Fail::Unported(r)) => return (Store::Unported(r), lexical, None),
+            Err(_) => return (Store::Missing, lexical, None),
+        };
+        let st = match vn.space {
+            expr::Space::Stack => Store::Stack(vn.offset),
+            expr::Space::Ram => Store::Ram,
+            expr::Space::Register => Store::Reg,
+        };
+        (st, lexical, None)
     }
 
     /// `FunctionDefinitionDataType.getPrototypeString(true)` (FunctionDefinitionDataType.java:261-295;
@@ -2348,7 +2528,9 @@ pub fn import(data: &[u8]) -> Result<Import> {
     if info.is_empty() {
         return Err(Error::Dwarf("no .debug_info".into()));
     }
-    let dw = Dwarf::new(&info, &abbrev, &strs, &line, &ranges)?;
+    let loc = sec(".debug_loc")?;
+    let mut dw = Dwarf::new(&info, &abbrev, &strs, &line, &ranges)?;
+    dw.loc = &loc;
     // Ghidra loads an ELF whose lowest load address is 0 at 0x100000 (x86-64), and the
     // importer adds that difference to DWARF addresses (programBaseAddressFixup)
     let min_load = file.segments().map(|s| s.address()).min().unwrap_or(0);
@@ -2386,6 +2568,7 @@ fn run(dw: Dwarf<'_>, fixup: u64, exec: Vec<(u64, u64)>) -> Import {
         exec,
         fixup,
         name_depth: 0,
+        unresolved: Vec::new(),
     };
     p.init_base_types();
     // indexDIEATypeRefs
@@ -2412,7 +2595,7 @@ fn run(dw: Dwarf<'_>, fixup: u64, exec: Vec<(u64, u64)>) -> Import {
     let funcs = p.import_functions();
     p.move_types();
     let warnings = std::mem::take(&mut p.dw.warnings);
-    Import { dies: p.dw.offsets.len(), units: p.dw.cus.len(), dtm: p.dtm, funcs, warnings }
+    Import { dies: p.dw.offsets.len(), units: p.dw.cus.len(), dtm: p.dtm, funcs, warnings, unresolved: p.unresolved }
 }
 
 /// The dump `DumpDwarf.java` writes: one line per data type under `/DWARF` (not pointers or

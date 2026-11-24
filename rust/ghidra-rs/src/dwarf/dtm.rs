@@ -538,6 +538,21 @@ impl Dtm {
         matches!(&self.dt(self.base_of(id)).kind, Kind::Composite(c) if !c.packed && c.comps.is_empty() && c.len == 0)
     }
     /// typedefs followed to what they name
+    /// Whether the name a data type shows comes from a type of the program that has a
+    /// `.conflict<n>` twin (or is one): through pointers and arrays, not typedefs
+    pub fn has_conflict(&self, mut id: Id) -> bool {
+        loop {
+            match self.dt(id).kind {
+                Kind::Pointer { to, .. } => id = to,
+                Kind::Array { elem, .. } => id = elem,
+                _ => break,
+            }
+        }
+        let Id::Db(i) = id else { return false };
+        let d = &self.db[i as usize];
+        self.by_base.get(&(d.cat, strip_conflict(&d.name).to_string())).is_some_and(|v| v.len() > 1)
+            || d.name.contains(CONFLICT)
+    }
     pub fn base_of(&self, mut id: Id) -> Id {
         while let Kind::Typedef { base } = self.dt(id).kind {
             id = base;

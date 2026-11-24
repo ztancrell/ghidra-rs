@@ -85,9 +85,10 @@ impl Encoder<'_> {
     fn name_id(&mut self, id: Id) -> Result<String, String> {
         let Id::Db(i) = id else { return Err("a data type that is not resolved".into()) };
         // DataTypeManagerDB.resolve names a conflicting type `.conflict<n>` in the order Java
-        // meets them, which the import does not keep everywhere (README, "The DWARF importer")
+        // meets them, which the import does not keep everywhere (README, "The DWARF importer"):
+        // a name with a `.conflict` twin may be either (Hatred's FT_Face of 0x1cbd140)
         let name = self.d.name(id);
-        if name.contains(".conflict") {
+        if name.contains(".conflict") || self.d.has_conflict(id) {
             return Err(format!("the data type name {name}"));
         }
         if self.seen.insert(i) {

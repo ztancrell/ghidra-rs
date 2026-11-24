@@ -515,8 +515,9 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     type DwarfFacts = (
         std::collections::BTreeMap<u32, ghidra_rs::factsout::DwarfFunc>,
         std::collections::HashMap<String, Result<String, String>>,
+        Vec<(u64, Option<String>)>,
     );
-    let (dwarf, dwarf_types): DwarfFacts = if has_dwarf {
+    let (dwarf, dwarf_types, dwarf_pre): DwarfFacts = if has_dwarf {
         let imp = ghidra_rs::dwarf::import(&data).map_err(|e| format!("{path}: DWARF: {e}"))?;
         // the prototypes and data types as Java's decompiler gets them, before the import is freed
         let (mut protos, types) = ghidra_rs::dwarf::pcode::facts(&imp, &ghidra_rs::factsout::core_ids64());
@@ -530,7 +531,7 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
                 Some((a, ghidra_rs::factsout::DwarfFunc { name: f.name, plate: f.plate, facts }))
             })
             .collect();
-        (funcs, types)
+        (funcs, types, imp.unresolved)
     } else {
         Default::default()
     };
@@ -672,6 +673,7 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
                 dwarf_types: &dwarf_types,
                 archive: archive.as_ref().map(|a| &a.0),
                 eh_sites: eh_sites.as_ref().ok().map(|v| &v[..]),
+                dwarf_pre: &dwarf_pre,
             };
             // the stack analysis goes by the purges Ghidra has at a call site
             let purges = ghidra_rs::factsout::call_purges(&img, &an, &inputs);

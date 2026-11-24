@@ -1012,6 +1012,8 @@ pub struct Inputs<'a> {
     /// ELF: the call sites of the GCC exception tables (`crate::gccexcept::call_sites`); None:
     /// not read, every function's comments are not derived then
     pub eh_sites: Option<&'a [crate::gccexcept::CallSite]>,
+    /// ELF: the DWARF importer's `Unresolved local var` PRE comments (`crate::dwarf::Import::unresolved`)
+    pub dwarf_pre: &'a [(u64, Option<String>)],
 }
 
 /// What the facts take of a function the DWARF importer gives a signature.
@@ -1099,7 +1101,8 @@ pub fn call_purges(img: &Image, an: &Analysis, inputs: &Inputs) -> HashMap<u32, 
 
 /// Write the facts of `an` to `out`.
 pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mut dyn Write) -> io::Result<()> {
-    let Inputs { fid, protos, analyzed, purges, cspec, strings, dwarf, dwarf_types, archive, eh_sites } = *inputs;
+    let Inputs { fid, protos, analyzed, purges, cspec, strings, dwarf, dwarf_types, archive, eh_sites, dwarf_pre } =
+        *inputs;
     let none = Protos::default();
     let mut ex = Exporter {
         img,
@@ -1137,13 +1140,37 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
     // GccExceptionAnalyzer's PRE and POST comments; a POST comment is at the start of the code
     // unit that holds the call site's last address (markEndOfTry: getCodeUnitContaining), here
     // the instruction of the finished analysis, else the address itself (an undefined byte)
-    let (eh_pre, eh_post) = crate::gccexcept::comments(eh_sites.unwrap_or(&[]), |a| {
+    let unit = |a: u64| {
         let Ok(a32) = u32::try_from(a) else { return a };
         match an.insns.range(..=a32).next_back() {
             Some((&s, i)) if a32 - s < u32::from(i.len) => u64::from(s),
             _ => a,
         }
-    });
+    };
+    // the DWARF importer's PRE comments come first (it runs before the exception analyzer):
+    // DWARFUtil.appendComment (DWARFUtil.java:343-359) skips a comment the code unit's has,
+    // AppendCommentCmd joins with a newline; an address whose comment is not known is noted
+    let mut dwarf_unknown = std::collections::BTreeSet::new();
+    let mut pre0: BTreeMap<u64, String> = BTreeMap::new();
+    for (at, s) in dwarf_pre {
+        let at = unit(*at);
+        match s {
+            None => {
+                dwarf_unknown.insert(at);
+            }
+            Some(s) => match pre0.get_mut(&at) {
+                Some(old) if old.contains(s.as_str()) => {}
+                Some(old) => {
+                    old.push_str("\nUnresolved local var: ");
+                    old.push_str(s);
+                }
+                None => {
+                    pre0.insert(at, format!("Unresolved local var: {s}"));
+                }
+            },
+        }
+    }
+    let (eh_pre, eh_post) = crate::gccexcept::comments(eh_sites.unwrap_or(&[]), unit, pre0);
 
     writeln!(out, "ghidra-rs-facts 2")?;
     writeln!(out, "coretypes\t{}", (if img.elf64 { CORE_TYPES64 } else { CORE_TYPES }).trim_end())?;
@@ -1422,6 +1449,14 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         };
         // the exception tables not read: no function's comments are known
         let plate = if img.elf64 && eh_sites.is_none() { Err(()) } else { plate };
+        // a DWARF comment whose text is not known in the body
+        let plate = match body_ranges[&f]
+            .iter()
+            .any(|&(a, b)| dwarf_unknown.range(u64::from(a)..=u64::from(b)).next().is_some())
+        {
+            true => Err(()),
+            false => plate,
+        };
         // DecompileCallback.encodeComments (620-640): the header, then the body's PRE (`user2`)
         // and POST (`user3`) comments by address (no EOL or other plate comment is written here)
         let item = |kind: &str, at: u64, text: &str| {

@@ -6504,6 +6504,9 @@ and arrays appear by name), one per function whose signature the import set, sor
   the constant operations of `DWARFExpressionEvaluator` that member offsets and bounds use.
   Raw parsing is its own code, not `gimli` (as asked); attributes are decoded on demand from
   the section bytes.
+- `dwarf/expr.rs` (2026-11-24, branch `dwarf-params`): location expressions, read, printed and
+  evaluated as the importer does for parameters and local variables; `.debug_loc` lists are in
+  `dwarf/read.rs`. See "DWARF parameter storage and local variables".
 - `dwarf/dtm.rs`: the data-type model the importer drives: built-ins with x86-64 GCC's data
   organization (sizes, the size-alignment map), pointers, arrays, typedefs, non-packed
   structures (`StructureDataType.replace`, `insertAtOffset`, `insertBitFieldAt` with its
@@ -7447,6 +7450,8 @@ what Java has (each with the reason in `dwarf::Func::storage`'s error):
 - a parameter, or a variable below the function, with a `DW_AT_location`: Java may read a
   storage from it (STORAGE commit mode and custom storage, a `<name>_local` parameter spill, a
   local variable of the function). Location expressions and lists are not evaluated;
+  Superseded (2026-11-24, branch `dwarf-params`): they are evaluated, see "DWARF parameter
+  storage and local variables";
 - no `this` and a parameter or a namespace: Java has the default model's name locked
   (`__stdcall`) on most of these and `unknown` on others. The setter is likely Java's Call
   Convention ID analyzer ("Archive prototypes applied" above), which decompiles the function;
@@ -7507,6 +7512,11 @@ entry looked up in `.debug_loc` (unit base `DW_AT_low_pc`, as DWARFLocationList.
 count fell to 9,283 and 21 of the locals were still silent, so that reading does not match
 Java's and was dropped. Open: port DWARFVariable.readStorage with DWARFExpressionEvaluator
 (which lists give a storage at the entry), and Call Convention ID on DWARF functions.
+Superseded (2026-11-24, branch `dwarf-params`): readStorage and the evaluator are ported. The
+`.debug_loc` reading above was right; what it missed is that Java's evaluator cannot read a
+register's value (`DW_OP_reg<n>` and `DW_OP_breg<n>` throw, RBP excepted), so a parameter in a
+register has no storage and the function is FORMAL. See "DWARF parameter storage and local
+variables". Call Convention ID stays open.
 
 mercs2 with Java's facts against Java's C (`ghidra-diff.sh m500`, MacBook, the desktop's
 12.3 facts and captured C): identical 488 -> 489 of 499, loud 11 -> 10, silent 0 -> 0. A
@@ -7580,7 +7590,9 @@ one `underived-function` line per function on stderr, `factsout::export`):
 | the demangler's signature on a DWARF function (one with a `def` too) | 2 |
 
 The location guard is checked first in `dwarf::Func::storage`, so the guards behind it on those
-3,997 are not counted. `--facts` on the MacBook: 215 s for the writer, 7.10 GB maximum RSS.
+3,997 are not counted. Superseded (2026-11-24, branch `dwarf-params`): the location guard and
+the `Unresolved local var` guard are gone; the current reasons are in "DWARF parameter storage
+and local variables". `--facts` on the MacBook: 215 s for the writer, 7.10 GB maximum RSS.
 
 Checks (desktop): `cargo test --release` 211 passed (master 210; the new one is
 `gccexcept::tests::one_call_site`); `cargo fmt --check` and `cargo clippy --release
@@ -7589,6 +7601,116 @@ PE path has no exception tables); `CORPORA=m8 tools/bars.sh` 57 of 57 lines equa
 `baselines/master-3e44b31ec6.summary`. Not run: the other 76 checks of that baseline (M500,
 switch, simple, r5d-adc) and `elf64-decomp.sh` (neither the prelude nor the decompiler
 changed), the loader on a Hatred function.
+
+#### DWARF parameter storage and local variables (branch `dwarf-params`, 2026-11-24)
+
+What the DWARF importer (Java 12.3) reads from `DW_AT_location`, ported:
+- `dwarf/expr.rs`: `DWARFExpression.read` and `toString(cu)` (DWARFExpression.java:59-80,
+  169-208; the opcodes and operand types of DWARFExpressionOpCode.java:29-195) and
+  `DWARFExpressionEvaluator.evaluate` (DWARFExpressionEvaluator.java:352-687) with the value
+  reader the importer sets (`withStaticStackRegisterValues(null, -8)`, x86-64.dwarf's
+  `stack_frame` RBP at -8 and `call_frame_cfa` 8). A register's value is not known to it:
+  `DW_OP_reg<n>` and `DW_OP_breg<n>` of any register but RBP fail with a value exception, and
+  `DW_OP_fbreg` falls through into `DW_OP_dup` (no `break`), as in Java.
+- `read.rs`: `.debug_loc` lists (DWARFLocationList.readV4, the unit's `DW_AT_low_pc` as base).
+- `dwarf/mod.rs`: the frame base at the entry (DWARFFunction.java:97-119), readParamStorage,
+  readLocalVariableStorage and readStorage (DWARFVariable.java:258-375: the location holding the
+  DWARF entry, `lexicalOffset` from the function's address, the terminal `DW_OP_deref` of a
+  local), processFuncChildren with its lexical blocks and inlined subroutines
+  (DWARFFunctionImporter.java:330-383), ParamSpillDWARFFunctionFixup (a parameter on the stack
+  below 0 becomes a local `<name>_local` and loses its storage) and
+  StorageVerificationDWARFFunctionFixup (STORAGE only when every parameter has a storage valid
+  at the entry; no parameter, or one without storage, is FORMAL).
+- the `Unresolved local var: <type> <name>@[<expression or ???>]` PRE comments of a local
+  without storage, at the start of its block (DWARFUtil.appendComment: a comment the code unit
+  has is not added again; AppendCommentCmd joins with a newline). `factsout` puts them before
+  the exception analyzer's comments (`gccexcept::comments` merges into them), at the start of
+  the instruction holding the address, as the POST comments.
+
+So a function whose parameters are in registers (on Hatred nearly all) is FORMAL, and its
+prototype is the calling convention's, which the facts already wrote. Still `underived ...
+function`, with the reason: a parameter or local whose location is not ported (DWARF 5 lists,
+`DW_OP_addrx`, a frame base not ported), a zero-length parameter (usesZeroLengthComponent;
+cpp3-clang's `_Scanner` with a `std::locale` not yet defined has no locked prototype in Java at
+all, not traced), STORAGE mode (custom storage), a local with a storage (commitLocalVariable,
+a `_local` spill included; a static local goes to the globals and does not count). A comment
+whose type has a `.conflict` twin, or whose location is not ported, makes the comments of the
+body it falls in `underived`. A data type with a `.conflict` twin in a prototype is now
+`underived` too (Hatred's FT_Face of 0x1cbd140 was `FT_Face.conflict` in Java). The plate
+comment is no longer `underived` for a variable or label below the function.
+
+`decomp/facts.rs`: `Architecture::createUnknownModel` for any model name of the facts the cspec
+lacks (x86-64-gcc.cspec has no `__thiscall`, which the DWARF import sets): a copy of the default
+model, compatible with it, its name printed in the declaration as the C++ does. Before, `load
+facts` failed on every such function. Not changed: the printer prints `unknown` in a
+declaration too, where the C++ does not (setPrintInDecl(false)); not seen in a check.
+
+Measured against Java 12.3 (`tools/facts-diff.sh`, master 14ba1171b8 -> branch, equal /
+different / missing / extra; MacBook, which matched the desktop before):
+
+| | record | master | branch |
+|---|---|---|---|
+| Hatred | func | 9,595 / 170,824 / 14 / 2 | 110,178 / 70,241 / 14 / 2 (of 180,433) |
+| | comments | 57,971 / 0 / 90,982 / 0 | 91,724 / 96 / 57,133 / 1 |
+| | type | 1,282 / 3 / 37,108 / 4 | 27,748 / 204 / 10,441 / 4 |
+| | `underived` records | 284,136 | 150,886 |
+| | func different or missing, not `underived` (silent) | 133 | 284 |
+| | comments different or missing, silent | 3 | 99 |
+| small corpus (14) | func | 352 / 707 / 53 / 0 | 583 / 476 / 53 / 0 (of 1,112) |
+| | comments | 292 / 2 / 352 / 0 | 524 / 6 / 116 / 0 |
+| | type | 67 / 0 / 1,040 / 0 | 650 / 30 / 427 / 9 |
+| | `underived` records | 1,321 | 873 |
+
+Every other row (data, label, ns) is unchanged. The new silent records are not prototypes:
+148 of the 151 new silent Hatred `func` records differ only in the stack locals of the
+analysis (`local_<n>` sizes, cat -1), which the DWARF guard hid before; 3 (0x1a615a0,
+0x1a616c0, 0x1a61760) have `this` as `TAsyncRunnable<void> *` where Java has
+`TAsyncRunnable<int> *` (not traced). Of the 96 different comments, 80 have a type that is
+`<name>.conflict` in Java and plain here (the import makes no `.conflict` twin there, so the
+guard above does not see it), 16 a comment at another block address or a body that differs
+(not traced). On the small corpus the 4 new different comments are bodies that differ (as
+0x106f30 and 0x104816 before: 0x1012b0 of cpp2-clang, 0x11a720 of cpp3-clang, whose body
+here stops at 0x11a791, 0x107b10 of cpp3-gcc's POST comment); the 30 different and 9 extra
+`type` records were not looked at.
+
+Hatred's game module (the 4,024 functions of `hatred-decomp`'s `funcs.tsv`): `underived ...
+function` 4,022 -> 796, so 3,228 have a derived `func` record (all 19 of `AHatredDoor` equal to
+Java's: `this` in RDI, `float DeltaSeconds` in XMM0 for `Tick`); different `func` records 4,022
+-> 605, of which 3 silent (0x16ee820, 0x16f5cd0, 0x1760b00: stack locals only); `underived ...
+comments` 2,450 -> 1,190, none silent. The reasons left (`GHIDRA_RS_UNDERIVED_DEBUG=1`):
+
+| reasons | functions |
+|---|---|
+| one jump to another function, with the archive definition of what it jumps to | 140 |
+| the calling convention of a function without `this` (parameters or a namespace) | 116 (+6 with an archive definition) |
+| a data type that is not written | 27 |
+| a call of a function with a variable argument list (FormatStringAnalyzer) | 27 |
+| a demangled `_ZThn` thunk name that is no function | 11 |
+| the demangler's signature on a DWARF function | 3 |
+| a data type with a `.conflict` twin (`FDataType`) | 2 |
+| others, one reason each | the rest of the 796 |
+
+`load facts` with the branch's facts, one console per function (`decompile`, `print C`), on a
+sample of 60 game functions (the 19 of `AHatredDoor` and 41 at random): none decompiles. Before,
+all 19 door functions failed on their own `underived` record; now: a called function's record
+is `underived` (24; for `Tick` 0x195a500), `restructure_varnode: a locked prototype with
+parameters` not ported (16), the function's comments `underived` (5), a `type` record missing
+for an id the prototype names (5: the `int32` typedef 0xd000000000000021 points at an
+`int32` 0xd00000000000001f the facts do not write), a locked float return value needing an
+extension (2), `isPrimitiveWhole` of a struct (1), a `join` storage (1). The full 4,024 were
+not run.
+
+`--facts` on Hatred (MacBook): 411 s, 7.83 GB maximum RSS (master: 396 s, 5.59 GB in the same
+run, the two in parallel).
+
+Checks (desktop): `cargo test --release` 212 passed (master 211; the new one is
+`dwarf::expr::tests::locations`); `cargo fmt --check` and `cargo clippy --release --all-targets
+-- -D warnings` clean; mercs2's PE facts byte-identical to master's (`cmp`); `CORPORA=m8
+tools/bars.sh` 57 of 57 lines equal to `baselines/master-3e44b31ec6.summary`, silent 0 (run
+before the `createUnknownModel` change, which only the facts path reads). Of the other 76
+checks, 5 of M500 ran (equal to the baseline); the run was stopped (about 5 minutes a check).
+Not run: `elf64-decomp.sh`, the 4,024 game functions in the console (60 sampled), Java's C
+against the branch's (`ghidra-diff.sh`).
 
 ## Speed
 

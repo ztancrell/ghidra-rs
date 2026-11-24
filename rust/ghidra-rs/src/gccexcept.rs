@@ -654,9 +654,14 @@ fn merge(map: &mut BTreeMap<u64, String>, at: u64, text: String) {
 
 /// The PRE and POST comments the analyzer writes (markStartOfTry, markEndOfTry,
 /// markStartOfCatch: 292-345), by address. `unit` is the first address of the code unit that
-/// holds an address (Listing.getCodeUnitContaining).
-pub fn comments(sites: &[CallSite], unit: impl Fn(u64) -> u64) -> (BTreeMap<u64, String>, BTreeMap<u64, String>) {
-    let (mut pre, mut post) = (BTreeMap::new(), BTreeMap::new());
+/// holds an address (Listing.getCodeUnitContaining). `pre`: the PRE comments already there (the
+/// DWARF importer's).
+pub fn comments(
+    sites: &[CallSite],
+    unit: impl Fn(u64) -> u64,
+    mut pre: BTreeMap<u64, String>,
+) -> (BTreeMap<u64, String>, BTreeMap<u64, String>) {
+    let mut post = BTreeMap::new();
     for cs in sites {
         let (a, b, lp) = (cs.first, cs.last, cs.landing_pad);
         merge(&mut pre, a, format!("try {{ // try from {a:08x} to {b:08x} has its CatchHandler @ {lp:08x}"));
@@ -729,7 +734,7 @@ mod tests {
         };
         let sites = call_sites(&img).unwrap();
         assert_eq!(sites, vec![CallSite { first: 0x2010, last: 0x2014, landing_pad: 0x2030, types: vec![] }]);
-        let (pre, post) = comments(&sites, |a| a - 4);
+        let (pre, post) = comments(&sites, |a| a - 4, BTreeMap::new());
         assert_eq!(pre[&0x2010], "try { // try from 00002010 to 00002014 has its CatchHandler @ 00002030");
         assert_eq!(post[&0x2010], "} // end try from 00002010 to 00002014");
         assert_eq!(pre[&0x2030], "catch() { ... } // from try @ 00002010 with catch @ 00002030");

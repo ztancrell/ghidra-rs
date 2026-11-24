@@ -13,7 +13,7 @@
 //! does not derive it names in `underived <address> <what>` records, and a decompile that reads
 //! one fails (`Facts::derived`).
 
-use super::fspec::{ExtraPop, FuncProto, Storage};
+use super::fspec::{ExtraPop, FuncProto, ModelId, Storage};
 use super::funcdata::Funcdata;
 use super::infertypes::update_type;
 use super::locked::{Locked, Param};
@@ -355,13 +355,29 @@ impl Facts {
             let start = s.as_ptr() as usize - text.as_ptr() as usize;
             start..start + s.len()
         };
-        // `Architecture::createUnknownModel("unknown")`: a copy of the default model. Any other
-        // unrecognized name fails in `function` (the C++ keeps the name and prints it in the
-        // declaration)
+        // `Architecture::createUnknownModel`: a copy of the default model for `unknown` and for
+        // each other model name of the facts the cspec lacks (x86-64-gcc.cspec has no
+        // `__thiscall`, which the DWARF import sets); made here, before the first use, as the
+        // C++ makes it at its first use (FuncProto::decode). The C++ prints such a name in the
+        // declaration, `unknown` excepted (setPrintInDecl).
         let models = &mut arch.spec.models;
-        let mut unknown = models.get(models.default).clone();
-        unknown.name = "unknown".into();
-        models.list.push(unknown);
+        let mut names = vec!["unknown".to_string()];
+        for (i, _) in text.match_indices(" model=\"") {
+            let rest = &text[i + 8..];
+            let n = &rest[..rest.find('"').unwrap_or(0)];
+            if !n.is_empty() && n != "default" && !names.iter().any(|x| x == n) {
+                names.push(n.to_string());
+            }
+        }
+        for n in names {
+            let known = models.list.iter().any(|m| m.name == n) || models.unported.iter().any(|u| u.0 == n);
+            if n == "unknown" || !known {
+                let mut m = models.get(models.default).clone();
+                m.name = n;
+                models.unknown.push(ModelId(models.list.len() as u32));
+                models.list.push(m);
+            }
+        }
         let mut f = Facts {
             text: String::new(),
             blocks: Vec::new(),
