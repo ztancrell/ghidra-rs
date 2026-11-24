@@ -195,6 +195,12 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   x86-64 storage is ported; the rest stays `underived` (`rust/README.md`, "Archive prototypes
   applied"). Open, for the user: Call Convention ID is taken to succeed, and a parameter is
   name-locked from what Java's facts show (both listed there as known limits).
+- 2026-11-24: Readable C++ of Hatred ("part 2") lives in `~/projects/hatred-decomp`, which
+  drives ghidra-rs as its engine. User's decision. Hatred Decomp picks the game's own
+  functions by DWARF compile unit (the four `Module.Hatred.*_of_4.cpp` units, 4,024
+  functions) and leaves Unreal's generated code out. ghidra-rs stays a port that matches
+  Java Ghidra 12.3; work part 2 needs in ghidra-rs (for example GCC exception tables, DWARF
+  location lists) is done as ports with the usual checks, on branches like `hatred-facts`.
 
 ## Milestones
 
