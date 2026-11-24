@@ -7843,6 +7843,48 @@ before the new test `stack_op_index_adds_up_registers_and_scalars`, which passes
 0x11a720's comments (cpp3-gcc 0x110820 is loud now). Not run on this round: `CORPORA=m8
 tools/bars.sh`, the full bars, `elf64-decomp.sh`.
 
+#### Round 4: call fixups in the stack walk (branch `dwarf-params`, 2026-11-24)
+
+- The stack analysis's walk runs a function's call fixup in place of a direct call to it, as
+  SymbolicPropogator does (`checkForCallFixup`, `injectPcode`): the fixup's p-code from the
+  compiler spec (`decomp::callfixup_pcode`, the decompiler's snippet compiler) replaces the
+  CALL op, and the call has none of its side effects. `__chkstk` / `__alloca_probe` run
+  `ESP = ESP + 4 - EAX`, so the stack pointer after the call is the entry's minus the frame
+  size in EAX. `factsout::call_fixups` gives the walk the fixup of each function by its name
+  (CallFixupAnalyzer.getCallFixupNameForFunction: without a `libID_conflict_` prefix, else
+  with `_` or `__` before it); the facts' `<inject>` uses the same rule. Only the facts' walks
+  run fixups (`Analysis::swap_call_fixups`, as the call purges); the analysis's own constant
+  propagation does not, and a call through a pointer runs none.
+- A PIC switch `MOVSXD r,[base + index*4]` with a base of RBP or R13 (encoded with a zero 8-bit
+  displacement) is the pattern's form too, so its table is found or the jump is counted a miss
+  (cpp3-clang 0x11a7e2).
+
+Measured on the MacBook, master b0738cc3a7 (code as 14ba1171b8) and this round, each built and
+run the same way: Hatred and the small corpus with `tools/facts-diff.sh` against Java 12.3;
+mercs2 with `analyze --facts` (Function ID databases in `GHIDRA_RS_FID`, no `--protos`) and
+`tools/facts-diff.sh` against `ref123/mercs2.facts`. Round 3's mercs2 numbers ran without the
+Function ID databases (`function id: 0 functions named`), so `__chkstk` had no name and no
+fixup there; Superseded: its 22,892 / 23,191 and "15 newly different" as the measure.
+
+| | record | master | round 4 |
+|---|---|---|---|
+| Hatred | func equal | 9,595 | 109,932 |
+| | silent func | 133 | 118 (59 new) |
+| | silent comments | 3 | 7 (4 new) |
+| small corpus | silent | 56 | 56 (0 new) |
+| mercs2 (PE) | func equal | 23,543 | 24,072 |
+| | records equal on master, not on round 4 | - | 3 `label` |
+
+The 15 `_chkstk` records of round 3 equal Java's (0x1b10260 and the rest), and no `func`
+record equal on master differs. Not reached: 3 `label` records equal on master differ: extra
+`LAB_023c59d9` and `LAB_023c59db` (the return address of a `__chkstk` call at 0x23c59d4) and
+missing `LAB_01f3cb1f` (the return address of a call at 0x1f3cb1a); not traced. The 59 new
+silent Hatred `func` records and the 4 comments are round 3's (same addresses); not traced:
+the stack variables differ in size from Java's (`local_f0` 40 bytes, Java 32, at 0x1a8eee0,
+where a `MOVUPS [RSP+0x70]` store makes ours longer), and the `Unresolved local var` of
+0x2c153fd. The func equal of 9,595 on master is no other scope: master writes no DWARF
+parameters, so 170,824 of its 180,433 `func` records differ from Java's.
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The

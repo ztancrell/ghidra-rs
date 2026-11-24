@@ -72,6 +72,7 @@ use std::collections::{BTreeMap, HashMap};
 
 pub use funcdata::Funcdata;
 pub(crate) use infertypes::symbol_types;
+pub(crate) use inject::callfixup_pcode;
 pub use print::print_raw;
 pub(crate) use printc::is_string;
 pub use printc::print_c;

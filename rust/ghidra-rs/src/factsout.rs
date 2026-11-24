@@ -312,6 +312,29 @@ pub fn callfixups(cspec: &str) -> HashMap<String, String> {
     m
 }
 
+/// The call fixup of a function named `name` (CallFixupAnalyzer.getCallFixupNameForFunction):
+/// the name without a `libID_conflict_` prefix, else with `_` or `__` before it.
+fn fixup_of<'a>(fixups: &'a HashMap<String, String>, name: &str) -> Option<&'a String> {
+    let name = if name.starts_with("libID_conflict_") { name.replace("libID_conflict_", "") } else { name.to_string() };
+    fixups.get(&name).or_else(|| fixups.get(&format!("_{name}"))).or_else(|| fixups.get(&format!("__{name}")))
+}
+
+/// The p-code of the call fixup of each function that has one, by entry, for the stack
+/// analysis's walk (`Analysis::swap_call_fixups`). The Call-Fixup Installer runs before it
+/// (`AnalysisPriority.DISASSEMBLY.after()`).
+pub fn call_fixups(
+    img: &Image,
+    an: &Analysis,
+    sl: &Sleigh,
+    inputs: &Inputs,
+) -> Result<HashMap<u32, Vec<crate::sleigh::PcodeOp>>, String> {
+    let pcode = crate::decomp::callfixup_pcode(sl, inputs.cspec).map_err(|e| e.0)?;
+    let names = callfixups(inputs.cspec);
+    let none = Protos::default();
+    let funcs = name_functions(img, an, inputs.fid, inputs.protos.unwrap_or(&none));
+    Ok(funcs.iter().filter_map(|(&f, func)| Some((f, pcode.get(fixup_of(&names, &func.name)?)?.clone()))).collect())
+}
+
 impl Exporter<'_> {
     fn writable(&self, a: u32) -> bool {
         (!self.img.elf64 && a >= TEB.0) || self.img.block_of(a).is_some_and(|s| !s.readonly && s.name != "Headers")
@@ -443,7 +466,7 @@ impl Exporter<'_> {
             false => format!("<symbollist>{params}{locals}</symbollist>"),
         };
         let ns = self.ns_id(&f.ns);
-        let inject = self.fixups.get(&f.name).map(|i| format!("<inject>{i}</inject>")).unwrap_or_default();
+        let inject = fixup_of(&self.fixups, &f.name).map(|i| format!("<inject>{i}</inject>")).unwrap_or_default();
         format!(
             "<doc id=\"0x{ns:x}\"><mapsym><function id=\"0x0\" name=\"{name}\" size=\"{size}\"{nr}>\
              <addr space=\"ram\" offset=\"0x{addr:x}\"/><localdb lock=\"false\" main=\"stack\">\
@@ -1387,7 +1410,7 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
     // Java's is not derived: a definition `export_elf64` leaves out, or one on a function with
     // a call fixup
     let archived = |ex: &Exporter, a: Option<u32>, name: &str| match a.map(|a| applied.get(&a)) {
-        Some(Some(Some(def))) if ex.protos.by_name.contains_key(*def) && !ex.fixups.contains_key(name) => {
+        Some(Some(Some(def))) if ex.protos.by_name.contains_key(*def) && fixup_of(&ex.fixups, name).is_none() => {
             Ok(Some(*def))
         }
         Some(None) => Ok(None),

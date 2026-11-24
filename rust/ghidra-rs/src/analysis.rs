@@ -613,6 +613,9 @@ pub struct Analysis {
     purge: HashMap<u32, u32>,            // function -> bytes its RETs pop (RET n), where they agree
     /// The purge X86 Function Callee Purge set, by function (`callee_purge`); none is unknown.
     pub callee_purges: HashMap<u32, u32>,
+    /// The p-code of the call fixup of a function, by entry (`call_fixups` of the facts; empty
+    /// otherwise): a direct call to one runs it in place of the CALL.
+    fixups: HashMap<u32, Vec<crate::sleigh::PcodeOp>>,
     reg_space: u32,
     /// the local fold: register and pointer width, the stack pointer's offset, and the
     /// registers a call kills besides it (the default prototype's `<killedbycall>`)
@@ -884,6 +887,7 @@ impl Analysis {
             fpu_ip: None,
             purge: HashMap::new(),
             callee_purges: HashMap::new(),
+            fixups: HashMap::new(),
             reg_space: 0,
             width: 4,
             sp: 0x10,
@@ -1934,6 +1938,17 @@ impl Analysis {
         }
         let ops = sl.pcode(p).ok()?;
         let code = sl.code_space();
+        // SymbolicPropogator.checkForCallFixup: a direct call to a function with a call fixup
+        // runs the fixup's p-code in place of the CALL op, and none of the call's side effects
+        // (`ESP = ESP + 4 - EAX;` for `__chkstk`); the CALL's flow stays the instruction's
+        let fixup = ops.iter().position(|op| op.opc == 7 && op.ins[0].space == code).and_then(|i| {
+            let t = u32::try_from(ops[i].ins[0].offset).ok()?;
+            self.fixups.get(&t).map(|f| (i, t, f))
+        });
+        let ops: Vec<_> = match fixup {
+            Some((i, _, f)) => ops[..i].iter().chain(f).chain(&ops[i + 1..]).cloned().collect(),
+            None => ops,
+        };
         let next = a as u64 + len as u64;
         let (mut flow, mut target, mut slot) = (Flow::Fall, None, None);
         let (mut refs, mut code_imms, mut rw) = (Vec::new(), Vec::new(), Vec::new());
@@ -2236,6 +2251,9 @@ impl Analysis {
                     rw.push(imm);
                 }
             }
+        }
+        if let Some((_, t, _)) = fixup {
+            (flow, target) = (Flow::Call, Some(t));
         }
         let computed = computed.filter(|_| slot.is_none());
         let inner = ops.iter().any(|op| {
@@ -2770,14 +2788,14 @@ impl Analysis {
             }
             _ => return None,
         };
-        // `MOVSXD r,dword ptr [base + index*4]`
+        // `MOVSXD r,dword ptr [base + index*4]`; a base of RBP or R13 takes a zero 8-bit
+        // displacement (`[r13 + rax*4 + 0]`, cpp3-clang 0x11a7e2)
         let (mx, m) = rex(bytes(*movsxd)?);
         let (dst, base, mut index) = match m {
-            [0x63, m, sib, ..]
+            [0x63, m, sib, disp, ..]
                 if mx & 8 != 0
-                    && m & 0xc7 == 0x04
+                    && ((m & 0xc7 == 0x04 && sib & 7 != 5) || (m & 0xc7 == 0x44 && sib & 7 == 5 && *disp == 0))
                     && sib & 0xc0 == 0x80
-                    && sib & 7 != 5
                     && (sib >> 3) & 7 | (mx & 2) << 2 != 4 =>
             {
                 ((m >> 3) & 7 | (mx & 4) << 1, sib & 7 | (mx & 1) << 3, (sib >> 3) & 7 | (mx & 2) << 2)
@@ -3295,6 +3313,15 @@ impl Analysis {
         std::mem::replace(&mut self.purge, purges)
     }
 
+    /// Replace the call fixups a direct call runs (function entry -> the fixup's p-code);
+    /// returns the ones replaced.
+    pub fn swap_call_fixups(
+        &mut self,
+        fixups: HashMap<u32, Vec<crate::sleigh::PcodeOp>>,
+    ) -> HashMap<u32, Vec<crate::sleigh::PcodeOp>> {
+        std::mem::replace(&mut self.fixups, fixups)
+    }
+
     pub fn purge(&self, f: u32) -> Option<u32> {
         self.purge.get(&f).copied()
     }
@@ -3469,6 +3496,7 @@ mod tests {
             fpu_ip: None,
             purge: HashMap::new(),
             callee_purges: HashMap::new(),
+            fixups: HashMap::new(),
             reg_space: 0,
             width: 4,
             sp: 0x10,

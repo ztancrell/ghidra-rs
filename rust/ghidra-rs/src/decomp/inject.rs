@@ -72,6 +72,21 @@ impl InjectLibrary {
     }
 }
 
+/// The compiled p-code of each `<callfixup>` of the compiler spec `cspec`, by fixup name: what
+/// SymbolicPropogator injects at a call (`checkForCallFixup`, `InjectPayload.getPcode`).
+pub(crate) fn callfixup_pcode(sleigh: &Sleigh, cspec: &str) -> Result<HashMap<String, Vec<PcodeOp>>> {
+    let root = crate::xml::parse(cspec).map_err(|e| LowlevelError(format!("compiler spec: {e}")))?;
+    let names = SleighNames::new(sleigh);
+    let mut lib = InjectLibrary::new(sleigh);
+    for el in root.kids_named("callfixup") {
+        let name = el.req("name")?;
+        let body = el.kid("pcode").and_then(|p| p.kid("body"));
+        let body = body.ok_or_else(|| LowlevelError(format!("callfixup {name}: missing <pcode><body>")))?;
+        lib.add_callfixup(&names, name, &body.text)?;
+    }
+    Ok(lib.payloads.into_iter().map(|p| (p.name, p.ops)).collect())
+}
+
 /// Where `ExecutablePcode::build` puts the first parameter in the unique space, and its step.
 const EXE_PARAM_START: u64 = 0x10;
 const EXE_PARAM_STEP: u64 = 0x20;

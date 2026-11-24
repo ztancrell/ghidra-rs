@@ -680,8 +680,12 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
             };
             // the stack analysis goes by the purges Ghidra has at a call site
             let purges = ghidra_rs::factsout::call_purges(&img, &an, &inputs);
+            // and runs the call fixups the Call-Fixup Installer set
+            let fixups = ghidra_rs::factsout::call_fixups(&img, &an, &sl, &inputs).map_err(|e| format!("{p}: {e}"))?;
             let own = an.swap_call_purges(purges);
+            let own_fixups = an.swap_call_fixups(fixups);
             let done = ghidra_rs::factsout::export(&img, &an, &sl, &inputs, &mut w).and_then(|()| w.flush());
+            an.swap_call_fixups(own_fixups);
             an.swap_call_purges(own);
             done.map_err(|e| format!("{p}: {e}"))?;
             println!("wrote facts {p}");
