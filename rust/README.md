@@ -6349,7 +6349,7 @@ slower analysis (54.5 s before) was not traced (Repair Flow Damage, or load on t
   Not checked by the pattern: another jump into the instructions between the compare and the
   switch.
 
-Measured against Java 12.3's facts (the body records; functions outside Java's EXTERNAL
+Measured before the merge of master (Superseded for the current counts by "Measured after master 7469505ff1 was merged in" below) against Java 12.3's facts (the body records; functions outside Java's EXTERNAL
 block), Hatred, the desktop:
 
 | | master 3a5ba15656 | with both |
@@ -6372,7 +6372,7 @@ larger (67 are at most the unresolved jumps). The function set, traced:
   (getFunctionContaining, CreateThunkFunctionCmd.java:352-356); the analysis does not read
   DWARF bodies.
 
-The 14 small binaries (`--facts` against Java's, equal records): body 1,013 -> 1,029 / 1,112,
+Superseded (see "Measured after master 7469505ff1 was merged in" below): the 14 small binaries (`--facts` against Java's, equal records): body 1,013 -> 1,029 / 1,112,
 label 4,645 -> 4,993 / 7,315, undef 1,034 -> 1,090 / 1,407, data 724 -> 740, override 770 ->
 782, func 209 -> 210; 2 PIC switch jumps counted unresolved (cpp binaries).
 
@@ -6393,10 +6393,65 @@ at undefined bytes right after an instruction or data, or at a block's start. No
 not counted: a match at an instruction that lies in no function (checkAlreadyInFunctionAbove),
 as in the PE's port. A pattern file with another action or rule fails the analysis.
 
-Measured: Hatred one more function, 0x35840d0 `SDL_AssertionsQuit`, which Java has too (in
+Measured before the merge of master (Superseded by "Measured after master 7469505ff1 was merged in" below): Hatred one more function, 0x35840d0 `SDL_AssertionsQuit`, which Java has too (in
 both 180,025, Java only 13, ghidra-rs only 2; bodies different 105, unchanged); no
 `after="defined"` match counted. The 14 small binaries: every record count unchanged, none
 counted.
+
+#### Measured after master 7469505ff1 was merged in (branch `fix-hatred-analysis`, 2026-11-23)
+
+Merge a95796c6ab against master 7469505ff1 on the same inputs. This replaces the counts of the
+two sections above.
+
+Hatred, `--facts` against Java 12.3's facts (`tools/facts-diff.sh`, MacBook, the Java run of
+`hatred-java2`; equal / different / missing / extra, of Java's 180,433 functions):
+
+| record | master | branch |
+|---|---|---|
+| body | 180,181 / 237 / 15 / 2 | 180,314 / 105 / 14 / 2 |
+| func | 9,582 / 170,836 / 15 / 2 | 9,595 / 170,824 / 14 / 2 |
+| tracked | 180,418 / 0 / 15 / 2 | 180,419 / 0 / 14 / 2 |
+| label | 714,835 / 144,566 / 24,010 / 33 | 717,043 / 144,507 / 21,861 / 32 |
+| undef | 227,281 / 878 / 7,246 / 6,655 | 227,813 / 831 / 6,761 / 6,492 |
+| data | 496,778 / 80,387 / 1,499,157 / 55,279 | 496,844 / 80,333 / 1,499,145 / 55,259 |
+| string | 196,587 / 369 / 29,362 / 400 | 196,648 / 310 / 29,360 / 400 |
+| override | 31,356 / 0 / 2,507 / 3,972 | 31,399 / 0 / 2,464 / 3,972 |
+| ns | 22,813 / 0 / 22,139 / 48 | the same |
+| type | 1,282 / 3 / 37,108 / 4 | the same |
+| `underived` (function / label / comments) | 170,854 / 8,682 / 170,920 | 170,856 / 10,189 / 170,921 |
+| silent func | 131 | 119 |
+
+- No func record is newly silent. The 119 are among master's 131
+  (`rust/target/baselines/archives-131.txt`); the other 12 are equal now (0x33c81c0,
+  0x33fffa0, 0x340fcb0, 0x3410400, 0x3420a90, 0x342c930, 0x342d070, 0x3444680, 0x3466360,
+  0x34c6fc0, 0x34da270, 0x34deae0; why each became equal was not traced).
+- No body is newly different: the 105 are among master's 237. The function only Java had
+  and both have now is 0x35840d0 (Function Start Search); the 2 only ghidra-rs has are
+  0x1b25ce4 and 0x1b2dc44, as above.
+- 67 PIC switch jumps are counted unresolved (the warning), first at 0x33c2ca5. How many
+  PIC switches the pattern resolved, and how many Java recovered, was not counted: the facts
+  have no jump-table record; the measure is the body row.
+- 1,507 more labels are `underived` (loud; which rule marks them was not traced). `block`,
+  `wref`, `comments` and `coretypes` rows are unchanged. `--facts` took 372 s, maximum
+  RSS 4.98 GB (master: 362 s, 5.61 GB).
+
+The 14 small binaries (desktop, equal / Java's records, master -> branch): body 1,013 -> 1,029
+/ 1,112, func 339 -> 352 / 1,112, tracked 1,057 -> 1,059 / 1,112, label 4,648 -> 4,996 /
+7,315, undef 1,034 -> 1,090 / 1,407, data 724 -> 740 / 12,072, override 770 -> 782 / 1,259; ns
+190 / 295 and type 67 / 1,107 the same; `underived` records 1,313 -> 1,401. Silent func 15 ->
+1: the 14 `.plt.sec` thunks of the two `-cet` builds (`ENDBR64; JMP [slot]`) are no longer
+silent; the one left is master's. 2 PIC switch jumps counted unresolved (cpp3-gcc); no
+`after="defined"` match counted.
+
+Checks on the merge (desktop): `cargo fmt --check` and `cargo clippy --release --all-targets
+-- -D warnings` clean; `cargo test --release` 210 passed (master 208; the two new ones are
+this branch's pattern-file and PIC-switch tests); `CORPORA=m8 tools/bars.sh` 57 of 57 lines
+equal to `pe-overrides-77ab900fd4.summary`, reference rebuilt; `simple`: pc-r, pc-t, pcc-r,
+pcc-t 194 / 194, pcd 198 / 200 (loud 2), pmd 199 / 200 (loud 1), silent 0, as master;
+`tools/elf64-decomp.sh`: 817 functions (master 815; the two new ones, 0x1010a0 of t1-cet and
+0x101040 of t1-pie, are identical), the reference ran 815, identical 809 (master 807), loud 6
+(5 `downChain`, 1 jump table through a CALLOTHER, as master), silent 0. Not run: M500, the
+Hatred camera corpus, mercs2's facts, anything on Windows binaries beyond M8 and `simple`.
 
 #### GCC exception tables: not ported (read 2026-11-23, branch `fix-hatred-analysis`)
 
