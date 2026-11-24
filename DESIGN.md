@@ -201,6 +201,12 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   functions) and leaves Unreal's generated code out. ghidra-rs stays a port that matches
   Java Ghidra 12.3; work part 2 needs in ghidra-rs (for example GCC exception tables, DWARF
   location lists) is done as ports with the usual checks, on branches like `hatred-facts`.
+- 2026-11-24: Java's stack-variable rule (getStackOpIndex, ported on `dwarf-params`) applies to
+  PE and ELF alike, even though mercs2's PE facts stop being byte-identical to master. User's
+  decision. The 15 PE records it makes wrong (stack tracking after `_chkstk`) are fixed by
+  porting Java's tracking, not by keeping the old rule for PE.
+- 2026-11-24: All CPU, RAM and GPU work (builds, tests, checks, Hatred and Java runs) runs on
+  the MacBook; the desktop keeps git and editing. User's rule, global.
 
 ## Milestones
 
