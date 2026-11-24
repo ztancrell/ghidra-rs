@@ -528,7 +528,10 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
                 // the import adds the image base adjustment itself (programBaseAddressFixup)
                 let a = u32::try_from(f.addr).ok()?;
                 let facts = protos.remove(&f.addr)?;
-                Some((a, ghidra_rs::factsout::DwarfFunc { name: f.name, plate: f.plate, facts }))
+                Some((
+                    a,
+                    ghidra_rs::factsout::DwarfFunc { name: f.name, plate: f.plate, facts, locals: f.locals_underived },
+                ))
             })
             .collect();
         (funcs, types, imp.unresolved)

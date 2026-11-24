@@ -19,7 +19,10 @@
 //! - a load or store guard whose pointer has a data-type needing resolution (`getTypeReadFacing`)
 //!   or points to a union,
 //! - a structure or union among the hints (`TypeStruct::getSubType`, partial structures),
-//! - a locked prototype with parameters (its symbols are not in the scope).
+//! - a locked prototype with a parameter on the stack or in a join (its symbol is a fixed
+//!   hint). Superseded (2026-11-24, branch `dwarf-params`): "a locked prototype with
+//!   parameters (its symbols are not in the scope)"; register parameters are symbols of the
+//!   scope now (`locked::param_symbols`) and give no hint.
 //!
 //! A piece of an array symbol is a partial struct (`getTypePartialStruct`, in
 //! `ActionMappedLocalSync`), which `MapState::addFixedType` turns into an open hint of the
@@ -846,8 +849,16 @@ fn annotate_raw_stack_ptr(fd: &mut Funcdata, arch: &Arch, unk1: TypeId) -> Resul
 
 /// Port of `ScopeLocal::restructureVarnode`.
 fn restructure_scope(fd: &mut Funcdata, arch: &Arch, aliasyes: bool) -> Result<()> {
-    if fd.proto.locked.as_ref().is_some_and(|l| !l.inputs.is_empty()) {
-        return unported("a locked prototype with parameters");
+    // the locked parameters are symbols of the local scope (`locked::param_symbols`); one on
+    // the stack would be a fixed hint (`MapState::gatherSymbols`) and a function parameter
+    // `fakeInputSymbols` skips
+    if fd
+        .proto
+        .locked
+        .as_ref()
+        .is_some_and(|l| l.inputs.iter().any(|p| !matches!(p.storage, Some(super::fspec::Storage::Space { .. }))))
+    {
+        return unported("a locked prototype with a parameter on the stack or in a join");
     }
     if fd.localmap.params().is_empty() {
         return unported("a model without a stack parameter range");

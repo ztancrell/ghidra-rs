@@ -105,6 +105,8 @@ pub struct Func {
     /// the storage of the parameters and of the return value from the calling convention
     /// (`FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS`); `Err` names what is not ported
     pub storage: std::result::Result<(Vec<Vec<Piece>>, Vec<Piece>), String>,
+    /// what of its local variables is not ported (`underived ... locals`), `None`: all of them
+    pub locals_underived: Option<String>,
 }
 
 /// One piece of a variable's storage, the least significant first: on the stack or in a
@@ -1922,7 +1924,10 @@ impl<'a> Prog<'a> {
             }
             // a type renamed `.conflict` here: on Hatred Java's comment has the plain name (11 of
             // 11), when Java names it so was not traced
-            match orig.contains(".conflict") {
+            // a type with a `.conflict` twin the import does not make (`Dtm::has_conflict`):
+            // Java's comment may name the twin (Hatred's FT_Face of 0x1cbd140)
+            let twin = self.dtm.may_have_conflict(ret) || orig_params.iter().any(|p| self.dtm.may_have_conflict(p.1));
+            match orig.contains(".conflict") || twin {
                 true => Err(()),
                 false => Ok(plate),
             }
@@ -1980,18 +1985,39 @@ impl<'a> Prog<'a> {
         // DWARFFunction.updateFunctionSignature (DWARFFunction.java:457-492): FORMAL gives every
         // parameter the storage of the calling convention; STORAGE the one DWARF's location
         // expressions give (DWARFVariable.readStorage), which are not evaluated here
-        let unported = stores.iter().chain(&locals).find_map(|s| match s {
-            Store::Unported(r) => Some(*r),
-            _ => None,
-        });
-        let storage = if let Some(r) = unported {
-            Err(format!("a DWARF location: {r}"))
-        } else if !formal {
-            Err("the storage DWARF's location expressions give every parameter (STORAGE commit mode)".into())
+        let unported = |v: &[Store]| {
+            v.iter().find_map(|s| match s {
+                Store::Unported(r) => Some(*r),
+                _ => None,
+            })
+        };
+        // the local variables are the function's own (its `localdb`), not its prototype: a
+        // caller does not read them
+        let locals_underived = if let Some(r) = unported(&locals) {
+            Some(format!("a DWARF location: {r}"))
         } else if locals.iter().any(|s| *s != Store::Ram) {
             // DWARFFunctionImporter.java:205-212: a local variable with storage becomes a variable
             // of the function (DWARFFunction.commitLocalVariable); a static one is a global
-            Err("the local variables of the DWARF import (commitLocalVariable)".into())
+            Some("the local variables of the DWARF import (commitLocalVariable)".into())
+        } else {
+            None
+        };
+        // a method whose `this` points to a class of another name than its namespace (Hatred's
+        // TAsyncRunnable<int>::Run of 0x1a615a0 has `TAsyncRunnable<void> *` here, `<int>` in
+        // Java): which DIE Java resolves its type from was not traced
+        let this_other = fparams.iter().find(|p| p.0 == "this").and_then(|p| match self.dtm.dt(p.1).kind {
+            Kind::Pointer { to, .. } => {
+                let n = self.dtm.name(self.dtm.base_of(to));
+                (qual.len() > 1 && dtm::strip_conflict(&n) != qual[qual.len() - 2]).then_some(n)
+            }
+            _ => None,
+        });
+        let storage = if let Some(n) = this_other {
+            Err(format!("the `this` type {n} of a method of another class"))
+        } else if let Some(r) = unported(&stores) {
+            Err(format!("a DWARF location: {r}"))
+        } else if !formal {
+            Err("the storage DWARF's location expressions give every parameter (STORAGE commit mode)".into())
         } else if cc.is_none() && (qual.len() > 1 || !fparams.is_empty()) {
             // Java has the default model's name locked (`__stdcall`) on most such functions (a
             // static method, Hatred's C functions with parameters) and `unknown` on others
@@ -2015,6 +2041,7 @@ impl<'a> Prog<'a> {
             base,
             hidden_ret,
             storage,
+            locals_underived,
         }))
     }
 
@@ -2221,6 +2248,18 @@ impl<'a> Prog<'a> {
         dups: &mut HashSet<u64>,
     ) -> Result<()> {
         let (addr, entry, fb) = f;
+        // the inlined subroutines below the function by abstract origin: how many instances
+        let mut inlined: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut walk: Vec<u32> = self.dw.children(die).collect();
+        while let Some(c) = walk.pop() {
+            if self.dw.tags[c as usize] == DW_TAG_INLINED_SUBROUTINE {
+                if let Some(&o) = self.agg(c).get(1) {
+                    inlined.entry(o).or_default().push(c);
+                }
+            }
+            walk.extend(self.dw.children(c));
+        }
+        let repeated: HashSet<u32> = inlined.into_values().filter(|v| v.len() > 1).flatten().collect();
         let mut stack = vec![(die, 0i64, self.dw.children(die).collect::<Vec<_>>().into_iter())];
         while let Some((parent, offset, it)) = stack.last_mut() {
             let (parent, offset) = (*parent, *offset);
@@ -2252,8 +2291,12 @@ impl<'a> Prog<'a> {
                                 comment.as_deref().filter(|c| !c.is_empty()).unwrap_or("???")
                             );
                             // a name with a `.conflict` twin: which one Java's type is was not
-                            // traced (Hatred's FT_Module, see the plate)
-                            let s = (!self.dtm.has_conflict(ty)).then_some(s);
+                            // traced (Hatred's FT_Module, see the plate); a local of a subroutine
+                            // inlined more than once in the function: at which instance Java puts
+                            // the comment was not traced (Hatred's 0x1af9650 has it at the second
+                            // of two FString constructors, here at the first)
+                            let twice = stack.iter().any(|e| repeated.contains(&e.0));
+                            let s = (!self.dtm.may_have_conflict(ty) && !twice).then_some(s);
                             self.unresolved.push((addr.wrapping_add(offset as u64), s));
                         }
                         Store::Unported(_) => {

@@ -538,6 +538,29 @@ impl Dtm {
         matches!(&self.dt(self.base_of(id)).kind, Kind::Composite(c) if !c.packed && c.comps.is_empty() && c.len == 0)
     }
     /// typedefs followed to what they name
+    /// `has_conflict`, or a typedef of a pointer to a structure or union (through pointers and
+    /// arrays): Java has a `.conflict` twin of such a typedef that the import does not make
+    /// (Hatred's FreeType handles, `FT_Module` of 0x37c48b0, `FT_Face` of 0x1cbd140;
+    /// DWARFDataTypeConflictHandler's path there not traced). For the names a comment or a
+    /// prototype shows; a `type` record that holds one is written as it is.
+    pub fn may_have_conflict(&self, mut id: Id) -> bool {
+        loop {
+            match self.dt(id).kind {
+                Kind::Pointer { to, .. } => id = to,
+                Kind::Array { elem, .. } => id = elem,
+                _ => break,
+            }
+        }
+        if let Kind::Typedef { base } = self.dt(id).kind {
+            if let Kind::Pointer { to, .. } = self.dt(base).kind {
+                if matches!(self.dt(self.base_of(to)).kind, Kind::Composite(_)) {
+                    return true;
+                }
+            }
+        }
+        self.has_conflict(id)
+    }
+
     /// Whether the name a data type shows comes from a type of the program that has a
     /// `.conflict<n>` twin (or is one): through pointers and arrays, not typedefs
     pub fn has_conflict(&self, mut id: Id) -> bool {

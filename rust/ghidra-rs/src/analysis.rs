@@ -557,6 +557,8 @@ pub struct Fold {
     /// `AND ESP,mask` keeps a stack address (the mask applies to its offset), as Ghidra's
     /// stack analysis has it; off for the walks of `propagate`
     stack_and: bool,
+    /// the walk came here through a case of a jump table (`flow_walk`)
+    pub via_table: bool,
 }
 
 impl Fold {
@@ -3240,6 +3242,7 @@ impl Analysis {
                     }
                     Flow::JumpInd => {
                         let cases = self.tables.get(&a).cloned().unwrap_or_default();
+                        let fold = Fold { via_table: true, ..fold.clone() };
                         stack.extend(cases.into_iter().chain(computed).map(|t| (t, a, fold.clone(), extra)));
                         break;
                     }

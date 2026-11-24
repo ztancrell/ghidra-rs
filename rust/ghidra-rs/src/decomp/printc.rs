@@ -245,9 +245,6 @@ impl PrintC<'_> {
     /// Port of `PrintC::docFunction`.
     fn doc_function(&mut self, name: &str) -> Result<()> {
         self.commsorter = super::comment::CommentSorter::setup_function_list(self.fd)?;
-        if self.fd.proto.locked.is_some() {
-            return err("print C: the declaration of a locked prototype is not ported");
-        }
         self.emit.open_group(); // beginFunction
         self.emit_comment_func_header();
         self.emit.tag_line();
@@ -326,10 +323,11 @@ impl PrintC<'_> {
         self.emit.open_group(); // beginFuncProto
         self.emit_prototype_output()?;
         self.emit.spaces(1, 0);
-        // option_convention: a model other than the default is printed (`printInDecl`)
+        // option_convention: a model other than the default is printed (`printInDecl`), but
+        // for one `createUnknownModel` names `unknown` (architecture.cc:1165-1166)
         let models = &self.arch.spec.models;
         let model = self.fd.proto.model.ok_or_else(|| LowlevelError("print C: a prototype without a model".into()))?;
-        if model != models.default {
+        if model != models.default && models.get(model).name != "unknown" {
             self.emit.print_str(&models.get(model).name);
             self.emit.spaces(1, 0);
         }
@@ -353,9 +351,13 @@ impl PrintC<'_> {
 
     /// Port of `PrintC::emitPrototypeOutput`.
     fn emit_prototype_output(&mut self) -> Result<()> {
-        let ty = match self.fd.proto.out_param {
-            Some((_, _, t)) => t,
-            None => self.fd.types.find_by_name("void").ok_or_else(|| LowlevelError("print C: no void type".into()))?,
+        // FuncProto::getOutputType: a locked prototype's output, else the recovered one
+        let ty = match (&self.fd.proto.locked, self.fd.proto.out_param) {
+            (Some(l), _) => l.output.ty,
+            (None, Some((_, _, t))) => t,
+            (None, None) => {
+                self.fd.types.find_by_name("void").ok_or_else(|| LowlevelError("print C: no void type".into()))?
+            }
         };
         self.emit.open_group(); // beginReturnType
         self.push_type(ty)?;
@@ -364,7 +366,8 @@ impl PrintC<'_> {
         Ok(())
     }
 
-    /// Port of `PrintC::emitPrototypeInputs`: the parameters are the symbols of category 0.
+    /// Port of `PrintC::emitPrototypeInputs`: the parameters are the symbols of category 0 (a
+    /// locked prototype's too, `locked::param_symbols`), then `...` of a locked one.
     fn emit_prototype_inputs(&mut self) -> Result<()> {
         let params = self.fd.symtab.category(LOCAL, 0);
         if params.is_empty() {
@@ -375,6 +378,12 @@ impl PrintC<'_> {
                 self.emit.print_str(",");
             }
             self.emit_var_decl(sym)?;
+        }
+        if self.fd.proto.locked.as_ref().is_some_and(|l| l.dotdotdot) {
+            if !params.is_empty() {
+                self.emit.print_str(",");
+            }
+            self.emit.print_str("...");
         }
         Ok(())
     }

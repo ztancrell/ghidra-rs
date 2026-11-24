@@ -3904,7 +3904,8 @@ is not ported), an open hint outside the local ranges and the parameter range
 above `max_basetype_size`, a RETURN of a stack varnode (`checkUnaliasedReturn`),
 `annotateRawStackPtr` once type recovery has started. (Superseded, see "Local symbols" below:
 of these only a locked prototype with parameters is left, and the action runs
-in the `decompile` root.) The action of the `decompile` root
+in the `decompile` root. Superseded (2026-11-24, branch `dwarf-params`): only one with a
+parameter on the stack or in a join is left, see "Round 2: locked parameters as symbols".) The action of the `decompile` root
 stays unported (`restructure_varnode` fails there as before), and `r1-options.sh` keeps
 `aliasupdate` off in the function itself: there the rule fails on the INDIRECTs of an indexed
 stack STORE. Without an options file the rule is on in the `decompile` root too:
@@ -7711,6 +7712,87 @@ before the `createUnknownModel` change, which only the facts path reads). Of the
 checks, 5 of M500 ran (equal to the baseline); the run was stopped (about 5 minutes a check).
 Not run: `elf64-decomp.sh`, the 4,024 game functions in the console (60 sampled), Java's C
 against the branch's (`ghidra-diff.sh`).
+
+#### Round 2: locked parameters as symbols, precise `underived` marks (branch `dwarf-params`, 2026-11-24)
+
+What changed for `load facts` (the C++ references are `Ghidra/Features/Decompiler/src/decompile/cpp/`):
+- A locked prototype's parameters are symbols of the local scope, as `ProtoStoreSymbol::setInput`
+  makes them (fspec.cc:3143-3179): category 0 at their index, type-locked, name-locked as the
+  record says, valid everywhere where the scope owns the storage and else at the restricted use
+  point before the entry, then `FuncProto::updateThisPointer` (fspec.cc:3567-3579)
+  (`locked::param_symbols`, at `ActionPrototypeTypes`). So `ActionNameVars` links the input
+  varnodes to them (the guard there is gone) and `ScopeLocal::restructureVarnode`
+  (varmap.cc:1389-1418) runs for a locked prototype whose parameters are all in registers:
+  such a symbol is in no stack range, so `gatherSymbols` (varmap.cc:1170-1186) and
+  `fakeInputSymbols` (varmap.cc:1527-1580) see nothing of it. A parameter on the stack or in a
+  join still fails there (`a locked prototype with a parameter on the stack or in a join`).
+  Superseded: "a locked prototype with parameters" in "Local symbols" and in `mapstate.rs`.
+- `print C` declares a locked prototype (`PrintC::emitPrototypeOutput`, `emitPrototypeInputs`
+  with `...`, printc.cc:2303-2336) and leaves out the model name `unknown`
+  (`Architecture::createUnknownModel`, architecture.cc:1160-1168). Superseded: "Not changed: the
+  printer prints `unknown` in a declaration too" above.
+- A `join` storage in a record (`piece<n>="space:offset:size"`) is read; a locked join parameter
+  of a call still fails later (`a locked join parameter of a call`).
+
+What changed in `analyze --facts`:
+- Two more `underived` words, which only the function's own decompile reads (`Facts::function`
+  with `own`): `locals` (the DWARF import's committed locals, `commitLocalVariable`; and the stack
+  variables below) and `overrides` (a call of a function with a variable argument list,
+  FormatStringAnalyzer). Before, both made the whole `function` record `underived`, so every
+  caller of such a function failed too. A caller reads only the prototype.
+- A non-core built-in type under a typedef (Hatred's `int32` -> `sdword`) is written in full, as
+  Java does (`<type name="sdword" metatype="int" size="4">`); before, its record was missing and
+  `load facts` failed on `no data-type with id 0xd00000000000001f`. A record that refers to a
+  record that is not written, directly or not, now makes every prototype naming it `underived`
+  (`bad_types`); before, only the first function to reach it was.
+- New precise marks for the silent groups of round 1: the stack variables of a function whose
+  variables change with the stack references a jump-table case's walk makes past code already
+  walked (`locals`; Java's walk of 0x16ee820 makes none there, VarnodeContext.flowStart not
+  traced; ELF only: on mercs2 3 of the 9 such functions have Java's variables, so it is not
+  Java's rule); a method whose `this` points to a class of another name (`TAsyncRunnable<int>::Run`
+  with `TAsyncRunnable<void> *`); a typedef of a pointer to a structure (FreeType's `FT_Module`,
+  `FT_Face`: Java has a `.conflict` twin the import does not make) in a prototype's own types,
+  a plate or an `Unresolved local var` comment; a local of a subroutine inlined more than once in
+  the function (Java's comment is at another instance, 0x1af9650).
+
+Measured against Java 12.3 (`tools/facts-diff.sh`, MacBook; master 14ba1171b8, round 1
+9d417db2f3, this round; equal / different / missing / extra; silent: different or missing with
+no `underived` record covering it, `function`, `locals` or `overrides` for `func`):
+
+| | record | master | round 1 | round 2 |
+|---|---|---|---|---|
+| Hatred | func | 9,595 / 170,824 / 14 / 2 | 110,178 / 70,241 / 14 / 2 | 109,800 / 70,619 / 14 / 2 |
+| | comments | 57,971 / 0 / 90,982 / 0 | 91,724 / 96 / 57,133 / 1 | 84,469 / 4 / 64,480 / 1 |
+| | type | 1,282 / 3 / 37,108 / 4 | 27,748 / 204 / 10,441 / 4 | 28,083 / 211 / 10,099 / 4 |
+| | `underived` records | 284,136 | 150,886 | 176,867 |
+| | silent func | 133 | 284 (151 new) | 227 (94 new) |
+| | silent comments | 3 | 99 (96 new) | 7 (4 new) |
+| small corpus (14) | func | 352 / 707 / 53 / 0 | 583 / 476 / 53 / 0 | 583 / 476 / 53 / 0 |
+| | comments | 292 / 2 / 352 / 0 | 524 / 6 / 116 / 0 | 443 / 4 / 199 / 0 |
+| | type | 67 / 0 / 1,040 / 0 | 650 / 30 / 427 / 9 | 703 / 30 / 374 / 9 |
+| | `underived` records | 1,321 | 873 | 960 |
+| | new silent (func, comments) | | 1, 4 | 1, 2 |
+
+Not reached: no new silent record. Left: 94 Hatred `func` records that differ from Java's only in
+the stack variables of the analysis (`local_*`: variables only one side has, or of another
+size; several patterns, none traced; the DWARF guard hid them on master), 4 Hatred comments
+records (0x1b25cd0, 0x2cbc6c0: a comment one side has; 0x2c15350, 0x2c158b0: other locals in
+the comment), and on the small corpus cpp3-gcc's 0x110820 (stack variables and a comment) and
+cpp3-clang's 0x11a720 (a comment). The comments marks cost equal records: 91,724 -> 84,469
+equal comments on Hatred. Hatred's game module: `underived ... function` 796 -> 2,958, of which
+2,215 for `a data type that is not written`: the prototype names a record that refers, directly
+or not, to one that is not written (`bad_types`). In round 1 those records were written as
+derived and failed at load (`no data-type with id`); which unwritten types are behind them was
+not traced.
+`--facts` on Hatred (MacBook): 889 s, 4.18 GB maximum RSS, in parallel with a `load facts` run.
+
+Checks (desktop): `cargo test --release` 212 passed; `cargo fmt --check` and `cargo clippy
+--release --all-targets -- -D warnings` clean; mercs2's PE facts byte-identical to master's
+(`cmp`); `CORPORA=m8 tools/bars.sh` 57 of 57 lines equal to `baselines/master-3e44b31ec6.summary`.
+The full `tools/bars.sh` (133 checks, all corpora) was started under `heavy-run` with the
+branch's binary (`rust/target/dp2/bars-full/summary.out`); its first 74 lines are equal to the
+baseline, the rest had not finished when this was written. The 4,024 game functions with
+`load facts` and Java's C of 20 of them were running on the MacBook, not measured here.
 
 ## Speed
 

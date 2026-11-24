@@ -52,6 +52,13 @@ fn db_id(i: u32) -> u64 {
     0xd000_0000_0000_0000 + u64::from(i) + 1
 }
 
+/// The id a built-in data type that is no core type is written with (Java's is its database
+/// key, which `tools/facts-diff.sh` leaves out): its name's FNV-1a hash in a range of its own.
+fn builtin_id(name: &str) -> u64 {
+    let h = name.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3));
+    0xdf00_0000_0000_0000 | (h & 0x00ff_ffff_ffff_ffff)
+}
+
 /// Close a `<type ...>` element whose opening tag is the first `open` bytes of `s`: in the tag
 /// itself when it has no children, as Java's encoder does.
 fn close(mut s: String, open: usize) -> String {
@@ -77,7 +84,13 @@ struct Encoder<'a> {
 impl Encoder<'_> {
     fn core_ref(&self, tag: &str, b: &B, rest: &str) -> Result<String, String> {
         let name = b.name();
-        let id = self.core.get(&name).ok_or_else(|| format!("the built-in data type {name}"))?;
+        let id = match self.core.get(&name) {
+            Some(id) => id.clone(),
+            // a built-in type of the program that is no core type (`sdword` under Hatred's
+            // `int32`) is written in full with its own id, which ties nothing to a record
+            None if tag == "type" => format!("0x{:x}", builtin_id(&name)),
+            None => return Err(format!("the built-in data type {name}")),
+        };
         Ok(format!("<{tag} name=\"{name}\" id=\"{id}\"{rest}/>"))
     }
 
@@ -287,6 +300,12 @@ impl Encoder<'_> {
 
     fn proto(&mut self, f: &Func) -> Result<Proto, String> {
         let (stores, ret_store) = f.storage.clone()?;
+        // a prototype's own types may name a `.conflict` twin the import does not make
+        if let Some(&t) =
+            std::iter::once(&f.ret).chain(f.params.iter().map(|p| &p.1)).find(|&&t| self.d.may_have_conflict(t))
+        {
+            return Err(format!("the data type name {}", self.d.name(t)));
+        }
         let mut params = Vec::new();
         for (k, ((name, ty), store)) in f.params.iter().zip(&stores).enumerate() {
             // the auto-parameters: `__return_storage_ptr__` first, then `this`

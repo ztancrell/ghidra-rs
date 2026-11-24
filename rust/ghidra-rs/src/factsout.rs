@@ -46,6 +46,13 @@ pub enum Underived {
     Comments,
     /// the label of a switch case (`caseD_3` in a `switchD_...` namespace)
     Label,
+    /// a function's local variables (its `localdb` past the parameters), which only its own
+    /// decompile reads: the DWARF import's committed locals, or a stack variable of the
+    /// analysis a walk past visited code may have made (`Exporter::locals`)
+    Locals,
+    /// the prototype overrides at the call sites in a function's body, which only its own
+    /// decompile reads (FormatStringAnalyzer)
+    Overrides,
 }
 
 impl Underived {
@@ -54,6 +61,8 @@ impl Underived {
             Underived::Function => "function",
             Underived::Comments => "comments",
             Underived::Label => "label",
+            Underived::Locals => "locals",
+            Underived::Overrides => "overrides",
         }
     }
 }
@@ -238,6 +247,9 @@ struct Exporter<'a> {
     ptr: u32,
     /// ELF: the `type` records of the DWARF import (`Inputs::dwarf_types`)
     dwarf_types: &'a HashMap<String, Result<String, String>>,
+    /// the ids of those records that are not written or refer to one, directly or not
+    /// (`bad_types`)
+    dwarf_bad: HashSet<String>,
     /// the ids of the namespaces the written records are in, by path (the global one is 0)
     ns_ids: HashMap<Vec<String>, u32>,
     /// of `ns_ids`, the ones a record is in: Java writes an `ns` record for these
@@ -456,6 +468,11 @@ impl Exporter<'_> {
         };
         scan(xml, &mut todo);
         while let Some(id) = todo.pop() {
+            // a record noted before is not scanned again: whether what it refers to is written
+            // is known of every record at once
+            if self.dwarf_bad.contains(&id) {
+                ok = false;
+            }
             match (self.protos.types.get(&id), self.dwarf_types.get(&id)) {
                 (Some(rec), _) | (None, Some(Ok(rec))) => {
                     if self.types.insert(id) {
@@ -723,7 +740,9 @@ impl Exporter<'_> {
     // at its turns in the queue (`Analysis::callee_purges`), which all come before the Stack
     // analyzer's turn (903). Not modelled: Java's Stack also runs on each later batch of new
     // functions, before the purge of functions made after that
-    fn locals(&self, p: &mut Parse, f: u32) -> String {
+    /// The stack variables of `f` as `<mapsym>`s, and whether a walk of an instruction past code
+    /// already walked made a stack reference its first walk did not (not derived then).
+    fn locals(&self, p: &mut Parse, f: u32) -> (String, bool) {
         const PREFIXES: [u8; 10] = [0x66, 0x67, 0xf2, 0xf3, 0x26, 0x2e, 0x36, 0x3e, 0x64, 0x65];
         let (rs, list) = self.sl.registers();
         // x86-64: RSP and 8-byte registers (RAX 0, RCX 8, ..., RDI 0x38; R8-R15 from 0x80)
@@ -731,8 +750,12 @@ impl Exporter<'_> {
         let sp_name = if elf64 { "RSP" } else { "ESP" };
         let sp = list.iter().find(|r| r.0 == sp_name).map_or(4 * w as u64, |r| r.1);
         // offset -> (bytes, of no data-type)
-        let mut vars: BTreeMap<i32, (u32, bool)> = BTreeMap::new();
-        let mut accumulate = |offset: i32, ref_size: u32| {
+        type Vars = BTreeMap<i32, (u32, bool)>;
+        // the stack references of each instruction at its first walk; every reference in walk
+        // order, with whether a jump-table case's walk past visited code made it and its first
+        // walk did not
+        let (mut first, mut log) = (HashMap::<u32, Vec<(i32, u32)>>::new(), Vec::new());
+        let accumulate = |vars: &mut Vars, offset: i32, ref_size: u32| {
             // MAX_LOCAL_OFFSET, MAX_PARAM_OFFSET; from the return address up (the stack
             // pentry's offset, getBaseStackParamOffset: 4, x86-64-gcc.cspec 8) are parameters
             if !(-(64 * 1024)..w as i32).contains(&offset) {
@@ -786,10 +809,11 @@ impl Exporter<'_> {
             if skip_all {
                 return;
             }
+            let mut refs = Vec::new();
             for &(d, _, store) in &fold.stack {
                 let own = if store { own_store.is_some_and(|s| s.is_none_or(|s| s == d)) } else { own_load == Some(d) };
                 if !own {
-                    accumulate(d as i32, fold.mem_size);
+                    refs.push((d as i32, fold.mem_size));
                 }
             }
             // LEA: the stack address its register holds afterwards (x86-64 too: checkForX86
@@ -801,10 +825,33 @@ impl Exporter<'_> {
                     None => w as u64 * modrm as u64,
                 };
                 if let Some(d) = reg(at) {
-                    accumulate(d as i32, fold.mem_size);
+                    refs.push((d as i32, fold.mem_size));
                 }
             }
+            // an instruction walked again past code already walked (MAX_EXTRA_INSTRUCTION_FLOW)
+            // after a case of a jump table runs on the state that case brought; Java's walk of
+            // Hatred's 0x16ee820 makes no stack reference there (its VarnodeContext.flowStart and
+            // the state it merges were not traced). Any revisit is not the condition: mercs2 has
+            // 1,055 functions with Java's stack variables where a revisit changes them
+            let was = first.entry(a).or_insert_with(|| refs.clone());
+            for r in refs {
+                log.push((r, fold.via_table && !was.contains(&r)));
+            }
         });
+        let build = |all: bool| {
+            let mut vars = Vars::new();
+            for &((d, size), new) in &log {
+                if all || !new {
+                    accumulate(&mut vars, d, size);
+                }
+            }
+            vars
+        };
+        let vars = build(true);
+        // not derived where those references change the variables. ELF only: on mercs2 (PE) 3
+        // of the 9 functions this finds have Java's stack variables, so it is not Java's rule,
+        // and the PE facts stay as they were
+        let revisit_new = elf64 && vars != build(false);
         let mut xml = String::new();
         for (&offset, &(len, plain)) in &vars {
             let name = if offset < 0 { format!("local_{:x}", -offset) } else { format!("local_res{offset:x}") };
@@ -824,7 +871,7 @@ impl Exporter<'_> {
                 if elf64 { offset as i64 as u64 } else { u64::from(offset as u32) }
             );
         }
-        xml
+        (xml, revisit_new)
     }
 }
 
@@ -1016,6 +1063,32 @@ pub struct Inputs<'a> {
     pub dwarf_pre: &'a [(u64, Option<String>)],
 }
 
+/// The ids of the DWARF `type` records that are not written (`Err`) or refer to one through
+/// their `<typeref>`s, directly or not.
+fn bad_types(types: &HashMap<String, Result<String, String>>) -> HashSet<String> {
+    let mut by: HashMap<&str, Vec<&str>> = HashMap::new(); // id -> the records referring to it
+    let mut todo: Vec<&str> = Vec::new();
+    for (id, rec) in types {
+        match rec {
+            Err(_) => todo.push(id),
+            Ok(x) => {
+                for t in x.split("<typeref ").skip(1) {
+                    if let Some(to) = t.split(" id=\"0x").nth(1).and_then(|r| r.split('"').next()) {
+                        by.entry(to).or_default().push(id);
+                    }
+                }
+            }
+        }
+    }
+    let mut bad = HashSet::new();
+    while let Some(id) = todo.pop() {
+        if bad.insert(id.to_string()) {
+            todo.extend(by.get(id).into_iter().flatten().copied());
+        }
+    }
+    bad
+}
+
 /// What the facts take of a function the DWARF importer gives a signature.
 pub struct DwarfFunc {
     /// its name with its namespaces (`a::b::f`)
@@ -1024,6 +1097,8 @@ pub struct DwarfFunc {
     pub plate: Result<Option<String>, ()>,
     /// its namespaces, name and prototype
     pub facts: crate::dwarf::pcode::FuncFacts,
+    /// what of its local variables is not ported (`crate::dwarf::Func::locals_underived`)
+    pub locals: Option<String>,
 }
 
 /// The prototype Java has for a function of the DWARF import after the Demangler analyzer went
@@ -1117,6 +1192,7 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         core: core_ids(if img.elf64 { CORE_TYPES64 } else { CORE_TYPES }),
         ptr: if img.elf64 { 8 } else { 4 },
         dwarf_types,
+        dwarf_bad: bad_types(dwarf_types),
         ns_ids: HashMap::new(),
         ns_used: BTreeSet::new(),
     };
@@ -1304,7 +1380,7 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
             None => purges.get(&end).copied(),
         };
         let thunk = func.thunked.is_some() || func.import.is_some();
-        let locals = if auto(f) && !thunk { ex.locals(&mut p, f) } else { String::new() };
+        let (locals, locals_revisit) = if auto(f) && !thunk { ex.locals(&mut p, f) } else { (String::new(), false) };
         // ELF: a function with a symbol whose body is one jump to another function is a thunk in
         // Java, as one without a symbol is (`name_functions`): it keeps its name and has the
         // prototype of the function it jumps to (to: its entry, the GOT slot of an import,
@@ -1393,10 +1469,33 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         let cdecl = func.model == Some("__cdecl");
         // a function the DWARF importer gives a signature has it written (`dwarf_signature`),
         // or is not derived; a GNU name without one has the signature of its mangling in Java
+        // what only the function's own decompile reads: a caller still has its prototype
+        let locals_why = match dw.and_then(|d| d.locals.as_deref()) {
+            Some(why) => Some(why),
+            None if locals_revisit => {
+                Some("a stack reference a jump-table case's walk makes past visited code (VarnodeContext.flowStart)")
+            }
+            None => None,
+        };
+        if locals_why.is_some() {
+            ex.underived.insert((f, Underived::Locals));
+        }
+        if calls_varargs {
+            ex.underived.insert((f, Underived::Overrides));
+        }
+        if std::env::var_os("GHIDRA_RS_UNDERIVED_DEBUG").is_some() {
+            if let Some(why) = locals_why {
+                eprintln!("underived-locals\t{f:x}\t{why}");
+            }
+            if calls_varargs {
+                eprintln!(
+                    "underived-overrides\t{f:x}\tcalls a function with a variable argument list (FormatStringAnalyzer)"
+                );
+            }
+        }
         if (dw.is_some() && !dwarf_ok)
             || (dw.is_none() && func.underived)
             || def.is_err()
-            || calls_varargs
             || (!img.elf64 && func.import.is_some() && !cdecl && !ex.protos.by_name.contains_key(&func.name))
         {
             ex.underived.insert((f, Underived::Function));
@@ -1424,9 +1523,6 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
                 }
                 if def.is_err() {
                     why.push("the archive definition of a thunk or of a function it jumps to".into());
-                }
-                if calls_varargs {
-                    why.push("calls a function with a variable argument list (FormatStringAnalyzer)".into());
                 }
                 eprintln!("underived-function\t{f:x}\t{}", why.join("; "));
             }
@@ -1779,6 +1875,7 @@ mod tests {
                     base: "malloc".into(),
                     proto: Err(String::new()),
                 },
+                locals: None,
             },
         )]);
         let at = archive_applied(&ar, &symbols, &dwarf);

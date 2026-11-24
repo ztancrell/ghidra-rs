@@ -276,16 +276,35 @@ impl TypeDecoder<'_> {
 /// The storage of an `<addr>` (Java writes offsets unsigned): none for an empty one.
 fn storage(arch: &Arch, el: &Element) -> std::result::Result<Option<Storage>, String> {
     let Some(space) = el.attr("space") else { return Ok(None) };
+    let space_index = |name: &str| {
+        arch.sleigh
+            .spaces
+            .iter()
+            .position(|s| s.name == name)
+            .map(|i| i as u32)
+            .ok_or_else(|| format!("Unknown space name: {name}"))
+    };
     if space == "join" {
-        return Err("a join storage is not ported".into());
+        // JoinRecord: `piece<n>="space:offset:size"`, the most significant first (AddressXML.encode)
+        let mut pieces = Vec::new();
+        for p in (1..).map_while(|i| el.attr(&format!("piece{i}"))) {
+            let bad = || format!("bad join piece {p}");
+            let mut it = p.split(':');
+            let (Some(sp), Some(off), Some(sz), None) = (it.next(), it.next(), it.next(), it.next()) else {
+                return Err(bad());
+            };
+            let off = u64::from_str_radix(off.trim_start_matches("0x"), 16).map_err(|_| bad())?;
+            pieces.push((space_index(sp)?, off, sz.parse::<u32>().map_err(|_| bad())?));
+        }
+        if pieces.is_empty() {
+            return Err("join address without pieces".into());
+        }
+        return Ok(Some(Storage::Join(pieces)));
     }
     let (offset, size) = (el.int("offset")? as u64, el.attr("size").map_or(Ok(0), |_| el.int("size"))? as u32);
     Ok(Some(match space {
         "stack" => Storage::Stack { offset, size },
-        name => {
-            let space = arch.sleigh.spaces.iter().position(|s| s.name == name);
-            Storage::Space { space: space.ok_or_else(|| format!("Unknown space name: {name}"))? as u32, offset, size }
-        }
+        name => Storage::Space { space: space_index(name)?, offset, size },
     }))
 }
 
@@ -710,6 +729,7 @@ impl Facts {
         self.derived(entry, "function")?;
         if own {
             self.derived(entry, "locals")?;
+            self.derived(entry, "overrides")?;
         }
         let rec =
             if arch.externref_target(entry).is_some() { self.extrefs.get(&entry) } else { self.funcs.get(&entry) };
@@ -750,7 +770,11 @@ impl Facts {
                 }
                 let [t] = sym.kids.as_slice() else { return Err(e("bad parameter".into())) };
                 let ty = dec.decode(types, t).map_err(e)?;
-                params.push((sym.int("index").map_err(e)?, Param { name: sname, storage: Some(storage), ty }));
+                let name_locked = sym.flag("namelock");
+                params.push((
+                    sym.int("index").map_err(e)?,
+                    Param { name: sname, storage: Some(storage), ty, name_locked },
+                ));
             } else if locked {
                 return Err(unported("a local variable with a locked data-type"));
             } else if sym.flag("namelock") {
@@ -814,7 +838,12 @@ impl Facts {
             }
             proto.locked = Some(Box::new(Locked {
                 inputs: params.into_iter().map(|p| p.1).collect(),
-                output: Param { name: String::new(), storage: storage.filter(|_| types.meta(ty) != Meta::Void), ty },
+                output: Param {
+                    name: String::new(),
+                    storage: storage.filter(|_| types.meta(ty) != Meta::Void),
+                    ty,
+                    name_locked: false,
+                },
                 dotdotdot: p.flag("dotdotdot"),
                 output_size_locked: types.meta(ty) == Meta::Unknown,
             }));
