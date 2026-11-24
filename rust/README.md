@@ -7794,6 +7794,55 @@ branch's binary (`rust/target/dp2/bars-full/summary.out`); its first 74 lines ar
 baseline, the rest had not finished when this was written. The 4,024 game functions with
 `load facts` and Java's C of 20 of them were running on the MacBook, not measured here.
 
+#### Round 3: getStackOpIndex, PIC switch misses loud (branch `dwarf-params`, 2026-11-24)
+
+- `factsout::stack_op_index` ports NewFunctionStackAnalysisCmd.getStackOpIndex
+  (NewFunctionStackAnalysisCmd.java:548-590): a LOAD or STORE through a stack address makes a
+  reference only on the first operand whose objects (`Instruction.getOpObjects`, the Function ID
+  port of `sleigh::fid_parts`) add up to the address, a register counting only where it held a
+  stack address when the LOAD or STORE ran (`Fold::stack_regs`), a scalar signed; and the POP
+  `*BP` exception. An operand that has a stack reference already adds to the variable at that
+  reference's offset (defineFuncVariable). Superseded: the ponytail "an operand names the
+  address is not the slot a PUSH, POP or CALL uses itself" of `Exporter::locals`. Hatred's
+  0x199b200 (`MOV [RBX + RAX*4],0` with RAX -1) no longer makes `local_83c`.
+- A function holding a PIC switch jump whose table the pattern did not find
+  (`pic_switch_misses`; Java recovers it with DecompilerSwitchAnalyzer) has `underived ...
+  locals` and `underived ... comments`: its body, so its stack variables and the blocks its
+  comments fall in, are not known (cpp3-gcc 0x110820; cpp3-clang 0x11a720, whose computed jump is not counted a miss, stays silent).
+- `GHIDRA_RS_UNDERIVED_DEBUG` names the record not written behind "a data type that is not
+  written". On Hatred (all functions): 17,471 such reasons are `the data type name <x>` (a type
+  with a `.conflict` twin, which the import does not name in Java's order), 21 `the built-in data
+  type float4`, 12 `a bit field in a union`. So the 2,215 game prototypes of round 2 are, by
+  that count, mostly the `.conflict` naming (DataTypeManagerDB.resolve order), not a small port.
+
+Measured against Java 12.3 (`tools/facts-diff.sh`, MacBook; master 14ba1171b8 again, round 2
+61b2a3a1a7 again, this round; silent: different or missing with no covering `underived`):
+
+| | record | master | round 2 | round 3 |
+|---|---|---|---|---|
+| Hatred | func equal | 9,595 | 109,800 | 109,931 |
+| | comments equal | 57,971 | 84,469 | 84,468 |
+| | silent func | 133 | 227 (94 new) | 121 (59 new) |
+| | silent comments | 3 | 7 (4 new) | 7 (4 new) |
+| mercs2 (PE, Java's `ref123/mercs2.facts`) | func equal | 22,892 | not run | 23,191 |
+| | silent func | 21,921 | not run | 21,622 (15 new) |
+
+Not reached: no new silent record, and mercs2's PE facts are no longer byte-identical to
+master's (446 `func` records change: 299 more equal to Java, 15 newly different). The 15 are
+`local_<n>` of 4 bytes where Java has 1 (an LEA's): after a `_chkstk` call (0x1b10260) the walk's
+ESP is not Java's, and a PUSH of the LEA's register lands on that address. Of the 59 new silent
+Hatred `func` records, 54 were among round 2's 94 (stack variables larger than Java's, as
+`local_9d8` 40 bytes where Java has 32; or only one side has them); not traced. The 4 comments:
+0x1b25cd0 and 0x2cbc6c0 have a body other than Java's (older cause); 0x2c15350 and 0x2c158b0
+write `Unresolved local var: ... NumFrames` at 0x2c153fd (a lexical block of an inlined
+subroutine, location lists not covering the entry) where Java writes none; why was not traced.
+Checks (desktop, before the user's rule of 2026-11-24 that all compute runs on the MacBook):
+`cargo test --release` 212 passed and `cargo clippy --release --all-targets -- -D warnings` clean
+before the new test `stack_op_index_adds_up_registers_and_scalars`, which passes alone; `cargo fmt
+--check` clean. Small corpus (MacBook): silent 56 -> 57 against master, the new one cpp3-clang
+0x11a720's comments (cpp3-gcc 0x110820 is loud now). Not run on this round: `CORPORA=m8
+tools/bars.sh`, the full bars, `elf64-decomp.sh`.
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The

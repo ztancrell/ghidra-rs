@@ -549,6 +549,10 @@ pub struct Fold {
     /// the stack slots the last instruction read or wrote through a folded address: (offset
     /// from ESP at the entry, bytes, written)
     pub stack: Vec<(u32, u32, bool)>,
+    /// for each of `stack`: the registers of the pointer's width that held a stack address
+    /// when it was made (register offset, offset from ESP at the entry), for
+    /// `NewFunctionStackAnalysisCmd.getStackOpIndex`
+    pub stack_regs: Vec<Vec<(u64, u32)>>,
     /// bytes of the last LOAD or STORE of the last instruction, 0 without one
     pub mem_size: u32,
     /// the memory the last instruction read or wrote through an address the fold knows (a
@@ -599,7 +603,7 @@ pub struct Analysis {
     /// a thunk (CreateThunkFunctionCmd.isThunk on the holding function, not ported).
     slot_jumps_inside: HashSet<u32>,
     /// PIC switch jumps (`pic_switch_table`) whose table, bound or cases were not found.
-    pic_switch_misses: BTreeSet<u32>,
+    pub pic_switch_misses: BTreeSet<u32>,
     /// Function Start Search on x86-64: undefined bytes after something defined where a
     /// `<funcstart after="defined"/>` pattern matches (`start_search_gcc64`; none is applied).
     start_after_defined: BTreeSet<u32>,
@@ -1946,6 +1950,7 @@ impl Analysis {
         let (uniq, rs, w, sp) = (sl.uniq_space(), self.reg_space, self.width, self.sp);
         fold.regs.retain(|f| f.0 != uniq);
         fold.stack.clear();
+        fold.stack_regs.clear();
         fold.mem_size = 0;
         fold.data.clear();
         let val = |v: &crate::sleigh::Varnode, fold: &Fold| -> Option<(Val, bool)> {
@@ -2009,7 +2014,19 @@ impl Analysis {
                 let size = if op.opc == 2 { op.out.as_ref().map_or(0, |o| o.size) } else { op.ins[2].size };
                 fold.mem_size = size;
                 match op.ins.get(1).and_then(|v| val(v, fold)) {
-                    Some((Val::S(b, d), _)) if b == sp => fold.stack.push((d, size, op.opc == 3)),
+                    Some((Val::S(b, d), _)) if b == sp => {
+                        let mut held: Vec<(u64, u32)> = fold
+                            .regs
+                            .iter()
+                            .filter(|f| f.0 == rs && f.2 == w)
+                            .filter_map(|f| fold.stack_offset(rs, sp, w, f.1).map(|d| (f.1, d)))
+                            .collect();
+                        if !held.iter().any(|h| h.0 == sp) {
+                            held.extend(fold.stack_offset(rs, sp, w, sp).map(|d| (sp, d)));
+                        }
+                        fold.stack.push((d, size, op.opc == 3));
+                        fold.stack_regs.push(held);
+                    }
                     Some((Val::C(x), _)) if x <= u64::from(u32::MAX) => fold.data.push((x as u32, size, op.opc == 3)),
                     _ => {}
                 }
