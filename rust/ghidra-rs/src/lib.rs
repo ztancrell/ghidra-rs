@@ -8,6 +8,7 @@ pub mod edits;
 pub mod exports;
 pub mod factsout;
 pub mod fid;
+pub mod gccexcept;
 pub mod gdt;
 pub mod gnudemangle;
 pub mod gnuparse;

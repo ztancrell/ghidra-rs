@@ -6477,6 +6477,10 @@ The `underived` mark can be lifted from a function once the call-site records ar
 is needed only where a call-site start, the unit of its last address or a landing pad lies in
 the function's body. A function without a DWARF plate that has such a comment has no
 `comments` record and no `underived` mark today: silent.
+Superseded (2026-11-24, branch `hatred-facts`): the call-site records and the three comments are
+ported (`gccexcept.rs`), and a plate comment is no longer `underived` for the exception tables;
+the labels, data, references and disassembly listed above are still not ported ("GCC exception
+tables ported" below).
 
 The PE path: `cargo test --release` 178 passed, 0 failed; `cargo fmt --check` and `cargo clippy
 --release --all-targets -- -D warnings` clean; M8 bars (`CORPORA=m8 bars.sh`, the 12.3 `x86.sla`,
@@ -6694,7 +6698,9 @@ FunctionDefinitionDataType.java:261-295, DWARFUtil.java:343-359, DWARFFunction.j
 for the demangler's (DemangledObject.java:400-420). It is `underived ... comments` where the
 function has a local variable or label DIE, a body of several ranges, another DIE at the same
 address, or a `.conflict` type in its prototype, and on every function of an image with a
-non-empty `.gcc_except_table` (GccExceptionAnalyzer's `try {` comments are not ported). On PIE
+non-empty `.gcc_except_table` (GccExceptionAnalyzer's `try {` comments are not ported;
+superseded 2026-11-24, branch `hatred-facts`: they are, and that image-wide mark is gone, "GCC
+exception tables ported" below). On PIE
 binaries the DWARF addresses got the image base twice (the import applies
 programBaseAddressFixup itself), so their DWARF functions were written as plain `func`
 records; they are `underived` now.
@@ -7508,6 +7514,81 @@ function in a namespace now decompiles.
 
 Not ported (item 4 of the task, not started): DWARF types on the prelude path (0x16e1920 still
 prints `xunknown4` at `param_1+0x9c` there).
+
+#### GCC exception tables ported (branch `hatred-facts`, 2026-11-24)
+
+`gccexcept.rs` ports the part of GccExceptionAnalyzer (Java 12.3) the facts records of a
+function body depend on: `.eh_frame`'s CIEs and FDEs (EhFrameSection.analyze, Cie.create,
+FrameDescriptionEntry.create), each FDE's LSDA in `.gcc_except_table` (LSDAHeader,
+LSDACallSiteTable, LSDAActionTable, LSDATypeTable, with the DWARF EH pointer decoders of
+DwarfDecoderFactory), and for each call-site record with a landing pad the three comments of
+processCallSiteRecord: PRE `try { // try from A to B has its CatchHandler @ L` at the call
+site, POST `} // end try from A to B` at the code unit holding B, PRE `catch(type#N @ T, ...)
+{ ... } // from try @ A with catch @ L` at the landing pad, merged as StringUtilities.mergeStrings
+does. Java's quirks are kept: the type table base one byte low (LSDAHeader.java:154), the LSDA's
+LPStart with its low four bits set, an action offset taken as a byte offset, `zLR` (an `L` at
+index 1) not reading an LSDA, an omitted TType encoding read as a signed byte (never equal to
+0xFF), and an exception anywhere in `.eh_frame` ending the analyzer before any comment.
+
+The facts writer puts them into the function's `comments` record as DecompileCallback.
+encodeComments does: the header, then the PRE (`user2`) and POST (`user3`) comments in the
+body by address. The POST comment's code unit is the instruction of the finished analysis, or
+the address itself where none holds it (Java's is the listing at the analyzer's turn, early in
+auto-analysis). Where the port stops (an exception Java may not have), `--facts` warns and every
+function's comments are `underived`, as every DWARF plate was before.
+
+Not ported: the labels (`cie_`, `fde_`, `lsda_exception_table_`), data, plate and EOL comments
+and references in the three sections, `.eh_frame_hdr` and `.debug_frame` (neither gives a call
+site), the disassembly at each PcBegin, call site and landing pad, and the relocation check of
+an `absptr` value's image base adjustment.
+
+Measured against Java 12.3 (`tools/facts-diff.sh`, master 3e44b31ec6 -> branch, equal /
+different / missing / extra):
+
+| | record | master | branch |
+|---|---|---|---|
+| Hatred (MacBook) | comments | 345 / 0 / 148,608 / 0 | 57,971 / 0 / 90,982 / 0 |
+| | `underived` records | 351,966 | 284,136 |
+| | missing comments with no `underived` mark (silent) | 74 | 3 |
+| | Java's 1,275 records with a `try {`: equal / `underived` / silent | 0 / 1,204 / 71 | 71 / 1,204 / 0 |
+| small corpus (14, desktop) | comments | 251 / 0 / 395 / 0 | 292 / 2 / 352 / 0 |
+| | `underived` records | 1,401 | 1,321 |
+
+Every other row of both is unchanged. The 3 silent ones are functions ghidra-rs does not find
+(0x3582f90, 0x35836e0, 0x3584210). The 2 different on the small corpus (0x106f30 of
+cpp3-clang, 0x104816 of cpp3-gcc) are bodies that differ: ghidra-rs's runs on to the landing
+pad, so its record has the `catch` comment Java's body leaves out (their `body` records were
+different before). With every call site written whatever the bodies, the four cpp binaries give
+all 546 of Java's `try`/`catch` PRE comments, 545 the same text; the other is merged after a
+DWARF `Unresolved local var` comment (the DWARF importer runs first) in a function whose
+comments are `underived` for its locals. Hatred: no exception ended the port (no warning).
+
+Hatred's game module (the 4,024 functions of `hatred-decomp`'s `funcs.tsv`): `underived ...
+comments` 4,024 -> 2,450 (1,475 of those where Java's record has the DWARF importer's
+`Unresolved local var` comments, 960 for the other DWARF plate guards above, 15 with no Java
+record); none of them has a `try` comment in Java. `underived ... function` stays on 4,022, so
+none of the 4,024 loads with `load facts` yet. Its reasons (`GHIDRA_RS_UNDERIVED_DEBUG=1` prints
+one `underived-function` line per function on stderr, `factsout::export`):
+
+| reasons | functions |
+|---|---|
+| a parameter's DWARF location (STORAGE commit mode, parameter spill) | 3,824 |
+| the same, and a body of one jump whose prototype is not known (`def` in the writer) | 146 |
+| the same, and a call of a function with a variable argument list (FormatStringAnalyzer) | 27 |
+| the calling convention of a function without `this` (parameters or a namespace) | 14 |
+| the local variables of the DWARF import (commitLocalVariable) | 9 |
+| the demangler's signature on a DWARF function (one with a `def` too) | 2 |
+
+The location guard is checked first in `dwarf::Func::storage`, so the guards behind it on those
+3,997 are not counted. `--facts` on the MacBook: 215 s for the writer, 7.10 GB maximum RSS.
+
+Checks (desktop): `cargo test --release` 211 passed (master 210; the new one is
+`gccexcept::tests::one_call_site`); `cargo fmt --check` and `cargo clippy --release
+--all-targets -- -D warnings` clean; mercs2's PE facts byte-identical to master's (`cmp`; the
+PE path has no exception tables); `CORPORA=m8 tools/bars.sh` 57 of 57 lines equal to
+`baselines/master-3e44b31ec6.summary`. Not run: the other 76 checks of that baseline (M500,
+switch, simple, r5d-adc) and `elf64-decomp.sh` (neither the prelude nor the decompiler
+changed), the loader on a Hatred function.
 
 ## Speed
 

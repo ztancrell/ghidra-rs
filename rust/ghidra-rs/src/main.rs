@@ -496,6 +496,14 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     } else {
         analysis::Image::from_pe(&data).map_err(|e| format!("{path}: {e}"))?
     };
+    // ELF with --facts: the call sites of the GCC exception tables (GccExceptionAnalyzer)
+    let eh_sites = match facts.is_some() && img.elf64 {
+        true => ghidra_rs::gccexcept::call_sites(&img),
+        false => Ok(Vec::new()),
+    };
+    if let Err(e) = &eh_sites {
+        eprintln!("warning: GCC exception tables: {e}; every function's comments are not derived");
+    }
     // ELF with --facts: the functions the DWARF importer gives a signature (Java's DWARF
     // analyzer; DWARFAnalyzer.canAnalyze: a program with DWARF sections), at the image base
     // Ghidra gives a PIE linked at 0. Imported before the analysis, so its memory is freed
@@ -510,14 +518,6 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     );
     let (dwarf, dwarf_types): DwarfFacts = if has_dwarf {
         let imp = ghidra_rs::dwarf::import(&data).map_err(|e| format!("{path}: DWARF: {e}"))?;
-        // Java's GCC Exception Handlers analyzer (GccExceptionAnalyzer) writes `try {` comments
-        // in the bodies of functions with a call-site table; `.eh_frame` and its tables are
-        // not read here, so with a `.gcc_except_table` no function's comments are derived
-        let eh = {
-            use object::{Object, ObjectSection};
-            object::File::parse(&*data)
-                .is_ok_and(|f| f.section_by_name(".gcc_except_table").is_some_and(|s| s.size() > 0))
-        };
         // the prototypes and data types as Java's decompiler gets them, before the import is freed
         let (mut protos, types) = ghidra_rs::dwarf::pcode::facts(&imp, &ghidra_rs::factsout::core_ids64());
         let funcs = imp
@@ -526,9 +526,8 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
             .filter_map(|f| {
                 // the import adds the image base adjustment itself (programBaseAddressFixup)
                 let a = u32::try_from(f.addr).ok()?;
-                let plate = if eh { Err(()) } else { f.plate };
                 let facts = protos.remove(&f.addr)?;
-                Some((a, ghidra_rs::factsout::DwarfFunc { name: f.name, plate, facts }))
+                Some((a, ghidra_rs::factsout::DwarfFunc { name: f.name, plate: f.plate, facts }))
             })
             .collect();
         (funcs, types)
@@ -672,6 +671,7 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
                 dwarf: &dwarf,
                 dwarf_types: &dwarf_types,
                 archive: archive.as_ref().map(|a| &a.0),
+                eh_sites: eh_sites.as_ref().ok().map(|v| &v[..]),
             };
             // the stack analysis goes by the purges Ghidra has at a call site
             let purges = ghidra_rs::factsout::call_purges(&img, &an, &inputs);

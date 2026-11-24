@@ -1009,6 +1009,9 @@ pub struct Inputs<'a> {
     /// Archives analyzer applies (`generic_clib_64`). `protos` has the prototypes of those
     /// `gdt::protos::export_elf64` writes; a function another one is applied to is `underived`
     pub archive: Option<&'a HashSet<String>>,
+    /// ELF: the call sites of the GCC exception tables (`crate::gccexcept::call_sites`); None:
+    /// not read, every function's comments are not derived then
+    pub eh_sites: Option<&'a [crate::gccexcept::CallSite]>,
 }
 
 /// What the facts take of a function the DWARF importer gives a signature.
@@ -1096,7 +1099,7 @@ pub fn call_purges(img: &Image, an: &Analysis, inputs: &Inputs) -> HashMap<u32, 
 
 /// Write the facts of `an` to `out`.
 pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mut dyn Write) -> io::Result<()> {
-    let Inputs { fid, protos, analyzed, purges, cspec, strings, dwarf, dwarf_types, archive } = *inputs;
+    let Inputs { fid, protos, analyzed, purges, cspec, strings, dwarf, dwarf_types, archive, eh_sites } = *inputs;
     let none = Protos::default();
     let mut ex = Exporter {
         img,
@@ -1130,6 +1133,17 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         }
         body_ranges.insert(f, v);
     }
+
+    // GccExceptionAnalyzer's PRE and POST comments; a POST comment is at the start of the code
+    // unit that holds the call site's last address (markEndOfTry: getCodeUnitContaining), here
+    // the instruction of the finished analysis, else the address itself (an undefined byte)
+    let (eh_pre, eh_post) = crate::gccexcept::comments(eh_sites.unwrap_or(&[]), |a| {
+        let Ok(a32) = u32::try_from(a) else { return a };
+        match an.insns.range(..=a32).next_back() {
+            Some((&s, i)) if a32 - s < u32::from(i.len) => u64::from(s),
+            _ => a,
+        }
+    });
 
     writeln!(out, "ghidra-rs-facts 2")?;
     writeln!(out, "coretypes\t{}", (if img.elf64 { CORE_TYPES64 } else { CORE_TYPES }).trim_end())?;
@@ -1359,6 +1373,36 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
             || (!img.elf64 && func.import.is_some() && !cdecl && !ex.protos.by_name.contains_key(&func.name))
         {
             ex.underived.insert((f, Underived::Function));
+            // GHIDRA_RS_UNDERIVED_DEBUG: why, one stderr line per function
+            if std::env::var_os("GHIDRA_RS_UNDERIVED_DEBUG").is_some() {
+                let mut why = Vec::new();
+                match (dw, &sig) {
+                    (Some(_), None) => why.push("dwarf: a thunk".to_string()),
+                    (Some(_), Some(Err(e))) => why.push(format!("dwarf: {e}")),
+                    _ => {}
+                }
+                if dw.is_some() && proto.is_some() {
+                    if archive_proto.is_some() {
+                        why.push("dwarf: an archive prototype too".into());
+                    }
+                    if via.is_some() {
+                        why.push("dwarf: one jump to another function".into());
+                    }
+                    if !dwarf_ok && archive_proto.is_none() && via.is_none() {
+                        why.push("dwarf: a data type that is not written".into());
+                    }
+                }
+                if dw.is_none() && func.underived {
+                    why.push("no dwarf: the function's own mark (GNU name, archive)".into());
+                }
+                if def.is_err() {
+                    why.push("the archive definition of a thunk or of a function it jumps to".into());
+                }
+                if calls_varargs {
+                    why.push("calls a function with a variable argument list (FormatStringAnalyzer)".into());
+                }
+                eprintln!("underived-function\t{f:x}\t{}", why.join("; "));
+            }
         }
         // Function ID's plate comment, then the Demangler analyzer's; on ELF the DWARF importer's
         // (it runs first). A GNU name's plate comment is not written: the demangler adds one
@@ -1376,14 +1420,31 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
                 exports.get(&f).copied().or(fid.get(&f).map(|a| a.name.as_str())),
             ),
         };
+        // the exception tables not read: no function's comments are known
+        let plate = if img.elf64 && eh_sites.is_none() { Err(()) } else { plate };
+        // DecompileCallback.encodeComments (620-640): the header, then the body's PRE (`user2`)
+        // and POST (`user3`) comments by address (no EOL or other plate comment is written here)
+        let item = |kind: &str, at: u64, text: &str| {
+            format!(
+                "<comment type=\"{kind}\"><addr space=\"ram\" offset=\"0x{f:x}\"/>\
+                 <addr space=\"ram\" offset=\"0x{at:x}\"/><text>{}</text></comment>",
+                esc(text).replace('\n', "&#10;")
+            )
+        };
         match plate {
-            Ok(Some(text)) => writeln!(
-                out,
-                "comments\t{f:x}\t<commentdb><comment type=\"header\"><addr space=\"ram\" offset=\"0x{f:x}\"/>\
-                 <addr space=\"ram\" offset=\"0x{f:x}\"/><text>{}</text></comment></commentdb>",
-                esc(&text).replace('\n', "&#10;")
-            )?,
-            Ok(None) => {}
+            Ok(header) => {
+                let mut x = header.map(|t| item("header", u64::from(f), &t)).unwrap_or_default();
+                for (kind, map) in [("user2", &eh_pre), ("user3", &eh_post)] {
+                    for &(first, last) in &body_ranges[&f] {
+                        for (&at, text) in map.range(u64::from(first)..=u64::from(last)) {
+                            x.push_str(&item(kind, at, text));
+                        }
+                    }
+                }
+                if !x.is_empty() {
+                    writeln!(out, "comments\t{f:x}\t<commentdb>{x}</commentdb>")?;
+                }
+            }
             Err(()) => {
                 ex.underived.insert((f, Underived::Comments));
             }
