@@ -859,8 +859,9 @@ fn name_functions(img: &Image, an: &Analysis, fid: &BTreeMap<u32, Applied>, prot
         let raw = exports.get(&f).copied().or_else(|| fid.get(&f).map(|a| a.name.as_str()));
         if let Some(raw) = raw {
             func.name_from(raw, img.elf64);
-        } else if let Some(i) = an.bodies.get(&f).filter(|b| b.len() == 1).and_then(|_| an.insns.get(&f)) {
-            // a thunk: one jump to a function or through an import slot
+        } else if let Some(i) = an.bodies.get(&f).and_then(|b| an.thunk_jump(f, b)) {
+            // a thunk: one jump to a function or through an import slot, also after an entry
+            // instruction without p-code (Analysis::thunk_jump)
             match (i.flow, i.target, i.slot) {
                 (Flow::Jump, Some(t), _) if t != f && an.funcs.contains(&t) => func.thunked = Some(t),
                 (Flow::JumpInd, _, Some(s)) if img.imports.contains_key(&s) => func.import = Some(s),
