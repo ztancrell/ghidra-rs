@@ -7885,6 +7885,51 @@ where a `MOVUPS [RSP+0x70]` store makes ours longer), and the `Unresolved local 
 0x2c153fd. The func equal of 9,595 on master is no other scope: master writes no DWARF
 parameters, so 170,824 of its 180,433 `func` records differ from Java's.
 
+#### Round 5: Constant Propagation runs only the call fixups installed before it (branch `dwarf-params`, 2026-11-24)
+
+- A call fixup is installed when its function gets its name (the Call-Fixup Installer, priority
+  301), and a name from Function ID comes at 799, after Constant Propagation (596). So the
+  facts' Constant Propagation walk (the LOAD and STORE references through registers) runs only
+  the fixups of functions named without Function ID; the Stack analyzer's walk (903, the
+  `stack_and` walk) runs every one. `factsout::call_fixups` marks each fixup with that
+  (`analysis::Fixups`). Superseded: round 4's "only the facts' walks run fixups" for the
+  Constant Propagation walk. On mercs2, `__chkstk` is named by Function ID: with its fixup the
+  walk kept the CALL's pushed return address in the frame (`ESP = ESP + 4 - EAX` leaves it
+  above ESP), so `MOV EAX,[EBP-4]; MOVZX ECX,word ptr [EAX+2]` at 0x23c5ba1 read it and made
+  `LAB_023c59d9` and `LAB_023c59db`; Java's Constant Propagation ran before `__chkstk` had a name.
+  ELF has no Function ID names, so its facts do not change.
+
+Measured on the MacBook against Java 12.3 as round 4 (`tools/facts-diff.sh`; mercs2 with
+`GHIDRA_RS_FID`):
+
+| | record | master | round 4 | round 5 |
+|---|---|---|---|---|
+| mercs2 (PE) | func equal | 23,543 | 24,072 | 24,072 |
+| | records equal on master, not on the branch | - | 3 `label` | 0 |
+| Hatred | func equal | 9,595 | 109,932 | 109,932 |
+| | silent func | 133 | 118 (59 new) | 118 (59 new, same list) |
+| | silent comments | 3 | 7 (4 new) | 7 (4 new, same) |
+
+Not reached: zero new silent. The 59 Hatred `func` records, by how our stack variables differ
+from Java's: a variable larger than Java's, ours merged over a 16-byte `MOVUPS`/`MOVAPS` store
+that Java's variables do not cover (`local_f0` 40 / 32 and the like, 11); one larger variable
+over several of Java's or past Java's end (`local_1b8` 104 where Java has five; `local_88` 32
+where Java has 20; 13); an LEA's 1-byte variable and a 16-byte one next to it where Java has
+one of 20 bytes (`local_58` at 0x21e5220, 7); variables only one side has (21); other sizes
+and splits (7). At 0x21e5220 the walk is straight-line code and its references are
+in Java's order; Java's 20 bytes at -0x58 come out of `accumulateVariable` only if the
+`MOVUPS xmmword ptr [RSP+0x144],XMM0` store (after `XORPS XMM0,XMM0`) makes no stack reference
+there, while the `MOVAPS [RSP+0x140]` four instructions on does; why was not traced. The 4
+comments: 0x2c15350 and 0x2c158b0 write `Unresolved local var` for `NumFrames` and
+`FramesPerSecond` at 0x2c153fd (and its twin), the innermost lexical block of the last child of
+the function, an inlined `ProcessKeyToFrameTable` (inlined 3 times in its compile unit); their
+location lists do not cover the entry, so Java's processFuncChildren should write the comment,
+and Java's function has its DWARF parameters, so no exception stopped it; why it writes none was
+not traced. 0x1b25cd0 and 0x2cbc6c0 are the older body difference.
+Checks (MacBook): `cargo fmt --check` and `cargo clippy --release --all-targets -- -D warnings`
+clean, `cargo test --release` 213 passed. Not run: the small corpus, `CORPORA=m8
+tools/bars.sh`, `elf64-decomp.sh` and the full bars (the fixup change does not reach ELF).
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The

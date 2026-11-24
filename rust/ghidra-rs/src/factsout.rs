@@ -319,20 +319,26 @@ fn fixup_of<'a>(fixups: &'a HashMap<String, String>, name: &str) -> Option<&'a S
     fixups.get(&name).or_else(|| fixups.get(&format!("_{name}"))).or_else(|| fixups.get(&format!("__{name}")))
 }
 
-/// The p-code of the call fixup of each function that has one, by entry, for the stack
-/// analysis's walk (`Analysis::swap_call_fixups`). The Call-Fixup Installer runs before it
-/// (`AnalysisPriority.DISASSEMBLY.after()`).
+/// The p-code of the call fixup of each function that has one, by entry, for the facts' walks
+/// (`Analysis::swap_call_fixups`), and whether it was installed before Constant Propagation: the
+/// Call-Fixup Installer (`AnalysisPriority.DISASSEMBLY.after()`) runs as a function gets its name,
+/// and a name of Function ID's comes after Constant Propagation (mercs2's `__chkstk`).
 pub fn call_fixups(
     img: &Image,
     an: &Analysis,
     sl: &Sleigh,
     inputs: &Inputs,
-) -> Result<HashMap<u32, Vec<crate::sleigh::PcodeOp>>, String> {
+) -> Result<crate::analysis::Fixups, String> {
     let pcode = crate::decomp::callfixup_pcode(sl, inputs.cspec).map_err(|e| e.0)?;
     let names = callfixups(inputs.cspec);
     let none = Protos::default();
     let funcs = name_functions(img, an, inputs.fid, inputs.protos.unwrap_or(&none));
-    Ok(funcs.iter().filter_map(|(&f, func)| Some((f, pcode.get(fixup_of(&names, &func.name)?)?.clone()))).collect())
+    let early = name_functions(img, an, &BTreeMap::new(), inputs.protos.unwrap_or(&none));
+    let fixup = |func: &Func| pcode.get(fixup_of(&names, &func.name)?);
+    Ok(funcs
+        .iter()
+        .filter_map(|(&f, func)| Some((f, (early.get(&f).and_then(fixup).is_some(), fixup(func)?.clone()))))
+        .collect())
 }
 
 impl Exporter<'_> {

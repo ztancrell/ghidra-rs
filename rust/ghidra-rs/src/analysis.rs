@@ -538,6 +538,11 @@ pub enum Val {
     S(u64, u32),
 }
 
+/// The call fixups of the facts' walks: function entry -> (installed before Constant
+/// Propagation, the fixup's p-code). The Call-Fixup Installer (301) sets one when the function
+/// gets its name: Function ID's names (799) come after Constant Propagation (596).
+pub type Fixups = HashMap<u32, (bool, Vec<crate::sleigh::PcodeOp>)>;
+
 /// State of the local fold: (space, offset, size, value or unknown, computed rather than a
 /// plain immediate) of registers and temporaries, and memory written through a folded
 /// address (address, value or unknown, computed).
@@ -613,9 +618,9 @@ pub struct Analysis {
     purge: HashMap<u32, u32>,            // function -> bytes its RETs pop (RET n), where they agree
     /// The purge X86 Function Callee Purge set, by function (`callee_purge`); none is unknown.
     pub callee_purges: HashMap<u32, u32>,
-    /// The p-code of the call fixup of a function, by entry (`call_fixups` of the facts; empty
-    /// otherwise): a direct call to one runs it in place of the CALL.
-    fixups: HashMap<u32, Vec<crate::sleigh::PcodeOp>>,
+    /// The call fixups of the facts' walks (`call_fixups`; empty otherwise): a direct call to
+    /// one runs it in place of the CALL.
+    fixups: Fixups,
     reg_space: u32,
     /// the local fold: register and pointer width, the stack pointer's offset, and the
     /// registers a call kills besides it (the default prototype's `<killedbycall>`)
@@ -1943,7 +1948,9 @@ impl Analysis {
         // (`ESP = ESP + 4 - EAX;` for `__chkstk`); the CALL's flow stays the instruction's
         let fixup = ops.iter().position(|op| op.opc == 7 && op.ins[0].space == code).and_then(|i| {
             let t = u32::try_from(ops[i].ins[0].offset).ok()?;
-            self.fixups.get(&t).map(|f| (i, t, f))
+            // Constant Propagation (596) runs only the fixups installed before it; the Stack
+            // analyzer (903, the `stack_and` walk) runs every one
+            self.fixups.get(&t).filter(|f| f.0 || fold.stack_and).map(|f| (i, t, &f.1))
         });
         let ops: Vec<_> = match fixup {
             Some((i, _, f)) => ops[..i].iter().chain(f).chain(&ops[i + 1..]).cloned().collect(),
@@ -3225,7 +3232,8 @@ impl Analysis {
     }
 
     /// The walk of `flow_constants`; `visit` sees each instruction's address and the state
-    /// after it. With `stack_and`, `AND ESP,mask` keeps ESP a stack address.
+    /// after it. With `stack_and` (the Stack analyzer's walk), `AND ESP,mask` keeps ESP a stack
+    /// address and every call fixup runs.
     pub fn flow_walk(
         &self,
         img: &Image,
@@ -3313,12 +3321,8 @@ impl Analysis {
         std::mem::replace(&mut self.purge, purges)
     }
 
-    /// Replace the call fixups a direct call runs (function entry -> the fixup's p-code);
-    /// returns the ones replaced.
-    pub fn swap_call_fixups(
-        &mut self,
-        fixups: HashMap<u32, Vec<crate::sleigh::PcodeOp>>,
-    ) -> HashMap<u32, Vec<crate::sleigh::PcodeOp>> {
+    /// Replace the call fixups a direct call runs; returns the ones replaced.
+    pub fn swap_call_fixups(&mut self, fixups: Fixups) -> Fixups {
         std::mem::replace(&mut self.fixups, fixups)
     }
 
