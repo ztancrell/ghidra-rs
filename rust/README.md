@@ -7929,6 +7929,66 @@ not traced. 0x1b25cd0 and 0x2cbc6c0 are the older body difference.
 Checks (MacBook): `cargo fmt --check` and `cargo clippy --release --all-targets -- -D warnings`
 clean, `cargo test --release` 213 passed. Not run: the small corpus, `CORPORA=m8
 tools/bars.sh`, `elf64-decomp.sh` and the full bars (the fixup change does not reach ELF).
+Superseded (round 6): "why was not traced" for 0x21e5220's `local_58` and the 0x2c153fd comments; see below.
+
+#### Round 6: Java traced live; CMOVcc flows, getVariablesIntersecting (branch `dwarf-params`, 2026-11-24)
+
+How Java was traced: a throwaway copy of the Ghidra 12.3 install (`rust/target/r6/ghidra` on the
+MacBook) with print lines in copies of `NewFunctionStackAnalysisCmd` and `DWARFFunctionImporter`
+compiled into its `Ghidra/patch` (loaded before the release jars), and a script run on the kept
+Hatred project (`-process -noanalysis -readOnly`, so nothing is saved) that clears the stack
+references and default stack variables of the 59 functions and runs the command again, then runs
+the DWARF import again. The rerun gives Java's facts' stack variables for all 59 (byte for byte
+by name and size), so the walk alone explains them. Nothing of this is in the repository.
+
+- A CBRANCH to the next instruction (CMOVcc's `if (!cc) goto inst_next`) saves the state at the
+  CBRANCH as a flow to the next instruction (SymbolicPropogator.applyPcode, condition not known
+  true); taken later, that flow runs through visited code, so up to MAX_EXTRA_INSTRUCTION_FLOW
+  instructions are walked again (`Analysis::flow_walk`, `Fold::to_next`). At 0x21e5220 the
+  `CMOVLE` at 0x21e5233 walks 0x21e5236-0x21e52a0 again; the second `MOVAPS [RSP+0x140]` then
+  meets the LEA's 1-byte variable and the `MOVUPS` 16-byte one: 20 bytes.
+- getVariablesIntersecting moves its probe by the length of the variable it finds, from the
+  probe and not from the variable's end, so a variable past it is missed and the variables can
+  overlap; addStackLocalVariables then leaves out one that overlaps one added before it
+  (0x19f14c0 `local_9d8` 32 bytes, no `local_9c0`).
+- defineFuncVariable makes no stack reference on an operand whose primary reference is another
+  kind: an instruction with a memory reference from the walks (`Ins::rw`) gets none. Partial:
+  `rw` has the WRITE references through a folded address and direct memory operands, not READs
+  through a register (0x1d461d0 `MOVUPS XMM0,[RCX]`, RCX 0x51ce518 past a CMOVNZ, stays).
+- `underived ... locals` (ELF) also where an operand adds a register the walk does not know to
+  a stack address and makes no reference (`[RSP + R8*4 + 0x10]`): Java's VarnodeContext knows
+  such a loop counter on some paths (0x1bb8950, 0x25c8930). 1,102 functions get the mark; 311 of
+  their `func` records equal Java's.
+- The DWARF importer does write `Unresolved local var` for NumFrames at 0x2c153fd (the trace
+  prints it). The comment is lost later: 0x2c153e0 is `CALL AssertFailed`, which Java learns does
+  not return after the import; Find Non-Returning Functions repairs the flow after the call
+  (ClearFlowAndRepairCmd, `ClearOptions(true)`: comments too) and the code is disassembled again
+  from another reference. The kept project has no comment stored at any address of
+  0x2c153e0-0x2c15440. A DWARF comment in code that flows from the fallthrough of a call to a
+  non-returning function is now not derived (`underived ... comments`): 23 functions, 21 of their
+  comments records equal Java's.
+
+Measured on the MacBook against Java 12.3 as round 5 (`tools/facts-diff.sh`, silent lists by
+`target/dp4/silent.sh`, master's `target/dp4/silent-m.txt`):
+
+| | record | master | round 5 | round 6 |
+|---|---|---|---|---|
+| Hatred | func equal | 9,595 | 109,932 | 110,007 |
+| | comments equal | 57,971 | 84,468 | 84,447 |
+| | new silent func | - | 59 | 8 |
+| | new silent comments | - | 4 | 2 |
+| mercs2 (PE) | func equal | 23,543 | 24,072 | 24,072 |
+| | records equal on master, not on the branch | - | 0 | 0 |
+| small corpus | silent | 56 | not run | 56 |
+
+Not reached: zero new silent. The 8 `func`: 0x1d46180 (a READ reference through RCX, above),
+0x190bc60, 0x1a180d0, 0x1d00a00, 0x24163f0, 0x2997830, 0x2b43cf0, 0x2b7ea80, not traced this
+round (the stack-reference sequences of 0x1d00a00 and 0x2b7ea80 equal Java's, so the cause is in
+defineFuncVariable or the adding, as 0x1d46180's). The 2 comments are 0x1b25cd0 and 0x2cbc6c0
+(older body difference). The small corpus was compared by count only (master's per-record lists
+were not kept). Checks (MacBook): `cargo fmt --check`, `cargo clippy --release --all-targets --
+-D warnings` clean, `cargo test --release` 213 passed. Not run: `CORPORA=m8 tools/bars.sh`,
+`elf64-decomp.sh`, the full bars.
 
 ## Speed
 

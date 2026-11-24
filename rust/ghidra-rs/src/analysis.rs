@@ -568,6 +568,9 @@ pub struct Fold {
     stack_and: bool,
     /// the walk came here through a case of a jump table (`flow_walk`)
     pub via_table: bool,
+    /// the index of the last instruction's p-code CBRANCH to the next instruction (CMOVcc's
+    /// `if (!cc) goto inst_next`), where it has no branch to its own start (REP)
+    to_next: Option<usize>,
 }
 
 impl Fold {
@@ -1935,6 +1938,19 @@ impl Analysis {
     }
 
     fn decode(&self, img: &Image, sl: &Sleigh, p: &mut crate::sleigh::Parse, a: u32, fold: &mut Fold) -> Option<Ins> {
+        self.decode_ops(img, sl, p, a, fold, usize::MAX)
+    }
+
+    /// `decode`, running only the first `upto` p-code ops on `fold`.
+    fn decode_ops(
+        &self,
+        img: &Image,
+        sl: &Sleigh,
+        p: &mut crate::sleigh::Parse,
+        a: u32,
+        fold: &mut Fold,
+        upto: usize,
+    ) -> Option<Ins> {
         let sec = img.block_of(a)?;
         let o = (a - sec.addr) as usize;
         let len = sl.decode(p, a as u64, &sec.data[o..]).ok()?;
@@ -2030,7 +2046,11 @@ impl Analysis {
             fold.mem.remove(old);
         }
         let mut computed = None;
-        for op in &ops {
+        fold.to_next = None;
+        for (i, op) in ops.iter().enumerate().take(upto) {
+            if op.opc == 5 && op.ins[0].space == code && op.ins[0].offset == next && fold.to_next.is_none() {
+                fold.to_next = Some(i);
+            }
             if matches!(op.opc, 2 | 3) {
                 // for the stack variables of `stack_uses`; nothing here reads these
                 let size = if op.opc == 2 { op.out.as_ref().map_or(0, |o| o.size) } else { op.ins[2].size };
@@ -2266,6 +2286,9 @@ impl Analysis {
         let inner = ops.iter().any(|op| {
             matches!(op.opc, 4 | 5) && (op.ins[0].space != code || op.ins[0].offset == a as u64 + len as u64)
         });
+        if ops.iter().any(|op| matches!(op.opc, 4 | 5) && op.ins[0].space == code && op.ins[0].offset == a as u64) {
+            fold.to_next = None;
+        }
         Some(Ins { len: len as u8, flow, target, slot, computed, refs, rw, code_imms, nop: ops.is_empty(), inner })
     }
 
@@ -3261,10 +3284,22 @@ impl Analysis {
                 if !visited.contains(&a) {
                     extra = None;
                 }
+                let pre = ins.inner.then(|| fold.clone());
                 let Some(d) = self.decode(img, sl, p, a, &mut fold) else { break };
                 visit(a, &fold);
                 let computed = d.computed;
                 out.push((a, d));
+                // a CBRANCH to the next instruction (CMOVcc) whose condition is not known true:
+                // applyPcode saves the state at the CBRANCH as a flow to the next instruction
+                // (SymbolicPropogator.java:1239-1247) and goes on; that flow, taken later, runs
+                // through code already visited, so up to MAX_EXTRA_INSTRUCTION_FLOW again
+                // ponytail: a condition the fold knows true (Java takes the branch first, the
+                // rest of the instruction later) is not modelled; nor REP's branch to its start
+                if let (Some(mut at), Some(k)) = (pre, fold.to_next) {
+                    if self.decode_ops(img, sl, p, a, &mut at, k).is_some() {
+                        stack.push((a + ins.len as u32, a, at, extra));
+                    }
+                }
                 let call = matches!(ins.flow, Flow::Call | Flow::CallInd);
                 if !popped && !visited.insert(a) {
                     let e = extra.map_or(0, |e| e + 1);

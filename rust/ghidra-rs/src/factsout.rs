@@ -770,7 +770,8 @@ impl Exporter<'_> {
     // analyzer's turn (903). Not modelled: Java's Stack also runs on each later batch of new
     // functions, before the purge of functions made after that
     /// The stack variables of `f` as `<mapsym>`s, and whether a walk of an instruction past code
-    /// already walked made a stack reference its first walk did not (not derived then).
+    /// already walked made a stack reference its first walk did not, or an operand indexes a stack
+    /// address with a register the walk does not know (not derived then).
     fn locals(&self, p: &mut Parse, f: u32) -> (String, bool) {
         const PREFIXES: [u8; 10] = [0x66, 0x67, 0xf2, 0xf3, 0x26, 0x2e, 0x36, 0x3e, 0x64, 0x65];
         let (rs, list) = self.sl.registers();
@@ -789,6 +790,8 @@ impl Exporter<'_> {
         let mut op_refs: HashMap<(u32, usize), i32> = HashMap::new();
         let mut fp = self.sl.new_parse();
         fp.fid = true;
+        // an indexed stack operand without a reference (below)
+        let mut indexed = false;
         let accumulate = |vars: &mut Vars, offset: i32, ref_size: u32| {
             // MAX_LOCAL_OFFSET, MAX_PARAM_OFFSET; from the return address up (the stack
             // pentry's offset, getBaseStackParamOffset: 4, x86-64-gcc.cspec 8) are parameters
@@ -796,11 +799,21 @@ impl Exporter<'_> {
                 return;
             }
             let size = ref_size.max(1) as i32;
-            let hits: Vec<(i32, u32)> = vars
-                .range(..offset + size)
-                .filter(|(&o, &(len, _))| o + len as i32 > offset)
-                .map(|(&o, &(len, _))| (o, len))
-                .collect();
+            // getVariablesIntersecting: at each probe from `offset` on, the variable
+            // getVariableContaining finds (the one starting last at or before it, where it
+            // reaches it); the probe then moves on by that variable's length from the probe, not
+            // to its end, so a variable past it is missed and the variables can overlap
+            let mut hits: Vec<(i32, u32)> = Vec::new();
+            let mut o = offset;
+            while o < offset + size {
+                match vars.range(..=o).next_back() {
+                    Some((&s, &(len, _))) if s + len as i32 > o => {
+                        hits.push((s, len));
+                        o += len as i32;
+                    }
+                    _ => o += 1,
+                }
+            }
             match (hits.first(), hits.last()) {
                 (Some(&(_, len)), _) if len == size as u32 => {} // "exact match": the length alone
                 (Some(&(first, _)), Some(&(last, len))) => {
@@ -835,8 +848,9 @@ impl Exporter<'_> {
             // (operand index, offset, bytes): the operand getStackOpIndex finds for each LOAD or
             // STORE through a stack address
             let mut refs = Vec::new();
-            if !fold.stack.is_empty() {
-                let ops = match self.sl.decode(&mut fp, u64::from(a), bytes) {
+            let mut ops = Vec::new();
+            if !fold.stack.is_empty() || elf64 {
+                ops = match self.sl.decode(&mut fp, u64::from(a), bytes) {
                     Ok(_) => self.sl.fid_parts(&fp).ops,
                     Err(_) => Vec::new(),
                 };
@@ -862,6 +876,24 @@ impl Exporter<'_> {
                 if let Some(d) = reg(at) {
                     refs.push((0, d as i32, fold.mem_size));
                 }
+            }
+            // defineFuncVariable: an operand whose primary reference is not a stack reference
+            // gets none. Constant Propagation's walks put a memory reference on the memory
+            // operand (one per instruction here) where one of them knew its address (Hatred's
+            // 0x1d461d0 `MOVUPS XMM0,[RCX]`, RCX 0x51ce518 on the path past a CMOVNZ)
+            if self.an.insns.get(&a).is_some_and(|i| !i.rw.is_empty()) {
+                refs.clear();
+            }
+            // ELF: an operand of a stack address plus a register the fold does not know (`[RSP +
+            // RCX*4 + 0x10]`) that makes no reference here: Java's VarnodeContext knows that
+            // register on some paths (a loop's counter) and makes references the fold cannot, so
+            // the variables are not derived (Hatred's 0x1bb8950, 0x25c8930)
+            use crate::sleigh::FidObj::Reg;
+            if elf64 && refs.is_empty() {
+                indexed |= ops.iter().any(|o| {
+                    o.objs.iter().any(|x| matches!(x, Reg(r) if reg(*r).is_some()))
+                        && o.objs.iter().any(|x| matches!(x, Reg(r) if reg(*r).is_none()))
+                });
             }
             // defineFuncVariable: an operand that has a stack reference already (an instruction
             // walked again) adds to the variable at that reference's offset; one in range
@@ -894,9 +926,16 @@ impl Exporter<'_> {
         // not derived where those references change the variables. ELF only: on mercs2 (PE) 3
         // of the 9 functions this finds have Java's stack variables, so it is not Java's rule,
         // and the PE facts stay as they were
-        let revisit_new = elf64 && vars != build(false);
+        let revisit_new = elf64 && (vars != build(false) || indexed);
         let mut xml = String::new();
+        // addStackLocalVariables adds them in offset order; one that overlaps one added before
+        // fails VariableUtilities.checkVariableConflict and is left out
+        let mut end = i32::MIN;
         for (&offset, &(len, plain)) in &vars {
+            if offset < end {
+                continue;
+            }
+            end = offset + len as i32;
             let name = if offset < 0 { format!("local_{:x}", -offset) } else { format!("local_res{offset:x}") };
             let ty = match len {
                 1 if plain => self.typeref("undefined"),
@@ -1291,9 +1330,36 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
     // DWARFUtil.appendComment (DWARFUtil.java:343-359) skips a comment the code unit's has,
     // AppendCommentCmd joins with a newline; an address whose comment is not known is noted
     let mut dwarf_unknown = std::collections::BTreeSet::new();
+    // the code that flows from the fallthrough of a call to a non-returning function: where
+    // Java learns that the callee does not return after the DWARF import, Find Non-Returning
+    // Functions repairs the flow (ClearFlowAndRepairCmd with ClearOptions(true), comments too)
+    // and the code is disassembled again from another reference without the comments (Hatred's
+    // 0x2c153fd after `CALL AssertFailed` at 0x2c153e0); when Java learned it is not ported
+    // ponytail: every such flow, not only the code ClearFlowAndRepairCmd clears (code with a
+    // reference from outside it stays)
+    let mut after_noreturn: HashSet<u32> = HashSet::new();
+    for (&a, i) in &an.insns {
+        if i.flow != Flow::Call || !i.target.is_some_and(|t| an.noreturn.contains(&t)) {
+            continue;
+        }
+        let mut todo = vec![a + u32::from(i.len)];
+        while let Some(x) = todo.pop() {
+            let Some(j) = an.insns.get(&x) else { continue };
+            if an.funcs.contains(&x) || !after_noreturn.insert(x) {
+                continue;
+            }
+            if j.falls_through() && !(j.flow == Flow::Call && j.target.is_some_and(|t| an.noreturn.contains(&t))) {
+                todo.push(x + u32::from(j.len));
+            }
+            if matches!(j.flow, Flow::Jump | Flow::CondJump) {
+                todo.extend(j.target);
+            }
+        }
+    }
     let mut pre0: BTreeMap<u64, String> = BTreeMap::new();
     for (at, s) in dwarf_pre {
         let at = unit(*at);
+        let s = s.as_ref().filter(|_| !u32::try_from(at).is_ok_and(|a| after_noreturn.contains(&a)));
         match s {
             None => {
                 dwarf_unknown.insert(at);
@@ -1541,9 +1607,10 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         // what only the function's own decompile reads: a caller still has its prototype
         let locals_why = match dw.and_then(|d| d.locals.as_deref()) {
             Some(why) => Some(why),
-            None if locals_revisit => {
-                Some("a stack reference a jump-table case's walk makes past visited code (VarnodeContext.flowStart)")
-            }
+            None if locals_revisit => Some(
+                "a stack reference a jump-table case's walk makes past visited code (VarnodeContext.flowStart), \
+                     or a stack operand indexed by a register the walk does not know",
+            ),
             None if pic_miss => Some("a PIC switch jump whose table is not found (DecompilerSwitchAnalyzer)"),
             None => None,
         };
