@@ -8070,7 +8070,84 @@ only gained `decomp::callfixup_pcode`, which the analysis calls; the mercs2 prel
 read is the one this build writes (`cksum` 304429596). The nine pairs that pass did not reach
 (`pc-r pc-t pcc-r pcc-t pcd pmd` on `simple`, `pcc-r pcc-t swfsc-t` on `switch`) are run for
 the merge. No unit test was added for the new branch of `decode_ops` (the tests have no
+
 fixture with a folded-address LOAD); its check is Hatred's 0x1d46180 in the facts comparison.
+### The own-facts gap remeasured: causes by count (branch `s10-gap`, 2026-11-25)
+
+Measured on the MacBook with the build of `dwarf-params` round 7 (03f7b64c40), mercs2, against
+the facts and the C of the Java 12.3 project (`target/ghidra-ref`, copied from the desktop).
+Nothing is ported on this branch: this section is the measurement and the ranking.
+
+`analyze --facts --functions-from <Java's function entries> --protos win32.protos`,
+`tools/facts-diff.sh`:
+
+| kind | equal | different | missing | extra | Java | equal |
+|---|---|---|---|---|---|---|
+| func | 41,219 | 3,758 | 13 | 0 | 44,990 | 91.6% |
+| body | 44,586 | 391 | 13 | 0 | 44,990 | 99.1% |
+| data | 232,192 | 10,645 | 28,665 | 10,623 | 271,502 | 85.5% |
+| label | 206,555 | 1,111 | 10,429 | 5,409 | 218,095 | 94.7% |
+| string | 23,924 | 1,978 | 518 | 31 | 26,420 | 90.6% |
+| override | 2,731 | 0 | 634 | 511 | 3,365 | 81.2% |
+| type | 263 | 0 | 102 | 3 | 365 | 72.1% |
+| ns | 0 | 0 | 797 | 0 | 797 | 0.0% |
+
+`underived` records: 8,674 (7,969 labels, 705 functions).
+
+Silent `func` records (different, and no `underived` record of the function, its locals or its
+overrides): 3,333 of the 3,758. By the parts that differ (`tools/facts-func-why.sh`; a record
+counts once, under all its parts):
+
+| parts that differ | records |
+|---|---|
+| extrapop, unknown here and known in Java | 865 |
+| extrapop, known here and unknown in Java | 592 |
+| stack variables differ | 424 |
+| stack variables only here | 289 |
+| extrapop unknown here, stack variables only in Java | 184 |
+| extrapop unknown in Java, stack variables only here | 184 |
+| model, return, stack variables only in Java | 172 |
+| stack variables only in Java | 131 |
+| model, return, stack variables differ | 121 |
+| model, return | 98 |
+| extrapop unknown in Java, stack variables differ | 88 |
+| every other set | 185 |
+
+The causes, largest first:
+
+1. No purge and no stack variables here where Java has them (865 + 184, and most of the 131 +
+   172 "only in Java"): the functions of Java's list that discovery does not find. They stand
+   for functions a script made after auto-analysis and get neither (the choice of S10 slice 2,
+   `DESIGN.md` "Open questions", 2026-11-17). Not changed here: it waits for that decision.
+2. A purge here where Java's is unknown (592 + 184 + 88): Java's X86 Function Callee Purge
+   ran before the function's body was complete, or took a callee's purge of that moment
+   ("Ghidra's task queue and the purge"). The count there was 1,778 over all `func` records;
+   864 of the silent ones have it now.
+3. Stack variables that differ where both have some (424 + 121 + 88): by offsets and sizes
+   (`rust/target/s10/locals-why.awk` on the MacBook, not in the repository) 275 records have
+   variables only Java makes, 223 variables only ghidra-rs makes, 106 a 4-byte variable where
+   Java has 1 byte at the same offset, 37 an 8-byte one where Java has 4. Not traced.
+4. Stack variables only here (289 + 184): 473 records where Java has none. Not traced.
+
+M500 and M8 against Java's C (`tools/ghidra-diff.sh`: identical of the functions Java finishes,
+then loud and silent):
+
+| row (own facts) | 2026-11-21 ("Repair Flow Damage") | now |
+|---|---|---|
+| Java's list | 419 (18, 62), M8 5 | 413 (18, 68), M8 5 / 7 (1, 1) |
+| plain discovery | 246 (120, 133), M8 2 | 243 (120, 136), M8 2 / 7 (1, 4) |
+
+Superseded: "419 (18, 62)" and "246 (120, 133)" of "Repair Flow Damage" as the current rows.
+Both rows lost functions since then, 6 and 3, all of them silent now. Not explained yet. One
+thing is ruled out: with the facts master's build writes (14ba1171b8, Java's list) and this
+build's decompiler the row is the same 413 (18, 68) with the same miss list, so the facts this
+branch changes are not the cause. Left to tell apart: master's changes since 2026-11-21 and the
+decompiler changes of `dwarf-params` rounds 1 and 2 (the facts path: `locked.rs`,
+`mapstate.rs`, `printc.rs`). Two rows that tell were started and not read:
+`rust/target/s10/check-engine.sh` on the MacBook writes `rows-check.txt` next to it (Java's
+facts with this build, 488 (11, 0) on 2026-11-21; and master's build as the decompiler with
+its own facts). The miss lists of the 2026-11-21 rows were not kept, so the 6 and 3 functions
+are not named here.
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The
