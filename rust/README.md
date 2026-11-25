@@ -7954,7 +7954,8 @@ by name and size), so the walk alone explains them. Nothing of this is in the re
 - defineFuncVariable makes no stack reference on an operand whose primary reference is another
   kind: an instruction with a memory reference from the walks (`Ins::rw`) gets none. Partial:
   `rw` has the WRITE references through a folded address and direct memory operands, not READs
-  through a register (0x1d461d0 `MOVUPS XMM0,[RCX]`, RCX 0x51ce518 past a CMOVNZ, stays).
+  through a register (0x1d461d0 `MOVUPS XMM0,[RCX]`, RCX 0x51ce518 past a CMOVNZ, stays). Superseded (round 7): a
+  READ of any size through a folded address is in `rw` (`Ins::load`); 0x1d46180 equals Java's.
 - `underived ... locals` (ELF) also where an operand adds a register the walk does not know to
   a stack address and makes no reference (`[RSP + R8*4 + 0x10]`): Java's VarnodeContext knows
   such a loop counter on some paths (0x1bb8950, 0x25c8930). 1,102 functions get the mark; 311 of
@@ -7990,6 +7991,86 @@ were not kept). Checks (MacBook): `cargo fmt --check`, `cargo clippy --release -
 -D warnings` clean, `cargo test --release` 213 passed. Not run: `CORPORA=m8 tools/bars.sh`,
 `elf64-decomp.sh`, the full bars.
 
+#### Round 7: READ references of any LOAD size; three changes dropped (branch `dwarf-params`, 2026-11-25)
+
+Four changes to the walk were tried together: (1) a READ reference for a LOAD of any size
+through a folded address, (2) memory values kept with their size, (3) comparisons and boolean
+operations folded on constants, (4) a branch whose condition is known true walked first. All
+four gave Hatred 7 new silent `func` records (5 of round 6's 8 fixed, 3 new: 0x263c5d0,
+0x2932fe0, 0x29961c0) and broke the mercs2 gate. Each was then built on top of the ones before
+it and measured on mercs2's PE facts (`target/dp4/pe.sh`, records not equal to Java's that are
+not in master's list of such records):
+
+| built | records newly in the list | of them equal on master |
+|---|---|---|
+| 1 | 25 | 17 |
+| 1, 2 | 42 | not split |
+| 1, 2, 3 | 42 | not split |
+| 1, 2, 3, 4 | 229 | 198 |
+
+Kept, in a smaller form: change 1. SymbolicPropogator's LOAD case makes its READ reference
+with the size of the output, whatever it is (`addLoadStoreReference`, SymbolicPropogator.java:
+927-947). `Analysis::decode_ops` now records a LOAD of another size than a pointer's through a
+folded address in the instruction's `rw` (the memory references defineFuncVariable asks
+about) and its size in `Ins::load`. This closes round 6's "Partial": the READ through a
+register (0x1d461d0 `MOVUPS XMM0,[RCX]`) is there, and the instruction gets no stack reference.
+
+Not kept from change 1: the same reference as a data reference of the listing (`Ins::refs`:
+labels, data, the Reference analyzer's targets). On mercs2 it made 17 records wrong that are
+equal on master, all traced to five places where the reference changes what the facts' Reference
+analyzer makes: the strings at 0xb642d4, 0xb642e4 and 0xb642ec (a byte LOAD of the second
+character at 0x9bbdb3 and the like stops the 13-byte string; the Strings analyzer then makes it
+16 bytes with its padding), a pointer made at 0xb604a9 (Java: `undefined1`) and the label it
+gives 0x4e494f, the table slot 0x616518 (a byte LOAD of 0x61651b at 0x6159cd stops the pointer)
+and `DAT_00400200` inside Java's IMAGE_NT_HEADERS32 (a 2-byte LOAD at 0x9ee748). In Java these
+references are either not there when the Reference analyzer looks or not made; which, and why,
+was not traced (it needs a trace of Java's analysis of mercs2). The other 8 of the 25 are data
+Java has and master does not: the record is there now, without the size (`undefined` where Java
+has `undefined1` or `undefined2`). Writing the size and the data from the facts' side was
+tried and changed no record (the facts of both builds are byte-identical), so it is not in.
+
+Dropped, with the reason:
+
+- Change 4 (known-true branches first, SymbolicPropogator.java:1160-1250): 187 more mercs2
+  records, 31 `func` among them, and the 3 new silent Hatred functions. Java's order depends on
+  `evaluator.followFalseConditionalBranches()` and on what `VarnodeContext.getConstant` gives
+  for the condition; the port took one case of it. Not traced further.
+- Change 2 (sized memory values, VarnodeContext.getMemoryValue): 17 more mercs2 records. Its
+  own note says the bytes of several stores are not assembled as Java does. Not traced further.
+- Change 3 (folded comparisons): no record changes without change 4, which is its only reader.
+
+The three are not in the repository; their patches are kept outside it (`rust/target/r7-patches/
+c2.patch`, `c3.patch`, `c4.patch` on the desktop, each against the one before, `c1.patch` the
+full change 1).
+
+Measured on the MacBook against Java 12.3 as round 6:
+
+| | record | master | round 6 | round 7 |
+|---|---|---|---|---|
+| Hatred | func equal | 9,595 | 110,007 | 110,010 |
+| | comments equal | 57,971 | 84,447 | 84,447 |
+| | new silent func | - | 8 | 6 |
+| | new silent comments | - | 2 | 2 |
+| mercs2 (PE) | func equal | 23,543 | 24,072 | 24,072 |
+| | records equal on master, not on the branch | - | 0 | 0 |
+
+
+Not reached: zero new silent. The 6 `func`: 0x190bc60, 0x1a180d0, 0x24163f0, 0x2997830,
+0x2b43cf0, 0x2b7ea80, not traced this round (0x1d46180 and 0x1d00a00 of round 6's 8 equal
+Java's now). The 2 comments are 0x1b25cd0 and 0x2cbc6c0, as in round 6. Small corpus: 56 silent
+records, as master. Checks (MacBook, the machine shared with another full pass): `cargo fmt
+--check` and `cargo clippy --release --all-targets -- -D warnings` clean, `cargo test --release`
+213 passed; `CORPORA=m8 tools/bars.sh`: the 57 lines equal those of
+`target/baselines/master-3e44b31ec6.summary`; `elf64-decomp.sh`'s loop over the 14 binaries
+already built on the MacBook (`target/x64f/elf64/bin`): 817 functions, the reference ran 815,
+identical 809, the counts of master in "ELF64 analysis". The full bars were not run again as a
+whole: the pass of 61b2a3a1a7 (round 2, the last commit that changes what the decompiler
+prints) gave 124 of the 133 lines, each equal to the baseline's, and since then the decompiler
+only gained `decomp::callfixup_pcode`, which the analysis calls; the mercs2 prelude the bars
+read is the one this build writes (`cksum` 304429596). The nine pairs that pass did not reach
+(`pc-r pc-t pcc-r pcc-t pcd pmd` on `simple`, `pcc-r pcc-t swfsc-t` on `switch`) are run for
+the merge. No unit test was added for the new branch of `decode_ops` (the tests have no
+fixture with a folded-address LOAD); its check is Hatred's 0x1d46180 in the facts comparison.
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The

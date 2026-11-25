@@ -515,10 +515,11 @@ pub struct Ins {
     pub slot: Option<u32>,     // memory operand of an indirect call/jump through a constant address
     pub computed: Option<u32>, // code target of another indirect call/jump, from the local fold
     pub refs: Vec<u32>,        // data references: constant addresses inside the image
-    pub rw: Vec<u32>,          // the `refs` a memory operand makes (READ or WRITE; the others are DATA)
+    pub rw: Vec<u32>,          // a memory operand's READ and WRITE references: `refs` (the rest are DATA) or `load`'s
     pub code_imms: Vec<u32>,   // immediates that point into an executable section
     pub nop: bool,             // no p-code (ENDBR64), which getThunkedAddr steps over
     pub inner: bool,           // a p-code branch inside the instruction (MINSS, CMOVcc): it splits a basic block
+    pub load: u8,              // bytes of a LOAD, not a pointer's size, through a folded address: READ in `rw` only
 }
 
 /// The references `Analysis::disassemble` goes by: every destination, and the destinations in
@@ -1975,6 +1976,7 @@ impl Analysis {
         let next = a as u64 + len as u64;
         let (mut flow, mut target, mut slot) = (Flow::Fall, None, None);
         let (mut refs, mut code_imms, mut rw) = (Vec::new(), Vec::new(), Vec::new());
+        let mut loaded = 0u8;
         // Local constant fold (a stand-in for Ghidra's constant propagation): 4-byte register
         // and temporary values from immediates, initialised memory, ADD/SUB/XOR/AND/OR. A
         // computed value (not a plain immediate) stored to memory that is code is a code
@@ -2069,7 +2071,18 @@ impl Analysis {
                         fold.stack.push((d, size, op.opc == 3));
                         fold.stack_regs.push(held);
                     }
-                    Some((Val::C(x), _)) if x <= u64::from(u32::MAX) => fold.data.push((x as u32, size, op.opc == 3)),
+                    Some((Val::C(x), _)) if x <= u64::from(u32::MAX) => {
+                        fold.data.push((x as u32, size, op.opc == 3));
+                        // SymbolicPropogator's LOAD makes a READ reference through a folded
+                        // address whatever the size loaded (Hatred's 0x1d461d0 `MOVUPS XMM0,[RCX]`);
+                        // a pointer's size is the LOAD case below
+                        if let Some(x) = addr(x).filter(|_| op.opc == 2 && size != w) {
+                            if !rw.contains(&x) {
+                                rw.push(x);
+                            }
+                            loaded = size.min(255) as u8;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -2289,7 +2302,19 @@ impl Analysis {
         if ops.iter().any(|op| matches!(op.opc, 4 | 5) && op.ins[0].space == code && op.ins[0].offset == a as u64) {
             fold.to_next = None;
         }
-        Some(Ins { len: len as u8, flow, target, slot, computed, refs, rw, code_imms, nop: ops.is_empty(), inner })
+        Some(Ins {
+            len: len as u8,
+            flow,
+            target,
+            slot,
+            computed,
+            refs,
+            rw,
+            code_imms,
+            nop: ops.is_empty(),
+            inner,
+            load: loaded,
+        })
     }
 
     /// Ghidra's `disassemble(addr)` after analysis: recursive descent from `addrs` into bytes no
@@ -3226,6 +3251,7 @@ impl Analysis {
                     let m = self.insns.get_mut(a).unwrap();
                     if !std::mem::replace(&mut reached[(a - self.code_lo) as usize], true) {
                         (m.refs, m.rw, m.code_imms, m.computed) = (Vec::new(), Vec::new(), Vec::new(), None);
+                        m.load = 0;
                     }
                     for &r in &d.refs {
                         if !m.refs.contains(&r) {
@@ -3243,6 +3269,7 @@ impl Analysis {
                         }
                     }
                     m.computed = m.computed.or(d.computed);
+                    m.load = m.load.max(d.load);
                 }
             }
         }
@@ -3514,6 +3541,7 @@ mod tests {
                 code_imms: vec![],
                 nop: false,
                 inner: false,
+                load: 0,
             };
             (a, i)
         };
