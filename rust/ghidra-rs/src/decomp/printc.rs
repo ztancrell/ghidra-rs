@@ -1527,7 +1527,8 @@ impl PrintC<'_> {
         };
         let off = super::namevars::symbol_offset(self.fd, self.arch, h)?;
         let sty = self.fd.symtab.symbol(sym).ty;
-        if sty.is_some_and(|t| self.fd.types.needs_resolution(t)) {
+        // a pointer goes through `pushPartialSymbol`, which prints the whole symbol at once
+        if sty.is_some_and(|t| self.fd.types.needs_resolution(t) && self.fd.types.meta(t) != Meta::Ptr) {
             return err("print C: a symbol whose data-type needs resolution (union, one-element array or one-field structure) is not ported");
         }
         if off == -1 {
@@ -1634,7 +1635,7 @@ impl PrintC<'_> {
     /// Port of `PrintC::pushConstant` of `val` in type `ty` (`vn`, the constant varnode, is
     /// none for a case label).
     fn push_constant(&mut self, val: u64, ty: TypeId, vn: Option<VarnodeId>) -> Result<()> {
-        if self.fd.types.needs_resolution(ty) {
+        if !self.fd.types.resolves_to_self(ty) {
             return err("print C: a constant whose data-type needs resolution (getHighTypeReadFacing) is not ported");
         }
         let size = self.fd.types.size(ty);

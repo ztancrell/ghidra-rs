@@ -622,7 +622,7 @@ pub(crate) fn op_undo_ptradd(fd: &mut Funcdata, op: OpId, finalize: bool) -> Res
             // getTypeReadFacing: any type that needsResolution (not only a union) would be
             // resolved, which is not ported
             let t = vn_type(fd, off_vn);
-            if fd.types.needs_resolution(t) {
+            if !fd.types.resolves_to_self(t) {
                 return err("opUndoPtradd: a constant type needing resolution (getTypeReadFacing) is not implemented in ghidra-rs yet");
             }
             fd.vn_mut(c).ty = Some(t);

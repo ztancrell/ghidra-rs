@@ -29,11 +29,12 @@ pub(crate) fn vn_type(fd: &mut Funcdata, vn: VarnodeId) -> TypeId {
 }
 
 /// `Varnode::getTypeReadFacing` / `getTypeDefFacing`: the varnode's data-type, unless it needs
-/// resolution (a union, or a pointer to one, ...): `unionresolve.cc` is not ported, so that fails
+/// resolution and is no pointer to something other than a union (`TypePointer::findResolve`: such a
+/// pointer is its own resolution): `unionresolve.cc` is not ported, so that fails
 /// loudly, naming `who`.
 pub(crate) fn vn_type_facing(fd: &mut Funcdata, vn: VarnodeId, who: &str) -> Result<TypeId> {
     let t = vn_type(fd, vn);
-    if fd.types.needs_resolution(t) {
+    if !fd.types.resolves_to_self(t) {
         return err(format!(
             "{who}: a data-type needing resolution (getTypeReadFacing, unionresolve.cc) is not implemented in ghidra-rs yet"
         ));
@@ -241,9 +242,6 @@ fn from_pointer(fd: &Funcdata, dt: TypeId, size: u32) -> Result<Option<TypeId>> 
 
 /// Port of `Datatype::getSubType`, with `TypeSpacebase::getSubType` answered from the scopes.
 pub(crate) fn sub_type(fd: &mut Funcdata, arch: &Arch, t: TypeId, off: i64) -> Result<Option<(TypeId, i64)>> {
-    if matches!(fd.types.get(t).kind, Kind::Fields(_) | Kind::Enum(_)) {
-        return err("type propagation into a struct, union or enum: not implemented in ghidra-rs yet");
-    }
     if let Kind::Spacebase { scope, .. } = fd.types.get(t).kind {
         let addr = off as u64 & calc_mask(arch.spec.stack_pointer.2);
         if scope == GLOBAL_SCOPE {
@@ -855,10 +853,10 @@ pub(crate) fn exact_piece(
         }
     }
     match last.map(|(t, o)| (t, o, fd.types.meta(t))) {
-        Some((t, o, Meta::Array | Meta::PartialStruct)) => Ok(Some(fd.types.partial_struct(t, o as i32, size))),
-        Some((_, _, Meta::Struct | Meta::Union)) => {
-            err("a piece of a struct or union (getExactPiece): not implemented in ghidra-rs yet")
+        Some((t, o, Meta::Array | Meta::Struct | Meta::PartialStruct)) => {
+            Ok(Some(fd.types.partial_struct(t, o as i32, size)))
         }
+        Some((_, _, Meta::Union)) => err("a piece of a union (getExactPiece): not implemented in ghidra-rs yet"),
         _ => Ok(None),
     }
 }

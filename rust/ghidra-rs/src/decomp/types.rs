@@ -214,6 +214,56 @@ impl TypeFactory {
         }
     }
 
+    /// Whether `Datatype::findResolve` and `resolveInFlow` give `id` itself at every op and
+    /// record nothing: a data-type that needs no resolution, or a pointer to anything but a
+    /// union (`TypePointer::findResolve`, `TypePointer::resolveInFlow`). The resolutions of
+    /// the other kinds (`ResolvedUnion`, unionresolve.cc) are not ported.
+    pub(crate) fn resolves_to_self(&self, id: TypeId) -> bool {
+        match self.get(id).kind {
+            Kind::Pointer { to, .. } => self.meta(to) != Meta::Union,
+            _ => !self.needs_resolution(id),
+        }
+    }
+
+    /// Port of `Datatype::findCompatibleResolve` (`TypePointer`, `TypeArray`, `TypeStruct`,
+    /// `TypeUnion`): the index of the form of `id` that is the data-type `ct`, or -1.
+    pub(crate) fn find_compatible_resolve(&self, id: TypeId, ct: TypeId) -> i32 {
+        let t = self.get(id);
+        // the one element of an array, the one field of a structure
+        let single = |inner: TypeId| {
+            let through = self.needs_resolution(ct)
+                && !self.needs_resolution(inner)
+                && self.find_compatible_resolve(ct, inner) >= 0;
+            if through || inner == ct {
+                0
+            } else {
+                -1
+            }
+        };
+        match &t.kind {
+            Kind::Pointer { to, .. } => match self.get(ct).kind {
+                Kind::Pointer { to: other, .. } => self.find_compatible_resolve(*to, other),
+                _ => -1,
+            },
+            Kind::Array { elem, .. } => single(*elem),
+            Kind::Fields(f) if t.meta == Meta::Struct => f.first().map_or(-1, |fld| single(fld.2)),
+            Kind::Fields(f) if t.meta == Meta::Union => {
+                let found = if !self.needs_resolution(ct) {
+                    f.iter().position(|&(_, off, ft)| ft == ct && off == 0)
+                } else {
+                    f.iter().position(|&(_, off, ft)| {
+                        off == 0
+                            && self.size(ft) == self.size(ct)
+                            && !self.needs_resolution(ft)
+                            && self.find_compatible_resolve(ct, ft) >= 0
+                    })
+                };
+                found.map_or(-1, |i| i as i32)
+            }
+            _ => -1,
+        }
+    }
+
     /// `Datatype::getName` (empty for a pointer or an array).
     pub(crate) fn name(&self, id: TypeId) -> Option<&str> {
         self.get(id).name.as_deref()
@@ -379,12 +429,31 @@ impl TypeFactory {
         })
     }
 
-    /// Port of `Datatype::getSubType` for the kinds without a scope behind them (arrays); a
+    /// Port of `Datatype::getSubType` for the kinds without a scope behind them (arrays,
+    /// structures, partial structs); a
     /// space-base type's sub-types come from its scope (see `infertypes`).
     pub(crate) fn sub_type(&self, id: TypeId, off: i64) -> Option<(TypeId, i64)> {
         match self.get(id).kind {
             Kind::Array { elem, .. } if off >= 0 && off < i64::from(self.size(id)) => {
                 Some((elem, off % i64::from(self.align_size(elem).max(1))))
+            }
+            // TypeStruct::getSubType: the field holding the offset (getFieldIter); a union
+            // has no sub-type (Datatype::getSubType)
+            Kind::Fields(ref fields) if self.meta(id) == Meta::Struct => {
+                let (mut min, mut max) = (0i64, fields.len() as i64 - 1);
+                while min <= max {
+                    let mid = (min + max) / 2;
+                    let (_, foff, fty) = fields[mid as usize];
+                    let foff = i64::from(foff);
+                    if foff > off {
+                        max = mid - 1;
+                    } else if foff + i64::from(self.size(fty)) > off {
+                        return Some((fty, off - foff));
+                    } else {
+                        min = mid + 1;
+                    }
+                }
+                None
             }
             // TypePartialStruct::getSubType (type.cc:2765-2779): the parent's component, a level
             // further down while it reaches past the end of the piece
@@ -859,6 +928,15 @@ mod tests {
         let pp = f.pointer(4, p1, 1);
         assert!(f.needs_resolution(one) && f.needs_resolution(un) && f.needs_resolution(a1) && f.needs_resolution(p1));
         assert!(!f.needs_resolution(two) && !f.needs_resolution(pp) && !f.needs_resolution(i4));
+        // a pointer to a one-field structure resolves to itself; only a union is scored
+        let pu = f.pointer(4, un, 1);
+        assert!(
+            f.resolves_to_self(p1) && f.resolves_to_self(two) && !f.resolves_to_self(one) && !f.resolves_to_self(pu)
+        );
+        let pi = f.pointer(4, i4, 1);
+        assert_eq!((f.find_compatible_resolve(p1, pi), f.find_compatible_resolve(p1, pp)), (0, -1));
+        assert_eq!((f.find_compatible_resolve(un, c), f.find_compatible_resolve(a1, c)), (1, -1));
+        assert_eq!((f.find_compatible_resolve(un, i4), f.find_compatible_resolve(one, a1)), (0, 0));
         assert_eq!(f.first_field(two), Some((0, i4)));
     }
 }

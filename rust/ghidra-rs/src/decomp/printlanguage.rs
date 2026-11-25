@@ -350,8 +350,8 @@ impl<'a> PrintC<'a> {
         if let Some(facts) = self.arch.facts.as_ref() {
             // emitSymbolScope: the scopes printed from the function's own namespace
             match self.scope.is_empty() {
-                true => clean_name(name),
-                false => clean_name(&facts.scoped_name(&self.scope, name)?.0),
+                true => Ok(clean_name(name)),
+                false => Ok(clean_name(&facts.scoped_name(&self.scope, name)?.0)),
             }
         } else {
             Ok(name.to_string())
@@ -448,9 +448,9 @@ pub(crate) fn scope_cut(name: &str) -> Option<usize> {
 /// name (`ns::name`), which the C++ prints as separate syntax tokens (`emitSymbolScope`, not
 /// cleaned) before the name token (cleaned, [`illegal_char_cpp`]). The prefix is the text up to
 /// the last `::` outside template brackets.
-pub(crate) fn clean_name(name: &str) -> Result<String> {
+pub(crate) fn clean_name(name: &str) -> String {
     match scope_cut(name) {
-        Some(i) => Ok(format!("{}::{}", &name[..i], illegal_char_cpp(&name[i + 2..])?)),
+        Some(i) => format!("{}::{}", &name[..i], illegal_char_cpp(&name[i + 2..])),
         None => illegal_char_cpp(name),
     }
 }
@@ -459,10 +459,10 @@ pub(crate) fn clean_name(name: &str) -> Result<String> {
 /// C++ identifier at its position becomes `_`. Letters are always legal; `_` and digits after the
 /// first character (`_` and `~` also first); `*:()[],&~` inside template brackets; operator
 /// characters right after a leading `operator`. Positions count UTF-16 units, as Java's `String`
-/// does: a character outside the BMP is two illegal units, so two `_`. A non-ASCII alphabetic
-/// character is an error: `Character.isLetter` (general categories L*) is not ported, and Rust's
-/// `is_alphabetic` is a wider set.
-pub(crate) fn illegal_char_cpp(input: &str) -> Result<String> {
+/// does: a character outside the BMP is two illegal units, so two `_`. A letter is what Java's
+/// `Character.isLetter` takes (`isletter.rs`). Superseded: "a non-ASCII alphabetic character is
+/// an error".
+pub(crate) fn illegal_char_cpp(input: &str) -> String {
     const AFTER_FIRST: u8 = 1;
     const TEMPLATE: u8 = 2;
     const OPERATOR: u8 = 4;
@@ -484,10 +484,8 @@ pub(crate) fn illegal_char_cpp(input: &str) -> Result<String> {
     let mut i = 0usize; // the UTF-16 index of `c`
     for c in input.chars() {
         let units = c.len_utf16();
-        let ok = if c.is_ascii_alphabetic() {
+        let ok = if u16::try_from(u32::from(c)).is_ok_and(super::isletter::is_letter) {
             true
-        } else if c.is_alphabetic() {
-            return err(format!("print C: the name {input:?} has a non-ASCII letter (Character.isLetter) not ported"));
         } else if c == '<' {
             depth += 1;
             true
@@ -508,7 +506,7 @@ pub(crate) fn illegal_char_cpp(input: &str) -> Result<String> {
         }
         i += units;
     }
-    Ok(out)
+    out
 }
 
 #[cfg(test)]
@@ -517,17 +515,18 @@ mod tests {
 
     #[test]
     fn illegal_char_cpp_as_java() {
-        let s = |t: &str| illegal_char_cpp(t).ok();
-        assert_eq!(s("_BinkPause@8").as_deref(), Some("_BinkPause_8"));
-        assert_eq!(s("8a~b").as_deref(), Some("_a_b"));
-        assert_eq!(s("~A").as_deref(), Some("~A"));
-        assert_eq!(s("vec<int*,a::b> x").as_deref(), Some("vec<int*,a::b>_x"));
-        assert_eq!(s("a::b").as_deref(), Some("a__b"));
-        assert_eq!(s("operator==").as_deref(), Some("operator=="));
-        assert_eq!(s("x\u{1F600}").as_deref(), Some("x__"));
-        assert!(s("\u{e9}").is_none());
-        assert_eq!(clean_name("hkpEntityListener::vftable").ok().as_deref(), Some("hkpEntityListener::vftable"));
-        assert_eq!(clean_name("a@b::f@4").ok().as_deref(), Some("a@b::f_4"));
+        let s = illegal_char_cpp;
+        assert_eq!(s("_BinkPause@8"), "_BinkPause_8");
+        assert_eq!(s("8a~b"), "_a_b");
+        assert_eq!(s("~A"), "~A");
+        assert_eq!(s("vec<int*,a::b> x"), "vec<int*,a::b>_x");
+        assert_eq!(s("a::b"), "a__b");
+        assert_eq!(s("operator=="), "operator==");
+        assert_eq!(s("x\u{1F600}"), "x__");
+        // Character.isLetter: a letter outside ASCII stays, a combining mark Rust calls alphabetic does not
+        assert_eq!(s("\u{e9}\u{345}x"), "\u{e9}_x");
+        assert_eq!(clean_name("hkpEntityListener::vftable"), "hkpEntityListener::vftable");
+        assert_eq!(clean_name("a@b::f@4"), "a@b::f_4");
     }
 
     #[test]

@@ -4,19 +4,22 @@
 //! Ported for the data-types ghidra-rs has (types.rs): structures, arrays and primitives, with
 //! the default `split_datatype_config` (structures and arrays; `option splitdatatypes` is not a
 //! console option here). Each of these fails with an error that names it:
-//! - a data-type that needs resolution (`getTypeReadFacing`: unionresolve.cc is not ported). So
-//!   the `ResolveCache` of the C++ is always empty here and left out;
-//! - a piece of a structure (`TypePartialStruct`, from `getExactPiece`; a piece of an array is
-//!   ported, superseded: "a piece of a structure or array");
-//! - the CONCAT of the split outputs (`buildOutConcats`: proto-partial varnodes and the partial
-//!   root need `VariablePiece`, which `Merge::groupPartials` does not have). A COPY or LOAD is
-//!   split only when nothing reads its output;
+//! - a data-type that needs resolution (`getTypeReadFacing`: unionresolve.cc is not ported),
+//!   but a pointer to anything other than a union, which resolves to itself. So the
+//!   `ResolveCache` of the C++ is always empty here and left out;
+//! - a piece of a union or an enumeration (`TypePartialUnion`, `TypePartialEnum`, from
+//!   `getExactPiece`; a piece of a structure or array is ported, superseded: "a piece of a
+//!   structure");
+//! - the CONCAT of the split outputs (`buildOutConcats`) on a big-endian target. Superseded:
+//!   "a COPY or LOAD is split only when nothing reads its output": the PIECE ops, the
+//!   proto-partial pieces and the partial root are built, and `Merge::groupPartials` groups them;
 //! - a value in the join space (`Address::renormalize`).
 //!
 //! `TypePointerRel` is not a ghidra-rs type, so `getValueDatatype` reads plain pointers only.
 
 use super::*;
 use crate::decomp::infertypes::vn_type;
+use crate::decomp::merge::register_proto_partial_root;
 use crate::decomp::types::{Kind, Meta, TypeFactory, TypeId};
 
 /// `SplitDatatype::Component`: the data-types of one piece on the way in and out, and its byte
@@ -49,7 +52,7 @@ fn unresolved<T>() -> Result<T> {
 /// `Varnode::getTypeReadFacing` and `getTypeDefFacing`: the type, unless it needs resolution.
 fn facing(fd: &mut Funcdata, vn: VarnodeId) -> Result<TypeId> {
     let t = vn_type(fd, vn);
-    if fd.types.needs_resolution(t) {
+    if !fd.types.resolves_to_self(t) {
         return unresolved();
     }
     Ok(t)
@@ -125,11 +128,11 @@ fn exact_piece(t: &mut TypeFactory, mut ct: TypeId, size: u32) -> Result<Option<
         }
     }
     match last {
-        Some((l, o)) if matches!(t.meta(l), Meta::Array | Meta::PartialStruct) => {
+        Some((l, o)) if matches!(t.meta(l), Meta::Array | Meta::Struct | Meta::PartialStruct) => {
             Ok(Some(t.partial_struct(l, o as i32, size)))
         }
-        Some((l, _)) if matches!(t.meta(l), Meta::Struct | Meta::Union) || t.is_enum(l) => {
-            err("SplitDatatype: a piece of a structure, union or enum (getExactPiece, TypePartialStruct) is not implemented in ghidra-rs yet")
+        Some((l, _)) if t.meta(l) == Meta::Union || t.is_enum(l) => {
+            err("SplitDatatype: a piece of a union or enum (getExactPiece, TypePartialUnion) is not implemented in ghidra-rs yet")
         }
         _ => Ok(None),
     }
@@ -196,12 +199,60 @@ fn root_addr(fd: &Funcdata, vn: VarnodeId) -> Result<(Space, u64)> {
     Ok((v.space, v.offset))
 }
 
-/// `SplitDatatype::buildOutConcats` when something reads the root: not ported.
-fn out_concats(fd: &Funcdata, root: VarnodeId) -> Result<()> {
+/// Port of `SplitDatatype::buildOutConcats` (little-endian): when something reads the root,
+/// PIECE ops after `previous` put the split outputs back together into it, most significant
+/// first; the pieces of a root that is not address-tied are proto-partial, and the root is
+/// registered for `Merge::groupPartials`.
+fn out_concats(
+    fd: &mut Funcdata,
+    big_endian: bool,
+    root: VarnodeId,
+    previous: OpId,
+    out_vns: &[VarnodeId],
+) -> Result<()> {
     if fd.vn(root).descend.is_empty() {
         return Ok(());
     }
-    err("SplitDatatype: the CONCAT of split outputs (buildOutConcats: proto-partial pieces, VariablePiece) is not implemented in ghidra-rs yet")
+    if big_endian {
+        return err(
+            "SplitDatatype: the CONCAT of split outputs (buildOutConcats) on a big-endian target is not ported",
+        );
+    }
+    let Some((&last, rest)) = out_vns.split_last().filter(|(_, rest)| !rest.is_empty()) else {
+        return err("SplitDatatype::buildOutConcats: fewer than two pieces");
+    };
+    let (space, base) = root_addr(fd, root)?;
+    let root_size = sz(fd, root);
+    let tied = fd.vn(root).has(VnFlags::ADDRTIED);
+    if !tied {
+        for &o in out_vns {
+            fd.vn_set(o, VnFlags::PROTO_PARTIAL);
+        }
+    }
+    let addr = op_addr(fd, previous);
+    let (mut vn, mut pre) = (last, previous);
+    let mut concat = previous;
+    for (i, &piece) in rest.iter().enumerate().rev() {
+        concat = fd.new_op(Piece, addr);
+        fd.op_set_input(concat, vn, 0)?; // most significant
+        fd.op_set_input(concat, piece, 1)?; // least significant
+        fd.op_insert_after(concat, pre)?;
+        if i == 0 {
+            break;
+        }
+        pre = concat;
+        let size = sz(fd, vn) + sz(fd, piece);
+        vn = fd.new_varnode_out(size, space, base.wrapping_add(u64::from(root_size - size)), concat);
+        if !tied {
+            fd.vn_set(vn, VnFlags::PROTO_PARTIAL);
+        }
+    }
+    fd.op_mut(concat).flags.set(OpFlags::PARTIAL_ROOT);
+    fd.op_set_output(concat, root)?;
+    if !tied {
+        register_proto_partial_root(fd, concat);
+    }
+    Ok(())
 }
 
 /// Port of `Funcdata::buildCopyTemp`: a COPY of `vn` into a temporary that is defined at
@@ -654,7 +705,14 @@ impl Split {
     }
 
     /// Port of `SplitDatatype::splitCopy`.
-    fn split_copy(&mut self, fd: &mut Funcdata, copy_op: OpId, in_type: TypeId, out_type: TypeId) -> Result<bool> {
+    fn split_copy(
+        &mut self,
+        fd: &mut Funcdata,
+        big_endian: bool,
+        copy_op: OpId,
+        in_type: TypeId,
+        out_type: TypeId,
+    ) -> Result<bool> {
         if !Self::copy_constraints(fd, copy_op)? {
             return Ok(false);
         }
@@ -666,10 +724,10 @@ impl Split {
         if is_arithmetic_input(fd, out_vn) {
             return Ok(false);
         }
-        out_concats(fd, out_vn)?;
         let in_vns =
             if is_const(fd, in_vn) { self.in_constants(fd, in_vn) } else { self.in_subpieces(fd, in_vn, copy_op)? };
         let out_vns = self.out_varnodes(fd, out_vn)?;
+        out_concats(fd, big_endian, out_vn, copy_op, &out_vns)?;
         for (&i, &o) in in_vns.iter().zip(&out_vns) {
             let n = fd.new_op(Copy, op_addr(fd, copy_op));
             fd.op_set_input(n, i, 0)?;
@@ -681,7 +739,7 @@ impl Split {
     }
 
     /// Port of `SplitDatatype::splitLoad`: also splits the COPY that alone reads the LOAD.
-    fn split_load(&mut self, fd: &mut Funcdata, load_op: OpId, in_type: TypeId) -> Result<bool> {
+    fn split_load(&mut self, fd: &mut Funcdata, big_endian: bool, load_op: OpId, in_type: TypeId) -> Result<bool> {
         self.is_load_store = true;
         let mut out_vn = out(fd, load_op)?;
         let mut copy_op = None;
@@ -701,10 +759,10 @@ impl Split {
             return Ok(false);
         }
         let Some(mut root) = RootPointer::find(fd, load_op, in_type)? else { return Ok(false) };
-        out_concats(fd, out_vn)?;
         let insert_point = copy_op.unwrap_or(load_op);
         let ptrs = self.pointers(fd, &root, load_op, true)?;
         let out_vns = self.out_varnodes(fd, out_vn)?;
+        out_concats(fd, big_endian, out_vn, insert_point, &out_vns)?;
         let spc = off(fd, inp(fd, load_op, 0)?) as u32; // getSpaceFromConst
         for (&p, &o) in ptrs.iter().zip(&out_vns) {
             let n = fd.new_op(Load, op_addr(fd, insert_point));
@@ -810,24 +868,24 @@ impl Split {
 }
 
 /// Port of `RuleSplitCopy`.
-pub(super) fn split_copy(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
+pub(super) fn split_copy(fd: &mut Funcdata, op: OpId, arch: &Arch) -> Result<i32> {
     let in_type = facing(fd, inp(fd, op, 0)?)?;
     let out_type = facing(fd, out(fd, op)?)?;
     let splittable = |t: TypeId| matches!(fd.types.meta(t), Meta::Array | Meta::Struct | Meta::PartialStruct);
     if !splittable(in_type) && !splittable(out_type) {
         return Ok(0);
     }
-    Ok(i32::from(Split::default().split_copy(fd, op, in_type, out_type)?))
+    Ok(i32::from(Split::default().split_copy(fd, arch.sleigh.big_endian, op, in_type, out_type)?))
 }
 
 /// Port of `RuleSplitLoad`.
-pub(super) fn split_load(fd: &mut Funcdata, op: OpId, _: &Arch) -> Result<i32> {
+pub(super) fn split_load(fd: &mut Funcdata, op: OpId, arch: &Arch) -> Result<i32> {
     let size = sz(fd, out(fd, op)?);
     let Some(in_type) = value_datatype(fd, op, size)? else { return Ok(0) };
     if !matches!(fd.types.meta(in_type), Meta::Struct | Meta::Array | Meta::PartialStruct) {
         return Ok(0);
     }
-    Ok(i32::from(Split::default().split_load(fd, op, in_type)?))
+    Ok(i32::from(Split::default().split_load(fd, arch.sleigh.big_endian, op, in_type)?))
 }
 
 /// Port of `RuleSplitStore`.
@@ -872,5 +930,38 @@ mod tests {
         // a structure is not split into itself, and two primitives never
         assert!(!Split::default().compatible(&mut fd, st, st, false));
         assert!(!Split::default().compatible(&mut fd, u16, u16, true));
+    }
+
+    /// An 8-byte root read by another op, split into pieces of 4, 2 and 2 bytes: two PIECEs
+    /// after the COPY rebuild it from the most significant piece down, the inner one at the
+    /// root's upper half, and nothing is built for a root nobody reads.
+    #[test]
+    fn out_concats_from_the_top() {
+        let mut fd = Funcdata::new(0x1000);
+        let bl = fd.blocks.new_block(0x1000);
+        fd.blocks.set_start_block(bl);
+        let ram = Space::Sleigh(1);
+        let copy = fd.new_op(Copy, 0x1000);
+        let root = fd.new_varnode_out(8, ram, 0x100, copy);
+        let c = fd.new_constant(8, 0);
+        fd.op_set_input(copy, c, 0).unwrap();
+        fd.op_insert_end(copy, bl);
+        let pieces = [(4, 0x100), (2, 0x104), (2, 0x106)].map(|(s, o)| fd.new_varnode(s, ram, o));
+        out_concats(&mut fd, false, root, copy, &pieces).unwrap();
+        assert_eq!(fd.vn(root).def, Some(copy), "an unread root keeps its COPY");
+        let reader = fd.new_op(Copy, 0x1004);
+        fd.op_set_input(reader, root, 0).unwrap();
+        fd.op_insert_end(reader, bl);
+        out_concats(&mut fd, false, root, copy, &pieces).unwrap();
+        let top = fd.vn(root).def.unwrap();
+        assert!(top != copy && code(&fd, top) == Piece && fd.op(top).flags.has(OpFlags::PARTIAL_ROOT));
+        let inner = inp(&fd, top, 0).unwrap();
+        assert_eq!((fd.vn(inner).offset, fd.vn(inner).size, inp(&fd, top, 1).unwrap()), (0x104, 4, pieces[0]));
+        let low = fd.vn(inner).def.unwrap();
+        assert_eq!((inp(&fd, low, 0).unwrap(), inp(&fd, low, 1).unwrap()), (pieces[2], pieces[1]));
+        assert_eq!(fd.blocks.block(bl).ops, [copy, low, top, reader]);
+        assert!(pieces.iter().chain([&inner]).all(|&v| fd.vn(v).has(VnFlags::PROTO_PARTIAL)));
+        assert_eq!(fd.highs.proto_partial, [top]);
+        assert!(out_concats(&mut fd, true, root, top, &pieces).is_err());
     }
 }

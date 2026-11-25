@@ -53,11 +53,12 @@ fn high_type(fd: &mut Funcdata, vn: VarnodeId) -> Result<TypeId> {
     Ok(h_type(fd, h).0)
 }
 
-/// `Varnode::getHighTypeReadFacing` / `getHighTypeDefFacing`: the high's type, which must not
-/// need resolution.
+/// `Varnode::getHighTypeReadFacing` / `getHighTypeDefFacing`: the high's type, which must be its
+/// own resolution (`TypeFactory::resolves_to_self`: it needs none, or is a pointer to something
+/// other than a union).
 fn facing(fd: &mut Funcdata, vn: VarnodeId) -> Result<TypeId> {
     let t = high_type(fd, vn)?;
-    if fd.types.needs_resolution(t) {
+    if !fd.types.resolves_to_self(t) {
         return unresolved();
     }
     Ok(t)
@@ -66,7 +67,7 @@ fn facing(fd: &mut Funcdata, vn: VarnodeId) -> Result<TypeId> {
 /// `Varnode::getTypeReadFacing`.
 fn vn_facing(fd: &mut Funcdata, vn: VarnodeId) -> Result<TypeId> {
     let t = vn_type(fd, vn);
-    if fd.types.needs_resolution(t) {
+    if !fd.types.resolves_to_self(t) {
         return unresolved();
     }
     Ok(t)
@@ -673,8 +674,9 @@ fn output_token(fd: &mut Funcdata, arch: &Arch, op: OpId) -> Result<TypeId> {
     }
 }
 
-/// Port of `ActionSetCasts::tryResolutionAdjustment` up to the resolution, which fails.
-fn try_resolution_adjustment(fd: &mut Funcdata, dt: TypeId, vn: VarnodeId) -> Result<bool> {
+/// Port of `ActionSetCasts::tryResolutionAdjustment` (`out`: the op's output, slot -1), up to
+/// a resolution to a field (`ResolvedUnion`, unionresolve.cc), which fails.
+fn try_resolution_adjustment(fd: &mut Funcdata, dt: TypeId, vn: VarnodeId, out: bool) -> Result<bool> {
     if fd.types.needs_resolution(dt) {
         return Ok(false);
     }
@@ -682,18 +684,36 @@ fn try_resolution_adjustment(fd: &mut Funcdata, dt: TypeId, vn: VarnodeId) -> Re
     if !fd.types.needs_resolution(cur) {
         return Ok(false);
     }
+    // a field of a pointer cannot be taken during assignment
+    if (out && fd.types.meta(cur) == Meta::Ptr) || fd.types.find_compatible_resolve(cur, dt) < 0 {
+        return Ok(false);
+    }
     unresolved()
 }
 
-/// Port of `ActionSetCasts::tryResolutionCopy` up to the resolution, which fails.
+/// Port of `ActionSetCasts::tryResolutionCopy`, up to a resolution to a field, which fails.
 fn try_resolution_copy(fd: &mut Funcdata, op: OpId) -> Result<bool> {
     let Some(out) = fd.op(op).out else { return Ok(false) };
     let out_type = high_type(fd, out)?;
     let in_type = high_type(fd, input(fd, op, 0)?)?;
-    if !fd.types.needs_resolution(in_type) && !fd.types.needs_resolution(out_type) {
+    let (in_needs, out_needs) = (fd.types.needs_resolution(in_type), fd.types.needs_resolution(out_type));
+    if !in_needs && !out_needs {
         return Ok(false);
     }
-    unresolved()
+    if in_needs {
+        if fd.types.find_compatible_resolve(in_type, out_type) < 0 {
+            return Ok(false);
+        }
+        return unresolved();
+    }
+    if fd.types.meta(out_type) != Meta::Ptr {
+        if fd.types.find_compatible_resolve(out_type, in_type) < 0 {
+            return Ok(false);
+        }
+        return unresolved();
+    }
+    // a pointer output needing resolution and an input needing none: nothing to record
+    Ok(true)
 }
 
 /// Port of `ActionSetCasts::resolveUnion` up to the resolution, which fails.
@@ -703,7 +723,7 @@ fn resolve_union(fd: &mut Funcdata, op: OpId, slot: usize) -> Result<i32> {
         return Ok(0);
     }
     let dt = high_type(fd, vn)?;
-    if fd.types.needs_resolution(dt) {
+    if !fd.types.resolves_to_self(dt) {
         return unresolved();
     }
     Ok(0)
@@ -735,7 +755,7 @@ fn cast_output(fd: &mut Funcdata, arch: &Arch, op: OpId) -> Result<i32> {
     let outvn = output(fd, op)?;
     let out_high = high_type(fd, outvn)?;
     if tokenct == out_high {
-        if fd.types.needs_resolution(tokenct) {
+        if !fd.types.resolves_to_self(tokenct) {
             return unresolved();
         }
         return Ok(0);
@@ -766,7 +786,7 @@ fn cast_output(fd: &mut Funcdata, arch: &Arch, op: OpId) -> Result<i32> {
         } else if cast_standard(&fd.types, out_res, tokenct, false, true).is_none() {
             return Ok(0);
         }
-        if try_resolution_adjustment(fd, tokenct, outvn)? {
+        if try_resolution_adjustment(fd, tokenct, outvn, true)? {
             return Ok(0);
         }
     }
@@ -782,7 +802,7 @@ fn cast_output(fd: &mut Funcdata, arch: &Arch, op: OpId) -> Result<i32> {
     }
     fd.op_set_output(op, vn)?;
     fd.op_insert_after(newop, op)?;
-    if fd.types.needs_resolution(tokenct) || fd.types.needs_resolution(out_high) {
+    if !fd.types.resolves_to_self(tokenct) || !fd.types.resolves_to_self(out_high) {
         return unresolved();
     }
     Ok(1)
@@ -825,11 +845,11 @@ fn cast_input(fd: &mut Funcdata, op: OpId, slot: usize) -> Result<i32> {
     } {
         insert_ptrsub_zero(fd, op, slot, ct)?;
         let ht = high_type(fd, vn)?;
-        if fd.types.needs_resolution(ht) {
+        if !fd.types.resolves_to_self(ht) {
             return unresolved();
         }
         return Ok(1);
-    } else if (opc != Opcode::Copy && try_resolution_adjustment(fd, ct, vn)?)
+    } else if (opc != Opcode::Copy && try_resolution_adjustment(fd, ct, vn, false)?)
         || (opc == Opcode::Copy && try_resolution_copy(fd, op)?)
     {
         return Ok(1);
@@ -842,7 +862,7 @@ fn cast_input(fd: &mut Funcdata, op: OpId, slot: usize) -> Result<i32> {
     fd.op_set_input(op, vnout, slot)?;
     fd.op_insert_before(newop, op)?;
     let ht = high_type(fd, vn)?;
-    if fd.types.needs_resolution(ct) || fd.types.needs_resolution(ht) {
+    if !fd.types.resolves_to_self(ct) || !fd.types.resolves_to_self(ht) {
         return unresolved();
     }
     Ok(1)
@@ -929,7 +949,7 @@ fn cast_op(fd: &mut Funcdata, arch: &Arch, op: OpId) -> Result<()> {
     let out = fd.op(op).out;
     if let Some(o) = out {
         let ht = high_type(fd, o)?;
-        if fd.types.needs_resolution(ht) {
+        if !fd.types.resolves_to_self(ht) {
             return unresolved();
         }
     }

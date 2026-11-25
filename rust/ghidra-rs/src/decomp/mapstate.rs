@@ -18,7 +18,9 @@
 //! INDIRECTs of stack varnodes); in the `decompile` root the decompile fails:
 //! - a load or store guard whose pointer has a data-type needing resolution (`getTypeReadFacing`)
 //!   or points to a union,
-//! - a structure or union among the hints (`TypeStruct::getSubType`, partial structures),
+//! - a piece of a union or an enumeration as a data-type (`getExactPiece`; superseded: "a
+//!   structure or union among the hints": a structure gives its fields, `TypeStruct::getSubType`,
+//!   and its pieces are partial structs; a union has no sub-type),
 //! - a locked prototype with parameters (its symbols are not in the scope).
 //!
 //! A piece of an array symbol is a partial struct (`getTypePartialStruct`, in
@@ -419,9 +421,6 @@ impl MapState {
             && (h.rt != RangeType::Open || !self.adjust_out_of_range(&mut h, &mut ty, t))
         {
             return Ok(());
-        }
-        if matches!(t.f.meta(ty), Meta::Struct | Meta::Union) {
-            return unported("a structure or union on the stack");
         }
         let (sstart, size) = (self.signed(h.st), t.f.size(ty) as i32);
         self.maplist.push(RangeHint { start: h.st, size, sstart, ty, flags: h.fl, rt: h.rt, highind: h.hi });
@@ -965,11 +964,11 @@ impl Funcdata {
             });
         }
         match last {
-            Some((l, o)) if matches!(self.types.meta(l), Meta::Array | Meta::PartialStruct) => {
+            Some((l, o)) if matches!(self.types.meta(l), Meta::Array | Meta::Struct | Meta::PartialStruct) => {
                 Ok(Some(self.types.partial_struct(l, o as i32, size)))
             }
-            Some((l, _)) if matches!(self.types.meta(l), Meta::Struct | Meta::Union) || self.types.is_enum(l) => {
-                err("getExactPiece: a piece of a structure, union or enumeration as a data-type is not ported")
+            Some((l, _)) if self.types.meta(l) == Meta::Union || self.types.is_enum(l) => {
+                err("getExactPiece: a piece of a union or enumeration as a data-type is not ported")
             }
             _ => Ok(None),
         }

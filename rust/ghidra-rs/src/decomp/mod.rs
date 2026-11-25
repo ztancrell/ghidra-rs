@@ -31,6 +31,7 @@ mod heritage;
 mod heritage_guard;
 mod infertypes;
 mod inject;
+mod isletter;
 mod jumptable;
 mod lanedivide;
 mod lateres;
