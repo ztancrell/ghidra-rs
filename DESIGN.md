@@ -207,6 +207,9 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   porting Java's tracking, not by keeping the old rule for PE.
 - 2026-11-24: All CPU, RAM and GPU work (builds, tests, checks, Hatred and Java runs) runs on
   the MacBook; the desktop keeps git and editing. User's rule, global.
+- 2026-11-25: `findContainer`'s smallest container in `query_global` imitates the C++
+  in-memory scope (`ScopeInternal`), not the query-order cache of Java's `ScopeGhidra`, when
+  Java's facts are loaded. User's decision. Not built yet (work paused).
 
 ## Milestones
 
