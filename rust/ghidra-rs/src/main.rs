@@ -515,8 +515,9 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     type DwarfFacts = (
         std::collections::BTreeMap<u32, ghidra_rs::factsout::DwarfFunc>,
         std::collections::HashMap<String, Result<String, String>>,
+        Vec<(u64, Option<String>)>,
     );
-    let (dwarf, dwarf_types): DwarfFacts = if has_dwarf {
+    let (dwarf, dwarf_types, dwarf_pre): DwarfFacts = if has_dwarf {
         let imp = ghidra_rs::dwarf::import(&data).map_err(|e| format!("{path}: DWARF: {e}"))?;
         // the prototypes and data types as Java's decompiler gets them, before the import is freed
         let (mut protos, types) = ghidra_rs::dwarf::pcode::facts(&imp, &ghidra_rs::factsout::core_ids64());
@@ -527,10 +528,13 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
                 // the import adds the image base adjustment itself (programBaseAddressFixup)
                 let a = u32::try_from(f.addr).ok()?;
                 let facts = protos.remove(&f.addr)?;
-                Some((a, ghidra_rs::factsout::DwarfFunc { name: f.name, plate: f.plate, facts }))
+                Some((
+                    a,
+                    ghidra_rs::factsout::DwarfFunc { name: f.name, plate: f.plate, facts, locals: f.locals_underived },
+                ))
             })
             .collect();
-        (funcs, types)
+        (funcs, types, imp.unresolved)
     } else {
         Default::default()
     };
@@ -672,11 +676,16 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
                 dwarf_types: &dwarf_types,
                 archive: archive.as_ref().map(|a| &a.0),
                 eh_sites: eh_sites.as_ref().ok().map(|v| &v[..]),
+                dwarf_pre: &dwarf_pre,
             };
             // the stack analysis goes by the purges Ghidra has at a call site
             let purges = ghidra_rs::factsout::call_purges(&img, &an, &inputs);
+            // and runs the call fixups the Call-Fixup Installer set
+            let fixups = ghidra_rs::factsout::call_fixups(&img, &an, &sl, &inputs).map_err(|e| format!("{p}: {e}"))?;
             let own = an.swap_call_purges(purges);
+            let own_fixups = an.swap_call_fixups(fixups);
             let done = ghidra_rs::factsout::export(&img, &an, &sl, &inputs, &mut w).and_then(|()| w.flush());
+            an.swap_call_fixups(own_fixups);
             an.swap_call_purges(own);
             done.map_err(|e| format!("{p}: {e}"))?;
             println!("wrote facts {p}");

@@ -49,11 +49,6 @@ enum Rec {
 
 /// Port of `ActionNameVars::apply`.
 pub(crate) fn name_vars(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
-    // The C++ keeps locked parameters as symbols of the local scope (`ProtoStoreSymbol`,
-    // type-locked, name-locked when named); `linkSymbol` and `compareName` read them.
-    if fd.proto.locked.as_ref().is_some_and(|l| !l.inputs.is_empty()) {
-        return err("namevars: the parameter symbols of a locked prototype are not ported");
-    }
     let mut namerec = Vec::new();
     link_symbols(fd, arch, &mut namerec)?;
     recover_name_recommendations(fd)?;

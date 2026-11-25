@@ -539,6 +539,8 @@ pub(crate) struct Models {
     pub(crate) eval_called: Option<ModelId>,
     /// the models whose decode needs what is not ported: name, error
     pub(crate) unported: Vec<(String, String)>,
+    /// the `UnknownProtoModel`s `createUnknownModel` made: copies of the default model
+    pub(crate) unknown: Vec<ModelId>,
 }
 
 impl Models {
@@ -557,11 +559,11 @@ impl Models {
     }
 
     /// Port of `ProtoModel::isCompatible`: the same model, or one is the copy of the other
-    /// (`compatModel`). The only copy here is the facts' `unknown` model
+    /// (`compatModel`). The only copies here are the facts' unknown models
     /// (`createUnknownModel`, an `UnknownProtoModel` of the default model); the x86 cspec has no
     /// `<modelalias>`.
     pub(crate) fn is_compatible(&self, a: ModelId, b: ModelId) -> bool {
-        let copy_of = |m: ModelId| (self.get(m).name == "unknown" && m != self.default).then_some(self.default);
+        let copy_of = |m: ModelId| (self.unknown.contains(&m) && m != self.default).then_some(self.default);
         a == b || copy_of(a) == Some(b) || copy_of(b) == Some(a)
     }
 }

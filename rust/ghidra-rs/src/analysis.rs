@@ -515,10 +515,11 @@ pub struct Ins {
     pub slot: Option<u32>,     // memory operand of an indirect call/jump through a constant address
     pub computed: Option<u32>, // code target of another indirect call/jump, from the local fold
     pub refs: Vec<u32>,        // data references: constant addresses inside the image
-    pub rw: Vec<u32>,          // the `refs` a memory operand makes (READ or WRITE; the others are DATA)
+    pub rw: Vec<u32>,          // a memory operand's READ and WRITE references: `refs` (the rest are DATA) or `load`'s
     pub code_imms: Vec<u32>,   // immediates that point into an executable section
     pub nop: bool,             // no p-code (ENDBR64), which getThunkedAddr steps over
     pub inner: bool,           // a p-code branch inside the instruction (MINSS, CMOVcc): it splits a basic block
+    pub load: u8,              // bytes of a LOAD, not a pointer's size, through a folded address: READ in `rw` only
 }
 
 /// The references `Analysis::disassemble` goes by: every destination, and the destinations in
@@ -538,6 +539,11 @@ pub enum Val {
     S(u64, u32),
 }
 
+/// The call fixups of the facts' walks: function entry -> (installed before Constant
+/// Propagation, the fixup's p-code). The Call-Fixup Installer (301) sets one when the function
+/// gets its name: Function ID's names (799) come after Constant Propagation (596).
+pub type Fixups = HashMap<u32, (bool, Vec<crate::sleigh::PcodeOp>)>;
+
 /// State of the local fold: (space, offset, size, value or unknown, computed rather than a
 /// plain immediate) of registers and temporaries, and memory written through a folded
 /// address (address, value or unknown, computed).
@@ -549,6 +555,10 @@ pub struct Fold {
     /// the stack slots the last instruction read or wrote through a folded address: (offset
     /// from ESP at the entry, bytes, written)
     pub stack: Vec<(u32, u32, bool)>,
+    /// for each of `stack`: the registers of the pointer's width that held a stack address
+    /// when it was made (register offset, offset from ESP at the entry), for
+    /// `NewFunctionStackAnalysisCmd.getStackOpIndex`
+    pub stack_regs: Vec<Vec<(u64, u32)>>,
     /// bytes of the last LOAD or STORE of the last instruction, 0 without one
     pub mem_size: u32,
     /// the memory the last instruction read or wrote through an address the fold knows (a
@@ -557,6 +567,11 @@ pub struct Fold {
     /// `AND ESP,mask` keeps a stack address (the mask applies to its offset), as Ghidra's
     /// stack analysis has it; off for the walks of `propagate`
     stack_and: bool,
+    /// the walk came here through a case of a jump table (`flow_walk`)
+    pub via_table: bool,
+    /// the index of the last instruction's p-code CBRANCH to the next instruction (CMOVcc's
+    /// `if (!cc) goto inst_next`), where it has no branch to its own start (REP)
+    to_next: Option<usize>,
 }
 
 impl Fold {
@@ -597,7 +612,7 @@ pub struct Analysis {
     /// a thunk (CreateThunkFunctionCmd.isThunk on the holding function, not ported).
     slot_jumps_inside: HashSet<u32>,
     /// PIC switch jumps (`pic_switch_table`) whose table, bound or cases were not found.
-    pic_switch_misses: BTreeSet<u32>,
+    pub pic_switch_misses: BTreeSet<u32>,
     /// Function Start Search on x86-64: undefined bytes after something defined where a
     /// `<funcstart after="defined"/>` pattern matches (`start_search_gcc64`; none is applied).
     start_after_defined: BTreeSet<u32>,
@@ -607,6 +622,9 @@ pub struct Analysis {
     purge: HashMap<u32, u32>,            // function -> bytes its RETs pop (RET n), where they agree
     /// The purge X86 Function Callee Purge set, by function (`callee_purge`); none is unknown.
     pub callee_purges: HashMap<u32, u32>,
+    /// The call fixups of the facts' walks (`call_fixups`; empty otherwise): a direct call to
+    /// one runs it in place of the CALL.
+    fixups: Fixups,
     reg_space: u32,
     /// the local fold: register and pointer width, the stack pointer's offset, and the
     /// registers a call kills besides it (the default prototype's `<killedbycall>`)
@@ -878,6 +896,7 @@ impl Analysis {
             fpu_ip: None,
             purge: HashMap::new(),
             callee_purges: HashMap::new(),
+            fixups: HashMap::new(),
             reg_space: 0,
             width: 4,
             sp: 0x10,
@@ -1920,6 +1939,19 @@ impl Analysis {
     }
 
     fn decode(&self, img: &Image, sl: &Sleigh, p: &mut crate::sleigh::Parse, a: u32, fold: &mut Fold) -> Option<Ins> {
+        self.decode_ops(img, sl, p, a, fold, usize::MAX)
+    }
+
+    /// `decode`, running only the first `upto` p-code ops on `fold`.
+    fn decode_ops(
+        &self,
+        img: &Image,
+        sl: &Sleigh,
+        p: &mut crate::sleigh::Parse,
+        a: u32,
+        fold: &mut Fold,
+        upto: usize,
+    ) -> Option<Ins> {
         let sec = img.block_of(a)?;
         let o = (a - sec.addr) as usize;
         let len = sl.decode(p, a as u64, &sec.data[o..]).ok()?;
@@ -1928,9 +1960,23 @@ impl Analysis {
         }
         let ops = sl.pcode(p).ok()?;
         let code = sl.code_space();
+        // SymbolicPropogator.checkForCallFixup: a direct call to a function with a call fixup
+        // runs the fixup's p-code in place of the CALL op, and none of the call's side effects
+        // (`ESP = ESP + 4 - EAX;` for `__chkstk`); the CALL's flow stays the instruction's
+        let fixup = ops.iter().position(|op| op.opc == 7 && op.ins[0].space == code).and_then(|i| {
+            let t = u32::try_from(ops[i].ins[0].offset).ok()?;
+            // Constant Propagation (596) runs only the fixups installed before it; the Stack
+            // analyzer (903, the `stack_and` walk) runs every one
+            self.fixups.get(&t).filter(|f| f.0 || fold.stack_and).map(|f| (i, t, &f.1))
+        });
+        let ops: Vec<_> = match fixup {
+            Some((i, _, f)) => ops[..i].iter().chain(f).chain(&ops[i + 1..]).cloned().collect(),
+            None => ops,
+        };
         let next = a as u64 + len as u64;
         let (mut flow, mut target, mut slot) = (Flow::Fall, None, None);
         let (mut refs, mut code_imms, mut rw) = (Vec::new(), Vec::new(), Vec::new());
+        let mut loaded = 0u8;
         // Local constant fold (a stand-in for Ghidra's constant propagation): 4-byte register
         // and temporary values from immediates, initialised memory, ADD/SUB/XOR/AND/OR. A
         // computed value (not a plain immediate) stored to memory that is code is a code
@@ -1944,6 +1990,7 @@ impl Analysis {
         let (uniq, rs, w, sp) = (sl.uniq_space(), self.reg_space, self.width, self.sp);
         fold.regs.retain(|f| f.0 != uniq);
         fold.stack.clear();
+        fold.stack_regs.clear();
         fold.mem_size = 0;
         fold.data.clear();
         let val = |v: &crate::sleigh::Varnode, fold: &Fold| -> Option<(Val, bool)> {
@@ -2001,14 +2048,41 @@ impl Analysis {
             fold.mem.remove(old);
         }
         let mut computed = None;
-        for op in &ops {
+        fold.to_next = None;
+        for (i, op) in ops.iter().enumerate().take(upto) {
+            if op.opc == 5 && op.ins[0].space == code && op.ins[0].offset == next && fold.to_next.is_none() {
+                fold.to_next = Some(i);
+            }
             if matches!(op.opc, 2 | 3) {
                 // for the stack variables of `stack_uses`; nothing here reads these
                 let size = if op.opc == 2 { op.out.as_ref().map_or(0, |o| o.size) } else { op.ins[2].size };
                 fold.mem_size = size;
                 match op.ins.get(1).and_then(|v| val(v, fold)) {
-                    Some((Val::S(b, d), _)) if b == sp => fold.stack.push((d, size, op.opc == 3)),
-                    Some((Val::C(x), _)) if x <= u64::from(u32::MAX) => fold.data.push((x as u32, size, op.opc == 3)),
+                    Some((Val::S(b, d), _)) if b == sp => {
+                        let mut held: Vec<(u64, u32)> = fold
+                            .regs
+                            .iter()
+                            .filter(|f| f.0 == rs && f.2 == w)
+                            .filter_map(|f| fold.stack_offset(rs, sp, w, f.1).map(|d| (f.1, d)))
+                            .collect();
+                        if !held.iter().any(|h| h.0 == sp) {
+                            held.extend(fold.stack_offset(rs, sp, w, sp).map(|d| (sp, d)));
+                        }
+                        fold.stack.push((d, size, op.opc == 3));
+                        fold.stack_regs.push(held);
+                    }
+                    Some((Val::C(x), _)) if x <= u64::from(u32::MAX) => {
+                        fold.data.push((x as u32, size, op.opc == 3));
+                        // SymbolicPropogator's LOAD makes a READ reference through a folded
+                        // address whatever the size loaded (Hatred's 0x1d461d0 `MOVUPS XMM0,[RCX]`);
+                        // a pointer's size is the LOAD case below
+                        if let Some(x) = addr(x).filter(|_| op.opc == 2 && size != w) {
+                            if !rw.contains(&x) {
+                                rw.push(x);
+                            }
+                            loaded = size.min(255) as u8;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -2218,11 +2292,29 @@ impl Analysis {
                 }
             }
         }
+        if let Some((_, t, _)) = fixup {
+            (flow, target) = (Flow::Call, Some(t));
+        }
         let computed = computed.filter(|_| slot.is_none());
         let inner = ops.iter().any(|op| {
             matches!(op.opc, 4 | 5) && (op.ins[0].space != code || op.ins[0].offset == a as u64 + len as u64)
         });
-        Some(Ins { len: len as u8, flow, target, slot, computed, refs, rw, code_imms, nop: ops.is_empty(), inner })
+        if ops.iter().any(|op| matches!(op.opc, 4 | 5) && op.ins[0].space == code && op.ins[0].offset == a as u64) {
+            fold.to_next = None;
+        }
+        Some(Ins {
+            len: len as u8,
+            flow,
+            target,
+            slot,
+            computed,
+            refs,
+            rw,
+            code_imms,
+            nop: ops.is_empty(),
+            inner,
+            load: loaded,
+        })
     }
 
     /// Ghidra's `disassemble(addr)` after analysis: recursive descent from `addrs` into bytes no
@@ -2751,14 +2843,14 @@ impl Analysis {
             }
             _ => return None,
         };
-        // `MOVSXD r,dword ptr [base + index*4]`
+        // `MOVSXD r,dword ptr [base + index*4]`; a base of RBP or R13 takes a zero 8-bit
+        // displacement (`[r13 + rax*4 + 0]`, cpp3-clang 0x11a7e2)
         let (mx, m) = rex(bytes(*movsxd)?);
         let (dst, base, mut index) = match m {
-            [0x63, m, sib, ..]
+            [0x63, m, sib, disp, ..]
                 if mx & 8 != 0
-                    && m & 0xc7 == 0x04
+                    && ((m & 0xc7 == 0x04 && sib & 7 != 5) || (m & 0xc7 == 0x44 && sib & 7 == 5 && *disp == 0))
                     && sib & 0xc0 == 0x80
-                    && sib & 7 != 5
                     && (sib >> 3) & 7 | (mx & 2) << 2 != 4 =>
             {
                 ((m >> 3) & 7 | (mx & 4) << 1, sib & 7 | (mx & 1) << 3, (sib >> 3) & 7 | (mx & 2) << 2)
@@ -3159,6 +3251,7 @@ impl Analysis {
                     let m = self.insns.get_mut(a).unwrap();
                     if !std::mem::replace(&mut reached[(a - self.code_lo) as usize], true) {
                         (m.refs, m.rw, m.code_imms, m.computed) = (Vec::new(), Vec::new(), Vec::new(), None);
+                        m.load = 0;
                     }
                     for &r in &d.refs {
                         if !m.refs.contains(&r) {
@@ -3176,6 +3269,7 @@ impl Analysis {
                         }
                     }
                     m.computed = m.computed.or(d.computed);
+                    m.load = m.load.max(d.load);
                 }
             }
         }
@@ -3188,7 +3282,8 @@ impl Analysis {
     }
 
     /// The walk of `flow_constants`; `visit` sees each instruction's address and the state
-    /// after it. With `stack_and`, `AND ESP,mask` keeps ESP a stack address.
+    /// after it. With `stack_and` (the Stack analyzer's walk), `AND ESP,mask` keeps ESP a stack
+    /// address and every call fixup runs.
     pub fn flow_walk(
         &self,
         img: &Image,
@@ -3216,10 +3311,22 @@ impl Analysis {
                 if !visited.contains(&a) {
                     extra = None;
                 }
+                let pre = ins.inner.then(|| fold.clone());
                 let Some(d) = self.decode(img, sl, p, a, &mut fold) else { break };
                 visit(a, &fold);
                 let computed = d.computed;
                 out.push((a, d));
+                // a CBRANCH to the next instruction (CMOVcc) whose condition is not known true:
+                // applyPcode saves the state at the CBRANCH as a flow to the next instruction
+                // (SymbolicPropogator.java:1239-1247) and goes on; that flow, taken later, runs
+                // through code already visited, so up to MAX_EXTRA_INSTRUCTION_FLOW again
+                // ponytail: a condition the fold knows true (Java takes the branch first, the
+                // rest of the instruction later) is not modelled; nor REP's branch to its start
+                if let (Some(mut at), Some(k)) = (pre, fold.to_next) {
+                    if self.decode_ops(img, sl, p, a, &mut at, k).is_some() {
+                        stack.push((a + ins.len as u32, a, at, extra));
+                    }
+                }
                 let call = matches!(ins.flow, Flow::Call | Flow::CallInd);
                 if !popped && !visited.insert(a) {
                     let e = extra.map_or(0, |e| e + 1);
@@ -3240,6 +3347,7 @@ impl Analysis {
                     }
                     Flow::JumpInd => {
                         let cases = self.tables.get(&a).cloned().unwrap_or_default();
+                        let fold = Fold { via_table: true, ..fold.clone() };
                         stack.extend(cases.into_iter().chain(computed).map(|t| (t, a, fold.clone(), extra)));
                         break;
                     }
@@ -3273,6 +3381,11 @@ impl Analysis {
     /// bytes popped besides the return address); returns the ones replaced.
     pub fn swap_call_purges(&mut self, purges: HashMap<u32, u32>) -> HashMap<u32, u32> {
         std::mem::replace(&mut self.purge, purges)
+    }
+
+    /// Replace the call fixups a direct call runs; returns the ones replaced.
+    pub fn swap_call_fixups(&mut self, fixups: Fixups) -> Fixups {
+        std::mem::replace(&mut self.fixups, fixups)
     }
 
     pub fn purge(&self, f: u32) -> Option<u32> {
@@ -3428,6 +3541,7 @@ mod tests {
                 code_imms: vec![],
                 nop: false,
                 inner: false,
+                load: 0,
             };
             (a, i)
         };
@@ -3449,6 +3563,7 @@ mod tests {
             fpu_ip: None,
             purge: HashMap::new(),
             callee_purges: HashMap::new(),
+            fixups: HashMap::new(),
             reg_space: 0,
             width: 4,
             sp: 0x10,

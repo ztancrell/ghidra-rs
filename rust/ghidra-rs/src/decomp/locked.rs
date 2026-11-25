@@ -20,6 +20,8 @@ pub(crate) struct Param {
     /// none for a `void` output (`hasStorage`)
     pub(crate) storage: Option<Storage>,
     pub(crate) ty: TypeId,
+    /// the parameter symbol's name lock (`ParameterPieces::namelock`; a record's `namelock`)
+    pub(crate) name_locked: bool,
 }
 
 /// The locked part of a prototype: every parameter, the output and the model are locked
@@ -133,7 +135,7 @@ pub(crate) fn lock_prototype(
     for (name, ty) in inputs {
         let st = assign(&m.input, types, ty, &mut status)
             .ok_or_else(|| LowlevelError(format!("Cannot assign parameter address for {}", types.print_raw(ty))))?;
-        params.push(Param { name, storage: Some(st), ty });
+        params.push(Param { name, storage: Some(st), ty, name_locked: false });
     }
     let mut proto = FuncProto::default();
     proto.set_model(models, id);
@@ -141,7 +143,7 @@ pub(crate) fn lock_prototype(
     proto.locked = Some(Box::new(Locked {
         inputs: params,
         output_size_locked: types.meta(output.1) == Meta::Unknown,
-        output: Param { name: output.0, storage: out_storage, ty: output.1 },
+        output: Param { name: output.0, storage: out_storage, ty: output.1, name_locked: false },
         dotdotdot,
     }));
     Ok(proto)
@@ -246,7 +248,42 @@ pub(crate) fn prototype_types(fd: &mut Funcdata, arch: &Arch) -> Result<bool> {
         // the parameter symbol of the local scope types it (setSymbolProperties)
         update_type(fd, vn, p.ty, true, true);
     }
+    param_symbols(fd, arch, &locked)?;
     Ok(true)
+}
+
+/// `ProtoStoreSymbol::setInput` (fspec.cc:3143-3179) for the locked parameters: each is a
+/// category-0 symbol of the local scope, type-locked (name-locked as its record says), valid
+/// everywhere where the scope owns its storage (`discoverScope`), else at the restricted use
+/// point just before the entry; then `FuncProto::updateThisPointer` (fspec.cc:3567-3579). The
+/// scope keeps them over a restart in the C++ (they are locked); here `clear_analysis` clears
+/// the scope, so they are made again when there are none.
+fn param_symbols(fd: &mut Funcdata, arch: &Arch, locked: &Locked) -> Result<()> {
+    use super::scope::{SymbolEntry, UseLimit, LOCAL};
+    if !fd.symtab.category(LOCAL, 0).is_empty() {
+        return Ok(());
+    }
+    for (i, p) in locked.inputs.iter().enumerate() {
+        let Some(st) = &p.storage else { continue };
+        let (space, offset, size) = location(fd, st)?;
+        let uselimit = if space == Space::Stack && fd.localmap.in_scope(offset, size) {
+            UseLimit::default()
+        } else {
+            let code = Space::Sleigh(arch.sleigh.code_space());
+            let at = fd.entry.wrapping_sub(1);
+            UseLimit(vec![(code, at, at)])
+        };
+        let entry = SymbolEntry { space, offset, size, uselimit, conflict: false, piece: None };
+        let sym = fd.symtab.add_symbol(LOCAL, &p.name, Some(p.ty), None, Some(entry))?;
+        fd.symtab.set_category(sym, 0, i as u32);
+        fd.symtab.lock_symbol(&fd.types, sym, true, p.name_locked);
+    }
+    if arch.spec.models.get(fd.proto.model.unwrap_or(arch.spec.models.default)).name == "__thiscall" {
+        if let Some(&first) = fd.symtab.category(LOCAL, 0).first() {
+            fd.symtab.set_this_pointer(first);
+        }
+    }
+    Ok(())
 }
 
 /// The locked parameter of the function that `vn` maps to (`Varnode::getSymbolEntry` in the

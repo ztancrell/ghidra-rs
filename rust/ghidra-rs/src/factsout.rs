@@ -46,6 +46,13 @@ pub enum Underived {
     Comments,
     /// the label of a switch case (`caseD_3` in a `switchD_...` namespace)
     Label,
+    /// a function's local variables (its `localdb` past the parameters), which only its own
+    /// decompile reads: the DWARF import's committed locals, or a stack variable of the
+    /// analysis a walk past visited code may have made (`Exporter::locals`)
+    Locals,
+    /// the prototype overrides at the call sites in a function's body, which only its own
+    /// decompile reads (FormatStringAnalyzer)
+    Overrides,
 }
 
 impl Underived {
@@ -54,6 +61,8 @@ impl Underived {
             Underived::Function => "function",
             Underived::Comments => "comments",
             Underived::Label => "label",
+            Underived::Locals => "locals",
+            Underived::Overrides => "overrides",
         }
     }
 }
@@ -238,6 +247,9 @@ struct Exporter<'a> {
     ptr: u32,
     /// ELF: the `type` records of the DWARF import (`Inputs::dwarf_types`)
     dwarf_types: &'a HashMap<String, Result<String, String>>,
+    /// the ids of those records that are not written or refer to one, directly or not
+    /// (`bad_types`)
+    dwarf_bad: HashMap<String, String>,
     /// the ids of the namespaces the written records are in, by path (the global one is 0)
     ns_ids: HashMap<Vec<String>, u32>,
     /// of `ns_ids`, the ones a record is in: Java writes an `ns` record for these
@@ -298,6 +310,35 @@ pub fn callfixups(cspec: &str) -> HashMap<String, String> {
         }
     }
     m
+}
+
+/// The call fixup of a function named `name` (CallFixupAnalyzer.getCallFixupNameForFunction):
+/// the name without a `libID_conflict_` prefix, else with `_` or `__` before it.
+fn fixup_of<'a>(fixups: &'a HashMap<String, String>, name: &str) -> Option<&'a String> {
+    let name = if name.starts_with("libID_conflict_") { name.replace("libID_conflict_", "") } else { name.to_string() };
+    fixups.get(&name).or_else(|| fixups.get(&format!("_{name}"))).or_else(|| fixups.get(&format!("__{name}")))
+}
+
+/// The p-code of the call fixup of each function that has one, by entry, for the facts' walks
+/// (`Analysis::swap_call_fixups`), and whether it was installed before Constant Propagation: the
+/// Call-Fixup Installer (`AnalysisPriority.DISASSEMBLY.after()`) runs as a function gets its name,
+/// and a name of Function ID's comes after Constant Propagation (mercs2's `__chkstk`).
+pub fn call_fixups(
+    img: &Image,
+    an: &Analysis,
+    sl: &Sleigh,
+    inputs: &Inputs,
+) -> Result<crate::analysis::Fixups, String> {
+    let pcode = crate::decomp::callfixup_pcode(sl, inputs.cspec).map_err(|e| e.0)?;
+    let names = callfixups(inputs.cspec);
+    let none = Protos::default();
+    let funcs = name_functions(img, an, inputs.fid, inputs.protos.unwrap_or(&none));
+    let early = name_functions(img, an, &BTreeMap::new(), inputs.protos.unwrap_or(&none));
+    let fixup = |func: &Func| pcode.get(fixup_of(&names, &func.name)?);
+    Ok(funcs
+        .iter()
+        .filter_map(|(&f, func)| Some((f, (early.get(&f).and_then(fixup).is_some(), fixup(func)?.clone()))))
+        .collect())
 }
 
 impl Exporter<'_> {
@@ -377,7 +418,7 @@ impl Exporter<'_> {
                 }
             }
             let xml = xml.replace("@ADDR@", &format!("0x{addr:x}")).replace("@SIZE@", &size.to_string());
-            self.note_types(&xml);
+            let _ = self.note_types(&xml);
             return xml;
         }
         let name = esc(&f.name);
@@ -431,7 +472,7 @@ impl Exporter<'_> {
             false => format!("<symbollist>{params}{locals}</symbollist>"),
         };
         let ns = self.ns_id(&f.ns);
-        let inject = self.fixups.get(&f.name).map(|i| format!("<inject>{i}</inject>")).unwrap_or_default();
+        let inject = fixup_of(&self.fixups, &f.name).map(|i| format!("<inject>{i}</inject>")).unwrap_or_default();
         format!(
             "<doc id=\"0x{ns:x}\"><mapsym><function id=\"0x0\" name=\"{name}\" size=\"{size}\"{nr}>\
              <addr space=\"ram\" offset=\"0x{addr:x}\"/><localdb lock=\"false\" main=\"stack\">\
@@ -442,10 +483,10 @@ impl Exporter<'_> {
         )
     }
 
-    /// Keep the `type` records `xml` refers to, and those they refer to. False: one of them is
-    /// a data type of the DWARF import that is not ported.
-    fn note_types(&mut self, xml: &str) -> bool {
-        let mut ok = true;
+    /// Keep the `type` records `xml` refers to, and those they refer to. `Err`: one of them is
+    /// a data type of the DWARF import that is not ported, with why that one is not.
+    fn note_types(&mut self, xml: &str) -> Result<(), String> {
+        let mut ok = Ok(());
         let mut todo: Vec<String> = Vec::new();
         let scan = |x: &str, todo: &mut Vec<String>| {
             for t in x.split("<typeref ").skip(1) {
@@ -456,13 +497,18 @@ impl Exporter<'_> {
         };
         scan(xml, &mut todo);
         while let Some(id) = todo.pop() {
+            // a record noted before is not scanned again: whether what it refers to is written
+            // is known of every record at once
+            if let Some(why) = self.dwarf_bad.get(&id) {
+                ok = Err(why.clone());
+            }
             match (self.protos.types.get(&id), self.dwarf_types.get(&id)) {
                 (Some(rec), _) | (None, Some(Ok(rec))) => {
                     if self.types.insert(id) {
                         scan(rec, &mut todo);
                     }
                 }
-                (None, Some(Err(_))) => ok = false,
+                (None, Some(Err(why))) => ok = Err(why.clone()),
                 (None, None) => {}
             }
         }
@@ -716,14 +762,17 @@ impl Exporter<'_> {
     /// instruction's last LOAD or STORE moves, an LEA of a stack address one of no size
     /// (`undefined`), and a variable that meets others becomes one over them all
     /// (`accumulateVariable`).
-    // ponytail: "an operand names the address" is "not the slot a PUSH, POP or CALL uses
-    // itself" (Ghidra adds up the operand's registers and scalars, `getStackOpIndex`). A call
+    // ponytail: getStackOpIndex reads the registers of the pointer's width only (an address-size
+    // prefix's 32-bit register in x86-64 code finds no operand). A call
     // whose purge is unknown ends the stack tracking of its path; the purges are the ones
     // `call_purges` gives the analysis for this walk: those X86 Function Callee Purge (500) set
     // at its turns in the queue (`Analysis::callee_purges`), which all come before the Stack
     // analyzer's turn (903). Not modelled: Java's Stack also runs on each later batch of new
     // functions, before the purge of functions made after that
-    fn locals(&self, p: &mut Parse, f: u32) -> String {
+    /// The stack variables of `f` as `<mapsym>`s, and whether a walk of an instruction past code
+    /// already walked made a stack reference its first walk did not, or an operand indexes a stack
+    /// address with a register the walk does not know (not derived then).
+    fn locals(&self, p: &mut Parse, f: u32) -> (String, bool) {
         const PREFIXES: [u8; 10] = [0x66, 0x67, 0xf2, 0xf3, 0x26, 0x2e, 0x36, 0x3e, 0x64, 0x65];
         let (rs, list) = self.sl.registers();
         // x86-64: RSP and 8-byte registers (RAX 0, RCX 8, ..., RDI 0x38; R8-R15 from 0x80)
@@ -731,19 +780,40 @@ impl Exporter<'_> {
         let sp_name = if elf64 { "RSP" } else { "ESP" };
         let sp = list.iter().find(|r| r.0 == sp_name).map_or(4 * w as u64, |r| r.1);
         // offset -> (bytes, of no data-type)
-        let mut vars: BTreeMap<i32, (u32, bool)> = BTreeMap::new();
-        let mut accumulate = |offset: i32, ref_size: u32| {
+        type Vars = BTreeMap<i32, (u32, bool)>;
+        // the stack references of each instruction at its first walk; every reference in walk
+        // order, with whether a jump-table case's walk past visited code made it and its first
+        // walk did not
+        let (mut first, mut log) = (HashMap::<u32, Vec<(i32, u32)>>::new(), Vec::new());
+        // the offset of the stack reference on each operand (instruction, operand index), as
+        // Instruction.getPrimaryReference finds it; the operand objects come from a parse of its own
+        let mut op_refs: HashMap<(u32, usize), i32> = HashMap::new();
+        let mut fp = self.sl.new_parse();
+        fp.fid = true;
+        // an indexed stack operand without a reference (below)
+        let mut indexed = false;
+        let accumulate = |vars: &mut Vars, offset: i32, ref_size: u32| {
             // MAX_LOCAL_OFFSET, MAX_PARAM_OFFSET; from the return address up (the stack
             // pentry's offset, getBaseStackParamOffset: 4, x86-64-gcc.cspec 8) are parameters
             if !(-(64 * 1024)..w as i32).contains(&offset) {
                 return;
             }
             let size = ref_size.max(1) as i32;
-            let hits: Vec<(i32, u32)> = vars
-                .range(..offset + size)
-                .filter(|(&o, &(len, _))| o + len as i32 > offset)
-                .map(|(&o, &(len, _))| (o, len))
-                .collect();
+            // getVariablesIntersecting: at each probe from `offset` on, the variable
+            // getVariableContaining finds (the one starting last at or before it, where it
+            // reaches it); the probe then moves on by that variable's length from the probe, not
+            // to its end, so a variable past it is missed and the variables can overlap
+            let mut hits: Vec<(i32, u32)> = Vec::new();
+            let mut o = offset;
+            while o < offset + size {
+                match vars.range(..=o).next_back() {
+                    Some((&s, &(len, _))) if s + len as i32 > o => {
+                        hits.push((s, len));
+                        o += len as i32;
+                    }
+                    _ => o += 1,
+                }
+            }
             match (hits.first(), hits.last()) {
                 (Some(&(_, len)), _) if len == size as u32 => {} // "exact match": the length alone
                 (Some(&(first, _)), Some(&(last, len))) => {
@@ -767,29 +837,32 @@ impl Exporter<'_> {
             let op = &op[rex.is_some() as usize..];
             let reg = |r: u64| fold.stack_offset(rs, sp, w, r);
             let modrm = op.get(1).map_or(0, |m| (m >> 3) & 7);
-            // the slot the instruction uses itself, which no operand names
-            let (skip_all, own_store, own_load) = match (op.first().copied().unwrap_or(0), modrm, op.get(1)) {
-                (0xc2 | 0xc3 | 0xca | 0xcb | 0xcf | 0xc8 | 0xc9 | 0x60 | 0x61 | 0x9c | 0x9d, ..) => (true, None, None),
-                (0xe8 | 0x9a, ..) | (0xff, 2 | 3, _) => (false, Some(None), None), // CALL: any store
-                // x86-64 `PUSH RSP`: its operand holds the slot's address when the STORE is
-                // made (RSP is lowered first), so getStackOpIndex finds it (Java's `_start`)
-                (0x54, ..) if elf64 && rex.is_none_or(|r| r & 1 == 0) => (false, None, None),
-                (0x50..=0x57 | 0x68 | 0x6a | 0x06 | 0x0e | 0x16 | 0x1e, ..) | (0xff, 6, _) => {
-                    (false, Some(reg(sp)), None)
-                }
-                (0x0f, _, Some(0xa0 | 0xa8)) => (false, Some(reg(sp)), None),
-                (0x58..=0x5f | 0x07 | 0x17 | 0x1f, ..) | (0x8f, 0, _) | (0x0f, _, Some(0xa1 | 0xa9)) => {
-                    (false, None, reg(sp).map(|d| d.wrapping_sub(w)))
-                }
-                _ => (false, None, None),
-            };
-            if skip_all {
+            let first_op = op.first().copied().unwrap_or(0);
+            // a return is terminal: evaluateSymbolicReference makes no reference there
+            if matches!(first_op, 0xc2 | 0xc3 | 0xca | 0xcb | 0xcf) {
                 return;
             }
-            for &(d, _, store) in &fold.stack {
-                let own = if store { own_store.is_some_and(|s| s.is_none_or(|s| s == d)) } else { own_load == Some(d) };
-                if !own {
-                    accumulate(d as i32, fold.mem_size);
+            let pop = matches!(first_op, 0x58..=0x5f | 0x07 | 0x17 | 0x1f)
+                || (first_op == 0x8f && modrm == 0)
+                || (first_op == 0x0f && matches!(op.get(1), Some(0xa1 | 0xa9)));
+            // (operand index, offset, bytes): the operand getStackOpIndex finds for each LOAD or
+            // STORE through a stack address
+            let mut refs = Vec::new();
+            let mut ops = Vec::new();
+            if !fold.stack.is_empty() || elf64 {
+                ops = match self.sl.decode(&mut fp, u64::from(a), bytes) {
+                    Ok(_) => self.sl.fid_parts(&fp).ops,
+                    Err(_) => Vec::new(),
+                };
+                for (&(d, _, _), held) in fold.stack.iter().zip(&fold.stack_regs) {
+                    let Some(i) = stack_op_index(&ops, held, d as i32) else { continue };
+                    // "Dirty Dirty nasty Hack for POP EBP problem": a POP of a register named
+                    // *BP makes no reference
+                    let bp = |r: u64| list.iter().any(|x| x.1 == r && x.0.contains("BP"));
+                    if pop && matches!(ops[i].objs.as_slice(), [crate::sleigh::FidObj::Reg(r)] if bp(*r)) {
+                        continue;
+                    }
+                    refs.push((i, d as i32, fold.mem_size));
                 }
             }
             // LEA: the stack address its register holds afterwards (x86-64 too: checkForX86
@@ -801,12 +874,68 @@ impl Exporter<'_> {
                     None => w as u64 * modrm as u64,
                 };
                 if let Some(d) = reg(at) {
-                    accumulate(d as i32, fold.mem_size);
+                    refs.push((0, d as i32, fold.mem_size));
                 }
             }
+            // defineFuncVariable: an operand whose primary reference is not a stack reference
+            // gets none. Constant Propagation's walks put a memory reference on the memory
+            // operand (one per instruction here) where one of them knew its address (Hatred's
+            // 0x1d461d0 `MOVUPS XMM0,[RCX]`, RCX 0x51ce518 on the path past a CMOVNZ)
+            if self.an.insns.get(&a).is_some_and(|i| !i.rw.is_empty()) {
+                refs.clear();
+            }
+            // ELF: an operand of a stack address plus a register the fold does not know (`[RSP +
+            // RCX*4 + 0x10]`) that makes no reference here: Java's VarnodeContext knows that
+            // register on some paths (a loop's counter) and makes references the fold cannot, so
+            // the variables are not derived (Hatred's 0x1bb8950, 0x25c8930)
+            use crate::sleigh::FidObj::Reg;
+            if elf64 && refs.is_empty() {
+                indexed |= ops.iter().any(|o| {
+                    o.objs.iter().any(|x| matches!(x, Reg(r) if reg(*r).is_some()))
+                        && o.objs.iter().any(|x| matches!(x, Reg(r) if reg(*r).is_none()))
+                });
+            }
+            // defineFuncVariable: an operand that has a stack reference already (an instruction
+            // walked again) adds to the variable at that reference's offset; one in range
+            // (MAX_LOCAL_OFFSET, MAX_PARAM_OFFSET) gets a reference
+            let refs: Vec<(i32, u32)> = refs
+                .into_iter()
+                .filter(|&(_, d, _)| (-(64 * 1024)..=2048).contains(&d))
+                .map(|(i, d, size)| (*op_refs.entry((a, i)).or_insert(d), size))
+                .collect();
+            // an instruction walked again past code already walked (MAX_EXTRA_INSTRUCTION_FLOW)
+            // after a case of a jump table runs on the state that case brought; Java's walk of
+            // Hatred's 0x16ee820 makes no stack reference there (its VarnodeContext.flowStart and
+            // the state it merges were not traced). Any revisit is not the condition: mercs2 has
+            // 1,055 functions with Java's stack variables where a revisit changes them
+            let was = first.entry(a).or_insert_with(|| refs.clone());
+            for r in refs {
+                log.push((r, fold.via_table && !was.contains(&r)));
+            }
         });
+        let build = |all: bool| {
+            let mut vars = Vars::new();
+            for &((d, size), new) in &log {
+                if all || !new {
+                    accumulate(&mut vars, d, size);
+                }
+            }
+            vars
+        };
+        let vars = build(true);
+        // not derived where those references change the variables. ELF only: on mercs2 (PE) 3
+        // of the 9 functions this finds have Java's stack variables, so it is not Java's rule,
+        // and the PE facts stay as they were
+        let revisit_new = elf64 && (vars != build(false) || indexed);
         let mut xml = String::new();
+        // addStackLocalVariables adds them in offset order; one that overlaps one added before
+        // fails VariableUtilities.checkVariableConflict and is left out
+        let mut end = i32::MIN;
         for (&offset, &(len, plain)) in &vars {
+            if offset < end {
+                continue;
+            }
+            end = offset + len as i32;
             let name = if offset < 0 { format!("local_{:x}", -offset) } else { format!("local_res{offset:x}") };
             let ty = match len {
                 1 if plain => self.typeref("undefined"),
@@ -824,7 +953,7 @@ impl Exporter<'_> {
                 if elf64 { offset as i64 as u64 } else { u64::from(offset as u32) }
             );
         }
-        xml
+        (xml, revisit_new)
     }
 }
 
@@ -1012,6 +1141,55 @@ pub struct Inputs<'a> {
     /// ELF: the call sites of the GCC exception tables (`crate::gccexcept::call_sites`); None:
     /// not read, every function's comments are not derived then
     pub eh_sites: Option<&'a [crate::gccexcept::CallSite]>,
+    /// ELF: the DWARF importer's `Unresolved local var` PRE comments (`crate::dwarf::Import::unresolved`)
+    pub dwarf_pre: &'a [(u64, Option<String>)],
+}
+
+/// The ids of the DWARF `type` records that are not written (`Err`) or refer to one through
+/// their `<typeref>`s, directly or not, with why the one not written is not.
+fn bad_types(types: &HashMap<String, Result<String, String>>) -> HashMap<String, String> {
+    let mut by: HashMap<&str, Vec<&str>> = HashMap::new(); // id -> the records referring to it
+    let mut todo: Vec<(&str, &String)> = Vec::new();
+    for (id, rec) in types {
+        match rec {
+            Err(why) => todo.push((id, why)),
+            Ok(x) => {
+                for t in x.split("<typeref ").skip(1) {
+                    if let Some(to) = t.split(" id=\"0x").nth(1).and_then(|r| r.split('"').next()) {
+                        by.entry(to).or_default().push(id);
+                    }
+                }
+            }
+        }
+    }
+    let mut bad = HashMap::new();
+    while let Some((id, why)) = todo.pop() {
+        if bad.insert(id.to_string(), why.clone()).is_none() {
+            todo.extend(by.get(id).into_iter().flatten().map(|&by| (by, why)));
+        }
+    }
+    bad
+}
+
+/// NewFunctionStackAnalysisCmd.getStackOpIndex (NewFunctionStackAnalysisCmd.java:548-590): the
+/// first operand whose objects, added up in order (a register only where it holds a stack
+/// address, `held`; a scalar signed), reach the stack `offset`, in full or in its low 16 bits.
+fn stack_op_index(ops: &[crate::sleigh::FidOperand], held: &[(u64, u32)], offset: i32) -> Option<usize> {
+    use crate::sleigh::FidObj;
+    ops.iter().position(|op| {
+        let mut local: i32 = 0;
+        op.objs.iter().any(|o| {
+            match *o {
+                FidObj::Reg(r) => match held.iter().find(|h| h.0 == r) {
+                    Some(&(_, d)) => local = local.wrapping_add(d as i32),
+                    None => return false,
+                },
+                FidObj::Scalar(s) => local = local.wrapping_add(s as i32),
+                FidObj::Addr => return false,
+            }
+            local == offset || (local & 0xffff) == offset
+        })
+    })
 }
 
 /// What the facts take of a function the DWARF importer gives a signature.
@@ -1022,6 +1200,8 @@ pub struct DwarfFunc {
     pub plate: Result<Option<String>, ()>,
     /// its namespaces, name and prototype
     pub facts: crate::dwarf::pcode::FuncFacts,
+    /// what of its local variables is not ported (`crate::dwarf::Func::locals_underived`)
+    pub locals: Option<String>,
 }
 
 /// The prototype Java has for a function of the DWARF import after the Demangler analyzer went
@@ -1099,7 +1279,8 @@ pub fn call_purges(img: &Image, an: &Analysis, inputs: &Inputs) -> HashMap<u32, 
 
 /// Write the facts of `an` to `out`.
 pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mut dyn Write) -> io::Result<()> {
-    let Inputs { fid, protos, analyzed, purges, cspec, strings, dwarf, dwarf_types, archive, eh_sites } = *inputs;
+    let Inputs { fid, protos, analyzed, purges, cspec, strings, dwarf, dwarf_types, archive, eh_sites, dwarf_pre } =
+        *inputs;
     let none = Protos::default();
     let mut ex = Exporter {
         img,
@@ -1114,6 +1295,7 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         core: core_ids(if img.elf64 { CORE_TYPES64 } else { CORE_TYPES }),
         ptr: if img.elf64 { 8 } else { 4 },
         dwarf_types,
+        dwarf_bad: bad_types(dwarf_types),
         ns_ids: HashMap::new(),
         ns_used: BTreeSet::new(),
     };
@@ -1137,13 +1319,64 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
     // GccExceptionAnalyzer's PRE and POST comments; a POST comment is at the start of the code
     // unit that holds the call site's last address (markEndOfTry: getCodeUnitContaining), here
     // the instruction of the finished analysis, else the address itself (an undefined byte)
-    let (eh_pre, eh_post) = crate::gccexcept::comments(eh_sites.unwrap_or(&[]), |a| {
+    let unit = |a: u64| {
         let Ok(a32) = u32::try_from(a) else { return a };
         match an.insns.range(..=a32).next_back() {
             Some((&s, i)) if a32 - s < u32::from(i.len) => u64::from(s),
             _ => a,
         }
-    });
+    };
+    // the DWARF importer's PRE comments come first (it runs before the exception analyzer):
+    // DWARFUtil.appendComment (DWARFUtil.java:343-359) skips a comment the code unit's has,
+    // AppendCommentCmd joins with a newline; an address whose comment is not known is noted
+    let mut dwarf_unknown = std::collections::BTreeSet::new();
+    // the code that flows from the fallthrough of a call to a non-returning function: where
+    // Java learns that the callee does not return after the DWARF import, Find Non-Returning
+    // Functions repairs the flow (ClearFlowAndRepairCmd with ClearOptions(true), comments too)
+    // and the code is disassembled again from another reference without the comments (Hatred's
+    // 0x2c153fd after `CALL AssertFailed` at 0x2c153e0); when Java learned it is not ported
+    // ponytail: every such flow, not only the code ClearFlowAndRepairCmd clears (code with a
+    // reference from outside it stays)
+    let mut after_noreturn: HashSet<u32> = HashSet::new();
+    for (&a, i) in &an.insns {
+        if i.flow != Flow::Call || !i.target.is_some_and(|t| an.noreturn.contains(&t)) {
+            continue;
+        }
+        let mut todo = vec![a + u32::from(i.len)];
+        while let Some(x) = todo.pop() {
+            let Some(j) = an.insns.get(&x) else { continue };
+            if an.funcs.contains(&x) || !after_noreturn.insert(x) {
+                continue;
+            }
+            if j.falls_through() && !(j.flow == Flow::Call && j.target.is_some_and(|t| an.noreturn.contains(&t))) {
+                todo.push(x + u32::from(j.len));
+            }
+            if matches!(j.flow, Flow::Jump | Flow::CondJump) {
+                todo.extend(j.target);
+            }
+        }
+    }
+    let mut pre0: BTreeMap<u64, String> = BTreeMap::new();
+    for (at, s) in dwarf_pre {
+        let at = unit(*at);
+        let s = s.as_ref().filter(|_| !u32::try_from(at).is_ok_and(|a| after_noreturn.contains(&a)));
+        match s {
+            None => {
+                dwarf_unknown.insert(at);
+            }
+            Some(s) => match pre0.get_mut(&at) {
+                Some(old) if old.contains(s.as_str()) => {}
+                Some(old) => {
+                    old.push_str("\nUnresolved local var: ");
+                    old.push_str(s);
+                }
+                None => {
+                    pre0.insert(at, format!("Unresolved local var: {s}"));
+                }
+            },
+        }
+    }
+    let (eh_pre, eh_post) = crate::gccexcept::comments(eh_sites.unwrap_or(&[]), unit, pre0);
 
     writeln!(out, "ghidra-rs-facts 2")?;
     writeln!(out, "coretypes\t{}", (if img.elf64 { CORE_TYPES64 } else { CORE_TYPES }).trim_end())?;
@@ -1249,7 +1482,7 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
     // Java's is not derived: a definition `export_elf64` leaves out, or one on a function with
     // a call fixup
     let archived = |ex: &Exporter, a: Option<u32>, name: &str| match a.map(|a| applied.get(&a)) {
-        Some(Some(Some(def))) if ex.protos.by_name.contains_key(*def) && !ex.fixups.contains_key(name) => {
+        Some(Some(Some(def))) if ex.protos.by_name.contains_key(*def) && fixup_of(&ex.fixups, name).is_none() => {
             Ok(Some(*def))
         }
         Some(None) => Ok(None),
@@ -1277,7 +1510,11 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
             None => purges.get(&end).copied(),
         };
         let thunk = func.thunked.is_some() || func.import.is_some();
-        let locals = if auto(f) && !thunk { ex.locals(&mut p, f) } else { String::new() };
+        let (locals, locals_revisit) = if auto(f) && !thunk { ex.locals(&mut p, f) } else { (String::new(), false) };
+        // a PIC switch jump of the body whose table the pattern did not find: Java recovers it with
+        // the decompiler (DecompilerSwitchAnalyzer), so the body, its stack variables and the
+        // blocks its comments fall in are not known
+        let pic_miss = an.bodies.get(&f).is_some_and(|b| b.iter().any(|a| an.pic_switch_misses.contains(a)));
         // ELF: a function with a symbol whose body is one jump to another function is a thunk in
         // Java, as one without a symbol is (`name_functions`): it keeps its name and has the
         // prototype of the function it jumps to (to: its entry, the GOT slot of an import,
@@ -1327,7 +1564,8 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         // a prototype naming a data type that is not ported is not derived; neither is a DWARF
         // function that takes a prototype of the archive or of the function it jumps to (which
         // of the two Java keeps was seen once, DWARF's on Hatred's SDL_ThreadID_REAL, not traced)
-        let dwarf_ok = proto.is_some() && archive_proto.is_none() && via.is_none() && ex.note_types(&xml);
+        let types_ok = ex.note_types(&xml);
+        let dwarf_ok = proto.is_some() && archive_proto.is_none() && via.is_none() && types_ok.is_ok();
         // Java's Variadic Function Signature Override analyzer (FormatStringAnalyzer) writes a
         // prototype override at a call of a function with a variable argument list that takes a
         // format string. Not ported: a function that calls one the archive gives such a list
@@ -1366,10 +1604,35 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
         let cdecl = func.model == Some("__cdecl");
         // a function the DWARF importer gives a signature has it written (`dwarf_signature`),
         // or is not derived; a GNU name without one has the signature of its mangling in Java
+        // what only the function's own decompile reads: a caller still has its prototype
+        let locals_why = match dw.and_then(|d| d.locals.as_deref()) {
+            Some(why) => Some(why),
+            None if locals_revisit => Some(
+                "a stack reference a jump-table case's walk makes past visited code (VarnodeContext.flowStart), \
+                     or a stack operand indexed by a register the walk does not know",
+            ),
+            None if pic_miss => Some("a PIC switch jump whose table is not found (DecompilerSwitchAnalyzer)"),
+            None => None,
+        };
+        if locals_why.is_some() {
+            ex.underived.insert((f, Underived::Locals));
+        }
+        if calls_varargs {
+            ex.underived.insert((f, Underived::Overrides));
+        }
+        if std::env::var_os("GHIDRA_RS_UNDERIVED_DEBUG").is_some() {
+            if let Some(why) = locals_why {
+                eprintln!("underived-locals\t{f:x}\t{why}");
+            }
+            if calls_varargs {
+                eprintln!(
+                    "underived-overrides\t{f:x}\tcalls a function with a variable argument list (FormatStringAnalyzer)"
+                );
+            }
+        }
         if (dw.is_some() && !dwarf_ok)
             || (dw.is_none() && func.underived)
             || def.is_err()
-            || calls_varargs
             || (!img.elf64 && func.import.is_some() && !cdecl && !ex.protos.by_name.contains_key(&func.name))
         {
             ex.underived.insert((f, Underived::Function));
@@ -1389,7 +1652,8 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
                         why.push("dwarf: one jump to another function".into());
                     }
                     if !dwarf_ok && archive_proto.is_none() && via.is_none() {
-                        why.push("dwarf: a data type that is not written".into());
+                        let not = types_ok.as_ref().err().map_or("", |w| w.as_str());
+                        why.push(format!("dwarf: a data type that is not written ({not})"));
                     }
                 }
                 if dw.is_none() && func.underived {
@@ -1397,9 +1661,6 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
                 }
                 if def.is_err() {
                     why.push("the archive definition of a thunk or of a function it jumps to".into());
-                }
-                if calls_varargs {
-                    why.push("calls a function with a variable argument list (FormatStringAnalyzer)".into());
                 }
                 eprintln!("underived-function\t{f:x}\t{}", why.join("; "));
             }
@@ -1421,7 +1682,15 @@ pub fn export(img: &Image, an: &Analysis, sl: &Sleigh, inputs: &Inputs, out: &mu
             ),
         };
         // the exception tables not read: no function's comments are known
-        let plate = if img.elf64 && eh_sites.is_none() { Err(()) } else { plate };
+        let plate = if (img.elf64 && eh_sites.is_none()) || pic_miss { Err(()) } else { plate };
+        // a DWARF comment whose text is not known in the body
+        let plate = match body_ranges[&f]
+            .iter()
+            .any(|&(a, b)| dwarf_unknown.range(u64::from(a)..=u64::from(b)).next().is_some())
+        {
+            true => Err(()),
+            false => plate,
+        };
         // DecompileCallback.encodeComments (620-640): the header, then the body's PRE (`user2`)
         // and POST (`user3`) comments by address (no EOL or other plate comment is written here)
         let item = |kind: &str, at: u64, text: &str| {
@@ -1683,6 +1952,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stack_op_index_adds_up_registers_and_scalars() {
+        use crate::sleigh::{FidObj, FidOperand};
+        let op = |objs: Vec<FidObj>| FidOperand { mask: Vec::new(), objs, scalar: false };
+        // RSP (0x20) at -0x948, RBX (0x18) at -0x838 (Hatred's 0x199b200)
+        let held = [(0x20, (-0x948i32) as u32), (0x18, (-0x838i32) as u32)];
+        // `MOV dword ptr [RSP + 0xc],ESI`: the memory operand
+        let mov = [op(vec![FidObj::Reg(0x20), FidObj::Scalar(0xc)]), op(vec![FidObj::Reg(0x30)])];
+        assert_eq!(stack_op_index(&mov, &held, -0x93c), Some(0));
+        // `MOV dword ptr [RBX + RAX*4],0x0` with RAX -1: RAX holds no stack address, so the
+        // sum is RBX + 4, not the address -0x83c (Java makes no reference)
+        let store = [op(vec![FidObj::Reg(0x18), FidObj::Reg(0x0), FidObj::Scalar(4)]), op(vec![FidObj::Scalar(0)])];
+        assert_eq!(stack_op_index(&store, &held, -0x83c), None);
+        assert_eq!(stack_op_index(&store, &held, -0x838), Some(0));
+    }
+
+    #[test]
     fn strings_as_the_reference_analyzer_reads_them() {
         assert_eq!(ascii_len(b"hello\0"), Some(5));
         assert_eq!(ascii_len(b"four\0"), None); // fewer than 5 characters
@@ -1744,6 +2029,7 @@ mod tests {
                     base: "malloc".into(),
                     proto: Err(String::new()),
                 },
+                locals: None,
             },
         )]);
         let at = archive_applied(&ar, &symbols, &dwarf);

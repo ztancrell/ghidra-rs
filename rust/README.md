@@ -3904,7 +3904,8 @@ is not ported), an open hint outside the local ranges and the parameter range
 above `max_basetype_size`, a RETURN of a stack varnode (`checkUnaliasedReturn`),
 `annotateRawStackPtr` once type recovery has started. (Superseded, see "Local symbols" below:
 of these only a locked prototype with parameters is left, and the action runs
-in the `decompile` root.) The action of the `decompile` root
+in the `decompile` root. Superseded (2026-11-24, branch `dwarf-params`): only one with a
+parameter on the stack or in a join is left, see "Round 2: locked parameters as symbols".) The action of the `decompile` root
 stays unported (`restructure_varnode` fails there as before), and `r1-options.sh` keeps
 `aliasupdate` off in the function itself: there the rule fails on the INDIRECTs of an indexed
 stack STORE. Without an options file the rule is on in the `decompile` root too:
@@ -6504,6 +6505,9 @@ and arrays appear by name), one per function whose signature the import set, sor
   the constant operations of `DWARFExpressionEvaluator` that member offsets and bounds use.
   Raw parsing is its own code, not `gimli` (as asked); attributes are decoded on demand from
   the section bytes.
+- `dwarf/expr.rs` (2026-11-24, branch `dwarf-params`): location expressions, read, printed and
+  evaluated as the importer does for parameters and local variables; `.debug_loc` lists are in
+  `dwarf/read.rs`. See "DWARF parameter storage and local variables".
 - `dwarf/dtm.rs`: the data-type model the importer drives: built-ins with x86-64 GCC's data
   organization (sizes, the size-alignment map), pointers, arrays, typedefs, non-packed
   structures (`StructureDataType.replace`, `insertAtOffset`, `insertBitFieldAt` with its
@@ -7447,6 +7451,8 @@ what Java has (each with the reason in `dwarf::Func::storage`'s error):
 - a parameter, or a variable below the function, with a `DW_AT_location`: Java may read a
   storage from it (STORAGE commit mode and custom storage, a `<name>_local` parameter spill, a
   local variable of the function). Location expressions and lists are not evaluated;
+  Superseded (2026-11-24, branch `dwarf-params`): they are evaluated, see "DWARF parameter
+  storage and local variables";
 - no `this` and a parameter or a namespace: Java has the default model's name locked
   (`__stdcall`) on most of these and `unknown` on others. The setter is likely Java's Call
   Convention ID analyzer ("Archive prototypes applied" above), which decompiles the function;
@@ -7507,6 +7513,11 @@ entry looked up in `.debug_loc` (unit base `DW_AT_low_pc`, as DWARFLocationList.
 count fell to 9,283 and 21 of the locals were still silent, so that reading does not match
 Java's and was dropped. Open: port DWARFVariable.readStorage with DWARFExpressionEvaluator
 (which lists give a storage at the entry), and Call Convention ID on DWARF functions.
+Superseded (2026-11-24, branch `dwarf-params`): readStorage and the evaluator are ported. The
+`.debug_loc` reading above was right; what it missed is that Java's evaluator cannot read a
+register's value (`DW_OP_reg<n>` and `DW_OP_breg<n>` throw, RBP excepted), so a parameter in a
+register has no storage and the function is FORMAL. See "DWARF parameter storage and local
+variables". Call Convention ID stays open.
 
 mercs2 with Java's facts against Java's C (`ghidra-diff.sh m500`, MacBook, the desktop's
 12.3 facts and captured C): identical 488 -> 489 of 499, loud 11 -> 10, silent 0 -> 0. A
@@ -7580,7 +7591,9 @@ one `underived-function` line per function on stderr, `factsout::export`):
 | the demangler's signature on a DWARF function (one with a `def` too) | 2 |
 
 The location guard is checked first in `dwarf::Func::storage`, so the guards behind it on those
-3,997 are not counted. `--facts` on the MacBook: 215 s for the writer, 7.10 GB maximum RSS.
+3,997 are not counted. Superseded (2026-11-24, branch `dwarf-params`): the location guard and
+the `Unresolved local var` guard are gone; the current reasons are in "DWARF parameter storage
+and local variables". `--facts` on the MacBook: 215 s for the writer, 7.10 GB maximum RSS.
 
 Checks (desktop): `cargo test --release` 211 passed (master 210; the new one is
 `gccexcept::tests::one_call_site`); `cargo fmt --check` and `cargo clippy --release
@@ -7590,6 +7603,474 @@ PE path has no exception tables); `CORPORA=m8 tools/bars.sh` 57 of 57 lines equa
 switch, simple, r5d-adc) and `elf64-decomp.sh` (neither the prelude nor the decompiler
 changed), the loader on a Hatred function.
 
+#### DWARF parameter storage and local variables (branch `dwarf-params`, 2026-11-24)
+
+What the DWARF importer (Java 12.3) reads from `DW_AT_location`, ported:
+- `dwarf/expr.rs`: `DWARFExpression.read` and `toString(cu)` (DWARFExpression.java:59-80,
+  169-208; the opcodes and operand types of DWARFExpressionOpCode.java:29-195) and
+  `DWARFExpressionEvaluator.evaluate` (DWARFExpressionEvaluator.java:352-687) with the value
+  reader the importer sets (`withStaticStackRegisterValues(null, -8)`, x86-64.dwarf's
+  `stack_frame` RBP at -8 and `call_frame_cfa` 8). A register's value is not known to it:
+  `DW_OP_reg<n>` and `DW_OP_breg<n>` of any register but RBP fail with a value exception, and
+  `DW_OP_fbreg` falls through into `DW_OP_dup` (no `break`), as in Java.
+- `read.rs`: `.debug_loc` lists (DWARFLocationList.readV4, the unit's `DW_AT_low_pc` as base).
+- `dwarf/mod.rs`: the frame base at the entry (DWARFFunction.java:97-119), readParamStorage,
+  readLocalVariableStorage and readStorage (DWARFVariable.java:258-375: the location holding the
+  DWARF entry, `lexicalOffset` from the function's address, the terminal `DW_OP_deref` of a
+  local), processFuncChildren with its lexical blocks and inlined subroutines
+  (DWARFFunctionImporter.java:330-383), ParamSpillDWARFFunctionFixup (a parameter on the stack
+  below 0 becomes a local `<name>_local` and loses its storage) and
+  StorageVerificationDWARFFunctionFixup (STORAGE only when every parameter has a storage valid
+  at the entry; no parameter, or one without storage, is FORMAL).
+- the `Unresolved local var: <type> <name>@[<expression or ???>]` PRE comments of a local
+  without storage, at the start of its block (DWARFUtil.appendComment: a comment the code unit
+  has is not added again; AppendCommentCmd joins with a newline). `factsout` puts them before
+  the exception analyzer's comments (`gccexcept::comments` merges into them), at the start of
+  the instruction holding the address, as the POST comments.
+
+So a function whose parameters are in registers (on Hatred nearly all) is FORMAL, and its
+prototype is the calling convention's, which the facts already wrote. Still `underived ...
+function`, with the reason: a parameter or local whose location is not ported (DWARF 5 lists,
+`DW_OP_addrx`, a frame base not ported), a zero-length parameter (usesZeroLengthComponent;
+cpp3-clang's `_Scanner` with a `std::locale` not yet defined has no locked prototype in Java at
+all, not traced), STORAGE mode (custom storage), a local with a storage (commitLocalVariable,
+a `_local` spill included; a static local goes to the globals and does not count). A comment
+whose type has a `.conflict` twin, or whose location is not ported, makes the comments of the
+body it falls in `underived`. A data type with a `.conflict` twin in a prototype is now
+`underived` too (Hatred's FT_Face of 0x1cbd140 was `FT_Face.conflict` in Java). The plate
+comment is no longer `underived` for a variable or label below the function.
+
+`decomp/facts.rs`: `Architecture::createUnknownModel` for any model name of the facts the cspec
+lacks (x86-64-gcc.cspec has no `__thiscall`, which the DWARF import sets): a copy of the default
+model, compatible with it, its name printed in the declaration as the C++ does. Before, `load
+facts` failed on every such function. Not changed: the printer prints `unknown` in a
+declaration too, where the C++ does not (setPrintInDecl(false)); not seen in a check.
+
+Measured against Java 12.3 (`tools/facts-diff.sh`, master 14ba1171b8 -> branch, equal /
+different / missing / extra; MacBook, which matched the desktop before):
+
+| | record | master | branch |
+|---|---|---|---|
+| Hatred | func | 9,595 / 170,824 / 14 / 2 | 110,178 / 70,241 / 14 / 2 (of 180,433) |
+| | comments | 57,971 / 0 / 90,982 / 0 | 91,724 / 96 / 57,133 / 1 |
+| | type | 1,282 / 3 / 37,108 / 4 | 27,748 / 204 / 10,441 / 4 |
+| | `underived` records | 284,136 | 150,886 |
+| | func different or missing, not `underived` (silent) | 133 | 284 |
+| | comments different or missing, silent | 3 | 99 |
+| small corpus (14) | func | 352 / 707 / 53 / 0 | 583 / 476 / 53 / 0 (of 1,112) |
+| | comments | 292 / 2 / 352 / 0 | 524 / 6 / 116 / 0 |
+| | type | 67 / 0 / 1,040 / 0 | 650 / 30 / 427 / 9 |
+| | `underived` records | 1,321 | 873 |
+
+Every other row (data, label, ns) is unchanged. The new silent records are not prototypes:
+148 of the 151 new silent Hatred `func` records differ only in the stack locals of the
+analysis (`local_<n>` sizes, cat -1), which the DWARF guard hid before; 3 (0x1a615a0,
+0x1a616c0, 0x1a61760) have `this` as `TAsyncRunnable<void> *` where Java has
+`TAsyncRunnable<int> *` (not traced). Of the 96 different comments, 80 have a type that is
+`<name>.conflict` in Java and plain here (the import makes no `.conflict` twin there, so the
+guard above does not see it), 16 a comment at another block address or a body that differs
+(not traced). On the small corpus the 4 new different comments are bodies that differ (as
+0x106f30 and 0x104816 before: 0x1012b0 of cpp2-clang, 0x11a720 of cpp3-clang, whose body
+here stops at 0x11a791, 0x107b10 of cpp3-gcc's POST comment); the 30 different and 9 extra
+`type` records were not looked at.
+
+Hatred's game module (the 4,024 functions of `hatred-decomp`'s `funcs.tsv`): `underived ...
+function` 4,022 -> 796, so 3,228 have a derived `func` record (all 19 of `AHatredDoor` equal to
+Java's: `this` in RDI, `float DeltaSeconds` in XMM0 for `Tick`); different `func` records 4,022
+-> 605, of which 3 silent (0x16ee820, 0x16f5cd0, 0x1760b00: stack locals only); `underived ...
+comments` 2,450 -> 1,190, none silent. The reasons left (`GHIDRA_RS_UNDERIVED_DEBUG=1`):
+
+| reasons | functions |
+|---|---|
+| one jump to another function, with the archive definition of what it jumps to | 140 |
+| the calling convention of a function without `this` (parameters or a namespace) | 116 (+6 with an archive definition) |
+| a data type that is not written | 27 |
+| a call of a function with a variable argument list (FormatStringAnalyzer) | 27 |
+| a demangled `_ZThn` thunk name that is no function | 11 |
+| the demangler's signature on a DWARF function | 3 |
+| a data type with a `.conflict` twin (`FDataType`) | 2 |
+| others, one reason each | the rest of the 796 |
+
+`load facts` with the branch's facts, one console per function (`decompile`, `print C`), on a
+sample of 60 game functions (the 19 of `AHatredDoor` and 41 at random): none decompiles. Before,
+all 19 door functions failed on their own `underived` record; now: a called function's record
+is `underived` (24; for `Tick` 0x195a500), `restructure_varnode: a locked prototype with
+parameters` not ported (16), the function's comments `underived` (5), a `type` record missing
+for an id the prototype names (5: the `int32` typedef 0xd000000000000021 points at an
+`int32` 0xd00000000000001f the facts do not write), a locked float return value needing an
+extension (2), `isPrimitiveWhole` of a struct (1), a `join` storage (1). The full 4,024 were
+not run.
+
+`--facts` on Hatred (MacBook): 411 s, 7.83 GB maximum RSS (master: 396 s, 5.59 GB in the same
+run, the two in parallel).
+
+Checks (desktop): `cargo test --release` 212 passed (master 211; the new one is
+`dwarf::expr::tests::locations`); `cargo fmt --check` and `cargo clippy --release --all-targets
+-- -D warnings` clean; mercs2's PE facts byte-identical to master's (`cmp`); `CORPORA=m8
+tools/bars.sh` 57 of 57 lines equal to `baselines/master-3e44b31ec6.summary`, silent 0 (run
+before the `createUnknownModel` change, which only the facts path reads). Of the other 76
+checks, 5 of M500 ran (equal to the baseline); the run was stopped (about 5 minutes a check).
+Not run: `elf64-decomp.sh`, the 4,024 game functions in the console (60 sampled), Java's C
+against the branch's (`ghidra-diff.sh`).
+
+#### Round 2: locked parameters as symbols, precise `underived` marks (branch `dwarf-params`, 2026-11-24)
+
+What changed for `load facts` (the C++ references are `Ghidra/Features/Decompiler/src/decompile/cpp/`):
+- A locked prototype's parameters are symbols of the local scope, as `ProtoStoreSymbol::setInput`
+  makes them (fspec.cc:3143-3179): category 0 at their index, type-locked, name-locked as the
+  record says, valid everywhere where the scope owns the storage and else at the restricted use
+  point before the entry, then `FuncProto::updateThisPointer` (fspec.cc:3567-3579)
+  (`locked::param_symbols`, at `ActionPrototypeTypes`). So `ActionNameVars` links the input
+  varnodes to them (the guard there is gone) and `ScopeLocal::restructureVarnode`
+  (varmap.cc:1389-1418) runs for a locked prototype whose parameters are all in registers:
+  such a symbol is in no stack range, so `gatherSymbols` (varmap.cc:1170-1186) and
+  `fakeInputSymbols` (varmap.cc:1527-1580) see nothing of it. A parameter on the stack or in a
+  join still fails there (`a locked prototype with a parameter on the stack or in a join`).
+  Superseded: "a locked prototype with parameters" in "Local symbols" and in `mapstate.rs`.
+- `print C` declares a locked prototype (`PrintC::emitPrototypeOutput`, `emitPrototypeInputs`
+  with `...`, printc.cc:2303-2336) and leaves out the model name `unknown`
+  (`Architecture::createUnknownModel`, architecture.cc:1160-1168). Superseded: "Not changed: the
+  printer prints `unknown` in a declaration too" above.
+- A `join` storage in a record (`piece<n>="space:offset:size"`) is read; a locked join parameter
+  of a call still fails later (`a locked join parameter of a call`).
+
+What changed in `analyze --facts`:
+- Two more `underived` words, which only the function's own decompile reads (`Facts::function`
+  with `own`): `locals` (the DWARF import's committed locals, `commitLocalVariable`; and the stack
+  variables below) and `overrides` (a call of a function with a variable argument list,
+  FormatStringAnalyzer). Before, both made the whole `function` record `underived`, so every
+  caller of such a function failed too. A caller reads only the prototype.
+- A non-core built-in type under a typedef (Hatred's `int32` -> `sdword`) is written in full, as
+  Java does (`<type name="sdword" metatype="int" size="4">`); before, its record was missing and
+  `load facts` failed on `no data-type with id 0xd00000000000001f`. A record that refers to a
+  record that is not written, directly or not, now makes every prototype naming it `underived`
+  (`bad_types`); before, only the first function to reach it was.
+- New precise marks for the silent groups of round 1: the stack variables of a function whose
+  variables change with the stack references a jump-table case's walk makes past code already
+  walked (`locals`; Java's walk of 0x16ee820 makes none there, VarnodeContext.flowStart not
+  traced; ELF only: on mercs2 3 of the 9 such functions have Java's variables, so it is not
+  Java's rule); a method whose `this` points to a class of another name (`TAsyncRunnable<int>::Run`
+  with `TAsyncRunnable<void> *`); a typedef of a pointer to a structure (FreeType's `FT_Module`,
+  `FT_Face`: Java has a `.conflict` twin the import does not make) in a prototype's own types,
+  a plate or an `Unresolved local var` comment; a local of a subroutine inlined more than once in
+  the function (Java's comment is at another instance, 0x1af9650).
+
+Measured against Java 12.3 (`tools/facts-diff.sh`, MacBook; master 14ba1171b8, round 1
+9d417db2f3, this round; equal / different / missing / extra; silent: different or missing with
+no `underived` record covering it, `function`, `locals` or `overrides` for `func`):
+
+| | record | master | round 1 | round 2 |
+|---|---|---|---|---|
+| Hatred | func | 9,595 / 170,824 / 14 / 2 | 110,178 / 70,241 / 14 / 2 | 109,800 / 70,619 / 14 / 2 |
+| | comments | 57,971 / 0 / 90,982 / 0 | 91,724 / 96 / 57,133 / 1 | 84,469 / 4 / 64,480 / 1 |
+| | type | 1,282 / 3 / 37,108 / 4 | 27,748 / 204 / 10,441 / 4 | 28,083 / 211 / 10,099 / 4 |
+| | `underived` records | 284,136 | 150,886 | 176,867 |
+| | silent func | 133 | 284 (151 new) | 227 (94 new) |
+| | silent comments | 3 | 99 (96 new) | 7 (4 new) |
+| small corpus (14) | func | 352 / 707 / 53 / 0 | 583 / 476 / 53 / 0 | 583 / 476 / 53 / 0 |
+| | comments | 292 / 2 / 352 / 0 | 524 / 6 / 116 / 0 | 443 / 4 / 199 / 0 |
+| | type | 67 / 0 / 1,040 / 0 | 650 / 30 / 427 / 9 | 703 / 30 / 374 / 9 |
+| | `underived` records | 1,321 | 873 | 960 |
+| | new silent (func, comments) | | 1, 4 | 1, 2 |
+
+Not reached: no new silent record. Left: 94 Hatred `func` records that differ from Java's only in
+the stack variables of the analysis (`local_*`: variables only one side has, or of another
+size; several patterns, none traced; the DWARF guard hid them on master), 4 Hatred comments
+records (0x1b25cd0, 0x2cbc6c0: a comment one side has; 0x2c15350, 0x2c158b0: other locals in
+the comment), and on the small corpus cpp3-gcc's 0x110820 (stack variables and a comment) and
+cpp3-clang's 0x11a720 (a comment). The comments marks cost equal records: 91,724 -> 84,469
+equal comments on Hatred. Hatred's game module: `underived ... function` 796 -> 2,958, of which
+2,215 for `a data type that is not written`: the prototype names a record that refers, directly
+or not, to one that is not written (`bad_types`). In round 1 those records were written as
+derived and failed at load (`no data-type with id`); which unwritten types are behind them was
+not traced.
+`--facts` on Hatred (MacBook): 889 s, 4.18 GB maximum RSS, in parallel with a `load facts` run.
+
+Checks (desktop): `cargo test --release` 212 passed; `cargo fmt --check` and `cargo clippy
+--release --all-targets -- -D warnings` clean; mercs2's PE facts byte-identical to master's
+(`cmp`); `CORPORA=m8 tools/bars.sh` 57 of 57 lines equal to `baselines/master-3e44b31ec6.summary`.
+The full `tools/bars.sh` (133 checks, all corpora) was started under `heavy-run` with the
+branch's binary (`rust/target/dp2/bars-full/summary.out`); its first 74 lines are equal to the
+baseline, the rest had not finished when this was written. The 4,024 game functions with
+`load facts` and Java's C of 20 of them were running on the MacBook, not measured here.
+
+#### Round 3: getStackOpIndex, PIC switch misses loud (branch `dwarf-params`, 2026-11-24)
+
+- `factsout::stack_op_index` ports NewFunctionStackAnalysisCmd.getStackOpIndex
+  (NewFunctionStackAnalysisCmd.java:548-590): a LOAD or STORE through a stack address makes a
+  reference only on the first operand whose objects (`Instruction.getOpObjects`, the Function ID
+  port of `sleigh::fid_parts`) add up to the address, a register counting only where it held a
+  stack address when the LOAD or STORE ran (`Fold::stack_regs`), a scalar signed; and the POP
+  `*BP` exception. An operand that has a stack reference already adds to the variable at that
+  reference's offset (defineFuncVariable). Superseded: the ponytail "an operand names the
+  address is not the slot a PUSH, POP or CALL uses itself" of `Exporter::locals`. Hatred's
+  0x199b200 (`MOV [RBX + RAX*4],0` with RAX -1) no longer makes `local_83c`.
+- A function holding a PIC switch jump whose table the pattern did not find
+  (`pic_switch_misses`; Java recovers it with DecompilerSwitchAnalyzer) has `underived ...
+  locals` and `underived ... comments`: its body, so its stack variables and the blocks its
+  comments fall in, are not known (cpp3-gcc 0x110820; cpp3-clang 0x11a720, whose computed jump is not counted a miss, stays silent).
+- `GHIDRA_RS_UNDERIVED_DEBUG` names the record not written behind "a data type that is not
+  written". On Hatred (all functions): 17,471 such reasons are `the data type name <x>` (a type
+  with a `.conflict` twin, which the import does not name in Java's order), 21 `the built-in data
+  type float4`, 12 `a bit field in a union`. So the 2,215 game prototypes of round 2 are, by
+  that count, mostly the `.conflict` naming (DataTypeManagerDB.resolve order), not a small port.
+
+Measured against Java 12.3 (`tools/facts-diff.sh`, MacBook; master 14ba1171b8 again, round 2
+61b2a3a1a7 again, this round; silent: different or missing with no covering `underived`):
+
+| | record | master | round 2 | round 3 |
+|---|---|---|---|---|
+| Hatred | func equal | 9,595 | 109,800 | 109,931 |
+| | comments equal | 57,971 | 84,469 | 84,468 |
+| | silent func | 133 | 227 (94 new) | 121 (59 new) |
+| | silent comments | 3 | 7 (4 new) | 7 (4 new) |
+| mercs2 (PE, Java's `ref123/mercs2.facts`) | func equal | 22,892 | not run | 23,191 |
+| | silent func | 21,921 | not run | 21,622 (15 new) |
+
+Not reached: no new silent record, and mercs2's PE facts are no longer byte-identical to
+master's (446 `func` records change: 299 more equal to Java, 15 newly different). The 15 are
+`local_<n>` of 4 bytes where Java has 1 (an LEA's): after a `_chkstk` call (0x1b10260) the walk's
+ESP is not Java's, and a PUSH of the LEA's register lands on that address. Of the 59 new silent
+Hatred `func` records, 54 were among round 2's 94 (stack variables larger than Java's, as
+`local_9d8` 40 bytes where Java has 32; or only one side has them); not traced. The 4 comments:
+0x1b25cd0 and 0x2cbc6c0 have a body other than Java's (older cause); 0x2c15350 and 0x2c158b0
+write `Unresolved local var: ... NumFrames` at 0x2c153fd (a lexical block of an inlined
+subroutine, location lists not covering the entry) where Java writes none; why was not traced.
+Checks (desktop, before the user's rule of 2026-11-24 that all compute runs on the MacBook):
+`cargo test --release` 212 passed and `cargo clippy --release --all-targets -- -D warnings` clean
+before the new test `stack_op_index_adds_up_registers_and_scalars`, which passes alone; `cargo fmt
+--check` clean. Small corpus (MacBook): silent 56 -> 57 against master, the new one cpp3-clang
+0x11a720's comments (cpp3-gcc 0x110820 is loud now). Not run on this round: `CORPORA=m8
+tools/bars.sh`, the full bars, `elf64-decomp.sh`.
+
+#### Round 4: call fixups in the stack walk (branch `dwarf-params`, 2026-11-24)
+
+- The stack analysis's walk runs a function's call fixup in place of a direct call to it, as
+  SymbolicPropogator does (`checkForCallFixup`, `injectPcode`): the fixup's p-code from the
+  compiler spec (`decomp::callfixup_pcode`, the decompiler's snippet compiler) replaces the
+  CALL op, and the call has none of its side effects. `__chkstk` / `__alloca_probe` run
+  `ESP = ESP + 4 - EAX`, so the stack pointer after the call is the entry's minus the frame
+  size in EAX. `factsout::call_fixups` gives the walk the fixup of each function by its name
+  (CallFixupAnalyzer.getCallFixupNameForFunction: without a `libID_conflict_` prefix, else
+  with `_` or `__` before it); the facts' `<inject>` uses the same rule. Only the facts' walks
+  run fixups (`Analysis::swap_call_fixups`, as the call purges); the analysis's own constant
+  propagation does not, and a call through a pointer runs none.
+- A PIC switch `MOVSXD r,[base + index*4]` with a base of RBP or R13 (encoded with a zero 8-bit
+  displacement) is the pattern's form too, so its table is found or the jump is counted a miss
+  (cpp3-clang 0x11a7e2).
+
+Measured on the MacBook, master b0738cc3a7 (code as 14ba1171b8) and this round, each built and
+run the same way: Hatred and the small corpus with `tools/facts-diff.sh` against Java 12.3;
+mercs2 with `analyze --facts` (Function ID databases in `GHIDRA_RS_FID`, no `--protos`) and
+`tools/facts-diff.sh` against `ref123/mercs2.facts`. Round 3's mercs2 numbers ran without the
+Function ID databases (`function id: 0 functions named`), so `__chkstk` had no name and no
+fixup there; Superseded: its 22,892 / 23,191 and "15 newly different" as the measure.
+
+| | record | master | round 4 |
+|---|---|---|---|
+| Hatred | func equal | 9,595 | 109,932 |
+| | silent func | 133 | 118 (59 new) |
+| | silent comments | 3 | 7 (4 new) |
+| small corpus | silent | 56 | 56 (0 new) |
+| mercs2 (PE) | func equal | 23,543 | 24,072 |
+| | records equal on master, not on round 4 | - | 3 `label` |
+
+The 15 `_chkstk` records of round 3 equal Java's (0x1b10260 and the rest), and no `func`
+record equal on master differs. Not reached: 3 `label` records equal on master differ: extra
+`LAB_023c59d9` and `LAB_023c59db` (the return address of a `__chkstk` call at 0x23c59d4) and
+missing `LAB_01f3cb1f` (the return address of a call at 0x1f3cb1a); not traced. The 59 new
+silent Hatred `func` records and the 4 comments are round 3's (same addresses); not traced:
+the stack variables differ in size from Java's (`local_f0` 40 bytes, Java 32, at 0x1a8eee0,
+where a `MOVUPS [RSP+0x70]` store makes ours longer), and the `Unresolved local var` of
+0x2c153fd. The func equal of 9,595 on master is no other scope: master writes no DWARF
+parameters, so 170,824 of its 180,433 `func` records differ from Java's.
+
+#### Round 5: Constant Propagation runs only the call fixups installed before it (branch `dwarf-params`, 2026-11-24)
+
+- A call fixup is installed when its function gets its name (the Call-Fixup Installer, priority
+  301), and a name from Function ID comes at 799, after Constant Propagation (596). So the
+  facts' Constant Propagation walk (the LOAD and STORE references through registers) runs only
+  the fixups of functions named without Function ID; the Stack analyzer's walk (903, the
+  `stack_and` walk) runs every one. `factsout::call_fixups` marks each fixup with that
+  (`analysis::Fixups`). Superseded: round 4's "only the facts' walks run fixups" for the
+  Constant Propagation walk. On mercs2, `__chkstk` is named by Function ID: with its fixup the
+  walk kept the CALL's pushed return address in the frame (`ESP = ESP + 4 - EAX` leaves it
+  above ESP), so `MOV EAX,[EBP-4]; MOVZX ECX,word ptr [EAX+2]` at 0x23c5ba1 read it and made
+  `LAB_023c59d9` and `LAB_023c59db`; Java's Constant Propagation ran before `__chkstk` had a name.
+  ELF has no Function ID names, so its facts do not change.
+
+Measured on the MacBook against Java 12.3 as round 4 (`tools/facts-diff.sh`; mercs2 with
+`GHIDRA_RS_FID`):
+
+| | record | master | round 4 | round 5 |
+|---|---|---|---|---|
+| mercs2 (PE) | func equal | 23,543 | 24,072 | 24,072 |
+| | records equal on master, not on the branch | - | 3 `label` | 0 |
+| Hatred | func equal | 9,595 | 109,932 | 109,932 |
+| | silent func | 133 | 118 (59 new) | 118 (59 new, same list) |
+| | silent comments | 3 | 7 (4 new) | 7 (4 new, same) |
+
+Not reached: zero new silent. The 59 Hatred `func` records, by how our stack variables differ
+from Java's: a variable larger than Java's, ours merged over a 16-byte `MOVUPS`/`MOVAPS` store
+that Java's variables do not cover (`local_f0` 40 / 32 and the like, 11); one larger variable
+over several of Java's or past Java's end (`local_1b8` 104 where Java has five; `local_88` 32
+where Java has 20; 13); an LEA's 1-byte variable and a 16-byte one next to it where Java has
+one of 20 bytes (`local_58` at 0x21e5220, 7); variables only one side has (21); other sizes
+and splits (7). At 0x21e5220 the walk is straight-line code and its references are
+in Java's order; Java's 20 bytes at -0x58 come out of `accumulateVariable` only if the
+`MOVUPS xmmword ptr [RSP+0x144],XMM0` store (after `XORPS XMM0,XMM0`) makes no stack reference
+there, while the `MOVAPS [RSP+0x140]` four instructions on does; why was not traced. The 4
+comments: 0x2c15350 and 0x2c158b0 write `Unresolved local var` for `NumFrames` and
+`FramesPerSecond` at 0x2c153fd (and its twin), the innermost lexical block of the last child of
+the function, an inlined `ProcessKeyToFrameTable` (inlined 3 times in its compile unit); their
+location lists do not cover the entry, so Java's processFuncChildren should write the comment,
+and Java's function has its DWARF parameters, so no exception stopped it; why it writes none was
+not traced. 0x1b25cd0 and 0x2cbc6c0 are the older body difference.
+Checks (MacBook): `cargo fmt --check` and `cargo clippy --release --all-targets -- -D warnings`
+clean, `cargo test --release` 213 passed. Not run: the small corpus, `CORPORA=m8
+tools/bars.sh`, `elf64-decomp.sh` and the full bars (the fixup change does not reach ELF).
+Superseded (round 6): "why was not traced" for 0x21e5220's `local_58` and the 0x2c153fd comments; see below.
+
+#### Round 6: Java traced live; CMOVcc flows, getVariablesIntersecting (branch `dwarf-params`, 2026-11-24)
+
+How Java was traced: a throwaway copy of the Ghidra 12.3 install (`rust/target/r6/ghidra` on the
+MacBook) with print lines in copies of `NewFunctionStackAnalysisCmd` and `DWARFFunctionImporter`
+compiled into its `Ghidra/patch` (loaded before the release jars), and a script run on the kept
+Hatred project (`-process -noanalysis -readOnly`, so nothing is saved) that clears the stack
+references and default stack variables of the 59 functions and runs the command again, then runs
+the DWARF import again. The rerun gives Java's facts' stack variables for all 59 (byte for byte
+by name and size), so the walk alone explains them. Nothing of this is in the repository.
+
+- A CBRANCH to the next instruction (CMOVcc's `if (!cc) goto inst_next`) saves the state at the
+  CBRANCH as a flow to the next instruction (SymbolicPropogator.applyPcode, condition not known
+  true); taken later, that flow runs through visited code, so up to MAX_EXTRA_INSTRUCTION_FLOW
+  instructions are walked again (`Analysis::flow_walk`, `Fold::to_next`). At 0x21e5220 the
+  `CMOVLE` at 0x21e5233 walks 0x21e5236-0x21e52a0 again; the second `MOVAPS [RSP+0x140]` then
+  meets the LEA's 1-byte variable and the `MOVUPS` 16-byte one: 20 bytes.
+- getVariablesIntersecting moves its probe by the length of the variable it finds, from the
+  probe and not from the variable's end, so a variable past it is missed and the variables can
+  overlap; addStackLocalVariables then leaves out one that overlaps one added before it
+  (0x19f14c0 `local_9d8` 32 bytes, no `local_9c0`).
+- defineFuncVariable makes no stack reference on an operand whose primary reference is another
+  kind: an instruction with a memory reference from the walks (`Ins::rw`) gets none. Partial:
+  `rw` has the WRITE references through a folded address and direct memory operands, not READs
+  through a register (0x1d461d0 `MOVUPS XMM0,[RCX]`, RCX 0x51ce518 past a CMOVNZ, stays). Superseded (round 7): a
+  READ of any size through a folded address is in `rw` (`Ins::load`); 0x1d46180 equals Java's.
+- `underived ... locals` (ELF) also where an operand adds a register the walk does not know to
+  a stack address and makes no reference (`[RSP + R8*4 + 0x10]`): Java's VarnodeContext knows
+  such a loop counter on some paths (0x1bb8950, 0x25c8930). 1,102 functions get the mark; 311 of
+  their `func` records equal Java's.
+- The DWARF importer does write `Unresolved local var` for NumFrames at 0x2c153fd (the trace
+  prints it). The comment is lost later: 0x2c153e0 is `CALL AssertFailed`, which Java learns does
+  not return after the import; Find Non-Returning Functions repairs the flow after the call
+  (ClearFlowAndRepairCmd, `ClearOptions(true)`: comments too) and the code is disassembled again
+  from another reference. The kept project has no comment stored at any address of
+  0x2c153e0-0x2c15440. A DWARF comment in code that flows from the fallthrough of a call to a
+  non-returning function is now not derived (`underived ... comments`): 23 functions, 21 of their
+  comments records equal Java's.
+
+Measured on the MacBook against Java 12.3 as round 5 (`tools/facts-diff.sh`, silent lists by
+`target/dp4/silent.sh`, master's `target/dp4/silent-m.txt`):
+
+| | record | master | round 5 | round 6 |
+|---|---|---|---|---|
+| Hatred | func equal | 9,595 | 109,932 | 110,007 |
+| | comments equal | 57,971 | 84,468 | 84,447 |
+| | new silent func | - | 59 | 8 |
+| | new silent comments | - | 4 | 2 |
+| mercs2 (PE) | func equal | 23,543 | 24,072 | 24,072 |
+| | records equal on master, not on the branch | - | 0 | 0 |
+| small corpus | silent | 56 | not run | 56 |
+
+Not reached: zero new silent. The 8 `func`: 0x1d46180 (a READ reference through RCX, above),
+0x190bc60, 0x1a180d0, 0x1d00a00, 0x24163f0, 0x2997830, 0x2b43cf0, 0x2b7ea80, not traced this
+round (the stack-reference sequences of 0x1d00a00 and 0x2b7ea80 equal Java's, so the cause is in
+defineFuncVariable or the adding, as 0x1d46180's). The 2 comments are 0x1b25cd0 and 0x2cbc6c0
+(older body difference). The small corpus was compared by count only (master's per-record lists
+were not kept). Checks (MacBook): `cargo fmt --check`, `cargo clippy --release --all-targets --
+-D warnings` clean, `cargo test --release` 213 passed. Not run: `CORPORA=m8 tools/bars.sh`,
+`elf64-decomp.sh`, the full bars.
+
+#### Round 7: READ references of any LOAD size; three changes dropped (branch `dwarf-params`, 2026-11-25)
+
+Four changes to the walk were tried together: (1) a READ reference for a LOAD of any size
+through a folded address, (2) memory values kept with their size, (3) comparisons and boolean
+operations folded on constants, (4) a branch whose condition is known true walked first. All
+four gave Hatred 7 new silent `func` records (5 of round 6's 8 fixed, 3 new: 0x263c5d0,
+0x2932fe0, 0x29961c0) and broke the mercs2 gate. Each was then built on top of the ones before
+it and measured on mercs2's PE facts (`target/dp4/pe.sh`, records not equal to Java's that are
+not in master's list of such records):
+
+| built | records newly in the list | of them equal on master |
+|---|---|---|
+| 1 | 25 | 17 |
+| 1, 2 | 42 | not split |
+| 1, 2, 3 | 42 | not split |
+| 1, 2, 3, 4 | 229 | 198 |
+
+Kept, in a smaller form: change 1. SymbolicPropogator's LOAD case makes its READ reference
+with the size of the output, whatever it is (`addLoadStoreReference`, SymbolicPropogator.java:
+927-947). `Analysis::decode_ops` now records a LOAD of another size than a pointer's through a
+folded address in the instruction's `rw` (the memory references defineFuncVariable asks
+about) and its size in `Ins::load`. This closes round 6's "Partial": the READ through a
+register (0x1d461d0 `MOVUPS XMM0,[RCX]`) is there, and the instruction gets no stack reference.
+
+Not kept from change 1: the same reference as a data reference of the listing (`Ins::refs`:
+labels, data, the Reference analyzer's targets). On mercs2 it made 17 records wrong that are
+equal on master, all traced to five places where the reference changes what the facts' Reference
+analyzer makes: the strings at 0xb642d4, 0xb642e4 and 0xb642ec (a byte LOAD of the second
+character at 0x9bbdb3 and the like stops the 13-byte string; the Strings analyzer then makes it
+16 bytes with its padding), a pointer made at 0xb604a9 (Java: `undefined1`) and the label it
+gives 0x4e494f, the table slot 0x616518 (a byte LOAD of 0x61651b at 0x6159cd stops the pointer)
+and `DAT_00400200` inside Java's IMAGE_NT_HEADERS32 (a 2-byte LOAD at 0x9ee748). In Java these
+references are either not there when the Reference analyzer looks or not made; which, and why,
+was not traced (it needs a trace of Java's analysis of mercs2). The other 8 of the 25 are data
+Java has and master does not: the record is there now, without the size (`undefined` where Java
+has `undefined1` or `undefined2`). Writing the size and the data from the facts' side was
+tried and changed no record (the facts of both builds are byte-identical), so it is not in.
+
+Dropped, with the reason:
+
+- Change 4 (known-true branches first, SymbolicPropogator.java:1160-1250): 187 more mercs2
+  records, 31 `func` among them, and the 3 new silent Hatred functions. Java's order depends on
+  `evaluator.followFalseConditionalBranches()` and on what `VarnodeContext.getConstant` gives
+  for the condition; the port took one case of it. Not traced further.
+- Change 2 (sized memory values, VarnodeContext.getMemoryValue): 17 more mercs2 records. Its
+  own note says the bytes of several stores are not assembled as Java does. Not traced further.
+- Change 3 (folded comparisons): no record changes without change 4, which is its only reader.
+
+The three are not in the repository; their patches are kept outside it (`rust/target/r7-patches/
+c2.patch`, `c3.patch`, `c4.patch` on the desktop, each against the one before, `c1.patch` the
+full change 1).
+
+Measured on the MacBook against Java 12.3 as round 6:
+
+| | record | master | round 6 | round 7 |
+|---|---|---|---|---|
+| Hatred | func equal | 9,595 | 110,007 | 110,010 |
+| | comments equal | 57,971 | 84,447 | 84,447 |
+| | new silent func | - | 8 | 6 |
+| | new silent comments | - | 2 | 2 |
+| mercs2 (PE) | func equal | 23,543 | 24,072 | 24,072 |
+| | records equal on master, not on the branch | - | 0 | 0 |
+
+
+Not reached: zero new silent. The 6 `func`: 0x190bc60, 0x1a180d0, 0x24163f0, 0x2997830,
+0x2b43cf0, 0x2b7ea80, not traced this round (0x1d46180 and 0x1d00a00 of round 6's 8 equal
+Java's now). The 2 comments are 0x1b25cd0 and 0x2cbc6c0, as in round 6. Small corpus: 56 silent
+records, as master. Checks (MacBook, the machine shared with another full pass): `cargo fmt
+--check` and `cargo clippy --release --all-targets -- -D warnings` clean, `cargo test --release`
+213 passed; `CORPORA=m8 tools/bars.sh`: the 57 lines equal those of
+`target/baselines/master-3e44b31ec6.summary`; `elf64-decomp.sh`'s loop over the 14 binaries
+already built on the MacBook (`target/x64f/elf64/bin`): 817 functions, the reference ran 815,
+identical 809, the counts of master in "ELF64 analysis". The full bars were not run again as a
+whole: the pass of 61b2a3a1a7 (round 2, the last commit that changes what the decompiler
+prints) gave 124 of the 133 lines, each equal to the baseline's, and since then the decompiler
+only gained `decomp::callfixup_pcode`, which the analysis calls; the mercs2 prelude the bars
+read is the one this build writes (`cksum` 304429596). The nine pairs that pass did not reach
+(`pc-r pc-t pcc-r pcc-t pcd pmd` on `simple`, `pcc-r pcc-t swfsc-t` on `switch`) are run for
+the merge. No unit test was added for the new branch of `decode_ops` (the tests have no
+fixture with a folded-address LOAD); its check is Hatred's 0x1d46180 in the facts comparison.
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The

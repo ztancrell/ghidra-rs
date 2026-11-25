@@ -215,7 +215,7 @@ impl CompilerSpec {
             }
         }
         let default = default.ok_or_else(|| LowlevelError("No default prototype specified".into()))?;
-        let mut models = Models { list, default, eval_current: None, eval_called: None, unported };
+        let mut models = Models { list, default, eval_current: None, eval_called: None, unported, unknown: Vec::new() };
         models.eval_current = eval_current.map(|n| models.find(&n)).transpose()?;
         models.eval_called = eval_called.map(|n| models.find(&n)).transpose()?;
         let (stack_pointer, stack_container) =
