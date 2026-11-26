@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 const USAGE: &str = "usage: ghidra-rs disasm <binary|psp-prx> [--func <symbol>|--addr <hex>] [--count N] [--pcode] [--sla <file>]
-       ghidra-rs analyze <pe32|elf64> [--functions <csv>] [--gaps <csv>] [--purges <txt>] [--abi-callers <register_abi.csv> <out.csv> [--data-pointers]]
+       ghidra-rs analyze <pe32|elf64|psp-prx> [--functions <csv>] [--gaps <csv>] [--purges <txt>] [--abi-callers <register_abi.csv> <out.csv> [--data-pointers]]
                          [--decomp-prelude <out>] [--facts <out> [--protos <file> | --gdt <archive>]] [--seeds <csv> | --functions-from <csv>]... [--store <file>] [--sla <file>]
        ghidra-rs edit <pe32> --store <file> [--new-store] [--seeds <csv> | --functions-from <csv>]... [--sla <file>] <command>
            commands: add-relocated-entries <securom_functions.csv>
@@ -24,6 +24,7 @@ const USAGE: &str = "usage: ghidra-rs disasm <binary|psp-prx> [--func <symbol>|-
                      library-evidence <markers.csv> <out.csv>      (needs --facts)
                      bindings <out.csv>
                      abi-candidates <out.csv> <out.txt> [<verified-c-dir>]   (needs --facts)
+       ghidra-rs prx-elf <psp-prx> <out.elf>        (the PRX as `analyze` loads it, relocated, as a plain ELF: the input of tools/mips-ref.sh)
        ghidra-rs gdt-protos <archive.gdt> <out>     (the prototype file of tools/ghidra-protos.sh, from the archive)
        ghidra-rs dwarf <elf> <out>                  (the DWARF import's data types and signatures, as tools/ghidra/DumpDwarf.java)
        ghidra-rs decompile -i <script>
@@ -45,6 +46,11 @@ fn run() -> Result<(), String> {
     }
     if args.len() >= 2 && (args[0] == "edit" || args[0] == "export") {
         return edit(&args[1], &args[2..], args[0] == "edit");
+    }
+    if args.len() == 3 && args[0] == "prx-elf" {
+        let data = std::fs::read(&args[1]).map_err(|e| format!("{}: {e}", args[1]))?;
+        let elf = prx_elf(&data).map_err(|e| format!("{}: {e}", args[1]))?;
+        return std::fs::write(&args[2], elf).map_err(|e| format!("{}: {e}", args[2]));
     }
     if args.len() == 3 && args[0] == "gdt-protos" {
         let ar = ghidra_rs::gdt::Archive::open(std::path::Path::new(&args[1]))?;
@@ -224,6 +230,74 @@ fn run() -> Result<(), String> {
         n += 1;
     }
     Ok(())
+}
+
+/// `prx-elf`: a PSP PRX as `psp::load` lays it out at `psp::DEFAULT_BASE`, relocations applied,
+/// written as an ELF32 executable (`ET_EXEC`) Java Ghidra's ELF loaders take: the
+/// `PT_LOAD` segments and the loaded sections at their loaded addresses, with the file's names,
+/// flags and `e_flags`, and the loaded entry point. Java cannot relocate a PRX
+/// (`MIPS_ElfExtension.java`), so the reference of `analyze` on a PRX is Java on this file.
+fn prx_elf(data: &[u8]) -> Result<Vec<u8>, String> {
+    use object::read::elf::{FileHeader, ProgramHeader, SectionHeader};
+    let prx = ghidra_rs::psp::load(data, ghidra_rs::psp::DEFAULT_BASE)?;
+    let le = object::Endianness::Little;
+    let head = object::elf::FileHeader32::<object::Endianness>::parse(data).map_err(|e| e.to_string())?;
+    let sections = head.sections(le, data).map_err(|e| e.to_string())?;
+    const DATA: u32 = 0x1000; // file offset of the image's first byte
+    let loads: Vec<_> = head
+        .program_headers(le, data)
+        .map_err(|e| e.to_string())?
+        .iter()
+        .filter(|p| p.p_type(le) == object::elf::PT_LOAD)
+        .collect();
+    let file_end = loads.iter().map(|p| p.p_vaddr(le) + p.p_filesz(le)).max().unwrap_or(0);
+    let mut out = vec![0u8; DATA as usize];
+    out.extend(&prx.mem[..file_end as usize]);
+    // section headers: the null one, the loaded sections, `.shstrtab`
+    let mut names = vec![0u8];
+    let mut heads: Vec<[u32; 10]> = vec![[0; 10]];
+    for s in sections.iter().filter(|s| s.sh_flags(le) & object::elf::SHF_ALLOC != 0 && s.sh_size(le) > 0) {
+        let name = sections.section_name(le, s).map_err(|e| e.to_string())?;
+        let nobits = s.sh_type(le) == object::elf::SHT_NOBITS;
+        let kind = if nobits { object::elf::SHT_NOBITS } else { object::elf::SHT_PROGBITS };
+        let (addr, size) = (s.sh_addr(le), s.sh_size(le));
+        if !nobits && addr + size > file_end {
+            return Err(format!("section {} lies past the segments' file bytes", String::from_utf8_lossy(name)));
+        }
+        heads.push([names.len() as u32, kind, s.sh_flags(le), prx.base + addr, DATA + addr, size, 0, 0, 4, 0]);
+        names.extend(name);
+        names.push(0);
+    }
+    heads.push([names.len() as u32, object::elf::SHT_STRTAB, 0, 0, out.len() as u32, 0, 0, 0, 1, 0]);
+    names.extend(b".shstrtab\0");
+    heads.last_mut().unwrap()[5] = names.len() as u32;
+    out.extend(&names);
+    out.resize(out.len().next_multiple_of(4), 0);
+    let shoff = out.len() as u32;
+    out.extend(heads.iter().flatten().flat_map(|w| w.to_le_bytes()));
+    let mut h = Vec::new();
+    h.extend(b"\x7fELF\x01\x01\x01");
+    h.resize(16, 0);
+    for v in [object::elf::ET_EXEC, object::elf::EM_MIPS] {
+        h.extend(v.to_le_bytes());
+    }
+    for v in [1, prx.entry, 52, shoff, head.e_flags(le)] {
+        h.extend(v.to_le_bytes());
+    }
+    for v in [52u16, 32, loads.len() as u16, 40, heads.len() as u16, heads.len() as u16 - 1] {
+        h.extend(v.to_le_bytes());
+    }
+    for p in &loads {
+        let (addr, filesz) = (prx.base + p.p_vaddr(le), p.p_filesz(le));
+        for v in [object::elf::PT_LOAD, DATA + p.p_vaddr(le), addr, addr, filesz, p.p_memsz(le), p.p_flags(le), 0x10] {
+            h.extend(v.to_le_bytes());
+        }
+    }
+    if h.len() > DATA as usize {
+        return Err("too many program headers".into());
+    }
+    out[..h.len()].copy_from_slice(&h);
+    Ok(out)
 }
 
 /// `gnu-demangle`: each line of the file through the GNU demangler's native half
@@ -516,7 +590,18 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
         }
     }
     let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-    let img = if data.starts_with(b"\x7fELF") {
+    let img = if ghidra_rs::psp::is_prx(&data) {
+        // Allegrex:LE:32:default, as `disasm` takes a PRX; `--sla` is taken as given
+        if !args.iter().any(|a| a == "--sla") && std::env::var_os("GHIDRA_RS_SLA").is_none() {
+            sla = Sleigh::allegrex_sla_path();
+        }
+        if abi.is_some() || store.is_some() || facts.is_some() || prelude.is_some() {
+            return Err(format!(
+                "{path}: --abi-callers, --store, --facts and --decomp-prelude do not take a PSP PRX (MIPS-4)"
+            ));
+        }
+        analysis::Image::from_prx(&data).map_err(|e| format!("{path}: {e}"))?
+    } else if data.starts_with(b"\x7fELF") {
         let img = analysis::Image::from_elf(&data).map_err(|e| format!("{path}: {e}"))?;
         // x86:LE:64:default, the gcc compiler spec: `x86-64.sla`, next to a `GHIDRA_RS_SLA` that
         // names x86's (as the console's `load file` takes it); `--sla` is taken as given
@@ -636,9 +721,10 @@ fn analyze(path: &str, args: &[String]) -> Result<(), String> {
     if functions.is_some() || prelude.is_some() || facts.is_some() {
         let t = std::time::Instant::now();
         // the databases are x86:LE:32's; Function ID on x86-64 is not ported (warned)
-        let files = if img.elf64 { Vec::new() } else { ghidra_rs::fid::default_files() };
+        let no_fid = img.elf64 || img.mips;
+        let files = if no_fid { Vec::new() } else { ghidra_rs::fid::default_files() };
         let dbs = files.iter().map(|f| ghidra_rs::fid::FidDb::open(f)).collect::<Result<Vec<_>, _>>()?;
-        let fid = if img.elf64 { Default::default() } else { ghidra_rs::fid::apply(&img, &an, &sl, &dbs)? };
+        let fid = if no_fid { Default::default() } else { ghidra_rs::fid::apply(&img, &an, &sl, &dbs)? };
         eprintln!(
             "function id: {} functions named from {} databases in {:.1}s",
             fid.len(),

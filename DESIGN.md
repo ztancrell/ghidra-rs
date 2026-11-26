@@ -227,6 +227,28 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   naming the source commit. Why: the upstream Ghidra tree stays as it is (2026-11-11), and
   Ghidra's layout keeps `allegrex.pspec` next to `allegrex.sla`, where `Sleigh::load` looks.
   Claude's call, within the user's decision above.
+- 2026-11-26: MIPS-3 (function discovery on MIPS) ports Ghidra's MIPS-relevant analysis the way
+  the x86 analyzers were ported, with Java Ghidra as the reference: recursive descent from the
+  entry points, call and branch references, delay slots, the `lui`/`addiu`/`ori` constant
+  pairs of the MIPS address analyzer, function start patterns, MIPS switch tables. Claude's
+  call; user approved doing MIPS-3. Done on branch `mips-m3` (`rust/README.md`, "Function
+  discovery on MIPS (MIPS-3)"); `gp`-relative references are not ported (no `gp` value before
+  MIPS-5).
+- 2026-11-26: The MIPS reference is headless Java Ghidra on the image ghidra-rs already
+  relocated at 0x08804000 (`ghidra-rs prx-elf` writes it as an ELF), with the ghidra-allegrex
+  release for the installed Ghidra in a throwaway settings directory under `rust/target/`,
+  never in `~/.config/ghidra` or the install. Claude's call; user approved doing MIPS-3.
+- 2026-11-26: Entry points of a PRX in MIPS-3 are the ELF entry and what the analysis finds
+  from it; `module_start`, the exports and the module's `gp` wait for MIPS-5. Claude's call;
+  user approved doing MIPS-3.
+- 2026-11-26: ghidra-allegrex's `Allegrex_patterns.xml` (function start patterns) is copied
+  unmodified to `rust/processors/Allegrex/data/patterns` and read as data, under the decision
+  above that the Allegrex spec comes from that project. Claude's call, to confirm.
+- 2026-11-26: MIPS switch tables are found by a pattern over the instruction words until the
+  decompiler runs on MIPS (Java uses the decompiler). Where the pattern resolves a table Java
+  does not (4 on `BOOT.BIN`), that is the stand-in's imprecision, not a fix kept by default:
+  the decompiler's jump-table recovery replaces the pattern in MIPS-4. Claude's call, to
+  confirm.
 
 ## Milestones
 
@@ -657,6 +679,8 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `crossbuild`, `inst_next2` and flowref/flowdest are still not ported.
    MIPS-2 (2026-11-26, branch `mips-m2`): a PRX is decoded with ghidra-allegrex's Allegrex
    spec; every word of SOCOM FTB's `.text` decodes, identical to the C++ engine.
+   MIPS-3 (2026-11-26, branch `mips-m3`): `analyze` takes a PRX; on SOCOM FTB 11,398 of Java's
+   11,399 functions, 11,384 with Java's body (the rest: switch tables, a pattern for now).
    In part on branch `worktree-agent-af1e2713bbdee8eab` (2026-11-17): the project store as one plain
    text file (`store.rs`: created and removed functions, fixed bodies, no-return flags, flow
    overrides, thunk marks, switch targets, laid over a fresh analysis by `analyze --store`) and
@@ -746,3 +770,5 @@ Open (asked 2026-11-26, with MIPS-1; details in `docs/plans/mips-psp.md`):
   to make an option.
 - Which MIPS analysis and calling convention the later milestones port (Ghidra's MIPS
   analyzers, `mips32le.cspec` or a PSP one), and where the import names (NIDs) come from.
+  Superseded in part (2026-11-26, MIPS-3): the analysis is decided, see Decided; the calling
+  convention and the import names are still open.

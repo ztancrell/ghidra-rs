@@ -80,6 +80,7 @@ Not copied, and not reproduced (ghidra-allegrex's Java, Kotlin and Python side):
   which is not copied yet.
 - `AllegrexEmulateInstructionStateModifier` (emulation), `AllegrexAddressAnalyzer` and
   `AllegrexPreAnalyzer` (analysis), `Allegrex_patterns.xml` (function start patterns).
+  Superseded (2026-11-26, MIPS-3): `Allegrex_patterns.xml` is copied, unmodified, as data.
 - `PspElfLoader`, `Allegrex_ElfExtension` and the relocation classes (type A and B relocations,
   rebasing), `Allegrex.opinion`, `allegrex.ldefs`: ghidra-rs has its own loader (`psp.rs`,
   MIPS-1, type A only, rules from PPSSPP).
@@ -87,18 +88,36 @@ Not copied, and not reproduced (ghidra-allegrex's Java, Kotlin and Python side):
 - The spec's own stated limits (its README): `vpfxs`, `vpfxt` and `vpfxd` are not modelled in
   p-code, and the half-float operand of `vfim.s` prints as an integer.
 
-### MIPS-3: function discovery on MIPS (not started)
+### MIPS-3: function discovery on MIPS (done but for the switch tables, branch `mips-m3`, 2026-11-26)
 
-`ghidra-rs analyze` is x86 only: recursive descent, switch tables, function bodies and
-references all read x86 p-code patterns and a 32-bit PE or ELF x86-64 image.
+`ghidra-rs analyze` takes a PSP PRX and writes the files it writes for x86 (`--functions`,
+`--gaps`, `--purges`). What was ported and how is in `rust/README.md`, "Function discovery on
+MIPS (MIPS-3)".
 
-Open questions:
+- On SOCOM's `BOOT.BIN`, against Java Ghidra 12.2 with ghidra-allegrex v21.6 on the same
+  relocated image: 11,399 functions on each side, 11,398 the same entries (one only in Java,
+  one only in ghidra-rs: two flows into one `jalr`), 11,384 with the same body, thunk and
+  no-return flag, 14 with another body.
+- Partial: the switch tables. Java recovers them with the decompiler; ghidra-rs has a pattern
+  over the instruction words until the decompiler runs on MIPS (MIPS-4). All 14 body
+  differences hold a `jr` through a table: 4 the pattern does not resolve, 4 it resolves and
+  Java does not, 6 where the targets differ.
+- The reference: `rust/tools/mips-ref.sh` (`ghidra-rs prx-elf` writes the relocated image as
+  an ELF; the extension goes into a throwaway settings directory).
+- `Allegrex_patterns.xml` (function start patterns) is copied from ghidra-allegrex as data,
+  like the spec (`rust/processors/Allegrex/NOTICE`).
 
-- Port Ghidra's MIPS analyzers (`MipsAddressAnalyzer`, the `gp` and `lui`/`addiu` constant
-  pairs, MIPS switch tables) as the x86 ones were, with Java Ghidra as the reference? Java
-  cannot relocate a PRX, so the reference would need the image relocated first or loaded at 0.
-- Whether the image type of `analyze` (`analysis::Image`, 32-bit addresses) takes a PRX as it
-  is.
+Superseded: "MIPS-3 (not started)" and its two open questions. Answered (2026-11-26, Claude's
+call; the user approved doing MIPS-3): Ghidra's MIPS analysis is ported as the x86 analyzers
+were, with Java as the reference on the image ghidra-rs relocated; and `analysis::Image` takes
+a PRX with one new flag (`mips`) and a constructor (`Image::from_prx`), nothing else changed.
+
+Waits for MIPS-5: entry points beyond the ELF entry (`module_start` and the exports of
+`.lib.ent`), the module's `gp` value (`sceModuleInfo`), the names of the import stubs. The
+stubs in `.sceStub.text.*` are analyzed as ordinary code.
+
+Not done: the `gp` and `t9` assumptions of the address analyzer, a comparison of instruction
+sets and references with Java (functions and bodies only), any PRX but this one.
 
 ### MIPS-4: the decompiler on MIPS (not started)
 

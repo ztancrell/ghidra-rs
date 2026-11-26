@@ -6,7 +6,8 @@ lift it to p-code. Milestone 2: function discovery on 32-bit x86 PE files, writi
 as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java. MIPS-1 (2026-11-26):
 `disasm` also takes little-endian MIPS32, and a PSP PRX with its relocations applied (see "MIPS32
 and the PSP (MIPS-1)"). MIPS-2 (2026-11-26): a PSP PRX is decoded as Allegrex, with the VFPU
-("Allegrex (MIPS-2)"). See `../DESIGN.md` for the scope and plan.
+("Allegrex (MIPS-2)"). MIPS-3 (2026-11-26): `analyze` takes a PSP PRX ("Function discovery on
+MIPS (MIPS-3)"). See `../DESIGN.md` for the scope and plan.
 
 ## Layout
 
@@ -33,6 +34,9 @@ and the PSP (MIPS-1)"). MIPS-2 (2026-11-26): a PSP PRX is decoded as Allegrex, w
 - `ghidra-rs/src/psp.rs`: the PSP PRX loader: segments, the PSP relocation sections, the
   count of every relocation by type ("MIPS32 and the PSP (MIPS-1)").
 - `ghidra-rs/tests/psp.rs`: the PSP relocation rules on a hand-made image.
+- `tools/mips-ref.sh`: the MIPS-3 check: Java's auto-analysis of a PRX (through `ghidra-rs
+  prx-elf` and ghidra-allegrex in a throwaway settings directory) against `analyze --purges`
+  ("Function discovery on MIPS (MIPS-3)").
 - `ghidra-rs/tests/decode.rs`: decodes a fixed byte sequence and checks text and p-code; a
   MIPS32 `jal` with its delay slot; an Allegrex VFPU `vdot.t` and integer `max`.
 - `ghidra-rs/src/abi.rs`: port of CheckAbiCallers.java: per-byte register liveness walks
@@ -195,7 +199,7 @@ Varnodes print as a register name when one matches exactly, `0x5:4` for constant
 ## Analysis (Milestone 2): the mercs2 Ghidra scripts
 
 ```sh
-ghidra-rs analyze <pe32|elf64> [--functions <csv>] [--gaps <csv>] [--purges <txt>] [--abi-callers <register_abi.csv> <out.csv> [--data-pointers]]
+ghidra-rs analyze <pe32|elf64|psp-prx> [--functions <csv>] [--gaps <csv>] [--purges <txt>] [--abi-callers <register_abi.csv> <out.csv> [--data-pointers]]
                          [--decomp-prelude <out>] [--facts <out> [--protos <file>]] [--seeds <csv> | --functions-from <csv>]... [--store <file>] [--sla <file>]
 ```
 
@@ -8098,7 +8102,8 @@ fixture with a folded-address LOAD); its check is Hatred's 0x1d46180 in the fact
 The first MIPS target is SOCOM U.S. Navy SEALs Fireteam Bravo's `BOOT.BIN` (`../DESIGN.md`,
 2026-11-26; the plan and the later milestones are in `../docs/plans/mips-psp.md`). MIPS-1 is
 `disasm` only: load, relocate, disassemble, p-code. `analyze` and the decompiler do not take
-MIPS.
+MIPS. Superseded (2026-11-26, branch `mips-m3`): `analyze` takes a PSP PRX, see "Function
+discovery on MIPS (MIPS-3)"; the decompiler still does not.
 
 ### The PRX loader (`psp.rs`)
 
@@ -8304,6 +8309,152 @@ Not checked: the register operands of the other 353 VFPU words (`vpfxd`, `vocp.s
 `2/PI`); and all p-code semantics of the Allegrex spec. The comparison is with a transcription
 of PPSSPP's rules, not with PPSSPP running, and on this one file. Java Ghidra with the
 ghidra-allegrex extension was not run.
+
+## Function discovery on MIPS (MIPS-3, branch `mips-m3`, 2026-11-26)
+
+`ghidra-rs analyze` takes a PSP PRX: the image `disasm` loads (`psp::load`, relocated at
+0x08804000), decoded as Allegrex, through the same task queue, analyzers and writers as the x86
+images (`--functions`, `--gaps`, `--purges`; `--facts`, `--decomp-prelude`, `--store` and
+`--abi-callers` refuse a PRX: MIPS-4). `analysis::Image` took the PRX with one new flag, `mips`
+(`Image::from_prx`: the loaded sections as blocks, read-only and zero-filled as the section
+headers say, the ELF entry point as the only entry). No export, import or `sceModuleInfo` is
+read: that is MIPS-5.
+
+```sh
+ghidra-rs analyze BOOT.BIN --functions functions.csv --gaps gaps.csv --purges purges.txt
+```
+
+What is MIPS's own in the analysis (`analysis.rs`; the rest is the code the x86 images run):
+
+- **Delay slots.** A branch and its delay slot instruction are one unit, 8 bytes, with the
+  p-code the engine gives the branch (the slot's p-code inside it). Bodies, sizes and gaps are
+  the ones Java's two instructions give. A flow into a delay slot is lost and counted in a
+  warning (none on `BOOT.BIN`).
+- **Flow types** come from the p-code as on x86: `jal`/`bal` a call, `jalr` a computed call,
+  `jr ra` a return (the spec's `RETURN`), another `jr` a computed jump, `j`/`b` a jump. A
+  branch-likely or `bc1t`/`bvt` (`if (!cond) goto inst_next; ...; goto target`) is a
+  conditional jump. A branch to itself (`b .`) is a jump, not x86's `REP`.
+- **Constants** (Java: the Allegrex Constant Reference Analyzer, ghidra-allegrex's copy of
+  `MipsAddressAnalyzer`, over `SymbolicPropogator`): the fold of the x86 analysis with `sp`,
+  the `<killedbycall>` registers `at`, `v0`, `v1` and the stack shift 0 of `allegrex.cspec`'s
+  default prototype (the names are written in `analysis.rs`: the cspec is not in this repo
+  yet). The address a `lui`/`addiu` or `lui`/`ori` pair makes (an `INT_ADD` or `INT_OR` of a
+  register's constant and an immediate) is a reference of the instruction: a data reference,
+  or a code constant when it points into an executable section.
+- **Computed calls.** A `jalr` whose register the constants give calls a function there
+  (Java: its COMPUTED_CALL reference, then Subroutine References). An instruction can have
+  several targets, one per flow that reaches it (`Analysis::computed_calls`).
+- **Reference task** (Java: the Reference and Data Reference analyzers; priority 600, on each
+  batch of functions, MIPS only): `Analysis::disassemble` with constants, inside the queue. It
+  disassembles, without making a function, the code at code constants (callbacks passed in a
+  register) and at pointers in referenced data, by the rules it already had for x86; the calls
+  in that code make their functions.
+- **Function Start Search** with ghidra-allegrex's `Allegrex_patterns.xml`
+  (`processors/Allegrex/data/patterns`, copied unmodified, read at build time): one search at
+  4-byte alignment; a `<funcstart/>` match at undefined bytes is disassembled and made a
+  function; a `<possiblefuncstart/>` match is disassembled and made a function later
+  ("Function Start Search delayed", priority 701) if it is in no function and no conditional
+  jump goes there, as `PossibleDelayedFunctionCreator`.
+- **Switch tables** (`Analysis::mips_switch_table`): a pattern over the instruction words,
+  where Java uses the decompiler (Decompiler Switch Analysis): `lw r,lo(x)` of a table word,
+  `x` a `lui`/`addiu` constant plus a register, then `jr r`; the entry count from the
+  `slti`/`sltiu` whose `beq`/`bne` on the flag guards it, through an `addiu` that moves the
+  index, in the straight-line history and that of the first jump that reached the block. A
+  `jr` it does not resolve is counted in a warning.
+- Not run on MIPS: the callee purge analyzer (x86's), RTTI, Function ID.
+
+Not ported: the `gp` value and the `t9` assumption of the address analyzer (`gp` stays an
+unknown register here; the module's `gp` is in `sceModuleInfo`, MIPS-5), its
+`ra`-constant call override, `MIPS UnAlligned Instruction Fix` (`lwl`/`lwr` pairs: no flow),
+a pattern match at an instruction outside every function, and the decompiler's jump-table
+recovery.
+
+### Against Java (`BOOT.BIN`, 2026-11-26)
+
+Java cannot relocate a PRX, so the reference is Java on the image ghidra-rs loads:
+`ghidra-rs prx-elf` writes it as a plain ELF32 executable (the two `PT_LOAD` segments and the
+50 loaded sections at their loaded addresses, the file's names, flags and `e_flags`, the
+loaded entry point), and headless Ghidra 12.2 (`/opt/ghidra`, build 2026-11-10) imports it as
+`Allegrex:LE:32:default` and runs its plain auto-analysis. The language is ghidra-allegrex's:
+its release v21.6 for Ghidra 12.2 (`ghidra_12.2_PUBLIC_20261031_ghidra-allegrex.zip`, whose
+`allegrex.sla` is byte for byte the one `build-sla.sh` compiles) is unpacked into a throwaway
+settings directory (`XDG_CONFIG_HOME` and `XDG_CACHE_HOME` set for the run), not into
+`~/.config/ghidra` or the install. With the extension present Ghidra picked its loader for
+the ELF ("PSP Executable (ELF)"), not the stock ELF loader; what that loader does beyond the
+stock one on a file with no relocation sections was not examined.
+
+```sh
+JAVA_HOME=/usr/lib/jvm/java-25-openjdk OUT=<a path with no component starting with "."> \
+    tools/mips-ref.sh BOOT.BIN
+```
+
+The script compares `tools/ghidra/DumpPurges.java`'s lines with `analyze --purges` (entry,
+purge, thunk, body minimum, body maximum, address count, no-return):
+
+| | functions |
+|---|---|
+| Java | 11,399 |
+| ghidra-rs | 11,399 |
+| entry in both | 11,398 |
+| only Java | 1 (0x08add548) |
+| only ghidra-rs | 1 (0x08add92c) |
+| in both, the whole line identical | 11,384 |
+| in both, the body differs | 14 |
+
+Java's analysis took 64 s by its own report, ghidra-rs's 3.6 to 4.0 s (one run each, not a
+benchmark). `--functions` writes 11,164 rows (the functions in `.text`; the other 235 are in
+the `.sceStub.text.*` sections) and reports a coverage of 3,373,992 of 3,474,880 `.text`
+bytes; `--gaps` writes 16 `padding` and 1,575 `unexamined` ranges (120 and 100,768 bytes).
+
+How the functions came, step by step (each row adds to the one before):
+
+| | ghidra-rs | in both | only Java |
+|---|---|---|---|
+| the entry point, calls, patterns, address tables, shared returns, switch pattern | 11,276 | 11,276 | 123 |
+| `jalr` targets of the local fold | 11,296 | 11,295 | 104 |
+| the Reference task: code at `lui`/`addiu` constants and at pointers in data | 11,378 | 11,377 | 22 |
+| every flow's `jalr` target; the constants of a delay slot count as the slot's | 11,399 | 11,398 | 1 |
+
+The causes of what is left, each looked at in the bytes:
+
+- **The two functions** (one each way) are two cases of one dispatcher that set `t0` and share
+  a tail into the same `jalr t0` at 0x08add054:
+  `08add108 lui v1,0x8ae` (`ae 08 03 3c`), `08add10c addiu t0,v1,-0x2ab8` (`48 d5 68 24`),
+  falling into `08add114 bne a0,v0,...` (`d5 ff 82 14`) and `08add11c j 0x8add044`; and
+  `08add1e0 lui v1,0x8ae`, `08add1e4 addiu t0,v1,-0x26d4` (`2c d9 68 24`),
+  `08add1e8 j 0x8add114` (`45 74 2b 0a`). The constant propagation of each side carries only
+  the first of the two flows through 0x08add114 on to the `jalr`: Java the first
+  (0x08add548), ghidra-rs the second (0x08add92c). The order in which Java's
+  `SymbolicPropogator` takes the saved flows is not reproduced.
+- **The 14 bodies** all hold a `jr` through a table. Of the 282 `jr` of a register other than
+  `ra` a linear sweep of `.text` shows (243 `jr at`, 39 `jr a0`), 272 are instructions in
+  Java: 267 with computed-jump references, 5 without. ghidra-rs resolves 268 and counts 5 as
+  not resolved. The number of distinct targets is the same at 251 of Java's 272 (the count
+  was compared, not each target). The 14:
+  - 4 where Java's body is larger: the pattern finds no bound (0x0896b514, 0x089746e8,
+    0x08a50928, 0x08adddf4). Example: `0896b4f4 sltiu a0,a0,0xa` (`0a 00 84 2c`) overwrites the
+    index with the flag, and `0896b500 lw a0,0x1b0(sp)` (`b0 01 a4 8f`) reloads it from the
+    stack before `sll`: tying the bound to the index needs the stack values the decompiler
+    tracks. (The fifth miss, 0x0896083c, has one target in Java; its body is the same.)
+  - 4 where ghidra-rs's body is larger because Java has no table at the `jr` (0x0885213c,
+    0x089ea45c, 0x08a10b68, 0x08ad58c4). Example: 0x0885213c lies behind a comparison tree
+    (`088520e8 slti a2,a1,0x3c`, `088520f4 slti a2,a1,0x12`, `088520fc slti a2,a1,0x21`, then
+    `08852124 bne a2,zero,...`, `08852128 addiu a1,a1,-0x21`): the pattern reads 0x3c - 0x21 =
+    27 entries from it. Why Java's decompiler recovers none there was not found.
+  - 6 where ghidra-rs's body is larger and Java's targets at the `jr` are others: one target
+    in Java at 0x088f79c0, 0x0897ed80, 0x089811cc, 0x08a4ac78 and 0x08a4ad88; at 0x0899f5f0
+    Java has 7 distinct targets and the pattern 3. Java logs decompiler warnings in two of
+    these functions (0x08a4abe0, 0x08a4acf0: "Unable to read bytes"). Which side has the
+    table right was not worked out.
+
+  The pattern is a stand-in, so where it finds a table Java does not, that is its imprecision,
+  not a fix to keep: the decompiler's jump-table recovery on MIPS (MIPS-4) replaces it.
+
+Not checked: Java's instruction set against ghidra-rs's (only functions and bodies were
+compared; one `jr`, 0x08b06148, is an instruction with a table here and no instruction in
+Java), references, the `callees`, `callers` and `data_refs` columns of `--functions` (no Java
+export was made for them), any other PRX, and a MIPS ELF that is not a PRX (`analyze` takes
+only the PRX). Function names, imports and exports are MIPS-5.
 
 ## Speed
 

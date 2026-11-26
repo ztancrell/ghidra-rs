@@ -292,3 +292,61 @@ fn address_table_in_executable_data_x86_32() {
     assert_eq!(an.table_slots.get(&0x402008), Some(&0x402000));
     assert!(an.insns.range(0x402000..0x402030).next().is_none());
 }
+
+// MIPS (Allegrex) discovery on a hand-made image: a `jal` with its delay slot makes its target
+// a function, a branch and its slot are one unit of a body, a `jr` through a table bounded by
+// `sltiu` is a switch, and a prologue after a return's filler is found by the pattern search.
+#[test]
+fn discover_functions_mips() {
+    let path = Sleigh::allegrex_sla_path();
+    assert!(path.exists(), "{} is missing: run rust/build-sla.sh first", path.display());
+    let sl = Sleigh::load(&path).unwrap();
+    let words: [u32; 23] = [
+        0x27bd_fff0, // 8804000 addiu sp,sp,-0x10
+        0xafbf_0000, // 8804004 sw ra,0(sp)
+        0x0e20_1008, // 8804008 jal 0x8804020
+        0x2404_0001, // 880400c   li a0,1
+        0x8fbf_0000, // 8804010 lw ra,0(sp)
+        0x03e0_0008, // 8804014 jr ra
+        0x27bd_0010, // 8804018   addiu sp,sp,0x10
+        0x0000_0000, // 880401c nop
+        0x2c82_0002, // 8804020 sltiu v0,a0,2
+        0x1040_0007, // 8804024 beq v0,zero,0x8804044
+        0x0004_2080, // 8804028   sll a0,a0,2
+        0x3c01_08b5, // 880402c lui at,0x8b5
+        0x0024_0821, // 8804030 addu at,at,a0
+        0x8c21_0000, // 8804034 lw at,0(at)
+        0x0020_0008, // 8804038 jr at
+        0x0000_0000, // 880403c   nop
+        0x2402_0001, // 8804040 li v0,1
+        0x03e0_0008, // 8804044 jr ra
+        0x0000_0000, // 8804048   nop
+        0x0000_0000, // 880404c nop
+        0x27bd_fff0, // 8804050 addiu sp,sp,-0x10: reached by nothing
+        0x03e0_0008, // 8804054 jr ra
+        0x27bd_0010, // 8804058   addiu sp,sp,0x10
+    ];
+    let section = |name: &str, exec, addr, words: &[u32]| Section {
+        name: name.into(),
+        exec,
+        readonly: true,
+        zero_tail: 0,
+        addr,
+        data: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+    };
+    let img = Image {
+        sections: vec![
+            section(".text", true, 0x0880_4000, &words),
+            section(".rodata", false, 0x08b5_0000, &[0x0880_4040, 0x0880_4044]),
+        ],
+        entry: Some(0x0880_4000),
+        mips: true,
+        ..Image::default()
+    };
+    let an = Analysis::run(&img, &sl, &[], false).unwrap();
+    assert_eq!(an.funcs.iter().copied().collect::<Vec<_>>(), [0x0880_4000, 0x0880_4020, 0x0880_4050]);
+    assert_eq!([an.body_size(0x0880_4000), an.body_size(0x0880_4020), an.body_size(0x0880_4050)], [28, 44, 12]);
+    assert_eq!(an.insns[&0x0880_4008].len, 8); // the jal with its delay slot
+    assert_eq!(an.tables[&0x0880_4038], [0x0880_4040, 0x0880_4044]);
+    assert!(an.mips_switch_misses.is_empty());
+}

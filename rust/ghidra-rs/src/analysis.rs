@@ -1,5 +1,5 @@
 //! Function discovery, bodies and references for 32-bit x86 PE images (and ELF x86-64 ones,
-//! `Image::from_elf`), modelled on what
+//! `Image::from_elf`, and PSP PRX ones, MIPS, `Image::from_prx`), modelled on what
 //! Ghidra's auto-analysis produces for the scripts in `main.rs` (ExportFunctions, ExportGaps).
 //! Every executable section is disassembled; results are reported for `.text`. See rust/README.md "Analysis" for what is and isn't covered.
 
@@ -32,6 +32,9 @@ pub struct Image {
     pub eat: Vec<(u32, u32)>,   // export address table: (slot, function it names)
     /// An ELF x86-64 image (`from_elf`): pointers are 8 bytes, the language x86:LE:64:default
     pub elf64: bool,
+    /// A little-endian MIPS32 image (`from_prx`: a PSP PRX, Allegrex): 4-byte instructions,
+    /// branches with a delay slot
+    pub mips: bool,
     /// ELF: the functions the loader makes, in its order (ElfProgramBuilder: the symbol-table
     /// STT_FUNC symbols, then the entry point and the dynamic entries); the exports hold the
     /// global and weak ones and the entries
@@ -456,6 +459,40 @@ impl Image {
         Ok(img)
     }
 
+    /// A PSP PRX as `psp::load` lays it out at `psp::DEFAULT_BASE`, its relocations applied: the
+    /// loaded sections as blocks, the ELF entry point as the one entry. Nothing of
+    /// `sceModuleInfo`, `.lib.ent` or `.lib.stub` is read (no exports, no imports: MIPS-5).
+    pub fn from_prx(bytes: &[u8]) -> Result<Image, String> {
+        use object::read::elf::{FileHeader, SectionHeader};
+        let prx = crate::psp::load(bytes, crate::psp::DEFAULT_BASE)?;
+        let le = object::Endianness::Little;
+        let head = object::elf::FileHeader32::<object::Endianness>::parse(bytes).map_err(|e| e.to_string())?;
+        let heads = head.sections(le, bytes).map_err(|e| e.to_string())?;
+        // (link address, size) of the sections that are writable, and of those without file bytes
+        let with = |f: &dyn Fn(&object::elf::SectionHeader32<object::Endianness>) -> bool| -> HashSet<(u32, u32)> {
+            heads.iter().filter(|h| f(h)).map(|h| (h.sh_addr(le), h.sh_size(le))).collect()
+        };
+        let writable = with(&|h| h.sh_flags(le) & object::elf::SHF_WRITE != 0);
+        let nobits = with(&|h| h.sh_type(le) == object::elf::SHT_NOBITS);
+        let sections = prx
+            .sections
+            .iter()
+            .map(|s| {
+                let at = (s.addr - prx.base) as usize;
+                let key = (s.addr - prx.base, s.size);
+                Section {
+                    name: s.name.clone(),
+                    exec: s.exec,
+                    readonly: !writable.contains(&key),
+                    zero_tail: if nobits.contains(&key) { s.size } else { 0 },
+                    addr: s.addr,
+                    data: prx.mem[at..at + s.size as usize].to_vec(),
+                }
+            })
+            .collect();
+        Ok(Image { sections, entry: Some(prx.entry), mips: true, ..Image::default() })
+    }
+
     /// A pointer of the image: 4 bytes, or 8 for an ELF64 image (None past 32 bits).
     pub fn read_ptr(&self, a: u32) -> Option<u32> {
         if !self.elf64 {
@@ -613,6 +650,15 @@ pub struct Analysis {
     slot_jumps_inside: HashSet<u32>,
     /// PIC switch jumps (`pic_switch_table`) whose table, bound or cases were not found.
     pub pic_switch_misses: BTreeSet<u32>,
+    /// MIPS: computed jumps (`jr` of a register other than `ra`) `mips_switch_table` found no
+    /// table and bound for.
+    pub mips_switch_misses: BTreeSet<u32>,
+    /// MIPS: every code address a walk of `propagate` found a `jalr` to call. An instruction
+    /// has one `computed`; Java makes a COMPUTED_CALL reference for each value a flow brings
+    /// (cases of a switch that set a register and share one `jalr`).
+    computed_calls: BTreeSet<u32>,
+    /// MIPS: the `<possiblefuncstart/>` matches of Function Start Search, for its delayed task.
+    possible_starts: BTreeSet<u32>,
     /// Function Start Search on x86-64: undefined bytes after something defined where a
     /// `<funcstart after="defined"/>` pattern matches (`start_search_gcc64`; none is applied).
     start_after_defined: BTreeSet<u32>,
@@ -740,13 +786,19 @@ fn pair_hit(d: &[u8], o: usize, pres: &[Pat], posts: &[Pat]) -> bool {
 /// (patternconstraints.xml), read as Java reads it.
 const GCC64_PATTERNS: &str = include_str!("../../../Ghidra/Processors/x86/data/patterns/x86-64gcc_patterns.xml");
 
+/// The function start patterns of ghidra-allegrex (`rust/processors/Allegrex/NOTICE`), read as
+/// data at build time
+const ALLEGREX_PATTERNS: &str = include_str!("../../processors/Allegrex/data/patterns/Allegrex_patterns.xml");
+
 /// What a pattern of a Function Start Search file does where it matches (FunctionStartAnalyzer's
-/// match actions): `<funcstart/>`, `<funcstart after="defined" .../>`, `<codeboundary/>`.
+/// match actions): `<funcstart/>`, `<funcstart after="defined" .../>`, `<codeboundary/>`,
+/// `<possiblefuncstart/>`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum StartAct {
     Func,
     FuncAfterDefined,
     Boundary,
+    PossibleFunc,
 }
 
 /// A `<patternpairs>` set (prepatterns end right before the candidate), or a `<pattern>`: no
@@ -828,6 +880,7 @@ fn start_patterns(xml: &str) -> Result<Vec<StartSet>, String> {
             [t] if t.starts_with("codeboundary") => Ok(StartAct::Boundary),
             [t] if t.starts_with("funcstart") && t.contains("after=\"defined\"") => Ok(StartAct::FuncAfterDefined),
             [t] if t.trim_end().trim_end_matches('>').trim_end() == "funcstart/" => Ok(StartAct::Func),
+            [t] if t.trim_end().trim_end_matches('>').trim_end() == "possiblefuncstart/" => Ok(StartAct::PossibleFunc),
             _ => Err(format!("pattern file: not ported: the actions {tags:?}")),
         }
     };
@@ -890,6 +943,9 @@ impl Analysis {
             fallthru: HashSet::new(),
             slot_jumps_inside: HashSet::new(),
             pic_switch_misses: BTreeSet::new(),
+            mips_switch_misses: BTreeSet::new(),
+            computed_calls: BTreeSet::new(),
+            possible_starts: BTreeSet::new(),
             start_after_defined: BTreeSet::new(),
             bodies: BTreeMap::new(),
             table_slots: BTreeMap::new(),
@@ -959,6 +1015,21 @@ impl Analysis {
                 an.warnings.push(format!("not ported: {} ELF dynamic relocations not applied", img.unapplied_relocs));
             }
         }
+        if img.mips {
+            // the fold of MIPS32: `sp`, and the `<killedbycall>` registers of the default
+            // prototype of ghidra-allegrex's allegrex.cspec (`at`, `v0`, `v1`; its `f0` and `f1`
+            // are float registers, which hold no address), whose extrapop and stackshift are 0.
+            // lean: the three names are written here, the cspec is not in this repo (MIPS-4
+            // copies it); then read them from it as x86-64's are
+            let reg = |n: &str| list.iter().find(|r| r.0 == n).map(|r| r.1).ok_or(format!("no register {n}"));
+            an.sp = reg("sp")?;
+            an.killed = vec![reg("at")?, reg("v0")?, reg("v1")?];
+            an.stackshift = Some(0);
+            an.warnings.push(
+                "not ported for MIPS: the decompiler's jump-table recovery (a pattern stands in), the gp value and the t9 assumption of the MIPS address analyzer, Function ID, the PSP's exports and import stubs (MIPS-5)"
+                    .into(),
+            );
+        }
         for (slot, (_, name)) in img.imports.iter().filter(|_| !img.elf64) {
             if KNOWN_NORETURN.contains(&name.as_str()) {
                 an.noreturn.insert(*slot);
@@ -976,7 +1047,7 @@ impl Analysis {
         // RTTI vftable slots: the RTTI analyzer (599) makes a function of each
         // (`EHDataTypeUtilities.createFunctionIfNeeded`); MSVC's, so not on ELF
         let mut rtti = Vec::new();
-        let tables = if img.elf64 { BTreeMap::new() } else { crate::scripts::vftables(img) };
+        let tables = if img.elf64 || img.mips { BTreeMap::new() } else { crate::scripts::vftables(img) };
         for &v in tables.keys() {
             for i in 0..4096 {
                 match img.read_u32(v + 4 * i) {
@@ -1021,9 +1092,11 @@ impl Analysis {
             SharedReturns,
             SlotJumps,
             Purge,
+            StartDelayed,
+            Constants,
         }
         let analyzer = |name, kind, priority, id| Analyzer { name, kind, priority, id };
-        let mut mgr = Manager::new(vec![
+        let mut analyzers = vec![
             // Not Java's analyzers, the old discovery at their priorities (to port):
             // - Disassemble Entry Points: EntryPointAnalyzer's do-later set (suspect entries,
             //   REFERENCE_ANALYSIS.before()) is not modelled; all seeds go in at 200.
@@ -1050,7 +1123,21 @@ impl Analysis {
             // ConstantPropagationAnalyzer (REFERENCE_ANALYSIS.before() x4) on each batch: only its
             // jumps through a pointer, with the thunks the Reference analyzer makes of them
             analyzer("Constant Reference Analyzer", Kind::Function, priority::REFERENCE_ANALYSIS - 4, Task::SlotJumps),
-        ]);
+            // PossibleDelayedFunctionCreator (DATA_ANALYSIS.after()), which Function Start Search
+            // schedules once on its `<possiblefuncstart/>` matches (MIPS only here)
+            analyzer(
+                "Function Start Search delayed",
+                Kind::Instruction,
+                priority::DATA_ANALYSIS + 1,
+                Task::StartDelayed,
+            ),
+        ];
+        if img.mips {
+            // the Reference and Data Reference analyzers (REFERENCE_ANALYSIS, after the constants
+            // of the address analyzer): on each batch of functions
+            analyzers.push(analyzer("Reference", Kind::Function, priority::REFERENCE_ANALYSIS, Task::Constants));
+        }
+        let mut mgr = Manager::new(analyzers);
         // ElfDefaultGotPltMarkup.processPLTSection at load: `.plt` past its first 16 bytes is
         // disassembled, following flows, from each byte no instruction covers yet; the first
         // address that decodes nothing ends it (processLinkageTable). No function is made.
@@ -1075,7 +1162,7 @@ impl Analysis {
         let mut body_noreturn = an.noreturn.clone();
         // the instructions the no-return analyzer looked at, and INT3 (checkNonReturningIndicators)
         let mut noreturn_seen = HashSet::new();
-        let int3 = |a: u32| img.block_of(a).is_some_and(|s| s.data[(a - s.addr) as usize] == 0xcc);
+        let int3 = |a: u32| !img.mips && img.block_of(a).is_some_and(|s| s.data[(a - s.addr) as usize] == 0xcc);
         let mut repair = repair::RepairCounts::default();
         while let Some((task, set)) = mgr.next_task() {
             let mut data = BTreeSet::new();
@@ -1108,13 +1195,50 @@ impl Analysis {
                     an.start_search_gcc64(img, sl, &mut p, &mut owner, &mut queue)?
                 }
                 Task::StartSearchAfterData if img.elf64 => {}
+                // Allegrex_patterns.xml has no after="data" pattern
+                Task::StartSearchAfterData if img.mips => {}
+                Task::StartSearch if img.mips => {
+                    an.start_search_mips(img, sl, &mut p, &mut owner, &mut queue)?;
+                    mgr.notify(Kind::Instruction, &an.possible_starts);
+                }
+                // MIPS: the code Java disassembles at the code addresses instructions make
+                // (`lui`/`addiu` pairs: callbacks) and at pointers in data, by `disassemble`'s
+                // rules; no function is made there, but its calls make theirs. Then the functions
+                // at the `jalr` targets the constants of the whole functions give.
+                // lean: each turn runs `disassemble` and its constant propagation over the whole
+                // program, not over the task's set; a few turns on BOOT.BIN. Upgrade: the walks
+                // of `propagate` on the batch's functions only
+                Task::Constants => {
+                    an.disassemble(img, sl, &[], true);
+                    for (&a, i) in &an.insns {
+                        let o = (a - an.code_lo) as usize;
+                        owner[o] = 1;
+                        owner[o + 1..o + i.len as usize].fill(2);
+                    }
+                    for t in std::mem::take(&mut an.computed_calls) {
+                        an.funcs.insert(t);
+                        queue.push(t);
+                    }
+                    an.descend(img, sl, &mut p, &mut owner, &mut queue, &mut Vec::new());
+                }
+                Task::StartDelayed => {
+                    // no function where a conditional reference comes in, or inside a function
+                    let cond: HashSet<u32> =
+                        an.insns.values().filter(|i| i.flow == Flow::CondJump).filter_map(|i| i.target).collect();
+                    let new: Vec<u32> = set
+                        .iter()
+                        .copied()
+                        .filter(|a| an.insns.contains_key(a) && !an.body_owner.contains_key(a) && !cond.contains(a))
+                        .collect();
+                    an.funcs.extend(new);
+                }
                 Task::StartSearch | Task::StartSearchAfterData => {
                     an.start_search(img, sl, &mut p, &mut owner, &mut queue)
                 }
                 Task::SharedReturns => an.shared_returns(&set),
                 Task::SlotJumps => slot_thunks = an.slot_jumps(img, sl, &mut p, &mut owner, &set),
                 // X86FunctionPurgeAnalyzer.canAnalyze: 32-bit only
-                Task::Purge if img.elf64 => {}
+                Task::Purge if img.elf64 || img.mips => {}
                 Task::Purge => an.callee_purge(img, &set, &body_noreturn),
             }
             mgr.notify(Kind::Data, &data);
@@ -1213,6 +1337,25 @@ impl Analysis {
                 an.start_after_defined.len(),
                 an.start_after_defined.first().copied().unwrap_or(0)
             ));
+        }
+        if !an.mips_switch_misses.is_empty() {
+            an.warnings.push(format!(
+                "not ported: the decompiler's jump-table recovery (DecompilerSwitchAnalyzer): {} computed jumps (`jr` of another register than ra) the MIPS table pattern did not resolve, first at 0x{:x}",
+                an.mips_switch_misses.len(),
+                an.mips_switch_misses.first().copied().unwrap_or(0)
+            ));
+        }
+        if img.mips {
+            // a branch and its delay slot are one unit (`decode_ops`): a flow into the slot is lost
+            let inside = |t: &u32| an.insns.range(..t).next_back().is_some_and(|(&a, i)| a + i.len as u32 > *t);
+            let into: BTreeSet<u32> = an.insns.values().filter_map(|i| i.target).filter(inside).collect();
+            if !into.is_empty() {
+                an.warnings.push(format!(
+                    "not modelled: {} flow targets lie in the delay slot of a branch (Java has the slot instruction on its own), first at 0x{:x}",
+                    into.len(),
+                    into.first().copied().unwrap_or(0)
+                ));
+            }
         }
         if !an.pic_switch_misses.is_empty() {
             an.warnings.push(format!(
@@ -1893,7 +2036,8 @@ impl Analysis {
                             continue;
                         }
                         StartAct::Func => drop(self.funcs.insert(a)),
-                        StartAct::Boundary => {}
+                        // none in x86-64gcc_patterns.xml
+                        StartAct::Boundary | StartAct::PossibleFunc => {}
                     }
                     queue.push(a);
                     self.descend(img, sl, p, owner, queue, &mut Vec::new());
@@ -1904,6 +2048,184 @@ impl Analysis {
                 return Ok(());
             }
         }
+    }
+
+    /// Function Start Search on MIPS, with ghidra-allegrex's `Allegrex_patterns.xml`
+    /// (FunctionStartAnalyzer.added): one search of the executable blocks at instruction
+    /// alignment. A `<funcstart/>` match at undefined bytes is disassembled and made a function;
+    /// a `<possiblefuncstart/>` match there is disassembled (after the others, as Java does at
+    /// DISASSEMBLY priority) and left to the delayed task (`possible_starts`).
+    // lean: a match at an instruction outside every function makes no function here (Java:
+    // unless checkAlreadyInFunctionAbove). Upgrade: that check, FunctionStartAnalyzer.java:296
+    fn start_search_mips(
+        &mut self,
+        img: &Image,
+        sl: &Sleigh,
+        p: &mut crate::sleigh::Parse,
+        owner: &mut [u8],
+        queue: &mut Vec<u32>,
+    ) -> Result<(), String> {
+        let sets = start_patterns(ALLEGREX_PATTERNS)?;
+        let (mut starts, mut possible) = (Vec::new(), Vec::new());
+        for sec in img.sections.iter().filter(|s| s.exec) {
+            for o in (0..sec.data.len()).step_by(4) {
+                let a = sec.addr + o as u32;
+                if owner[(a - self.code_lo) as usize] != 0 {
+                    continue;
+                }
+                match sets.iter().find(|s| s.hit(&sec.data, o)).map(|s| s.act) {
+                    Some(StartAct::Func) => starts.push(a),
+                    Some(StartAct::PossibleFunc) => possible.push(a),
+                    _ => {}
+                }
+            }
+        }
+        for &a in &starts {
+            self.funcs.insert(a);
+            queue.push(a);
+            self.descend(img, sl, p, owner, queue, &mut Vec::new());
+        }
+        for &a in &possible {
+            queue.push(a);
+            self.descend(img, sl, p, owner, queue, &mut Vec::new());
+        }
+        self.possible_starts = possible.into_iter().collect();
+        Ok(())
+    }
+
+    /// A switch of the compilers of PSP games: `lw r,lo(x)` of a word of a table of code
+    /// addresses, `x` a constant (`lui`, `addiu`) plus a register (`addu`), then `jr r`. The
+    /// entry count is the `slti`/`sltiu flag,index,N` before it whose `beq flag,zero` leaves for
+    /// the default case, less the `N` of one whose `bne flag,zero` does (a range that starts
+    /// below 0), each moved by an `addiu index,index,-k` after it (`slti a1,a0,9; beq
+    /// a1,zero,default; addiu a0,a0,-1`: 8 entries). Every case must be an aligned address of
+    /// the jump's own section. `recent` is the straight-line history before the jump, `before`
+    /// that of the first jump that reached its run (a comparison tree's branch: its test holds
+    /// the other way).
+    // lean: a pattern over the instruction words, as `switch_table` on x86. Java recovers the
+    // tables with the decompiler (DecompilerSwitchAnalyzer); a `jr` this does not resolve is
+    // counted (`mips_switch_misses`). Upgrade: the decompiler's jump-table recovery, once it
+    // runs on MIPS (MIPS-4).
+    fn mips_switch_table(&self, img: &Image, at: u32, before: &[u32], recent: &[u32]) -> Option<(u32, Vec<u32>)> {
+        let sec = img.block_of(at)?;
+        let jump = img.read_u32(at)?;
+        // jr: SPECIAL, function 8
+        if jump >> 26 != 0 || jump & 0x3f != 8 {
+            return None;
+        }
+        // per register: a constant, a constant plus an unknown register, the address of a word loaded
+        const NONE: (Option<u32>, Option<u32>, Option<u32>) = (None, None, None);
+        let mut regs = [NONE; 32];
+        // the last comparison: (flag register, index register, N), and the range it and the
+        // branch on its flag leave the index register in: (register, first value, one past the
+        // last), until the index is scaled (`sll x,index,2`)
+        let mut cmp: Option<(usize, usize, u32)> = None;
+        let mut bound: Option<(usize, Option<u32>, Option<u32>)> = None;
+        let mut scaled = false;
+        // the instructions in address order, with the way their branch was left: the last one
+        // of `before` is the jump that reached this run
+        let hist = &recent[recent.len().saturating_sub(16)..];
+        let insns =
+            before.iter().enumerate().map(|(i, &a)| (a, i + 1 == before.len())).chain(hist.iter().map(|&a| (a, false)));
+        for (a, taken) in insns {
+            let likely = matches!(img.read_u32(a)? >> 26, 20..=23);
+            for d in (0..self.insns.get(&a).map_or(0, |i| i.len as u32)).step_by(4) {
+                // a branch-likely runs its delay slot only when it is taken
+                if d > 0 && likely && !taken {
+                    continue;
+                }
+                let w = img.read_u32(a + d)?;
+                let (op, rs, rt, rd) =
+                    (w >> 26, (w >> 21 & 31) as usize, (w >> 16 & 31) as usize, (w >> 11 & 31) as usize);
+                let imm = w as u16 as i16 as u32;
+                // the register the instruction writes, where it is not the index moving along
+                let mut wrote = None;
+                match op {
+                    // sll rd,index,2
+                    0 if w & 0x3f == 0 && w >> 6 & 31 == 2 && bound.is_some_and(|b| b.0 == rt) => {
+                        scaled = true;
+                        regs[rd] = NONE;
+                    }
+                    // addu rd,rs,rt with one side a constant
+                    0 if w & 0x7ff == 0x21 => {
+                        regs[rd] = match (regs[rs].0, regs[rt].0) {
+                            (Some(c), None) | (None, Some(c)) => (None, Some(c), None),
+                            _ => NONE,
+                        };
+                        wrote = Some(rd);
+                    }
+                    0 => {
+                        regs[rd] = NONE;
+                        wrote = Some(rd);
+                    }
+                    // jal: the callee's registers
+                    3 => {
+                        regs = [NONE; 32];
+                        if !scaled {
+                            bound = None;
+                        }
+                    }
+                    // addiu: a constant's low half, or the index moved (to another register too)
+                    9 => {
+                        regs[rt] = (regs[rs].0.map(|c| c.wrapping_add(imm)), None, None);
+                        match bound.filter(|b| b.0 == rs && !scaled) {
+                            Some(b) => {
+                                bound = Some((rt, b.1.map(|n| n.wrapping_add(imm)), b.2.map(|n| n.wrapping_add(imm))))
+                            }
+                            None => wrote = Some(rt),
+                        }
+                    }
+                    // slti, sltiu
+                    10 | 11 => {
+                        cmp = Some((rt, rs, imm));
+                        regs[rt] = NONE;
+                        wrote = Some(rt).filter(|_| rt != rs);
+                    }
+                    // beq, bne, beql, bnel on the flag of the comparison, against `zero`: index < N
+                    // where beq falls through or bne is taken, index >= N otherwise
+                    4 | 5 | 20 | 21 if rt == 0 && cmp.is_some_and(|c| c.0 == rs) && !scaled => {
+                        let (_, index, n) = cmp.unwrap();
+                        let b = bound.filter(|b| b.0 == index).unwrap_or((index, None, None));
+                        bound =
+                            Some(if (op & 1 == 0) != taken { (index, b.1, Some(n)) } else { (index, Some(n), b.2) });
+                    }
+                    // lui
+                    15 => {
+                        regs[rt] = (Some((w & 0xffff) << 16), None, None);
+                        wrote = Some(rt);
+                    }
+                    // lw
+                    35 => {
+                        regs[rt] = (None, None, regs[rs].1.map(|c| c.wrapping_add(imm)));
+                        wrote = Some(rt);
+                    }
+                    // branches and stores write no integer register
+                    1 | 4..=7 | 20..=23 | 40..=43 | 46 => {}
+                    _ => {
+                        regs[rt] = NONE;
+                        wrote = Some(rt);
+                    }
+                }
+                // the index register overwritten before it was scaled: its range is gone
+                if !scaled && wrote.is_some_and(|r| bound.is_some_and(|b| b.0 == r)) {
+                    bound = None;
+                }
+                if wrote.is_some_and(|r| cmp.is_some_and(|c| c.1 == r)) {
+                    cmp = None;
+                }
+            }
+        }
+        let table = regs[(jump >> 21 & 31) as usize].2?;
+        // the index starts at 0 without a lower bound (`sltiu`, or a `blez` before the `slti`)
+        // and with one below 0 (a wider test of a comparison tree: the compiler takes the
+        // lowest case off the index)
+        let first = |b: Option<u32>| b.filter(|&n| (n as i32) > 0).unwrap_or(0);
+        let n = bound.and_then(|b| Some(b.2?.wrapping_sub(first(b.1)))).filter(|n| (1..=1024).contains(n))?;
+        let end = sec.addr + sec.data.len() as u32;
+        let cases: Option<Vec<u32>> = (0..n)
+            .map(|i| img.read_u32(table.checked_add(4 * i)?).filter(|&t| t % 4 == 0 && t >= sec.addr && t < end))
+            .collect();
+        Some((table, cases?))
     }
 
     /// Function Start Search: functions at prologue patterns in bytes no code covers yet, each
@@ -1955,11 +2277,18 @@ impl Analysis {
         let sec = img.block_of(a)?;
         let o = (a - sec.addr) as usize;
         let len = sl.decode(p, a as u64, &sec.data[o..]).ok()?;
+        // MIPS: a branch and its delay slot instruction are one unit, as its p-code is.
+        // lean: Java keeps the slot instruction as an instruction of its own, which a flow may
+        // enter; here such a flow is lost (`run` counts them in a warning). Upgrade: slot
+        // instructions as their own `Ins`, with the walks stepping through them
+        let len = if img.mips { p.fall } else { len };
         if len == 0 || o + len > sec.data.len() {
             return None;
         }
         let ops = sl.pcode(p).ok()?;
         let code = sl.code_space();
+        // MIPS: a branch-likely's (and `bc1t`'s) `if (!cond) goto inst_next`
+        let mut skips = false;
         // SymbolicPropogator.checkForCallFixup: a direct call to a function with a call fixup
         // runs the fixup's p-code in place of the CALL op, and none of the call's side effects
         // (`ESP = ESP + 4 - EAX;` for `__chkstk`); the CALL's flow stays the instruction's
@@ -2188,6 +2517,19 @@ impl Analysis {
                     }
                     _ => None,
                 };
+                // MIPS: the address a `lui`/`addiu` or `lui`/`ori` pair makes, a register's
+                // constant plus an immediate, is a reference of the instruction
+                // (SymbolicPropogator's INT_ADD and INT_OR, through the MIPS address analyzer)
+                if let (true, Some((Val::C(x), _))) = (
+                    img.mips && matches!(op.opc, 19 | 28) && o.space == rs && o.size == w && op.ins[1].space == 0,
+                    r.filter(|_| op.ins[0].space == rs),
+                ) {
+                    match (code_at(x).filter(|x| x % 4 == 0), addr(x)) {
+                        (Some(x), _) if !code_imms.contains(&x) => code_imms.push(x),
+                        (None, Some(x)) if !refs.contains(&x) => refs.push(x),
+                        _ => {}
+                    }
+                }
                 if o.space == code {
                     // a direct store, `MOV [g],reg`
                     let p = Val::C(o.offset);
@@ -2221,10 +2563,10 @@ impl Analysis {
                 let esp = crate::sleigh::Varnode { space: rs, offset: sp, size: w };
                 // a default prototype with a known extrapop: every call moves the stack pointer by its
                 // stackshift (SymbolicPropogator.getDefaultStackDepthChange), past the pushed return
-                let purge = self.stackshift.map(|s| s - w).or_else(|| callee.and_then(|t| self.purge.get(&t).copied()));
-                let after = purge.zip(val(&esp, fold)).map(|(n, (v, _))| match v {
-                    Val::C(x) => Val::C(mask(x.wrapping_add(u64::from(w + n)), w)),
-                    Val::S(b, d) => Val::S(b, d.wrapping_add(w + n)),
+                let shift = self.stackshift.or_else(|| callee.and_then(|t| self.purge.get(&t).copied()).map(|n| w + n));
+                let after = shift.zip(val(&esp, fold)).map(|(n, (v, _))| match v {
+                    Val::C(x) => Val::C(mask(x.wrapping_add(u64::from(n)), w)),
+                    Val::S(b, d) => Val::S(b, d.wrapping_add(n)),
                 });
                 let gone = |r: u64| self.killed.iter().chain([&sp]).any(|&k| (k..k + w as u64).contains(&r));
                 fold.regs.retain(|f| f.0 != rs || f.1 < 0x200 && !gone(f.1));
@@ -2235,7 +2577,13 @@ impl Analysis {
             }
             match op.opc {
                 // REP-prefixed string ops branch to their own start or end: no flow change
-                4 | 5 if op.ins[0].space == code && (op.ins[0].offset == a as u64 || op.ins[0].offset == next) => {}
+                // (MIPS: a branch to itself is a jump, `b .`)
+                4 | 5
+                    if op.ins[0].space == code
+                        && (op.ins[0].offset == a as u64 && !img.mips || op.ins[0].offset == next) =>
+                {
+                    skips |= op.opc == 5;
+                }
                 4 | 5 | 7 if op.ins[0].space == code => {
                     // a flow past 32 bits leaves the image: no target, counted in a warning
                     target = u32::try_from(op.ins[0].offset).ok();
@@ -2294,6 +2642,10 @@ impl Analysis {
         }
         if let Some((_, t, _)) = fixup {
             (flow, target) = (Flow::Call, Some(t));
+        }
+        // a jump the instruction may skip is conditional (Java: a fallthrough and a jump)
+        if img.mips && skips && flow == Flow::Jump {
+            flow = Flow::CondJump;
         }
         let computed = computed.filter(|_| slot.is_none());
         let inner = ops.iter().any(|op| {
@@ -2373,7 +2725,9 @@ impl Analysis {
                 }
                 // OperandReferenceAnalyzer.getAddressTable, createFlowTable: an address table
                 // an instruction refers to becomes pointers, and nothing is disassembled there
-                let flows = !matches!(self.insns[&a].flow, Flow::Fall | Flow::Return);
+                // (MIPS: the constants of a branch and its delay slot are the slot instruction's,
+                // which flows nowhere)
+                let flows = !img.mips && !matches!(self.insns[&a].flow, Flow::Fall | Flow::Return);
                 if let Some(elems) = self.table_entry(img, &owner, &refs.dests, t, 3).filter(|e| e.len() >= min_table) {
                     if !flows {
                         self.make_table(img, &mut owner, &mut refs, t, &elems);
@@ -2406,7 +2760,10 @@ impl Analysis {
                 self.descend(img, sl, &mut p, &mut owner, &mut queue, &mut log);
             }
         }
-        self.funcs = funcs;
+        // MIPS, inside `run` (its Reference task): the call targets in the new code are functions
+        if !img.mips {
+            self.funcs = funcs;
+        }
         new
     }
 
@@ -2727,7 +3084,8 @@ impl Analysis {
         log: &mut Vec<u32>,
     ) {
         let mut pending: HashMap<u32, Fold> = HashMap::new();
-        // x86-64: the history of the first jump that reached a run, for `pic_switch_table`
+        // x86-64 and MIPS: the history of the first jump that reached a run, for
+        // `pic_switch_table` and `mips_switch_table`
         let mut reached: HashMap<u32, Vec<u32>> = HashMap::new();
         while let Some(start) = queue.pop() {
             let mut a = start;
@@ -2749,7 +3107,7 @@ impl Analysis {
                     }
                     if ins.flow != Flow::Call && owner[(t - self.code_lo) as usize] == 0 {
                         pending.entry(t).or_insert_with(|| fold.clone());
-                        if img.elf64 {
+                        if img.elf64 || img.mips {
                             reached.entry(t).or_insert_with(|| {
                                 recent[recent.len().saturating_sub(8)..].iter().copied().chain([a]).collect()
                             });
@@ -2757,8 +3115,23 @@ impl Analysis {
                     }
                     queue.push(t);
                 }
+                // MIPS: a `jalr` whose register the fold knows calls a function there (Java: the
+                // COMPUTED_CALL reference of the address analyzer, then Subroutine References)
+                if let Some(t) = ins.computed.filter(|&t| img.mips && ins.flow == Flow::CallInd && t % 4 == 0) {
+                    self.funcs.insert(t);
+                    queue.push(t);
+                }
                 if ins.flow == Flow::JumpInd {
-                    let mut found = self.switch_table(img, a, &recent).map(|t| (t, img.ptr_size()));
+                    let mut found = match img.mips {
+                        true => match self.mips_switch_table(img, a, &before, &recent) {
+                            Some(t) => Some((t, 4)),
+                            None => {
+                                self.mips_switch_misses.insert(a);
+                                None
+                            }
+                        },
+                        false => self.switch_table(img, a, &recent).map(|t| (t, img.ptr_size())),
+                    };
                     if found.is_none() && img.elf64 {
                         match self.pic_switch_table(img, a, &[&before[..], &recent[..]].concat()) {
                             Some(Ok(t)) => found = Some((t, 4)),
@@ -3185,6 +3558,9 @@ impl Analysis {
     /// `RET n` (0 for `RET`), where every return of the body agrees.
     pub fn stack_purges(&mut self, img: &Image) {
         self.purge.clear();
+        if img.mips {
+            return; // no callee purge: the stack shift of a call is the prototype's (0)
+        }
         for (&f, body) in &self.bodies {
             let mut pops = body.iter().filter(|a| self.insns[a].flow == Flow::Return).map(|&a| {
                 let s = img.block_of(a).unwrap();
@@ -3270,6 +3646,9 @@ impl Analysis {
                     }
                     m.computed = m.computed.or(d.computed);
                     m.load = m.load.max(d.load);
+                    if img.mips && d.flow == Flow::CallInd {
+                        self.computed_calls.extend(d.computed.filter(|t| t % 4 == 0));
+                    }
                 }
             }
         }
@@ -3557,6 +3936,9 @@ mod tests {
             fallthru: HashSet::new(),
             slot_jumps_inside: HashSet::new(),
             pic_switch_misses: BTreeSet::new(),
+            mips_switch_misses: BTreeSet::new(),
+            computed_calls: BTreeSet::new(),
+            possible_starts: BTreeSet::new(),
             start_after_defined: BTreeSet::new(),
             bodies: BTreeMap::new(),
             table_slots: BTreeMap::new(),

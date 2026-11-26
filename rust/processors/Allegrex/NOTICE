@@ -11,5 +11,9 @@ ghidra-allegrex is licensed under the Apache License 2.0 (LICENSE, next to this 
 copy) and, in its README's words, is "Derived from Ghidra MIPS module licensed under Apache
 License 2.0". It ships no NOTICE file and its spec files carry no header lines.
 
-Not copied: allegrex.cspec, allegrex.ldefs, Allegrex.opinion, data/patterns and everything
-under src/ and ghidra_scripts/ (the Java, Kotlin and Python side).
+data/patterns/Allegrex_patterns.xml (the function start patterns, for `ghidra-rs analyze`) is
+copied unmodified from the same project's release v21.6 for Ghidra 12.2
+(ghidra_12.2_PUBLIC_20261031_ghidra-allegrex.zip, path data/patterns), on 2026-11-26.
+
+Not copied: allegrex.cspec, allegrex.ldefs, Allegrex.opinion, data/patterns/patternconstraints.xml
+and everything under src/ and ghidra_scripts/ (the Java, Kotlin and Python side).
