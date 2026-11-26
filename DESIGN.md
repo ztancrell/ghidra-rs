@@ -227,6 +227,17 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   naming the source commit. Why: the upstream Ghidra tree stays as it is (2026-11-11), and
   Ghidra's layout keeps `allegrex.pspec` next to `allegrex.sla`, where `Sleigh::load` looks.
   Claude's call, within the user's decision above.
+- 2026-11-26 (MIPS-5): PSP NID names come from PSPSDK's import files (pspdev/pspsdk, BSD
+  licence), extracted to `rust/psp-nids` with the licence and a `NOTICE`, and compiled into the
+  binary. A NID with no name there is `<library>_0x<NID>`. GPL sources (PPSSPP's tables, the
+  PSP library documentation projects) and data of unclear licence (psp-ghidra-scripts' XML
+  files) are not copied. Claude's call, within the user's rule (only a clearly compatible
+  licence, with attribution). Superseded: the open question "where the import names (NIDs)
+  come from" (asked 2026-11-26).
+- 2026-11-26 (MIPS-5): the PRX loader reads `sceModuleInfo` and the import and export tables
+  by the pointers of `sceModuleInfo`; section headers only cross-check. `disasm` prints a
+  `<name>:` line at an import stub or exported function and `  ; <name>` after a `j` or `jal`
+  to one, by default and for a PRX only (x86 prints no names in `disasm`). Claude's call.
 
 ## Milestones
 
@@ -657,6 +668,8 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    `crossbuild`, `inst_next2` and flowref/flowdest are still not ported.
    MIPS-2 (2026-11-26, branch `mips-m2`): a PRX is decoded with ghidra-allegrex's Allegrex
    spec; every word of SOCOM FTB's `.text` decodes, identical to the C++ engine.
+   MIPS-5 (2026-11-26, branch `mips-m5`): the loader reads `sceModuleInfo` and the import and
+   export tables; `disasm` names the import stubs (PSPSDK's NID names, or library and NID).
    In part on branch `worktree-agent-af1e2713bbdee8eab` (2026-11-17): the project store as one plain
    text file (`store.rs`: created and removed functions, fixed bodies, no-return flags, flow
    overrides, thunk marks, switch targets, laid over a fresh analysis by `analyze --store`) and
@@ -745,4 +758,6 @@ Open (asked 2026-11-26, with MIPS-1; details in `docs/plans/mips-psp.md`):
 - The load base of a PRX is fixed at 0x08804000 (Claude's call, see the plan): to confirm, or
   to make an option.
 - Which MIPS analysis and calling convention the later milestones port (Ghidra's MIPS
-  analyzers, `mips32le.cspec` or a PSP one), and where the import names (NIDs) come from.
+  analyzers, `mips32le.cspec` or a PSP one), and where the import names (NIDs) come from. Superseded
+  (2026-11-26, MIPS-5) for the import names only: decided, see Decided (PSPSDK's import files,
+  in `rust/psp-nids`).

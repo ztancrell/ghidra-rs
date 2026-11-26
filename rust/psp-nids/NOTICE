@@ -1,0 +1,22 @@
+PSP NID names
+
+pspsdk-nids.txt is extracted from PSPSDK (https://github.com/pspdev/pspsdk) at commit
+40da14ada3342368ebdfaac8fd3f769e99fd26ac (2026-11-26): the IMPORT_FUNC and
+IMPORT_FUNC_WITH_ALIAS lines of the 101 import files src/*/*.S, one line each as
+
+  <library> 0x<NID> <function name>
+
+sorted, 3,159 lines. Nothing else of PSPSDK is copied. The extraction, from a PSPSDK checkout:
+
+  LC_ALL=C grep -rhE '^\s*IMPORT_FUNC' src --include='*.S' \
+    | LC_ALL=C sed -E 's/^\s*IMPORT_FUNC(_WITH_ALIAS)?\s+"([^"]+)"\s*,\s*0x([0-9A-Fa-f]{8})\s*,\s*([A-Za-z_0-9]+).*/\2 \3 \4/' \
+    | awk '{print $1, "0x" toupper($2), $3}' | LC_ALL=C sort -u
+
+PSPSDK is distributed under a BSD-compatible licence (LICENSE, next to this file, is its
+copy), "with the exception of the files located in tools/PrxEncrypter" (its README), none of
+which is used here. Its import files carry no header lines.
+
+As extracted: of an alias pair the first name is kept (3 lines); one library and NID has two
+names (sceNand_driver 0xC478C1DE), and the first line wins a lookup. 2,523 of the 3,159 names
+give their NID as the first four bytes of their SHA-1; the other 636 are PSPSDK's names for
+NIDs that are not derived that way, or names that are not the firmware's own.

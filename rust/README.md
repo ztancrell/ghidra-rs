@@ -31,8 +31,11 @@ and the PSP (MIPS-1)"). MIPS-2 (2026-11-26): a PSP PRX is decoded as Allegrex, w
   (see "The read-only scripts"); `ghidra-rs/tests/exports.rs` runs them on a hand-made image.
 - `ghidra-rs/src/main.rs`: the `ghidra-rs` CLI (binary loading via the `object` crate).
 - `ghidra-rs/src/psp.rs`: the PSP PRX loader: segments, the PSP relocation sections, the
-  count of every relocation by type ("MIPS32 and the PSP (MIPS-1)").
-- `ghidra-rs/tests/psp.rs`: the PSP relocation rules on a hand-made image.
+  count of every relocation by type ("MIPS32 and the PSP (MIPS-1)"); `sceModuleInfo`, the
+  import stub table, the export table and the NID names ("PSP module info, imports and NID
+  names (MIPS-5)").
+- `ghidra-rs/tests/psp.rs`: the PSP relocation rules, and the module tables, on hand-made
+  images.
 - `ghidra-rs/tests/decode.rs`: decodes a fixed byte sequence and checks text and p-code; a
   MIPS32 `jal` with its delay slot; an Allegrex VFPU `vdot.t` and integer `max`.
 - `ghidra-rs/src/abi.rs`: port of CheckAbiCallers.java: per-byte register liveness walks
@@ -69,6 +72,9 @@ and the PSP (MIPS-1)"). MIPS-2 (2026-11-26): a PSP PRX is decoded as Allegrex, w
 - `processors/Allegrex/`: the Allegrex (PSP) SLEIGH spec of ghidra-allegrex, copied unmodified
   (`data/languages`), with its `LICENSE` (Apache 2.0) and a `NOTICE` naming the source commit
   ("Allegrex (MIPS-2)").
+- `psp-nids/`: PSP NID names extracted from PSPSDK (`pspsdk-nids.txt`), with its `LICENSE`
+  (BSD) and a `NOTICE` naming the source commit and the extraction ("PSP module info, imports
+  and NID names (MIPS-5)").
 - `tools/sleigh_ref.cc`: a reference disassembler on Ghidra's C++ engine, printing in the
   same format, used to verify the Rust port.
 - `ghidra-rs/src/console.rs`: the milestone 3 harness: the decompiler prelude, the Rust side of
@@ -167,7 +173,10 @@ ghidra-rs disasm <binary|psp-prx> [--func <symbol>|--addr <hex>] [--count N] [--
 
 The binary is an ELF, PE or Mach-O file for x86-64 or 32-bit x86, a little-endian MIPS32 ELF,
 or a PSP PRX (loaded at 0x08804000 with its relocations applied; addresses are loaded
-addresses, a line on stderr counts the relocations, and `--func` is refused).
+addresses, a line on stderr counts the relocations, and `--func` is refused). For a PRX a
+second line on stderr describes the module, a `<name>:` line precedes each import stub and
+exported function, and a `j` or `jal` to one ends in `  ; <name>` ("PSP module info, imports
+and NID names (MIPS-5)"). No other file gets names in `disasm`.
 
 - `--func`: start at a symbol (static, dynamic or PE export; a leading `_` is optional for
   Mach-O) and, if the symbol has a size, stop at its end.
@@ -8180,6 +8189,10 @@ sed -E 's/^([0-9a-f]{16})  ([0-9a-f]{2} ?)+ +/\1  /; s/^([0-9a-f]{16})  \(bad.*/
 cmp rs.txt ref.txt
 ```
 
+Superseded (2026-11-26, branch `mips-m5`): `disasm` now prints names on a PRX, so the last
+`sed` of this check needs two more expressions, `/^[^0 ]/d; s/  ; .*//` (see "PSP module info,
+imports and NID names (MIPS-5)").
+
 | | words |
 |---|---|
 | `.text` | 868,720 |
@@ -8239,6 +8252,10 @@ grep '^0' rs-full.txt | cut -c19-49 | sed 's/(bad.*//' | xxd -r -p > text.raw
 sed -E 's/^([0-9a-f]{16})  ([0-9a-f]{2} ?)+ +/\1  /; s/^([0-9a-f]{16})  \(bad.*/\1  (bad)/; s/    <no p-code.*/    <no p-code>/' rs-full.txt > rs.txt
 cmp rs.txt ref.txt
 ```
+
+Superseded (2026-11-26, branch `mips-m5`): `disasm` now prints names on a PRX, so the last
+`sed` of this check needs two more expressions, `/^[^0 ]/d; s/  ; .*//` (see "PSP module info,
+imports and NID names (MIPS-5)").
 
 | | words |
 |---|---|
@@ -8304,6 +8321,116 @@ Not checked: the register operands of the other 353 VFPU words (`vpfxd`, `vocp.s
 `2/PI`); and all p-code semantics of the Allegrex spec. The comparison is with a transcription
 of PPSSPP's rules, not with PPSSPP running, and on this one file. Java Ghidra with the
 ghidra-allegrex extension was not run.
+
+## PSP module info, imports and NID names (MIPS-5, branch `mips-m5`, 2026-11-26)
+
+`psp::load` now also reads the module's own tables from the relocated image
+(`psp::parse_module`; `Prx::module`), and `disasm` prints the names they give. `analyze` does
+not use them yet (`Module::names` is there for it).
+
+### The tables (`psp.rs`)
+
+The layouts are PPSSPP's `PspModuleInfo` (`Core/HLE/sceKernelModule.h`), `PspLibStubEntry` and
+`PspLibEntEntry` and the loops over them in `Core/HLE/sceKernelModule.cpp` (master at
+`c771d8544180c3cf0d10e83073b50e188b02cd11`, read as data 2026-11-26), with PSPSDK's
+`_sceModuleInfo` (`src/user/pspmoduleinfo.h`) for the same first structure. All pointers are
+loaded addresses: the relocations of MIPS-1 have already rebased them.
+
+- `sceModuleInfo` (52 bytes) is found from the first program header, as PPSSPP does when no
+  section names it: the physical address field is the structure's file offset, so its address
+  is virtual address + physical address - file offset. It holds the attributes and version
+  (16 bits each), the name (28 bytes), `gp`, and the start and end of the export table and of
+  the import stub table.
+- The import stub table has one entry per library, of 5, 6 or 7 words: the name's address,
+  version and flags, the entry's size in words, the count of variables (8 bits) and of
+  functions (16 bits), the address of the NIDs (one word per function) and the address of the
+  first stub. Function `i` has stub `first + 8 * i`: two instructions (`jr ra` and `nop` in the
+  file) that the firmware replaces. From 6 words on there is a table of variables, (address of
+  the list of references, NID) pairs.
+- The export table has entries of 4 or 5 words: name (0 for the module's own exports, listed
+  under the module's name), version and flags, size, the counts, and the address of a table
+  of all NIDs followed by as many addresses, functions first.
+
+The section headers (`.rodata.sceModuleInfo`, `.lib.ent`, `.lib.stub`) are a cross-check only:
+a section that differs from what `sceModuleInfo` gives is a note. Nothing is skipped silently:
+an entry that cannot be read as above (a size below the format's, an address outside the
+image) is a note printed on stderr, and its table is cut off there; only an unreadable
+`sceModuleInfo` leaves `Prx::module` an error, and the image still loads. A name from the file
+keeps printable ASCII only (anything else becomes `_`) and ends at 255 bytes. More than
+65,536 imports or exports are not read (a `lean:` limit against tables made to overlap).
+`.rodata.sceNid` and `.sceStub.text.*` are not looked up by name: the entries point into them.
+
+### Names
+
+An import is `<library>_0x<NID>` (eight upper-case hex digits), or the name PSPSDK gives that
+NID in that library. The table is `psp-nids/pspsdk-nids.txt`, compiled into the binary: the
+3,159 `IMPORT_FUNC` lines of PSPSDK's 101 import files (https://github.com/pspdev/pspsdk,
+commit `40da14ada3342368ebdfaac8fd3f769e99fd26ac`, BSD licence; `psp-nids/NOTICE` has the
+extraction command). A lookup is by library and NID, never by NID alone. Imported variables
+are not in PSPSDK's files and keep the NID form. The module's own exports are named from ten
+fixed NIDs (`module_start`, `module_stop`, `module_info` and the like: PPSSPP's `NID_MODULE_*`
+constants; each is the first four bytes, little-endian, of the SHA-1 of its name, which was
+checked for all ten).
+
+`disasm` on a PRX prints, besides the relocation line, one line on stderr with the module's
+name, attributes, version, `gp` and the counts, then each note. In the listing a `<name>:`
+line stands before the instruction at an import stub or an exported function, and a `j` or
+`jal` whose target is one ends in `  ; <name>`. x86 files print no names in `disasm`, so there
+was no format to follow; this is the minimum (Claude's call). The target is read from the
+instruction word, so a call through a register gets no name.
+
+```
+$ ghidra-rs disasm BOOT.BIN --addr 8b545c0 --count 4
+sceUsbStart:
+0000000008b545c0  08 00 e0 03                    jr ra
+0000000008b545c4  00 00 00 00                    nop 
+sceUsbStop:
+0000000008b545c8  08 00 e0 03                    jr ra
+0000000008b545cc  00 00 00 00                    nop 
+```
+
+### On `BOOT.BIN` (2026-11-26)
+
+| | |
+|---|---|
+| module name | `APP_APPLICATION_NAME` |
+| attributes, version | 0x0000 (user), 0x0101 |
+| `gp` | 0 (the field is zero in the file and has no relocation) |
+| `sceModuleInfo` | 0x08b55018, as the section `.rodata.sceModuleInfo` |
+| import libraries | 32 (as many as `.sceStub.text.*` sections) |
+| imported functions | 247 (the stub sections hold 247 stubs, 1,976 bytes) |
+| imported variables | 0 |
+| named from the PSPSDK table | 246 |
+| by NID only | 1 (`sceMpeg_0x4571CC64`) |
+| exported functions | 2: NID 0xD632ACDB (`module_start`) twice, at 0x0880435c and at 0x08808d60 (the ELF entry point) |
+| exported variables | 1 (`module_info`, at `sceModuleInfo`) |
+| notes | 0 |
+| `jal` to an import stub in `.text` | 539, to 236 of the 247 stubs |
+| `<name>:` lines in `.text` | 2 (the two exports) |
+
+245 of the 246 names give their NID by SHA-1; `sceImposeBatteryIconStatus` (0x8C943191) does
+not, so it is PSPSDK's name, not a verified one.
+
+With the names filtered out (`sed -E '/^[^0 ]/d; s/  ; .*//'`), the `--pcode` listing of the
+whole `.text` is the 3,170,155 lines the `disasm` of branch `mips-m3`'s build prints (a build
+from before this change; byte-identical). The check against the C++ engine ("Allegrex
+(MIPS-2)") was not rerun: `sleigh_ref` was not built here.
+
+### NID sources looked at (2026-11-26)
+
+| source | licence | used |
+|---|---|---|
+| PSPSDK, `src/*/*.S` (pspdev/pspsdk, `40da14ad`) | BSD 3-clause (`LICENSE`; `tools/PrxEncrypter` is GPL-3, not touched) | yes: the table above |
+| ghidra-allegrex (`4e46aa14`) | Apache-2.0 | nothing to use: it ships no NID data (two scripts for PPSSPP `.sym` files) |
+| PPSSPP, the HLE function tables in `Core/HLE` (`c771d854`) | GPL-2.0 or later (file headers) | no: not compatible with Apache-2.0. Read for the structure layouts only |
+| pspdev/psp-ghidra-scripts (`f6bf867a`), `ppsspp_niddb*.xml`, `500_psplibdoc_191008.xml` | repository `LICENSE` is Apache-2.0, but its README says the XML files are from the PSP PRX Libraries Documentation Project, and the file names say PPSSPP | no: the data's own licence is not clear |
+| mathieulh/PSP-PRX-Libraries-Documentation-Project (`3a129e46`), Spenon-dev/PSPLibDoc (`c2834ef4`) | GPL-2.0 (as GitHub reports them; the files were not read) | no |
+| uOFW (uofw/uofw, `f7b06231`) | MIT, with PSPSDK parts under BSD (`COPYING` and README) | no: compatible, but only the licence was read; whether it holds a usable NID list was not looked at |
+
+Not done: names for imported variables and for other modules' exports beyond the PSPSDK
+table; a second table for what PSPSDK lacks; a PRX with imported variables, with entries of 7
+words or with named export libraries (the target has none, so those paths are only run by the
+hand-made test, which covers one variable import and the module's own export entry).
 
 ## Speed
 

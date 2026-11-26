@@ -47,3 +47,50 @@ fn psp_relocations() {
     };
     assert_eq!(stats, want);
 }
+
+// A hand-made module at 0x1000: sceModuleInfo, one import library (two functions, one variable),
+// the module's own export entry (module_start and module_info) and a second import entry of a
+// size the format does not have.
+#[test]
+fn psp_module_tables() {
+    use ghidra_rs::psp::parse_module;
+    let base = 0x1000;
+    let mut mem = vec![0u8; 0x100];
+    let mut put = |at: usize, words: &[u32]| {
+        for (i, w) in words.iter().enumerate() {
+            mem[at + 4 * i..at + 4 * i + 4].copy_from_slice(&w.to_le_bytes());
+        }
+    };
+    // sceModuleInfo at 0x1000: attributes and version, the name, gp, ent, stub
+    put(0x00, &[0x0102_0000, u32::from_le_bytes(*b"mod\0")]);
+    put(0x20, &[0x9000, 0x1040, 0x1050, 0x1050, 0x107c]);
+    // the export entry: no name, 4 words, 1 variable, 1 function, the table at 0x1080
+    put(0x40, &[0, 0x8000_0000, 0x0001_0104, 0x1080]);
+    // the import entry: name, version and flags, 6 words, 1 variable, 2 functions, NIDs, stubs,
+    // variables; then an entry of 3 words
+    put(0x50, &[0x10a0, 0x4001_0011, 0x0002_0106, 0x1090, 0x10c0, 0x1098, 0, 0, 3]);
+    put(0x80, &[0xd632_acdb, 0xf01d_73a7, 0x10d0, 0x1000]);
+    put(0x90, &[0x289d_82fe, 0x1234_5678, 0x10e0, 0x9abc_def0]);
+    mem[0xa0..0xab].copy_from_slice(b"sceDisplay\0");
+    let m = parse_module(&mem, base, 0x1000).unwrap();
+    assert_eq!((m.name.as_str(), m.attributes, m.version, m.gp), ("mod", 0, 0x0102, 0x9000));
+    assert_eq!((m.ent, m.stub, &m.libraries), ((0x1040, 0x1050), (0x1050, 0x107c), &vec!["sceDisplay".to_string()]));
+    let list = |v: &[ghidra_rs::psp::Symbol]| -> Vec<(String, u32, bool, bool)> {
+        v.iter().map(|s| (s.name.clone(), s.addr, s.var, s.resolved)).collect()
+    };
+    let want = [
+        ("sceDisplaySetFrameBuf", 0x10c0, false, true), // in the pspsdk table
+        ("sceDisplay_0x12345678", 0x10c8, false, false),
+        ("sceDisplay_0x9ABCDEF0", 0x10e0, true, false),
+    ];
+    assert_eq!(list(&m.imports), want.map(|(n, a, v, r)| (n.to_string(), a, v, r)));
+    let want = [("module_start", 0x10d0, false, true), ("module_info", 0x1000, true, true)];
+    assert_eq!(list(&m.exports), want.map(|(n, a, v, r)| (n.to_string(), a, v, r)));
+    assert_eq!(
+        m.names().into_iter().collect::<Vec<_>>(),
+        [(0x10c0, "sceDisplaySetFrameBuf"), (0x10c8, "sceDisplay_0x12345678"), (0x10d0, "module_start")]
+    );
+    assert_eq!(m.notes, ["import entry at 0x00001068: size 3 words; the table is cut off here"]);
+    // sceModuleInfo itself outside the image is the one error
+    assert!(parse_module(&mem, base, 0x10f0).is_err());
+}

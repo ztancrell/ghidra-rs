@@ -10,6 +10,14 @@
 //! and the program header whose load address is added (bits 16-23). The words in the file are
 //! relative to that second segment's start (checked on SOCOM FTB's BOOT.BIN: every one lies
 //! inside its segment).
+//!
+//! The module's own tables are read from the relocated image ([`parse_module`]): `sceModuleInfo`,
+//! the import stub table it points at (`.lib.stub`) and the export table (`.lib.ent`). The
+//! layouts follow PPSSPP's `PspModuleInfo` (Core/HLE/sceKernelModule.h), `PspLibStubEntry` and
+//! `PspLibEntEntry` and the loops that walk them in `KernelImportModuleFuncs` and
+//! `__KernelLoadELFFromPtr` (Core/HLE/sceKernelModule.cpp, commit c771d85441, read 2026-11-26),
+//! and pspsdk's `_sceModuleInfo` (src/user/pspmoduleinfo.h). An import or export is identified
+//! by a 32-bit NID; [`nid_name`] names the ones pspsdk's import files list.
 use std::collections::BTreeMap;
 
 /// Where a PRX is loaded when nothing else says so: the usual address of a game's main module
@@ -107,6 +115,73 @@ pub struct Prx {
     /// the loaded (`SHF_ALLOC`) sections
     pub sections: Vec<Section>,
     pub relocs: Relocs,
+    /// the module's own tables, or why they could not be read (the image still loads)
+    pub module: Result<Module, String>,
+}
+
+/// An imported or exported function or variable.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Symbol {
+    pub library: String,
+    pub nid: u32,
+    /// an imported function: its stub (8 bytes the firmware fills in); an imported variable: its
+    /// list of references; an export: the function or variable itself
+    pub addr: u32,
+    pub var: bool,
+    /// the name of [`nid_name`], or `<library>_0x<NID>`
+    pub name: String,
+    /// whether `name` came from a NID table
+    pub resolved: bool,
+}
+
+/// `sceModuleInfo` and the tables it points at, from the relocated image.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Module {
+    pub info_addr: u32,
+    pub name: String,
+    pub attributes: u16,
+    pub version: u16,
+    pub gp: u32,
+    /// the export table, `[start, end)`
+    pub ent: (u32, u32),
+    /// the import stub table, `[start, end)`
+    pub stub: (u32, u32),
+    /// the library of each import stub table entry, in table order
+    pub libraries: Vec<String>,
+    pub imports: Vec<Symbol>,
+    pub exports: Vec<Symbol>,
+    /// every entry that was not read as the format says, and every difference from the section
+    /// headers: nothing is skipped silently
+    pub notes: Vec<String>,
+}
+
+impl Module {
+    /// The names of the functions: each import stub and each exported function, by address
+    /// (for a listing; `analyze` does not use it yet).
+    pub fn names(&self) -> BTreeMap<u32, &str> {
+        let funcs = self.imports.iter().chain(&self.exports).filter(|s| !s.var);
+        funcs.map(|s| (s.addr, s.name.as_str())).collect()
+    }
+
+    pub fn summary(&self) -> String {
+        let count = |v: &[Symbol], var: bool| v.iter().filter(|s| s.var == var).count();
+        let named = self.imports.iter().filter(|s| s.resolved).count();
+        format!(
+            "module {}: attributes {:#06x}, version {:#06x}, gp {:#010x}; {} import libraries, {} imported functions, {} imported variables ({} named by NID table, {} by NID only); {} exported functions, {} exported variables; {} notes",
+            self.name,
+            self.attributes,
+            self.version,
+            self.gp,
+            self.libraries.len(),
+            count(&self.imports, false),
+            count(&self.imports, true),
+            named,
+            self.imports.len() - named,
+            count(&self.exports, false),
+            count(&self.exports, true),
+            self.notes.len()
+        )
+    }
 }
 
 fn u16_at(d: &[u8], o: usize) -> Result<u16, String> {
@@ -122,6 +197,188 @@ fn u32_at(d: &[u8], o: usize) -> Result<u32, String> {
 /// The bytes `[off, off + size)` of the file.
 fn slice(d: &[u8], off: u32, size: u32) -> Result<&[u8], String> {
     d.get(off as usize..).and_then(|s| s.get(..size as usize)).ok_or(format!("{off:#x}+{size:#x} is outside the file"))
+}
+
+/// NID to name, per library: `<library> 0x<NID> <name>` lines extracted from pspsdk's import
+/// files (BSD licence; `rust/psp-nids/NOTICE`).
+const NIDS: &str = include_str!("../../psp-nids/pspsdk-nids.txt");
+
+/// The exports every module may have under its own name. The NID is the first four bytes of the
+/// name's SHA-1, little-endian (PPSSPP's comment on `PspLibStubEntry`; each pair below was
+/// checked that way, and PPSSPP's `NID_MODULE_*` constants hold the same values).
+const MODULE_NIDS: [(u32, &str); 10] = [
+    (0xd632_acdb, "module_start"),
+    (0xcee8_593c, "module_stop"),
+    (0x2f06_4fa6, "module_reboot_before"),
+    (0xadf1_2745, "module_reboot_phase"),
+    (0xd374_4be0, "module_bootstart"),
+    (0xf01d_73a7, "module_info"),
+    (0x0f7c_276c, "module_start_thread_parameter"),
+    (0xcf0c_c697, "module_stop_thread_parameter"),
+    (0xf4f4_299d, "module_reboot_before_thread_parameter"),
+    (0x11b9_7506, "module_sdk_version"),
+];
+
+/// The name pspsdk gives function `nid` of `library`, if it lists one.
+pub fn nid_name(library: &str, nid: u32) -> Option<&'static str> {
+    // lean: a scan of the 3,159 lines per lookup (a module imports a few hundred functions); a
+    // map built once if a caller ever looks up many more
+    let key = format!("{library} 0x{nid:08X} ");
+    NIDS.lines().find_map(|l| l.strip_prefix(key.as_str()))
+}
+
+/// lean: a module with more imports or exports than this is cut off, with a note (a hostile
+/// file can make the tables overlap and repeat without end); raise it if a real module has more
+const MAX_SYMBOLS: usize = 1 << 16;
+
+/// Read `sceModuleInfo` at address `info` of the relocated image `mem` (loaded at `base`), then
+/// the import stub table and the export table it points at. Only an unreadable `sceModuleInfo`
+/// is an error; a bad table entry is a note.
+pub fn parse_module(mem: &[u8], base: u32, info: u32) -> Result<Module, String> {
+    let bytes = |a: u32, n: usize| {
+        let s = a.checked_sub(base).and_then(|o| mem.get(o as usize..)).and_then(|s| s.get(..n));
+        s.ok_or(format!("{a:#010x} is outside the image"))
+    };
+    let word = |a: u32| bytes(a, 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+    // a name from the file: what is not printable ASCII becomes `_`, and it ends at 255 bytes
+    let text = |b: &[u8]| -> String {
+        let s = b.split(|&c| c == 0).next().unwrap_or(&[]);
+        s.iter().take(255).map(|&c| if c.is_ascii_graphic() { c as char } else { '_' }).collect()
+    };
+    let string = |a: u32| a.checked_sub(base).and_then(|o| mem.get(o as usize..)).map(text);
+    let symbol = |library: &str, nid: u32, addr: u32, var: bool, known: Option<&str>| Symbol {
+        library: library.to_string(),
+        nid,
+        addr,
+        var,
+        name: known.map_or_else(|| format!("{library}_0x{nid:08X}"), str::to_string),
+        resolved: known.is_some(),
+    };
+
+    let head = word(info)?;
+    let mut m = Module {
+        info_addr: info,
+        name: text(bytes(info.wrapping_add(4), 28)?),
+        attributes: head as u16,
+        version: (head >> 16) as u16,
+        gp: word(info.wrapping_add(32))?,
+        ent: (word(info.wrapping_add(36))?, word(info.wrapping_add(40))?),
+        stub: (word(info.wrapping_add(44))?, word(info.wrapping_add(48))?),
+        libraries: Vec::new(),
+        imports: Vec::new(),
+        exports: Vec::new(),
+        notes: Vec::new(),
+    };
+
+    // the import stub table: entries of `size` words (5, 6 or 7), one per library
+    let mut pos = m.stub.0;
+    while pos < m.stub.1 && m.imports.len() < MAX_SYMBOLS {
+        let fields = (|| {
+            Ok::<_, String>([
+                word(pos)?,
+                word(pos.wrapping_add(8))?,
+                word(pos.wrapping_add(12))?,
+                word(pos.wrapping_add(16))?,
+            ])
+        })();
+        let [name, counts, nids, stubs] = match fields {
+            Ok(f) => f,
+            Err(e) => {
+                m.notes.push(format!("import entry at {pos:#010x}: {e}"));
+                break;
+            }
+        };
+        let (size, vars, funcs) = (counts & 0xff, counts >> 8 & 0xff, counts >> 16);
+        if size < 5 {
+            m.notes.push(format!("import entry at {pos:#010x}: size {size} words; the table is cut off here"));
+            break;
+        }
+        let library = string(name).unwrap_or_else(|| {
+            m.notes.push(format!("import entry at {pos:#010x}: name at {name:#010x} is outside the image"));
+            "(invalidname)".into()
+        });
+        for i in 0..funcs {
+            match word(nids.wrapping_add(4 * i)) {
+                _ if m.imports.len() >= MAX_SYMBOLS => break,
+                Ok(nid) => {
+                    let known = nid_name(&library, nid);
+                    m.imports.push(symbol(&library, nid, stubs.wrapping_add(8 * i), false, known))
+                }
+                Err(e) => {
+                    m.notes.push(format!("{library}: function {i} of {funcs}: NID at {e}"));
+                    break;
+                }
+            }
+        }
+        // the variables: (address of the list of references, NID) pairs; the field is there
+        // from 6 words on
+        let var_data = if size >= 6 && vars > 0 { word(pos.wrapping_add(20)).unwrap_or(0) } else { 0 };
+        for i in (0..vars).take_while(|_| var_data != 0) {
+            let at = var_data.wrapping_add(8 * i);
+            match (word(at), word(at.wrapping_add(4))) {
+                _ if m.imports.len() >= MAX_SYMBOLS => break,
+                (Ok(refs), Ok(nid)) => m.imports.push(symbol(&library, nid, refs, true, None)),
+                (Err(e), _) | (_, Err(e)) => {
+                    m.notes.push(format!("{library}: variable {i} of {vars}: {e}"));
+                    break;
+                }
+            }
+        }
+        if vars > 0 && var_data == 0 {
+            m.notes.push(format!("{library}: {vars} variables with no table (entry of {size} words)"));
+        }
+        m.libraries.push(library);
+        pos = pos.saturating_add(4 * size);
+    }
+
+    // the export table: entries of `size` words (4 or 5); each has its NIDs, then as many
+    // addresses, functions first
+    let mut pos = m.ent.0;
+    while pos < m.ent.1 && m.exports.len() < MAX_SYMBOLS {
+        let fields = (|| Ok::<_, String>([word(pos)?, word(pos.wrapping_add(8))?, word(pos.wrapping_add(12))?]))();
+        let [name, counts, table] = match fields {
+            Ok(f) => f,
+            Err(e) => {
+                m.notes.push(format!("export entry at {pos:#010x}: {e}"));
+                break;
+            }
+        };
+        let (size, mut vars, funcs) = (counts & 0xff, counts >> 8 & 0xff, counts >> 16);
+        if size < 4 {
+            m.notes.push(format!("export entry at {pos:#010x}: size {size} words; the table is cut off here"));
+            break;
+        }
+        if size > 4 {
+            // a second, wider variable count (PPSSPP's `vcountNew`)
+            vars = vars.max(word(pos.wrapping_add(16)).unwrap_or(0) & 0xffff);
+        }
+        // an entry with no name holds the module's own exports, under the module's name
+        let library = match name {
+            0 => m.name.clone(),
+            _ => string(name).unwrap_or_else(|| "(invalidname)".into()),
+        };
+        let total = funcs + vars;
+        for j in 0..total {
+            let pair = (word(table.wrapping_add(4 * j)), word(table.wrapping_add(4 * (total + j))));
+            match pair {
+                _ if m.exports.len() >= MAX_SYMBOLS => break,
+                (Ok(nid), Ok(addr)) => {
+                    let own = MODULE_NIDS.iter().find(|n| name == 0 && n.0 == nid).map(|n| n.1);
+                    let known = own.or_else(|| nid_name(&library, nid).filter(|_| j < funcs));
+                    m.exports.push(symbol(&library, nid, addr, j >= funcs, known))
+                }
+                (Err(e), _) | (_, Err(e)) => {
+                    m.notes.push(format!("export entry at {pos:#010x}: symbol {j} of {total}: {e}"));
+                    break;
+                }
+            }
+        }
+        pos = pos.saturating_add(4 * size);
+    }
+    if m.imports.len() >= MAX_SYMBOLS || m.exports.len() >= MAX_SYMBOLS {
+        m.notes.push(format!("more than {MAX_SYMBOLS} imports or exports: the rest is not read"));
+    }
+    Ok(m)
 }
 
 /// An ELF32 little-endian MIPS file of type `ET_MIPS_PSP_PRX`.
@@ -189,9 +446,15 @@ pub fn load(data: &[u8], base: u32) -> Result<Prx, String> {
     }
     let mut mem: Vec<u8> = Vec::new();
     let mut segs = Vec::new();
+    // `sceModuleInfo`: the physical address field of the first program header is its file offset
+    // (PPSSPP's rule when no section names it)
+    let mut info = None;
     for i in 0..phnum as usize {
         let ph = phoff + i * phentsize;
         let (kind, off, vaddr) = (u32_at(data, ph)?, u32_at(data, ph + 4)?, u32_at(data, ph + 8)?);
+        if i == 0 {
+            info = Some(vaddr.wrapping_add(u32_at(data, ph + 12)? & 0x7fff_ffff).wrapping_sub(off));
+        }
         let (filesz, memsz) = (u32_at(data, ph + 16)?, u32_at(data, ph + 20)?);
         if kind == PT_MIPS_PSPREL2 {
             return Err("PSP type B relocations (program header 0x700000a1) are not implemented".into());
@@ -220,7 +483,7 @@ pub fn load(data: &[u8], base: u32) -> Result<Prx, String> {
     };
     let strtab = if shstrndx < shnum as usize { sh(shstrndx)? } else { [0; 7] };
     let names = slice(data, strtab[4], strtab[5])?;
-    let mut sections = Vec::new();
+    let mut sections: Vec<Section> = Vec::new();
     let mut relocs = Relocs::default();
     for i in 0..shnum as usize {
         let [name, kind, flags, addr, off, size, info] = sh(i)?;
@@ -241,5 +504,23 @@ pub fn load(data: &[u8], base: u32) -> Result<Prx, String> {
             _ => {}
         }
     }
-    Ok(Prx { base, entry: base.wrapping_add(u32_at(data, 24)?), mem, sections, relocs })
+    let module = info.ok_or("no program header".to_string()).and_then(|info| {
+        let mut m = parse_module(&mem, base, base.wrapping_add(info))?;
+        // the section headers are a cross-check only
+        let checks = [
+            (".rodata.sceModuleInfo", (m.info_addr, m.info_addr.wrapping_add(52))),
+            (".lib.ent", m.ent),
+            (".lib.stub", m.stub),
+        ];
+        for (name, (start, end)) in checks {
+            for s in sections.iter().filter(|s| s.name == name && (s.addr, s.addr + s.size) != (start, end)) {
+                let (a, e) = (s.addr, s.addr + s.size);
+                m.notes.push(format!(
+                    "section {name} is {a:#010x}-{e:#010x}; sceModuleInfo gives {start:#010x}-{end:#010x}"
+                ));
+            }
+        }
+        Ok(m)
+    });
+    Ok(Prx { base, entry: base.wrapping_add(u32_at(data, 24)?), mem, sections, relocs, module })
 }

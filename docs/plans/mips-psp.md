@@ -110,13 +110,30 @@ Open questions:
 - Delay slots, `lui`/`addiu` pairs and `gp`-relative data in the decompiler's own passes
   (which C++ actions are MIPS-specific has not been inventoried).
 
-### MIPS-5: PSP import stubs and names (not started)
+### MIPS-5: PSP module info, import stubs and names (done, branch `mips-m5`, 2026-11-26)
 
-The stubs in `.sceStub.text.*` are named by library in the section names; the functions are
-identified by NID (`.rodata.sceNid`, `.lib.stub`).
+- `psp::load` reads `sceModuleInfo`, the import stub table and the export table from the
+  relocated image (`psp::parse_module`), by the pointers of `sceModuleInfo`; the section
+  headers only cross-check. Layouts from PPSSPP's `Core/HLE/sceKernelModule.{h,cpp}` and
+  PSPSDK's `pspmoduleinfo.h`, read as data.
+- An import stub is named `<library>_0x<NID>`, or as PSPSDK names it: 3,159 library, NID, name
+  lines extracted from PSPSDK's import files (BSD licence) are in `rust/psp-nids`, with the
+  licence and a `NOTICE`.
+- `ghidra-rs disasm` prints the names at the stubs and exported functions and after a `j` or
+  `jal` to one. `analyze` does not use them yet (`psp::Module::names` is there for MIPS-3).
+- On SOCOM's `BOOT.BIN`: module `APP_APPLICATION_NAME`, `gp` 0, 32 libraries, 247 imported
+  functions (246 named, `sceMpeg_0x4571CC64` by NID only), no imported variables, 2 exported
+  functions (both `module_start`, NID 0xD632ACDB) and 1 exported variable (`module_info`);
+  539 `jal`s in `.text` go to 236 of the stubs. Details and the sources looked at are in
+  `rust/README.md`, "PSP module info, imports and NID names (MIPS-5)".
+
+Superseded: "MIPS-5 (not started)" and its two open questions. The NID table comes from PSPSDK
+(above; PPSSPP's tables and the PSP library documentation projects are GPL and were not
+copied). The loader parses `sceModuleInfo`, `.lib.ent` and `.lib.stub`.
 
 Open questions:
 
-- Where NID-to-name tables come from (none is in this repo or in Ghidra).
-- Whether `sceModuleInfo`, `.lib.ent` and `.lib.stub` are parsed by the loader (MIPS-1 reads
-  none of them: it needs only the segments and the relocation sections).
+- A second NID source for what PSPSDK lacks (1 of 247 here): uOFW is MIT but was not read for
+  one; the GPL sources stay out unless the user decides otherwise.
+- `gp` is 0 in this module's `sceModuleInfo`; whether the code sets `gp` itself matters to
+  MIPS-3 and MIPS-4 and was not looked at.
