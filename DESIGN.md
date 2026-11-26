@@ -229,7 +229,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   Claude's call, within the user's decision above.
 - 2026-11-26 (MIPS-5): PSP NID names come from PSPSDK's import files (pspdev/pspsdk, BSD
   licence), extracted to `rust/psp-nids` with the licence and a `NOTICE`, and compiled into the
-  binary. A NID with no name there is `<library>_0x<NID>`. GPL sources (PPSSPP's tables, the
+  binary. A NID with no name there is `<library>_0x<NID>` (Superseded in part, branch
+  `mips-m5-hash`: unless `SEARCHED_NIDS` in `psp.rs` names it, a name found by SHA-1 search,
+  computed and not copied; it holds SOCOM's `sceMpeg` 0x4571CC64, `sceMpegAvcDecodeFlush`;
+  PSPSDK's name wins). GPL sources (PPSSPP's tables, the
   PSP library documentation projects) and data of unclear licence (psp-ghidra-scripts' XML
   files) are not copied. Claude's call, within the user's rule (only a clearly compatible
   licence, with attribution). Superseded: the open question "where the import names (NIDs)
@@ -670,6 +673,7 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    spec; every word of SOCOM FTB's `.text` decodes, identical to the C++ engine.
    MIPS-5 (2026-11-26, branch `mips-m5`): the loader reads `sceModuleInfo` and the import and
    export tables; `disasm` names the import stubs (PSPSDK's NID names, or library and NID).
+   Branch `mips-m5-hash`: one more name found by SHA-1 search; SOCOM FTB's 247 imports all named.
    In part on branch `worktree-agent-af1e2713bbdee8eab` (2026-11-17): the project store as one plain
    text file (`store.rs`: created and removed functions, fixed bodies, no-return flags, flow
    overrides, thunk marks, switch targets, laid over a fresh analysis by `analyze --store`) and

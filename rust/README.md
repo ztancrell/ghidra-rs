@@ -8366,7 +8366,13 @@ An import is `<library>_0x<NID>` (eight upper-case hex digits), or the name PSPS
 NID in that library. The table is `psp-nids/pspsdk-nids.txt`, compiled into the binary: the
 3,159 `IMPORT_FUNC` lines of PSPSDK's 101 import files (https://github.com/pspdev/pspsdk,
 commit `40da14ada3342368ebdfaac8fd3f769e99fd26ac`, BSD licence; `psp-nids/NOTICE` has the
-extraction command). A lookup is by library and NID, never by NID alone. Imported variables
+extraction command). A lookup is by library and NID, never by NID alone. A NID PSPSDK does not
+list is then looked up in `SEARCHED_NIDS` (`psp.rs`): names found by hashing candidate names,
+since a NID is the first four bytes of its name's SHA-1, little-endian. It holds one,
+`sceMpeg` 0x4571CC64 `sceMpegAvcDecodeFlush`: on 2026-11-26 the only match among 39,449,440
+names of the form `sceMpeg` + 1 to 4 parts from a fixed word list (chance matches expected for
+that many tries: 39,449,440 / 2^32, about 0.009). It is computed, like the `module_*` names
+below, not copied from any source. PSPSDK's name wins when both have one. Imported variables
 are not in PSPSDK's files and keep the NID form. The module's own exports are named from ten
 fixed NIDs (`module_start`, `module_stop`, `module_info` and the like: PPSSPP's `NID_MODULE_*`
 constants; each is the first four bytes, little-endian, of the SHA-1 of its name, which was
@@ -8401,7 +8407,8 @@ sceUsbStop:
 | imported functions | 247 (the stub sections hold 247 stubs, 1,976 bytes) |
 | imported variables | 0 |
 | named from the PSPSDK table | 246 |
-| by NID only | 1 (`sceMpeg_0x4571CC64`) |
+| named by SHA-1 search | 1 (`sceMpegAvcDecodeFlush`, NID 0x4571CC64; branch `mips-m5-hash`) |
+| by NID only | 0 |
 | exported functions | 2: NID 0xD632ACDB (`module_start`) twice, at 0x0880435c and at 0x08808d60 (the ELF entry point) |
 | exported variables | 1 (`module_info`, at `sceModuleInfo`) |
 | notes | 0 |
@@ -8410,6 +8417,11 @@ sceUsbStop:
 
 245 of the 246 names give their NID by SHA-1; `sceImposeBatteryIconStatus` (0x8C943191) does
 not, so it is PSPSDK's name, not a verified one.
+
+Superseded: "by NID only: 1 (`sceMpeg_0x4571CC64`)" (as merged from `mips-m5-uofw`). With
+`SEARCHED_NIDS` (branch `mips-m5-hash`) `disasm`'s stderr line reads "247 named by NID table,
+0 by NID only", and the one `jal` to that stub (at 0x08936044) ends in
+`; sceMpegAvcDecodeFlush`. The 539 named `jal`s are unchanged.
 
 With the names filtered out (`sed -E '/^[^0 ]/d; s/  ; .*//'`), the `--pcode` listing of the
 whole `.text` is the 3,170,155 lines the `disasm` of branch `mips-m3`'s build prints (a build
@@ -8430,9 +8442,12 @@ from before this change; byte-identical). The check against the C++ engine ("All
 Superseded: the uOFW row's "only the licence was read; whether it holds a usable NID list was
 not looked at" (as merged from `mips-m5`). uOFW was then read for 0x4571CC64 on branch
 `mips-m5-uofw` (`docs/plans/mips-psp.md`, MIPS-5); `sceMpeg_0x4571CC64` keeps the NID form.
+Superseded (branch `mips-m5-hash`): the NID is now named `sceMpegAvcDecodeFlush` by SHA-1
+search (Names, above), not from a NID source.
 
 Not done: names for imported variables and for other modules' exports beyond the PSPSDK
-table; a second table for what PSPSDK lacks; a PRX with imported variables, with entries of 7
+table; a second table for what PSPSDK lacks (Superseded in part: `SEARCHED_NIDS`, branch
+`mips-m5-hash`, names the one NID SOCOM's `BOOT.BIN` needed); a PRX with imported variables, with entries of 7
 words or with named export libraries (the target has none, so those paths are only run by the
 hand-made test, which covers one variable import and the module's own export entry).
 

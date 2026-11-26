@@ -93,4 +93,8 @@ fn psp_module_tables() {
     assert_eq!(m.notes, ["import entry at 0x00001068: size 3 words; the table is cut off here"]);
     // sceModuleInfo itself outside the image is the one error
     assert!(parse_module(&mem, base, 0x10f0).is_err());
+    // a NID pspsdk lacks, named by the SHA-1 search table; the same NID in another library is not
+    use ghidra_rs::psp::nid_name;
+    assert_eq!(nid_name("sceMpeg", 0x4571_cc64), Some("sceMpegAvcDecodeFlush"));
+    assert_eq!(nid_name("sceDisplay", 0x4571_cc64), None);
 }

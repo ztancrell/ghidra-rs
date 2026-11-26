@@ -17,7 +17,8 @@
 //! `PspLibEntEntry` and the loops that walk them in `KernelImportModuleFuncs` and
 //! `__KernelLoadELFFromPtr` (Core/HLE/sceKernelModule.cpp, commit c771d85441, read 2026-11-26),
 //! and pspsdk's `_sceModuleInfo` (src/user/pspmoduleinfo.h). An import or export is identified
-//! by a 32-bit NID; [`nid_name`] names the ones pspsdk's import files list.
+//! by a 32-bit NID; [`nid_name`] names the ones pspsdk's import files list, and one found by
+//! SHA-1 search.
 use std::collections::BTreeMap;
 
 /// Where a PRX is loaded when nothing else says so: the usual address of a game's main module
@@ -219,12 +220,21 @@ const MODULE_NIDS: [(u32, &str); 10] = [
     (0x11b9_7506, "module_sdk_version"),
 ];
 
-/// The name pspsdk gives function `nid` of `library`, if it lists one.
+/// Library, NID and name for NIDs pspsdk does not list, found by hashing candidate names: the
+/// NID is the first four bytes of the name's SHA-1, little-endian, as for [`MODULE_NIDS`].
+/// `sceMpegAvcDecodeFlush` (2026-11-26) was the one match among 39,449,440 names of the form
+/// `sceMpeg` + 1 to 4 parts from a fixed word list; chance matches expected for that many
+/// tries: 39,449,440 / 2^32, about 0.009. Not copied from any source.
+const SEARCHED_NIDS: [(&str, u32, &str); 1] = [("sceMpeg", 0x4571_cc64, "sceMpegAvcDecodeFlush")];
+
+/// The name pspsdk gives function `nid` of `library`, if it lists one, else a name of
+/// [`SEARCHED_NIDS`].
 pub fn nid_name(library: &str, nid: u32) -> Option<&'static str> {
     // lean: a scan of the 3,159 lines per lookup (a module imports a few hundred functions); a
     // map built once if a caller ever looks up many more
     let key = format!("{library} 0x{nid:08X} ");
-    NIDS.lines().find_map(|l| l.strip_prefix(key.as_str()))
+    let searched = || SEARCHED_NIDS.iter().find(|n| n.0 == library && n.1 == nid).map(|n| n.2);
+    NIDS.lines().find_map(|l| l.strip_prefix(key.as_str())).or_else(searched)
 }
 
 /// lean: a module with more imports or exports than this is cut off, with a note (a hostile
