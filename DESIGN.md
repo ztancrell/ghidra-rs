@@ -264,6 +264,23 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   by the pointers of `sceModuleInfo`; section headers only cross-check. `disasm` prints a
   `<name>:` line at an import stub or exported function and `  ; <name>` after a `j` or `jal`
   to one, by default and for a PRX only (x86 prints no names in `disasm`). Claude's call.
+- 2026-11-26 (branch `mips-m3-psp`): `analyze` on a PRX uses the module tables. Each exported
+  function is an entry point with its name. An import is keyed by its stub, as a PE import by
+  its slot; a function at a stub is a thunk to `EXTERNAL` in `--purges`. Superseded: "Entry
+  points of a PRX in MIPS-3 are the ELF entry ... wait for MIPS-5" (above).
+- 2026-11-26 (branch `mips-m3-psp`), Claude's call: on a PRX `--functions` also writes a row
+  for each function at an import stub, under the import's name (x86 writes import names only
+  in `--facts`, so there was no format to follow). A stub nothing calls is not made a
+  function, and an import's name makes nothing no-return on a PRX: Java does neither, and
+  parity comes first.
+- 2026-11-26 (branch `mips-m3-psp`), Claude's call: no `gp` handling is ported. SOCOM FTB's
+  `BOOT.BIN` never reads or writes `gp` (counts in `rust/README.md`, "`gp` and `t9`"), and no
+  value is invented. The `t9` assumption is not ported either: Java's does nothing on this
+  file. Both stay in `analyze`'s "not ported" warning. Superseded: "`gp`-relative references
+  are not ported (no `gp` value before MIPS-5)" (above): the module's `gp` field is 0 too.
+- 2026-11-26 (branch `mips-m3-psp`), Claude's call, to confirm: Java's analysis of `BOOT.BIN`
+  varies from run to run (11,389 to 11,397 functions in three runs), so a parity number
+  against one Java run is not exact. The README gives each run and the three together.
 
 ## Milestones
 
@@ -699,6 +716,8 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    MIPS-5 (2026-11-26, branch `mips-m5`): the loader reads `sceModuleInfo` and the import and
    export tables; `disasm` names the import stubs (PSPSDK's NID names, or library and NID).
    Branch `mips-m5-hash`: one more name found by SHA-1 search; SOCOM FTB's 247 imports all named.
+   Branch `mips-m3-psp` (2026-11-26): `analyze` uses the PRX's exports (entry points) and
+   import stubs (named thunks); SOCOM FTB never uses `gp`.
    In part on branch `worktree-agent-af1e2713bbdee8eab` (2026-11-17): the project store as one plain
    text file (`store.rs`: created and removed functions, fixed bodies, no-return flags, flow
    overrides, thunk marks, switch targets, laid over a fresh analysis by `analyze --store`) and

@@ -2,7 +2,7 @@
 // hand-made 32-bit .text: an exported function calling a second one, and a third that only
 // the prologue pattern search finds.
 use ghidra_rs::analysis::{Analysis, Image, Section};
-use ghidra_rs::scripts::{export_functions, export_gaps};
+use ghidra_rs::scripts::{dump_purges, export_functions, export_gaps};
 use ghidra_rs::sleigh::Sleigh;
 
 #[test]
@@ -349,4 +349,75 @@ fn discover_functions_mips() {
     assert_eq!(an.insns[&0x0880_4008].len, 8); // the jal with its delay slot
     assert_eq!(an.tables[&0x0880_4038], [0x0880_4040, 0x0880_4044]);
     assert!(an.mips_switch_misses.is_empty());
+}
+
+// A PRX's module tables in the analysis, on a hand-made image: an exported function nothing
+// reaches is an entry point with its name; a function at an import stub is a thunk to
+// `EXTERNAL` and has a `--functions` row under the import's name; a stub nothing calls is no
+// function (as an x86 import with no thunk).
+#[test]
+fn psp_exports_and_import_stubs() {
+    let path = Sleigh::allegrex_sla_path();
+    assert!(path.exists(), "{} is missing: run rust/build-sla.sh first", path.display());
+    let sl = Sleigh::load(&path).unwrap();
+    let text: [u32; 11] = [
+        0x27bd_fff0, // 8804000 addiu sp,sp,-0x10
+        0xafbf_0000, // 8804004 sw ra,0(sp)
+        0x0e20_1400, // 8804008 jal 0x8805000
+        0x0000_0000, // 880400c   nop
+        0x8fbf_0000, // 8804010 lw ra,0(sp)
+        0x03e0_0008, // 8804014 jr ra
+        0x27bd_0010, // 8804018   addiu sp,sp,0x10
+        0x0000_0000, // 880401c nop
+        0x2402_0001, // 8804020 li v0,1: the export; no call and no pattern finds it
+        0x03e0_0008, // 8804024 jr ra
+        0x0000_0000, // 8804028   nop
+    ];
+    let stubs: [u32; 4] = [0x03e0_0008, 0, 0x03e0_0008, 0]; // two stubs: jr ra, nop
+    let section = |name: &str, addr, words: &[u32]| Section {
+        name: name.into(),
+        exec: true,
+        readonly: true,
+        zero_tail: 0,
+        addr,
+        data: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+    };
+    let image = |tables: bool| {
+        let mut img = Image {
+            sections: vec![
+                section(".text", 0x0880_4000, &text),
+                section(".sceStub.text.sceDisplay", 0x0880_5000, &stubs),
+            ],
+            entry: Some(0x0880_4000),
+            mips: true,
+            ..Image::default()
+        };
+        if tables {
+            img.exports.push((0x0880_4020, "module_start".into()));
+            img.imports.insert(0x0880_5000, ("sceDisplay".into(), "sceDisplaySetMode".into()));
+            img.imports.insert(0x0880_5008, ("sceDisplay".into(), "sceDisplay_0x12345678".into()));
+        }
+        img
+    };
+    let funcs = |img: &Image| Analysis::run(img, &sl, &[], false).unwrap().funcs.into_iter().collect::<Vec<_>>();
+    assert_eq!(funcs(&image(false)), [0x0880_4000, 0x0880_5000]);
+    let img = image(true);
+    let an = Analysis::run(&img, &sl, &[], false).unwrap();
+    assert_eq!(an.funcs.iter().copied().collect::<Vec<_>>(), [0x0880_4000, 0x0880_4020, 0x0880_5000]);
+    let mut csv = Vec::new();
+    assert_eq!(export_functions(&img, &an, &Default::default(), &mut csv).unwrap(), 3);
+    let rows: Vec<&str> = std::str::from_utf8(&csv).unwrap().lines().skip(1).collect();
+    assert_eq!(
+        rows,
+        [
+            "0x08804000,28,\"\",0,0,\"\",0,1,0,0",
+            "0x08804020,12,\"module_start\",1,0,\"\",0,0,0,0",
+            "0x08805000,8,\"sceDisplaySetMode\",0,0,\"\",0,0,1,0",
+        ]
+    );
+    let mut purges = Vec::new();
+    dump_purges(&img, &an, &mut purges).unwrap();
+    let thunks: Vec<&str> =
+        std::str::from_utf8(&purges).unwrap().lines().map(|l| l.split(' ').nth(2).unwrap()).collect();
+    assert_eq!(thunks, ["-", "-", "EXTERNAL"]);
 }

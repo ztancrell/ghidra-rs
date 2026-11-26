@@ -158,7 +158,7 @@ pub struct Module {
 
 impl Module {
     /// The names of the functions: each import stub and each exported function, by address
-    /// (for a listing; `analyze` does not use it yet).
+    /// (for `disasm`'s listing; `analyze` takes `imports` and `exports` in `Image::from_prx`).
     pub fn names(&self) -> BTreeMap<u32, &str> {
         let funcs = self.imports.iter().chain(&self.exports).filter(|s| !s.var);
         funcs.map(|s| (s.addr, s.name.as_str())).collect()

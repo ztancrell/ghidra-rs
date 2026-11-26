@@ -16,6 +16,10 @@
 # Ghidra 12.2), OUT (default rust/target/mips-ref; Ghidra refuses a project path with a
 # component starting with `.`, so in a worktree under .claude/ set OUT to a path without one).
 # Java's output (<name>.java, DumpPurges.java's lines) is kept: delete it to run Java again.
+# Java's result varies from run to run on SOCOM's BOOT.BIN (which switch tables its decompiler
+# recovers, and the functions only their cases call): see the README before reading one run.
+# ghidra-rs writes a function at an import stub as a thunk to EXTERNAL; Java reads no import
+# of a PRX and has `-` there, so the last count reads EXTERNAL as `-`.
 # The Ghidra project is kept too (OUT/proj-<name>), for further scripts; delete it when done.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
@@ -47,5 +51,5 @@ comm -13 "$out/$t.java.e" "$out/$t.rs.e" >"$out/$t.only-rs"
 comm -23 "$out/$t.java.e" "$out/$t.rs.e" >"$out/$t.only-java"
 sort "$out/$t.java" >"$out/$t.java.s"
 sort "$out/$t.rs" >"$out/$t.rs.s"
-echo "$t: java $(wc -l <"$out/$t.java"), ghidra-rs $(wc -l <"$out/$t.rs"), entries in both $(comm -12 "$out/$t.java.e" "$out/$t.rs.e" | wc -l), only ghidra-rs $(wc -l <"$out/$t.only-rs"), only java $(wc -l <"$out/$t.only-java"), identical lines $(comm -12 "$out/$t.java.s" "$out/$t.rs.s" | wc -l)"
+echo "$t: java $(wc -l <"$out/$t.java"), ghidra-rs $(wc -l <"$out/$t.rs"), entries in both $(comm -12 "$out/$t.java.e" "$out/$t.rs.e" | wc -l), only ghidra-rs $(wc -l <"$out/$t.only-rs"), only java $(wc -l <"$out/$t.only-java"), identical lines $(comm -12 "$out/$t.java.s" "$out/$t.rs.s" | wc -l), with EXTERNAL as - $(sed 's/ EXTERNAL / - /' "$out/$t.rs" | sort | comm -12 "$out/$t.java.s" - | wc -l)"
 rm -f "$out/$t.java.e" "$out/$t.rs.e" "$out/$t.java.s" "$out/$t.rs.s"
