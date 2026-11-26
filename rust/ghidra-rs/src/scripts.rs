@@ -121,7 +121,8 @@ fn containing(an: &Analysis) -> HashMap<u32, u32> {
     m
 }
 
-/// tools/ghidra/ExportFunctions.java: one CSV row per function in .text.
+/// tools/ghidra/ExportFunctions.java: one CSV row per function in .text. A PRX also gets a row
+/// for each function at an import stub (the `.sceStub.text.*` sections), named as the import.
 /// `fid`: the functions Function ID marked (`fid::apply`), with the names it applied.
 pub fn export_functions(
     img: &Image,
@@ -181,7 +182,8 @@ pub fn export_functions(
     writeln!(out, "address,size,name,exported,fid,vtable_class,lua,callees,callers,data_refs")?;
     let mut n = 0;
     for (&f, body) in &an.bodies {
-        if !an.is_text(f) {
+        let stub = img.imports.get(&f).filter(|_| img.mips);
+        if !an.is_text(f) && stub.is_none() {
             continue;
         }
         let callees: HashSet<u32> = body.iter().filter_map(|a| callee(&an.insns[a])).collect();
@@ -191,7 +193,7 @@ pub fn export_functions(
             (Some(s), _) => demangle(s)?,
             (None, Some(a)) if a.conflict => a.name.clone(),
             (None, Some(a)) => demangle(&a.name)?,
-            _ => String::new(),
+            _ => stub.map_or(String::new(), |(_, n)| n.clone()),
         };
         writeln!(
             out,
@@ -254,11 +256,12 @@ pub fn export_gaps(img: &Image, an: &Analysis, out: &mut dyn Write) -> std::io::
 
 /// tools/ghidra/DumpPurges.java: one line per function, in address order: entry, purge
 /// (2147483647 unknown), thunked entry (`-`; `EXTERNAL` for a jump through an import slot,
-/// whose thunked function Ghidra keeps in its EXTERNAL block), body min, body max, address
-/// count, no-return.
+/// whose thunked function Ghidra keeps in its EXTERNAL block, and for a function at an import
+/// stub of a PRX, where Java, which reads no import of a PRX, has `-`), body min, body max,
+/// address count, no-return.
 pub fn dump_purges(img: &Image, an: &Analysis, out: &mut dyn Write) -> std::io::Result<usize> {
     for (&f, body) in &an.bodies {
-        let slot = an.slot_thunk(f).filter(|s| img.imports.contains_key(s));
+        let slot = an.slot_thunk(f).or(Some(f).filter(|_| img.mips)).filter(|s| img.imports.contains_key(s));
         let thunk = match (an.thunk_of.get(&f), slot) {
             (Some(t), _) => format!("{t:08x}"),
             (None, Some(_)) => "EXTERNAL".into(),

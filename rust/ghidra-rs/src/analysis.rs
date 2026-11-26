@@ -64,6 +64,8 @@ pub struct Image {
     /// (ElfProgramBuilder.processEntryPoints, ElfProgramBuilder.java:651-668: an executable or
     /// shared object whose OS/ABI is Linux or none)
     pub elf_process_entry: Option<u32>,
+    /// PRX: why `sceModuleInfo` was not read, or the notes of its tables (`psp::Module::notes`)
+    pub psp_notes: Vec<String>,
 }
 
 /// An entry of Java's EXTERNAL block (ElfProgramBuilder.allocateExternalSymbol).
@@ -460,8 +462,10 @@ impl Image {
     }
 
     /// A PSP PRX as `psp::load` lays it out at `psp::DEFAULT_BASE`, its relocations applied: the
-    /// loaded sections as blocks, the ELF entry point as the one entry. Nothing of
-    /// `sceModuleInfo`, `.lib.ent` or `.lib.stub` is read (no exports, no imports: MIPS-5).
+    /// loaded sections as blocks, the ELF entry point as the entry. The module's tables
+    /// (`psp::Module`) give the exports (each exported function, `module_start` among them, an
+    /// entry point with its name) and the imports: an import is keyed by its stub, the two
+    /// instructions the firmware fills in, where x86 has the slot of the import table.
     pub fn from_prx(bytes: &[u8]) -> Result<Image, String> {
         use object::read::elf::{FileHeader, SectionHeader};
         let prx = crate::psp::load(bytes, crate::psp::DEFAULT_BASE)?;
@@ -490,7 +494,20 @@ impl Image {
                 }
             })
             .collect();
-        Ok(Image { sections, entry: Some(prx.entry), mips: true, ..Image::default() })
+        let mut img = Image { sections, entry: Some(prx.entry), mips: true, ..Image::default() };
+        match &prx.module {
+            Ok(m) => {
+                for s in m.exports.iter().filter(|s| !s.var) {
+                    img.exports.push((s.addr, s.name.clone()));
+                }
+                for s in m.imports.iter().filter(|s| !s.var) {
+                    img.imports.insert(s.addr, (s.library.clone(), s.name.clone()));
+                }
+                img.psp_notes = m.notes.clone();
+            }
+            Err(e) => img.psp_notes.push(format!("sceModuleInfo not read, so no exports and no imports: {e}")),
+        }
+        Ok(img)
     }
 
     /// A pointer of the image: 4 bytes, or 8 for an ELF64 image (None past 32 bits).
@@ -1026,11 +1043,13 @@ impl Analysis {
             an.killed = vec![reg("at")?, reg("v0")?, reg("v1")?];
             an.stackshift = Some(0);
             an.warnings.push(
-                "not ported for MIPS: the decompiler's jump-table recovery (a pattern stands in), the gp value and the t9 assumption of the MIPS address analyzer, Function ID, the PSP's exports and import stubs (MIPS-5)"
+                "not ported for MIPS: the decompiler's jump-table recovery (a pattern stands in), the gp value and the t9 assumption of the MIPS address analyzer (gp stays unknown, so a gp-relative reference is not made), Function ID"
                     .into(),
             );
+            an.warnings.extend(img.psp_notes.iter().map(|n| format!("PSP module tables: {n}")));
         }
-        for (slot, (_, name)) in img.imports.iter().filter(|_| !img.elf64) {
+        // not on a PRX: Java reads no import of one, so no stub is no-return there by its name
+        for (slot, (_, name)) in img.imports.iter().filter(|_| !img.elf64 && !img.mips) {
             if KNOWN_NORETURN.contains(&name.as_str()) {
                 an.noreturn.insert(*slot);
             }

@@ -122,6 +122,24 @@ stubs in `.sceStub.text.*` are analyzed as ordinary code.
 Not done: the `gp` and `t9` assumptions of the address analyzer, a comparison of instruction
 sets and references with Java (functions and bodies only), any PRX but this one.
 
+Superseded (branch `mips-m3-psp`, 2026-11-26): "Waits for MIPS-5" above. `analyze` now takes
+the module tables (`rust/README.md`, "The module tables in `analyze`"):
+
+- Each exported function is an entry point with its name; an import is keyed by its stub, a
+  function at a stub is a thunk to `EXTERNAL` in `--purges` and has a named row in
+  `--functions`. On `BOOT.BIN`: 247 imports, 235 of the stubs functions (the 12 others have
+  no `jal`), both `module_start` named; functions, bodies and gaps as before.
+- `gp`: `BOOT.BIN` never uses it (0 of 868,720 `.text` instructions read or write `gp`; the
+  `sceModuleInfo` field is 0; Java has no `gp` value either). Nothing ported; the warning
+  stays for a PRX that does.
+- `t9`: ghidra-allegrex's analyzer has the assumption on by default, but Java set `t9` at 0
+  function entries on this file (no `jalr t9`, no `jr t9` in `.text`). Not ported.
+- Java against itself: three runs gave 11,395, 11,389 and 11,397 functions (switch tables its
+  decompiler recovers in one run and not in another; cause not found, machine busy). Taken
+  together they give the 11,399 / 11,398 / 11,384 above; nothing new differs.
+- Java names nothing at the stubs: ghidra-allegrex has no code for `sceModuleInfo`, the stub
+  table or NIDs. No name could be compared.
+
 ### MIPS-4: the decompiler on MIPS (first step done, branch `mips-m4`, 2026-11-26)
 
 The decompiler runs on the relocated PRX, on both engines, with ghidra-allegrex's
@@ -216,11 +234,14 @@ Not done, in the order proposed:
   licence and a `NOTICE`.
 - `ghidra-rs disasm` prints the names at the stubs and exported functions and after a `j` or
   `jal` to one. `analyze` does not use them yet (`psp::Module::names` is there for MIPS-3).
+  Superseded (branch `mips-m3-psp`): `analyze` uses the exports and the import stubs (MIPS-3,
+  above).
 - On SOCOM's `BOOT.BIN`: module `APP_APPLICATION_NAME`, `gp` 0, 32 libraries, 247 imported
   functions (247 named: 246 by PSPSDK, `sceMpegAvcDecodeFlush` by SHA-1 search, below), no
   imported variables, 2 exported
   functions (both `module_start`, NID 0xD632ACDB) and 1 exported variable (`module_info`);
-  539 `jal`s in `.text` go to 236 of the stubs. Details and the sources looked at are in
+  539 `jal`s in `.text` go to 236 of the stubs (Superseded, branch `mips-m3-psp`: 538 go to
+  235 stubs and 1 to the export `module_start` at 0x0880435c). Details and the sources looked at are in
   `rust/README.md`, "PSP module info, imports and NID names (MIPS-5)".
 
 Superseded: "MIPS-5 (not started)" and its two open questions. The NID table comes from PSPSDK
@@ -253,4 +274,5 @@ only" (the summary above, as merged from `mips-m5`).
 Superseded: "uOFW is MIT but was not read for one" (the open question above, as written on
 `mips-m5`).
 - `gp` is 0 in this module's `sceModuleInfo`; whether the code sets `gp` itself matters to
-  MIPS-3 and MIPS-4 and was not looked at.
+  MIPS-3 and MIPS-4 and was not looked at. Superseded (branch `mips-m3-psp`): looked at; no
+  instruction of `.text` reads or writes `gp` (MIPS-3, above).

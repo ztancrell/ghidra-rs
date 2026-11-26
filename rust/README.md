@@ -7,7 +7,8 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
 `disasm` also takes little-endian MIPS32, and a PSP PRX with its relocations applied (see "MIPS32
 and the PSP (MIPS-1)"). MIPS-2 (2026-11-26): a PSP PRX is decoded as Allegrex, with the VFPU
 ("Allegrex (MIPS-2)"). MIPS-3 (2026-11-26): `analyze` takes a PSP PRX ("Function discovery on
-MIPS (MIPS-3)"). See `../DESIGN.md` for the scope and plan.
+MIPS (MIPS-3)"); it uses the PRX's exports and import stubs ("The module tables in `analyze`").
+See `../DESIGN.md` for the scope and plan.
 
 ## Layout
 
@@ -8387,7 +8388,8 @@ What is MIPS's own in the analysis (`analysis.rs`; the rest is the code the x86 
 - Not run on MIPS: the callee purge analyzer (x86's), RTTI, Function ID.
 
 Not ported: the `gp` value and the `t9` assumption of the address analyzer (`gp` stays an
-unknown register here; the module's `gp` is in `sceModuleInfo`, MIPS-5), its
+unknown register here; `BOOT.BIN` never uses `gp` and Java's `t9` assumption does nothing on
+it: "`gp` and `t9`", below), its
 `ra`-constant call override, `MIPS UnAlligned Instruction Fix` (`lwl`/`lwr` pairs: no flow),
 a pattern match at an instruction outside every function, and the decompiler's jump-table
 recovery.
@@ -8478,11 +8480,110 @@ compared; one `jr`, 0x08b06148, is an instruction with a table here and no instr
 Java), references, the `callees`, `callers` and `data_refs` columns of `--functions` (no Java
 export was made for them), any other PRX, and a MIPS ELF that is not a PRX (`analyze` takes
 only the PRX). Function names, imports and exports are MIPS-5.
+
+### The module tables in `analyze` (branch `mips-m3-psp`, 2026-11-26)
+
+`Image::from_prx` now takes the exports and imports `psp::load` reads (`Prx::module`, MIPS-5):
+
+- **Exports.** Each exported function is an entry point, like a PE export, and has its name
+  and `exported` 1 in `--functions`. An exported variable (`module_info`) is not an entry.
+- **Imports.** An import is keyed by its stub (the two instructions the firmware fills in),
+  where a PE has the slot of its import table: `Image::imports`, stub -> (library, name). The
+  summary line counts them. A stub is a function only when the analysis reaches it (a `jal`),
+  as an x86 import has a thunk only where the code has one; no stub is seeded. In `--purges`
+  a function at a stub has `EXTERNAL` in the thunk column, as an x86 thunk through an import
+  slot has.
+- **Names in the outputs.** x86 writes import names in no `analyze` file but `--facts`, which
+  refuses a PRX, so there was no format to follow. The minimum added here (Claude's call): on
+  a PRX `--functions` also writes a row for each function at an import stub (those are outside
+  `.text`), with the import's name in `name` and `exported` 0. x86 files are unchanged.
+- An import's name makes no function no-return on a PRX (x86's list of names is not applied):
+  Java reads no import of one. `sceKernelExitGame` and the like therefore return here, as in
+  Java; treating them as no-return would be a fix beating Ghidra and is not done.
+- If `sceModuleInfo` cannot be read, the image still loads with no exports and no imports and
+  `analyze` prints why as a warning; the notes of the tables are warnings too.
+
+On `BOOT.BIN`: "11399 functions (247 imports)". The function set, the bodies and `--gaps` are
+the ones of master's build (`ed70ec7cd2`), byte for byte but for the thunk column: both
+exports (`module_start` at 0x0880435c and at 0x08808d60, the ELF entry) were functions
+already, 0x0880435c by the one `jal` to it. `--purges` has `EXTERNAL` on 235 lines.
+`--functions` writes 11,399 rows: the 11,164 of `.text`, 2 of them now named `module_start`,
+and 235 stubs under their import names. The other 12 of the 247 stubs have no `jal` in `.text`
+and are functions on neither side.
+
+Superseded: "the ELF entry point as the only entry. No export, import or `sceModuleInfo` is
+read: that is MIPS-5", "`--functions` writes 11,164 rows" and "Function names, imports and
+exports are MIPS-5" (above, as merged from `mips-m3`).
+
+#### `gp` and `t9` (read from the bytes, 2026-11-26)
+
+`BOOT.BIN` never uses `gp`. Of the 868,720 words of `.text`, decoded as Allegrex, 0 print
+`gp` as an operand: no load or store with `gp` as its base, no instruction that writes it
+(none in the two `module_start`, none anywhere). A scan of the raw words for register 28 as
+the base of a load or store (opcodes 0x20 and up) finds 24, all `vmidt.q` (`a0 80 83 f3`), a
+VFPU instruction whose bits there are not a register; 0 words write register 28 by an
+immediate instruction or a three-register one. The stubs are `jr ra` and `nop`. The module
+has no `.sdata`, `.sbss` or `.got` section, and the `gp` field of `sceModuleInfo` is 0. Java
+agrees: after its analysis no function entry has a `gp` context value and no `_gp` or
+`_mips_gp_value` symbol exists. So nothing was ported: there is no value to give `gp` and no
+reference that needs one. `analyze` still warns that `gp` is not ported, for a PRX that uses
+it.
+
+The `t9` assumption (ghidra-allegrex's `AllegrexAddressAnalyzer`, "Assume T9 set to Function
+entry", on by default: when an instruction reads a `t9` no one set, `t9` is given the
+function's entry address there and the function is analysed again) applies to this language
+but did nothing on this file: after Java's analysis 0 of its functions have a `t9` context
+value at the entry. 470 instructions of `.text` name `t9`, none of them a `jalr t9` or a
+`jr t9` (the calls through a register are `jalr a2`, `a3`, `a1`, `t0`, `v0` and so on): the
+code is not position-independent and `t9` is an ordinary temporary. Not ported; the warning
+keeps it.
+
+#### Against Java again (`BOOT.BIN`, 2026-11-26)
+
+Java's result on this image is not the same from run to run. Three runs of `tools/mips-ref.sh`
+on the same `prx-elf` file (byte-identical each time), same Ghidra 12.2 and ghidra-allegrex
+v21.6:
+
+| | Java run 1 | run 2 | run 3 | a line of any run |
+|---|---|---|---|---|
+| Java's functions | 11,395 | 11,389 | 11,397 | 11,399 entries |
+| entry in both | 11,394 | 11,388 | 11,396 | 11,398 |
+| only ghidra-rs | 5 | 11 | 3 | 1 (0x08add92c) |
+| only Java | 1 | 1 | 1 | 1 (0x08add548) |
+| whole line identical, `EXTERNAL` read as `-` | 11,373 | 11,371 | 11,377 | 11,384 |
+| whole line identical, as written | 11,138 | 11,136 | 11,142 | |
+
+- **Java's variation.** 32 distinct lines are not in all three runs. What varies is which
+  switch tables Java's decompiler recovers: a function's body is smaller in one run
+  (0x0885ca28: 1,480 addresses in run 1, 2,092 in runs 2 and 3 and in ghidra-rs), and the
+  functions only the lost cases call are missing (run 1 lacks 0x0899bf9c, 0x0899ca4c,
+  0x0899ca54 and 0x0899d854; each of the sampled ones, 0x0899bf9c, 0x0899ca4c and 0x0899d854,
+  has exactly one `jal` in `.text`). Why Java varies was not found; the machine was busy
+  during the runs (load average 4 to 8 on 12 cores, another build running). Taken together
+  the three runs give the numbers of the single run of `mips-m3` (11,399, 11,398, 11,384): the
+  two functions and the 14 bodies of "Against Java" above, unchanged, and nothing new.
+- **`EXTERNAL`.** 235 lines differ from Java's in the thunk column alone: the functions at
+  import stubs. Java has `-` there because it reads no import of a PRX (below).
+  `tools/mips-ref.sh` now prints both counts.
+- **Names.** There is nothing to compare. Java has one named function, `entry` at
+  0x08808d60 (the ELF entry point, which is `module_start` here); the other functions of run 1
+  (11,394) have default names, and the program has no external library. ghidra-allegrex
+  v21.6 (`4e46aa14`, its source read as data) has no code for `sceModuleInfo`, `.lib.ent`,
+  `.lib.stub` or NIDs: its "PSP Executable (ELF)" loader is Ghidra's ELF loader with the PSP
+  relocations, and its names come from PPSSPP `.sym` files through two scripts. So the 237
+  names `analyze` writes (2 exports, 235 stubs) have no Java counterpart; they were checked in
+  MIPS-5 against PSPSDK and by SHA-1, not against Java.
+
+Not checked: as in "Against Java" above; a PRX that uses `gp`, one with imported variables
+(an imported variable is not put in `Image::imports`), and one whose `sceModuleInfo` does not
+read (only the warning's code path exists, no test).
 ## PSP module info, imports and NID names (MIPS-5, branch `mips-m5`, 2026-11-26)
 
 `psp::load` now also reads the module's own tables from the relocated image
 (`psp::parse_module`; `Prx::module`), and `disasm` prints the names they give. `analyze` does
-not use them yet (`Module::names` is there for it).
+not use them yet (`Module::names` is there for it). Superseded (branch `mips-m3-psp`):
+`analyze` takes the exports and the import stubs from `Prx::module` ("The module tables in
+`analyze`", above); `Module::names` stays `disasm`'s.
 
 ### The tables (`psp.rs`)
 
@@ -8573,6 +8674,10 @@ sceUsbStop:
 
 245 of the 246 names give their NID by SHA-1; `sceImposeBatteryIconStatus` (0x8C943191) does
 not, so it is PSPSDK's name, not a verified one.
+
+Superseded (branch `mips-m3-psp`): "539, to 236 of the 247 stubs". The 539 named `jal`s go to
+236 targets, of which 235 are stubs (538 `jal`s) and one is the export `module_start` at
+0x0880435c (1 `jal`); 12 stubs have no `jal`.
 
 Superseded: "by NID only: 1 (`sceMpeg_0x4571CC64`)" (as merged from `mips-m5-uofw`). With
 `SEARCHED_NIDS` (branch `mips-m5-hash`) `disasm`'s stderr line reads "247 named by NID table,
