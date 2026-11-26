@@ -3,7 +3,9 @@
 A headless Rust reverse-engineering core that decodes machine code with Ghidra's compiled
 SLEIGH specs (`.sla`). Milestone 1: load an ELF/PE/Mach-O x86-64 binary, disassemble it and
 lift it to p-code. Milestone 2: function discovery on 32-bit x86 PE files, writing the same files
-as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java. See `../DESIGN.md` for the scope and plan.
+as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java. MIPS-1 (2026-11-26):
+`disasm` also takes little-endian MIPS32, and a PSP PRX with its relocations applied (see "MIPS32
+and the PSP (MIPS-1)"). See `../DESIGN.md` for the scope and plan.
 
 ## Layout
 
@@ -27,7 +29,11 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   ExportLibraryEvidence, ExportBindings, ExportAbiCandidates) as `ghidra-rs export` commands
   (see "The read-only scripts"); `ghidra-rs/tests/exports.rs` runs them on a hand-made image.
 - `ghidra-rs/src/main.rs`: the `ghidra-rs` CLI (binary loading via the `object` crate).
-- `ghidra-rs/tests/decode.rs`: decodes a fixed byte sequence and checks text and p-code.
+- `ghidra-rs/src/psp.rs`: the PSP PRX loader: segments, the PSP relocation sections, the
+  count of every relocation by type ("MIPS32 and the PSP (MIPS-1)").
+- `ghidra-rs/tests/psp.rs`: the PSP relocation rules on a hand-made image.
+- `ghidra-rs/tests/decode.rs`: decodes a fixed byte sequence and checks text and p-code; a
+  MIPS32 `jal` with its delay slot.
 - `ghidra-rs/src/abi.rs`: port of CheckAbiCallers.java: per-byte register liveness walks
   over p-code register reads and writes.
 - `ghidra-rs/tests/analysis.rs`: function discovery and both CSV writers on a fixed 32-bit blob;
@@ -57,7 +63,8 @@ as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java.
   GNU demangler"); `tools/gnu-syms.sh` and `tools/ghidra/GnuParseDump.java` check them.
 - `ghidra-rs/tests/abi.rs`: register reads and writes (sub-registers as base-register bytes)
   of a few fixed instructions.
-- `build-sla.sh`: builds Ghidra's SLEIGH compiler and compiles `x86-64.sla` and `x86.sla`.
+- `build-sla.sh`: builds Ghidra's SLEIGH compiler and compiles `x86-64.sla`, `x86.sla` and
+  MIPS's `mips32le.sla`.
 - `tools/sleigh_ref.cc`: a reference disassembler on Ghidra's C++ engine, printing in the
   same format, used to verify the Rust port.
 - `ghidra-rs/src/console.rs`: the milestone 3 harness: the decompiler prelude, the Rust side of
@@ -114,7 +121,7 @@ Needs Rust (stable), and g++, make and zlib headers for the SLEIGH compiler.
 
 ```sh
 cd rust
-./build-sla.sh             # once, and again whenever the x86 .slaspec/.sinc files change
+./build-sla.sh             # once, and again whenever the x86 or MIPS .slaspec/.sinc files change
 cargo build --release
 cargo test --release
 ```
@@ -123,7 +130,8 @@ cargo test --release
 
 `build-sla.sh` copies the C++ sources from `Ghidra/Features/Decompiler/src/decompile/cpp`
 into `rust/target/sleigh-build`, builds the `sleigh_opt` target there (using the checked-in
-bison/flex outputs, so the upstream tree is not touched) and runs, for `x86-64` and `x86`:
+bison/flex outputs, so the upstream tree is not touched) and runs, for `x86-64`, `x86` and
+`mips32le` (in `Ghidra/Processors/MIPS/data/languages`; 166 KB):
 
 ```sh
 sleigh_opt Ghidra/Processors/x86/data/languages/x86-64.slaspec \
@@ -140,13 +148,18 @@ Ghidra's "packed" element/attribute encoding (`slaformat.cc`, `PackedDecode` in
 variable. The context defaults (`addrsize`, `opsize`, ...) come from the `<context_set>` of the
 `.pspec` with the same name next to the `.sla`. A language whose `.pspec` has another name (the
 16-bit x86 languages on `x86.sla`) is loaded with `Sleigh::load_with_pspec`; no command line
-option selects one yet.
+option selects one yet. A little-endian MIPS binary gets `mips32le.sla` with `mips32.pspec`
+(the language `MIPS:LE:32:default` of `mips.ldefs`).
 
 ## Usage
 
 ```sh
-ghidra-rs disasm <binary> [--func <symbol>|--addr <hex>] [--count N] [--pcode] [--sla <file>]
+ghidra-rs disasm <binary|psp-prx> [--func <symbol>|--addr <hex>] [--count N] [--pcode] [--sla <file>]
 ```
+
+The binary is an ELF, PE or Mach-O file for x86-64 or 32-bit x86, a little-endian MIPS32 ELF,
+or a PSP PRX (loaded at 0x08804000 with its relocations applied; addresses are loaded
+addresses, a line on stderr counts the relocations, and `--func` is refused).
 
 - `--func`: start at a symbol (static, dynamic or PE export; a leading `_` is optional for
   Mach-O) and, if the symbol has a size, stop at its end.
@@ -157,7 +170,8 @@ ghidra-rs disasm <binary> [--func <symbol>|--addr <hex>] [--count N] [--pcode] [
 - `--pcode`: print the p-code ops under each instruction.
 
 Output is `address  bytes  MNEMONIC operands` in Ghidra's spelling. Bytes Ghidra's spec
-cannot decode print as `(bad: ...)`, and the sweep moves on one byte.
+cannot decode print as `(bad: ...)`, and the sweep moves on one byte (on MIPS: the whole
+4-byte word).
 
 ```
 $ ghidra-rs disasm /usr/bin/ls --count 2 --pcode
@@ -8071,6 +8085,120 @@ read is the one this build writes (`cksum` 304429596). The nine pairs that pass 
 (`pc-r pc-t pcc-r pcc-t pcd pmd` on `simple`, `pcc-r pcc-t swfsc-t` on `switch`) are run for
 the merge. No unit test was added for the new branch of `decode_ops` (the tests have no
 fixture with a folded-address LOAD); its check is Hatred's 0x1d46180 in the facts comparison.
+## MIPS32 and the PSP (MIPS-1, branch `mips-m1`, 2026-11-26)
+
+The first MIPS target is SOCOM U.S. Navy SEALs Fireteam Bravo's `BOOT.BIN` (`../DESIGN.md`,
+2026-11-26; the plan and the later milestones are in `../docs/plans/mips-psp.md`). MIPS-1 is
+`disasm` only: load, relocate, disassemble, p-code. `analyze` and the decompiler do not take
+MIPS.
+
+### The PRX loader (`psp.rs`)
+
+A PSP PRX is an ELF32 little-endian MIPS file of type 0xffa0, linked at address 0 and
+relocated when loaded. `psp::load`:
+
+1. lays the `PT_LOAD` segments out at their link addresses in one block (memory past a
+   segment's file bytes, `.bss`, is zero);
+2. applies every section of type 0x700000a0 (`SHT_MIPS_PSPREL`) that belongs to a loaded
+   section, for the load base;
+3. lists the loaded sections at their loaded addresses, for `disasm`.
+
+The load base is `psp::DEFAULT_BASE`, 0x08804000. Ghidra has no rule to port here:
+`MIPS_ElfExtension.java` names the file type and the section type, applies nothing
+("relocations not supported") and leaves the image at its link address. The base is the one
+the ghidra-allegrex loader's README recommends for games; PPSSPP allocates the module in user
+memory (from 0x08800000). No option changes it yet.
+
+A relocation entry is an `Elf32_Rel`. Its `r_info` holds the type (bits 0-7), the program
+header the offset is relative to (bits 8-15) and the program header whose loaded address is
+added (bits 16-23); the words in the file are relative to that second segment's start. The
+rules follow PPSSPP's `ElfReader::LoadRelocations` (read 2026-11-26):
+
+| type | rule |
+|---|---|
+| `R_MIPS_32` (2) | the word plus the segment's loaded address |
+| `R_MIPS_26` (4) | the 26-bit jump field plus that address / 4 |
+| `R_MIPS_HI16` (5) | with the next `R_MIPS_LO16` entry of its section: the high half of (high << 16) + signed low + address, rounded for the signed low half |
+| `R_MIPS_LO16` (6) | the low 16 bits plus the address |
+| `R_MIPS_NONE` (0) | nothing |
+
+Every word is read before any is changed (PPSSPP's two passes). Nothing is skipped silently:
+an entry of any other type is counted under "unknown type" and left as it is (`R_MIPS_16` and
+`R_MIPS_GPREL16`, which PPSSPP handles, are among them: no file to check them on yet), as are
+a `HI16` with no `LO16` after it, an entry outside the image, and the entries of standard
+`SHT_REL`/`SHT_RELA` sections (they need symbols; not applied). Type B relocations (program
+header 0x700000a1) fail the load.
+
+On `BOOT.BIN` (4,708,752 bytes; 9 relocation sections):
+
+| | entries |
+|---|---|
+| `R_MIPS_32` | 12,661 |
+| `R_MIPS_26` | 44,782 |
+| `R_MIPS_HI16` | 22,821 |
+| `R_MIPS_LO16` | 27,496 |
+| applied | 107,760 |
+| unknown type, `HI16` without `LO16`, outside the image, standard REL/RELA | 0 each |
+
+95,099 of `.text`'s 868,720 words change (its 26, HI16 and LO16 entries).
+
+### Delay slots (`sleigh.rs`)
+
+A MIPS branch executes the instruction after it first. As in the C++ engine
+(`Sleigh::oneInstruction`, `SleighBuilder::delaySlot`): `decode` returns the branch's own
+length (4), also decodes the delay slot instruction from the bytes after it, and `pcode` puts
+that instruction's whole p-code where the branch's template says, with `inst_next` past the
+slot (`Parse::fall` is the length with the slot). The sweep then decodes the slot instruction
+again on its own, as Ghidra's listing shows it. A branch whose slot does not decode, or is
+itself a branch with a slot, has no p-code, as in the C++ engine.
+
+### Against the C++ engine (2026-11-26)
+
+`tools/sleigh_ref.cc` takes `mips32le.sla` (the context defaults of `mips32.pspec`; a word
+that does not decode is skipped whole, as in `disasm`). The whole relocated `.text` of
+`BOOT.BIN` at 0x08804000, linear sweep, text and p-code (the raw file is rebuilt from the
+bytes column, so both decode the same relocated bytes):
+
+```sh
+cd target && mkdir -p mips-check && cd mips-check
+../release/ghidra-rs disasm BOOT.BIN --addr 8804000 --count 1000000000 --pcode > rs-full.txt
+grep '^0' rs-full.txt | cut -c19-49 | sed 's/(bad.*//' | xxd -r -p > text.raw
+../sleigh_ref ../../../Ghidra/Processors/MIPS/data/languages/mips32le.sla text.raw 8804000 pcode > ref.txt
+sed -E 's/^([0-9a-f]{16})  ([0-9a-f]{2} ?)+ +/\1  /; s/^([0-9a-f]{16})  \(bad.*/\1  (bad)/; s/    <no p-code.*/    <no p-code>/' rs-full.txt > rs.txt
+cmp rs.txt ref.txt
+```
+
+| | words |
+|---|---|
+| `.text` | 868,720 |
+| decoded, text and p-code identical to the C++ engine | 866,259 |
+| decoded, no p-code in either (`bc2tl` with a slot that does not decode) | 25 |
+| not decodable in either | 2,436 |
+| differing lines (of 3,252,586) | 0 |
+
+The stock spec is plain MIPS32: it has none of Allegrex's own instructions (MIPS-2, not
+started). The 2,436 words that do not decode, by opcode bits (bits 31-26):
+
+| opcode | words | on Allegrex (from the PSP opcode map as remembered, not checked here) |
+|---|---|---|
+| 0x34 (110100) | 1,652 | VFPU |
+| 0x3c (111100) | 282 | VFPU |
+| 0x1b (011011) | 259 | VFPU |
+| 0x37 (110111) | 229 | VFPU |
+| 0x00, function 0x16 | 12 | an Allegrex integer instruction |
+| 0x1f, function 0x20, shift field 3 | 2 | an Allegrex integer instruction |
+
+More words decode, identically in both engines, as an instruction the PSP does not have,
+because Allegrex reuses the encoding: `daddiu` 757 and `daddi` 27 (opcodes 0x19, 0x18), `dadd`
+7 and `daddu` 25 (function 0x2c, 0x2d), `lwc2` 1,522, `swc2` 1,535, `ldc2` 1,948, `sdc2`
+1,194, `bc2t` 7, `bc2tl` 25. These are counted from the mnemonics; what each really is waits
+for the Allegrex spec.
+
+Not checked: a little-endian MIPS32 ELF that is not a PRX (no such file was at hand; it takes
+the path of the x86 files, with no relocations), big-endian MIPS, MIPS16 and microMIPS code
+(the spec has them; none was decoded here), and Java Ghidra's listing (the check is against
+the C++ engine only).
+
 ## Speed
 
 Measured on 2026-11-11 with a release build on a 12-thread machine (one thread used). The
@@ -8085,7 +8213,9 @@ with output sent to `/dev/null`:
 
 ## Limits
 
-- One processor family: x86 (`x86-64.sla` and the 32-bit `x86.sla`). `analyze` takes 32-bit
+- Two processor families: x86 (`x86-64.sla` and the 32-bit `x86.sla`) and, in `disasm` only,
+  little-endian MIPS32 (`mips32le.sla`, stock: no Allegrex instructions). Superseded
+  (2026-11-26, branch `mips-m1`): "One processor family: x86". `analyze` takes 32-bit
   PE files and ELF x86-64 files (functions, bodies, gaps; see "ELF64 analysis"); `--decomp-prelude`
   and the decompiler take both (see "The decompiler on x86-64"); `--abi-callers`, `--store`,
   `edit` and `export` take 32-bit PE files only. Superseded (2026-11-21): "`analyze` takes 32-bit
@@ -8093,8 +8223,9 @@ with output sent to `/dev/null`:
   decompiler take 32-bit PE files only".
 - Context starts from the `.pspec` defaults. Context commits (`globalset`) are recorded per
   address in the `Parse` and apply to later decodes there (flowing ones from that address on);
-  the x86 specs do not use them. Delay slots, `crossbuild`, `inst_next2` and flowref/flowdest
-  are not implemented.
+  the x86 specs do not use them. `crossbuild`, `inst_next2` and flowref/flowdest are not
+  implemented. Superseded (2026-11-26, branch `mips-m1`): "Delay slots ... are not
+  implemented"; they are ("MIPS32 and the PSP (MIPS-1)").
 
 ## Verifying against the C++ engine
 
@@ -8126,7 +8257,8 @@ Results on 2026-11-11 (text and p-code identical in every case):
 | /usr/lib/libcrypto.so.3 | 845,611 | 0 (with p-code) |
 | /usr/lib/libLLVM.so.21.1 | 21,830,419 | 0 (text only) |
 
-`sleigh_ref` uses the 64-bit context defaults for a `.sla` whose path contains `x86-64`, and
+`sleigh_ref` uses the 64-bit context defaults for a `.sla` whose path contains `x86-64`, those
+of `mips32.pspec` for one whose path contains `mips` (see "MIPS32 and the PSP (MIPS-1)"), and
 the 32-bit ones of `x86.pspec` (`addrsize=1`, `opsize=1`) otherwise. `ghidra-rs disasm` picks
 `x86.sla` by itself for a 32-bit binary.
 

@@ -43,3 +43,23 @@ fn decode_x86_64_sequence() {
     }
     assert_eq!(addr, 0x5620 + code.len() as u64);
 }
+
+// A MIPS32 `jal` and its delay slot, as relocated in SOCOM FTB's BOOT.BIN (bytes copied in):
+// the delay slot's p-code sits before the CALL, and `ra` is the address after the slot. Text
+// and p-code are what sleigh_ref prints for the same bytes with mips32le.sla.
+#[test]
+fn decode_mips32le_delay_slot() {
+    let path = Sleigh::mips32le_sla_path();
+    assert!(path.exists(), "{} is missing: run rust/build-sla.sh first", path.display());
+    let sl = Sleigh::load_with_pspec(&path, Some(&path.with_file_name("mips32.pspec"))).unwrap();
+    let code: &[u8] = &[0xfc, 0x04, 0x23, 0x0e, 0x98, 0x98, 0x84, 0x24];
+    let mut p = sl.new_parse();
+    let ins = sl.disasm(&mut p, 0x880400c, code).unwrap();
+    assert_eq!((ins.len, p.fall), (4, 8));
+    assert_eq!(format!("{} {}", ins.mnemonic, ins.body), "jal 0x88c13f0");
+    let ops: Vec<String> = sl.pcode(&p).unwrap().iter().map(|o| sl.fmt_op(o)).collect();
+    assert_eq!(ops, ["ra = COPY 0x8804014:4", "a0 = INT_ADD a0, 0xffff9898:4", "CALL ram[0x88c13f0]:4"]);
+    let ins = sl.disasm(&mut p, 0x8804010, &code[4..]).unwrap();
+    assert_eq!((ins.len, p.fall), (4, 4));
+    assert_eq!(format!("{} {}", ins.mnemonic, ins.body), "addiu a0, a0, -0x6768");
+}

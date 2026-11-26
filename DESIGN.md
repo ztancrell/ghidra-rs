@@ -210,6 +210,13 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
 - 2026-11-25: `findContainer`'s smallest container in `query_global` imitates the C++
   in-memory scope (`ScopeInternal`), not the query-order cache of Java's `ScopeGhidra`, when
   Java's facts are loaded. User's decision. Not built yet (work paused).
+- 2026-11-26: Change of direction (the user's decision): the goal widens to MIPS32 little-endian,
+  PSP "Allegrex". The first target is the PSP game SOCOM U.S. Navy SEALs Fireteam Bravo
+  (multiplayer public beta, UCUS-98637), its `BOOT.BIN` (a PSP PRX: relocatable ELF32 MIPS),
+  toward a PC port. MIPS goes into ghidra-rs first, rather than stock Ghidra being used for
+  SOCOM. This starts (b) of the 2026-11-14 order ("more processors and file formats, when a
+  second game asks for them") ahead of the paused work. The milestones are in
+  `docs/plans/mips-psp.md`; MIPS-1 (load, relocate, disassemble, p-code) is on branch `mips-m1`.
 
 ## Milestones
 
@@ -634,6 +641,10 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
 4. More processors (ARM/AArch64, MIPS, ...), batch mode, a persistent project DB.
    Will need the engine parts not ported yet: delay slots, `crossbuild`, `inst_next2` and
    flowref/flowdest.
+   Superseded (2026-11-26, branch `mips-m1`): delay slots are ported, and MIPS32 little-endian
+   has its own milestones (`docs/plans/mips-psp.md`; MIPS-1 done: a PSP PRX loaded and
+   relocated, disassembly and p-code identical to the C++ engine on SOCOM FTB's `.text`).
+   `crossbuild`, `inst_next2` and flowref/flowdest are still not ported.
    In part on branch `worktree-agent-af1e2713bbdee8eab` (2026-11-17): the project store as one plain
    text file (`store.rs`: created and removed functions, fixed bodies, no-return flags, flow
    overrides, thunk marks, switch targets, laid over a fresh analysis by `analyze --store`) and
@@ -713,3 +724,12 @@ Open (asked 2026-11-17, with the project store):
   with only the exceptions stored.
 - Whether ExportBindings `--recover` and AuditRecoveredFunctions `--remove-empty` get ported
   (both fail by name now), and whether mercs2 switches its pipeline to the store.
+
+Open (asked 2026-11-26, with MIPS-1; details in `docs/plans/mips-psp.md`):
+
+- Where the Allegrex instructions come from (VFPU and the extra integer opcodes): the stock
+  `mips32le.sla` has none, and Ghidra ships no Allegrex spec.
+- The load base of a PRX is fixed at 0x08804000 (Claude's call, see the plan): to confirm, or
+  to make an option.
+- Which MIPS analysis and calling convention the later milestones port (Ghidra's MIPS
+  analyzers, `mips32le.cspec` or a PSP one), and where the import names (NIDs) come from.

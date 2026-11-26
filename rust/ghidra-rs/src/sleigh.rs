@@ -2,8 +2,8 @@
 //! (sleigh.cc, slghsymbol.cc, slghpattern.cc, slghpatexpress.cc, context.cc, semantics.cc).
 //! Logic follows upstream; the class hierarchy is flattened into enums and index arenas.
 //!
-//! Not ported (x86 does not use them): delay slots, crossbuild, inst_next2 and
-//! flowref/flowdest. Context starts from the `.pspec` defaults; context commits
+//! Delay slots are ported (MIPS; `Sleigh::oneInstruction`, `SleighBuilder::delaySlot`). Not
+//! ported: crossbuild, inst_next2 and flowref/flowdest. Context starts from the `.pspec` defaults; context commits
 //! (globalset) are recorded in the `Parse` and apply to later decodes at their address.
 
 use crate::sla::{self, a, e, Elem, Result};
@@ -233,6 +233,8 @@ struct OpTpl {
 #[derive(Debug)]
 struct Tpl {
     labels: u32,
+    delay: u32, // ConstructTpl::delayslot: bytes of delay slot the instruction takes
+
     result: Option<HandleTpl>,
     ops: Vec<OpTpl>,
 }
@@ -349,6 +351,13 @@ pub struct Parse {
     pub addr: u64,
     pub naddr: u64,
     pub len: usize,
+    /// Length with the delay slot instructions (`Sleigh::oneInstruction`'s return value);
+    /// `len` when there are none. The p-code's `inst_next` is `addr + fall`.
+    pub fall: usize,
+    delay: u32,        // ParserContext::delayslot
+    slots: Vec<Parse>, // the delay slot instructions' parses: the first `nslots` are live
+    nslots: usize,
+    slot_err: Option<String>, // why a delay slot instruction did not decode
     ctx: Vec<u32>,
     states: Vec<State>,
     pending: Vec<(usize, u32, usize, u32, u32, bool)>, // (sym, point, num, mask, value, flow)
@@ -572,6 +581,7 @@ fn vn_tpl(el: &Elem) -> Result<VnTpl> {
 fn tpl(el: &Elem) -> Result<(Tpl, i64)> {
     let section = if el.has(a::SECTION) { el.int(a::SECTION)? } else { -1 };
     let labels = if el.has(a::LABELS) { el.int(a::LABELS)? as u32 } else { 0 };
+    let delay = if el.has(a::DELAY) { el.int(a::DELAY)? as u32 } else { 0 };
     let mut kids = el.kids.iter();
     let result = match kids.next() {
         Some(h) if h.id == e::HANDLE_TPL => {
@@ -601,7 +611,7 @@ fn tpl(el: &Elem) -> Result<(Tpl, i64)> {
         let ins = it.map(vn_tpl).collect::<Result<_>>()?;
         ops.push(OpTpl { opc: o.int(a::CODE)? as u8, out, ins });
     }
-    Ok((Tpl { labels, result, ops }, section))
+    Ok((Tpl { labels, delay, result, ops }, section))
 }
 
 fn block(el: &Elem) -> Result<Block> {
@@ -698,6 +708,12 @@ impl Sleigh {
     /// Path of `<name>.sla` in Ghidra's x86 language directory (built by `rust/build-sla.sh`).
     pub fn sla_path(name: &str) -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../Ghidra/Processors/x86/data/languages/{name}.sla"))
+    }
+
+    /// Default location of `mips32le.sla` (MIPS32 little endian, built by `rust/build-sla.sh`).
+    /// Its processor spec is `mips32.pspec` next to it: load it with `load_with_pspec`.
+    pub fn mips32le_sla_path() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Ghidra/Processors/MIPS/data/languages/mips32le.sla")
     }
 
     /// ghidra-rs reads no `.ldefs`, whose `<truncate_space>` shortens a space's addresses
@@ -938,6 +954,11 @@ impl Sleigh {
             addr: 0,
             naddr: 0,
             len: 0,
+            fall: 0,
+            delay: 0,
+            slots: Vec::new(),
+            nslots: 0,
+            slot_err: None,
             ctx: self.ctx_default.clone(),
             states: Vec::with_capacity(64),
             pending: Vec::new(),
@@ -1186,9 +1207,42 @@ impl Sleigh {
         Ok(())
     }
 
-    /// Decode one instruction at `addr` from `bytes` into `p`; returns its length.
+    /// Decode one instruction at `addr` from `bytes` into `p`; returns its length. The delay
+    /// slot instructions it takes (MIPS branches) are decoded too, from the bytes after it, for
+    /// `pcode` (`Sleigh::oneInstruction`); they are no part of the returned length.
     pub fn decode(&self, p: &mut Parse, addr: u64, bytes: &[u8]) -> Result<usize> {
+        let len = self.decode_one(p, addr, bytes)?;
+        (p.fall, p.nslots, p.slot_err) = (len, 0, None);
+        let mut count = 0;
+        while count < p.delay as usize {
+            if p.slots.len() == p.nslots {
+                p.slots.push(self.new_parse());
+            }
+            let Parse { slots, changes, nslots, .. } = p;
+            let slot = &mut slots[*nslots];
+            // the slot sees, and adds to, the context changes of the sweep
+            std::mem::swap(&mut slot.changes, changes);
+            let r = self.decode_one(slot, addr + p.fall as u64, bytes.get(p.fall..).unwrap_or(&[]));
+            std::mem::swap(&mut slot.changes, changes);
+            match r {
+                Ok(n) if n > 0 => {
+                    p.fall += n;
+                    count += n;
+                    p.nslots += 1;
+                }
+                r => {
+                    p.slot_err = Some(r.err().unwrap_or_else(|| "empty instruction".into()));
+                    break;
+                }
+            }
+        }
+        Ok(len)
+    }
+
+    /// `Sleigh::resolve`, `resolveHandles` and `applyCommits` for one instruction.
+    fn decode_one(&self, p: &mut Parse, addr: u64, bytes: &[u8]) -> Result<usize> {
         p.buf = [0; 48];
+        p.delay = 0;
         let n = bytes.len().min(MAX_INSTRUCTION_LEN as usize);
         p.buf[..n].copy_from_slice(&bytes[..n]);
         p.addr = addr;
@@ -1266,6 +1320,9 @@ impl Sleigh {
                 st.length = length - st.offset;
                 point = st.parent;
                 depth = depth.wrapping_sub(1);
+                if let Some(d) = self.ctors[ct].templ.as_ref().map(|t| t.delay).filter(|&d| d > 0) {
+                    p.delay = d;
+                }
             }
         }
         p.len = p.states[0].length as usize;
@@ -1783,6 +1840,9 @@ impl Sleigh {
 
     /// P-code for the instruction last decoded into `p`.
     pub fn pcode(&self, p: &Parse) -> PcodeResult<Vec<PcodeOp>> {
+        if let Some(e) = &p.slot_err {
+            return Err(PcodeError::Invalid(format!("delay slot: {e}")));
+        }
         let mut b = Builder {
             s: self,
             p,
@@ -1792,6 +1852,7 @@ impl Sleigh {
             labels: Vec::new(),
             label_refs: Vec::new(),
             uniqoff: (p.addr & self.uniq_mask) << 8,
+            naddr: p.addr + p.fall as u64,
         };
         let t = self.ctors[p.states[0].ct].templ.as_ref().ok_or(PcodeError::Unimplemented)?;
         b.build(t, -1, 0)?;
@@ -1882,6 +1943,7 @@ struct Builder<'a> {
     labels: Vec<u32>,
     label_refs: Vec<usize>,
     uniqoff: u64,
+    naddr: u64, // `inst_next` of the p-code: past the delay slots; a delay slot's own while it is built
 }
 
 impl Builder<'_> {
@@ -1893,17 +1955,44 @@ impl Builder<'_> {
             match op.opc {
                 OP_BUILD => self.append_build(op, secnum, point)?,
                 OP_LABELBUILD => {
-                    let id = (self.s.fix(&op.ins[0].off, self.p, point)? as u32 + self.labelbase) as usize;
+                    let id = (self.fix(&op.ins[0].off, point)? as u32 + self.labelbase) as usize;
                     self.labels.resize(self.labels.len().max(id + 1), NONE);
                     self.labels[id] = self.ops.len() as u32;
                 }
-                OP_DELAY_SLOT | OP_CROSSBUILD => {
-                    return Err(PcodeError::Invalid("delay slots / crossbuild are not supported".into()))
-                }
+                OP_DELAY_SLOT => self.delay_slot()?,
+                OP_CROSSBUILD => return Err(PcodeError::Invalid("crossbuild is not supported".into())),
                 _ => self.dump(op, point)?,
             }
         }
         self.labelbase = old;
+        Ok(())
+    }
+
+    /// `ConstTpl::fix` for the p-code: `inst_next` is past the delay slots.
+    fn fix(&self, c: &C, point: u32) -> Result<u64> {
+        match c {
+            C::Next => Ok(self.naddr),
+            _ => self.s.fix(c, self.p, point),
+        }
+    }
+
+    /// `SleighBuilder::delaySlot`: the whole p-code of the delay slot instructions, in the
+    /// middle of the current instruction's.
+    fn delay_slot(&mut self) -> PcodeResult<()> {
+        let outer = self.p;
+        if outer.nslots == 0 {
+            // a delay slot instruction that takes a delay slot itself: the C++ has not parsed it
+            return Err(PcodeError::Invalid("Could not obtain cached delay slot instruction".into()));
+        }
+        let (uniqoff, naddr) = (self.uniqoff, self.naddr);
+        for slot in &outer.slots[..outer.nslots] {
+            self.p = slot;
+            self.uniqoff = (slot.addr & self.s.uniq_mask) << 8;
+            self.naddr = slot.naddr;
+            let t = self.s.ctors[slot.states[0].ct].templ.as_ref().ok_or(PcodeError::Unimplemented)?;
+            self.build(t, -1, 0)?;
+        }
+        (self.p, self.uniqoff, self.naddr) = (outer, uniqoff, naddr);
         Ok(())
     }
 
@@ -1921,7 +2010,7 @@ impl Builder<'_> {
     }
 
     fn append_build(&mut self, op: &OpTpl, secnum: i64, point: u32) -> PcodeResult<()> {
-        let index = self.s.fix(&op.ins[0].off, self.p, point)? as usize;
+        let index = self.fix(&op.ins[0].off, point)? as usize;
         let ct = self.p.states[point as usize].ct;
         let o = self.s.operand(self.s.ctors[ct].operands[index]);
         match o.triple {
@@ -1944,8 +2033,8 @@ impl Builder<'_> {
 
     fn loc(&self, vt: &VnTpl, point: u32) -> Result<Varnode> {
         let space = self.s.fix_space(&vt.space, self.p, point)?;
-        let size = self.s.fix(&vt.size, self.p, point)? as u32;
-        let off = self.s.fix(&vt.off, self.p, point)?;
+        let size = self.fix(&vt.size, point)? as u32;
+        let off = self.fix(&vt.off, point)?;
         let offset = if space == CONST_SPACE {
             off & calc_mask(size)
         } else if space == self.s.uniq_space {

@@ -13,6 +13,7 @@ pub mod gdt;
 pub mod gnudemangle;
 pub mod gnuparse;
 pub mod mdmang;
+pub mod psp;
 pub mod queue;
 pub mod scripts;
 pub mod sla;

@@ -3,7 +3,7 @@ use object::{Architecture, Object, ObjectSection, ObjectSymbol};
 use std::io::Write;
 use std::path::PathBuf;
 
-const USAGE: &str = "usage: ghidra-rs disasm <binary> [--func <symbol>|--addr <hex>] [--count N] [--pcode] [--sla <file>]
+const USAGE: &str = "usage: ghidra-rs disasm <binary|psp-prx> [--func <symbol>|--addr <hex>] [--count N] [--pcode] [--sla <file>]
        ghidra-rs analyze <pe32|elf64> [--functions <csv>] [--gaps <csv>] [--purges <txt>] [--abi-callers <register_abi.csv> <out.csv> [--data-pointers]]
                          [--decomp-prelude <out>] [--facts <out> [--protos <file> | --gdt <archive>]] [--seeds <csv> | --functions-from <csv>]... [--store <file>] [--sla <file>]
        ghidra-rs edit <pe32> --store <file> [--new-store] [--seeds <csv> | --functions-from <csv>]... [--sla <file>] <command>
@@ -112,13 +112,28 @@ fn run() -> Result<(), String> {
 
     let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
     let file = object::File::parse(&*data).map_err(|e| format!("{path}: {e}"))?;
+    let own_sla = std::env::var_os("GHIDRA_RS_SLA").is_some() || args.iter().any(|a| a == "--sla");
+    let mips = file.architecture() == Architecture::Mips;
     match file.architecture() {
         Architecture::X86_64 => {}
-        Architecture::I386 if std::env::var_os("GHIDRA_RS_SLA").is_none() && !args.iter().any(|a| a == "--sla") => {
-            sla = Sleigh::sla_path("x86")
-        }
+        Architecture::I386 if !own_sla => sla = Sleigh::sla_path("x86"),
         Architecture::I386 => {}
-        a => return Err(format!("{path}: only x86 and x86-64 are supported (found {a:?})")),
+        Architecture::Mips if file.is_little_endian() && !own_sla => sla = Sleigh::mips32le_sla_path(),
+        Architecture::Mips if file.is_little_endian() => {}
+        a => return Err(format!("{path}: only x86, x86-64 and little-endian MIPS32 are supported (found {a:?})")),
+    }
+    // a PSP PRX is loaded at `psp::DEFAULT_BASE` with its relocations applied
+    let prx = match ghidra_rs::psp::is_prx(&data) {
+        true => Some(ghidra_rs::psp::load(&data, ghidra_rs::psp::DEFAULT_BASE).map_err(|e| format!("{path}: {e}"))?),
+        false => None,
+    };
+    if let Some(prx) = &prx {
+        eprintln!("PRX loaded at {:#010x}: {}", prx.base, prx.relocs.summary());
+        if func.is_some() {
+            return Err(format!(
+                "{path}: --func is not supported on a PRX (its symbols are not relocated); use --addr"
+            ));
+        }
     }
     let (start, sym_end) = match (&func, addr) {
         (Some(name), _) => {
@@ -133,19 +148,35 @@ fn run() -> Result<(), String> {
             sym.or_else(export).ok_or(format!("{path}: symbol {name} not found"))?
         }
         (None, Some(a)) => (a, None),
-        (None, None) => (file.entry(), None),
+        (None, None) => (prx.as_ref().map_or(file.entry(), |p| p.entry as u64), None),
     };
     let count = count.unwrap_or(if sym_end.is_some() { usize::MAX } else { 20 });
-    let sec = file
-        .sections()
-        .find(|s| s.address() <= start && start < s.address() + s.size())
-        .ok_or(format!("{start:#x} is not in any section"))?;
-    let bytes = sec.data().map_err(|e| e.to_string())?;
-    let base = sec.address();
+    let no_section = || format!("{start:#x} is not in any section");
+    let (bytes, base) = match &prx {
+        Some(prx) => {
+            let inside = |s: &&ghidra_rs::psp::Section| (s.addr as u64..s.addr as u64 + s.size as u64).contains(&start);
+            let s = prx.sections.iter().find(inside).ok_or_else(no_section)?;
+            let at = (s.addr - prx.base) as usize;
+            (&prx.mem[at..at + s.size as usize], s.addr as u64)
+        }
+        None => {
+            let sec = file
+                .sections()
+                .find(|s| s.address() <= start && start < s.address() + s.size())
+                .ok_or_else(no_section)?;
+            (sec.data().map_err(|e| e.to_string())?, sec.address())
+        }
+    };
     let sec_end = base + bytes.len() as u64;
     let end = sym_end.unwrap_or(sec_end).min(sec_end);
 
-    let sl = Sleigh::load(&sla)?;
+    // the MIPS32 language's processor spec is not named after its .sla (mips.ldefs)
+    let sl = match mips {
+        true => Sleigh::load_with_pspec(&sla, Some(&sla.with_file_name("mips32.pspec")))?,
+        false => Sleigh::load(&sla)?,
+    };
+    // a word that does not decode is skipped whole on MIPS32 (fixed 4-byte instructions)
+    let bad_step = if mips { 4 } else { 1 };
     let mut p = sl.new_parse();
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
@@ -177,8 +208,9 @@ fn run() -> Result<(), String> {
             }
             r => {
                 let why = r.err().unwrap_or_else(|| "truncated".into());
-                let _ = writeln!(line, "{:<30} (bad: {why})", format!("{:02x}", rest[0]));
-                a += 1;
+                let skipped: Vec<String> = rest.iter().take(bad_step).map(|b| format!("{b:02x}")).collect();
+                let _ = writeln!(line, "{:<30} (bad: {why})", skipped.join(" "));
+                a += bad_step as u64;
             }
         }
         if out.write_all(line.as_bytes()).is_err() {
