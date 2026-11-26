@@ -1,0 +1,15 @@
+Allegrex (PSP) SLEIGH specification
+
+The files in data/languages are copied unmodified from ghidra-allegrex
+(https://github.com/kotcrab/ghidra-allegrex), by Kotcrab, at commit
+4e46aa146a6e8fc3369cf4a7e4053f3ea5b05a1d (2026-10-31, tag v21.6), path data/languages:
+
+  allegrex.slaspec, allegrex.sinc, allegrexInstructions.sinc, allegrexFloat.sinc,
+  allegrexVfpuBase.sinc, allegrexVfpuGenerated.sinc, allegrexVfpu.sinc, allegrex.pspec
+
+ghidra-allegrex is licensed under the Apache License 2.0 (LICENSE, next to this file, is its
+copy) and, in its README's words, is "Derived from Ghidra MIPS module licensed under Apache
+License 2.0". It ships no NOTICE file and its spec files carry no header lines.
+
+Not copied: allegrex.cspec, allegrex.ldefs, Allegrex.opinion, data/patterns and everything
+under src/ and ghidra_scripts/ (the Java, Kotlin and Python side).

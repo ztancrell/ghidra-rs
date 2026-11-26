@@ -217,6 +217,16 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   SOCOM. This starts (b) of the 2026-11-14 order ("more processors and file formats, when a
   second game asks for them") ahead of the paused work. The milestones are in
   `docs/plans/mips-psp.md`; MIPS-1 (load, relocate, disassemble, p-code) is on branch `mips-m1`.
+- 2026-11-26: The Allegrex instructions (VFPU and the extra integer opcodes) come from the
+  SLEIGH spec of the community project ghidra-allegrex (kotcrab/ghidra-allegrex, Apache-2.0),
+  used as data and compiled by Ghidra's SLEIGH compiler like the other `.sla` files; the spec is
+  not written here. User's decision. Superseded: the open question "where the Allegrex
+  instructions come from" (asked 2026-11-26).
+- 2026-11-26: The copied spec lives in `rust/processors/Allegrex/data/languages` (Ghidra's
+  `Processors/<name>/data/languages` layout, under `rust/`), with its licence and a `NOTICE`
+  naming the source commit. Why: the upstream Ghidra tree stays as it is (2026-11-11), and
+  Ghidra's layout keeps `allegrex.pspec` next to `allegrex.sla`, where `Sleigh::load` looks.
+  Claude's call, within the user's decision above.
 
 ## Milestones
 
@@ -645,6 +655,8 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    has its own milestones (`docs/plans/mips-psp.md`; MIPS-1 done: a PSP PRX loaded and
    relocated, disassembly and p-code identical to the C++ engine on SOCOM FTB's `.text`).
    `crossbuild`, `inst_next2` and flowref/flowdest are still not ported.
+   MIPS-2 (2026-11-26, branch `mips-m2`): a PRX is decoded with ghidra-allegrex's Allegrex
+   spec; every word of SOCOM FTB's `.text` decodes, identical to the C++ engine.
    In part on branch `worktree-agent-af1e2713bbdee8eab` (2026-11-17): the project store as one plain
    text file (`store.rs`: created and removed functions, fixed bodies, no-return flags, flow
    overrides, thunk marks, switch targets, laid over a fresh analysis by `analyze --store`) and
@@ -728,7 +740,8 @@ Open (asked 2026-11-17, with the project store):
 Open (asked 2026-11-26, with MIPS-1; details in `docs/plans/mips-psp.md`):
 
 - Where the Allegrex instructions come from (VFPU and the extra integer opcodes): the stock
-  `mips32le.sla` has none, and Ghidra ships no Allegrex spec.
+  `mips32le.sla` has none, and Ghidra ships no Allegrex spec. Superseded (2026-11-26): decided,
+  see Decided (ghidra-allegrex's spec, in `rust/processors/Allegrex`).
 - The load base of a PRX is fixed at 0x08804000 (Claude's call, see the plan): to confirm, or
   to make an option.
 - Which MIPS analysis and calling convention the later milestones port (Ghidra's MIPS

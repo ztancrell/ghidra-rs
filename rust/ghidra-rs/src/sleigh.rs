@@ -716,6 +716,13 @@ impl Sleigh {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Ghidra/Processors/MIPS/data/languages/mips32le.sla")
     }
 
+    /// Default location of `allegrex.sla` (the PSP's Allegrex, with the VFPU; the spec is
+    /// ghidra-allegrex's, in `rust/processors/Allegrex`, built by `rust/build-sla.sh`). Its
+    /// processor spec is `allegrex.pspec` next to it, which `load` finds.
+    pub fn allegrex_sla_path() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../processors/Allegrex/data/languages/allegrex.sla")
+    }
+
     /// ghidra-rs reads no `.ldefs`, whose `<truncate_space>` shortens a space's addresses
     /// (`SleighArchitecture::modifySpaces`) and puts `RulePtrFlow` to work. So a `.sla` that a
     /// language of an `.ldefs` next to it uses with a `<truncate_space>` is refused.

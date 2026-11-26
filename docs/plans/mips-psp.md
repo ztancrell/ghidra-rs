@@ -43,20 +43,49 @@ Choices made in MIPS-1 without the user (to confirm or change):
 - A word that does not decode is skipped whole (4 bytes) on MIPS, in `ghidra-rs disasm` and in
   `sleigh_ref` alike; on x86 the sweep still moves one byte.
 
-### MIPS-2: Allegrex instructions (not started)
+### MIPS-2: Allegrex instructions (done, branch `mips-m2`, 2026-11-26)
 
-The stock spec has no VFPU and none of Allegrex's extra integer opcodes. On SOCOM's `.text`
-2,436 words do not decode, and more decode as an instruction Allegrex does not have (`daddiu`
-784 words with `daddi`, `lwc2`/`swc2`/`ldc2`/`sdc2` 6,199; see the README's tables).
+The user's decision (2026-11-26, `DESIGN.md`): the Allegrex instructions come from the SLEIGH
+spec of ghidra-allegrex, used as data. The spec is not written here.
 
-Open questions (the user's to decide):
+- Source: https://github.com/kotcrab/ghidra-allegrex, commit
+  `4e46aa146a6e8fc3369cf4a7e4053f3ea5b05a1d` (2026-10-31, tag `v21.6`), `data/languages`.
+- Licence: Apache License 2.0 (its `LICENSE`, read 2026-11-26; the same text as this repo's
+  `LICENSE` apart from the brackets of the appendix's placeholder). No `NOTICE` file, no header
+  lines in the spec files. Its README: "Derived from Ghidra MIPS module licensed under Apache
+  License 2.0".
+- Copied, unmodified, to `rust/processors/Allegrex/data/languages`: `allegrex.slaspec`, its six
+  `.sinc` files and `allegrex.pspec`. The licence text is `rust/processors/Allegrex/LICENSE`;
+  `rust/processors/Allegrex/NOTICE` names the source, the commit and what was left out.
+- `rust/build-sla.sh` compiles `allegrex.sla` (68 KB) with Ghidra's SLEIGH compiler; the spec
+  compiled as it is. `ghidra-rs disasm` takes it for a PSP PRX; any other little-endian MIPS
+  file, or `--sla`, still gets the stock `mips32le.sla`.
+- On SOCOM's `.text` every one of the 868,720 words decodes, text and p-code identical to the
+  C++ engine on the same `.sla`. The 2,436 words the stock spec could not decode and the 7,047
+  it decoded as `daddiu`, `lwc2` and the like are VFPU instructions, `clz`, `wsbw`, `max` and
+  `min`. Numbers and the comparison with PPSSPP's tables are in `rust/README.md`, "Allegrex
+  (MIPS-2)".
 
-- Where the Allegrex spec comes from: written here as `.sinc` additions to Ghidra's MIPS
-  spec, or taken from an existing one (ghidra-allegrex has one; its licence and fit are not
-  checked). Either way it is data read through `.sla`, per the 2026-11-13 decision.
-- What the reference is, once the spec is not Ghidra's: the C++ engine still checks the
-  engine against the same `.sla`, but nothing in this repo checks the spec itself (PPSSPP's
-  disassembler could).
+Superseded: "MIPS-2 (not started)" and its two open questions. Where the spec comes from is
+decided (above). What checks the spec itself: PPSSPP's instruction tables were read as data
+for one comparison (README); no check of the spec's p-code semantics exists.
+
+Not copied, and not reproduced (ghidra-allegrex's Java, Kotlin and Python side):
+
+- `AllegrexPcodeInjectLibrary` and its payloads: in Ghidra the decompiler replaces the spec's
+  helper user ops (`vfpuReadP/T/Q`, `vfpuWriteP/T/Q`, `vfpuLoadQ`, `vfpuLoadQPart`,
+  `vfpuSaveQPart`, the matrix reads and writes) with p-code that reads and writes the VFPU
+  registers. Here they stay `CALLOTHER` ops, as the C++ engine prints them. MIPS-4 will need
+  them, with `allegrex.cspec` (the PSP calling convention and the `<callotherfixup>` entries),
+  which is not copied yet.
+- `AllegrexEmulateInstructionStateModifier` (emulation), `AllegrexAddressAnalyzer` and
+  `AllegrexPreAnalyzer` (analysis), `Allegrex_patterns.xml` (function start patterns).
+- `PspElfLoader`, `Allegrex_ElfExtension` and the relocation classes (type A and B relocations,
+  rebasing), `Allegrex.opinion`, `allegrex.ldefs`: ghidra-rs has its own loader (`psp.rs`,
+  MIPS-1, type A only, rules from PPSSPP).
+- The relocatable kernel object exporter and the PPSSPP `.sym` scripts.
+- The spec's own stated limits (its README): `vpfxs`, `vpfxt` and `vpfxd` are not modelled in
+  p-code, and the half-float operand of `vfim.s` prints as an integer.
 
 ### MIPS-3: function discovery on MIPS (not started)
 
@@ -76,7 +105,8 @@ Open questions:
 Open questions:
 
 - The calling convention: `mips32le.cspec` (o32) as it is, or a PSP one (the PSP ABI passes
-  more arguments in registers than o32 does; not verified here).
+  more arguments in registers than o32 does; not verified here). ghidra-allegrex has an
+  `allegrex.cspec` (same source and licence as the spec of MIPS-2; not copied, not read here).
 - Delay slots, `lui`/`addiu` pairs and `gp`-relative data in the decompiler's own passes
   (which C++ actions are MIPS-specific has not been inventoried).
 

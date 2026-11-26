@@ -118,6 +118,10 @@ fn run() -> Result<(), String> {
         Architecture::X86_64 => {}
         Architecture::I386 if !own_sla => sla = Sleigh::sla_path("x86"),
         Architecture::I386 => {}
+        // a PSP PRX is Allegrex code; any other MIPS file gets Ghidra's stock MIPS32
+        Architecture::Mips if file.is_little_endian() && !own_sla && ghidra_rs::psp::is_prx(&data) => {
+            sla = Sleigh::allegrex_sla_path()
+        }
         Architecture::Mips if file.is_little_endian() && !own_sla => sla = Sleigh::mips32le_sla_path(),
         Architecture::Mips if file.is_little_endian() => {}
         a => return Err(format!("{path}: only x86, x86-64 and little-endian MIPS32 are supported (found {a:?})")),
@@ -170,12 +174,13 @@ fn run() -> Result<(), String> {
     let sec_end = base + bytes.len() as u64;
     let end = sym_end.unwrap_or(sec_end).min(sec_end);
 
-    // the MIPS32 language's processor spec is not named after its .sla (mips.ldefs)
-    let sl = match mips {
+    // the MIPS32 language's processor spec is not named after its .sla (mips.ldefs); Allegrex's
+    // is (`allegrex.pspec`)
+    let sl = match mips && !sla.with_extension("pspec").exists() {
         true => Sleigh::load_with_pspec(&sla, Some(&sla.with_file_name("mips32.pspec")))?,
         false => Sleigh::load(&sla)?,
     };
-    // a word that does not decode is skipped whole on MIPS32 (fixed 4-byte instructions)
+    // a word that does not decode is skipped whole on MIPS32 and Allegrex (fixed 4-byte instructions)
     let bad_step = if mips { 4 } else { 1 };
     let mut p = sl.new_parse();
     let stdout = std::io::stdout();

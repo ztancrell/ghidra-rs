@@ -63,3 +63,43 @@ fn decode_mips32le_delay_slot() {
     assert_eq!((ins.len, p.fall), (4, 4));
     assert_eq!(format!("{} {}", ins.mnemonic, ins.body), "addiu a0, a0, -0x6768");
 }
+
+// Two words of SOCOM FTB's BOOT.BIN that only the PSP's Allegrex has, with allegrex.sla
+// (ghidra-allegrex's spec): a VFPU dot product, which stock MIPS32 decodes as `daddiu`, and the
+// integer `max`, stock `dadd`. Text and p-code are what sleigh_ref prints for the same bytes.
+#[test]
+fn decode_allegrex() {
+    let path = Sleigh::allegrex_sla_path();
+    assert!(path.exists(), "{} is missing: run rust/build-sla.sh first", path.display());
+    let sl = Sleigh::load(&path).unwrap();
+    let mut p = sl.new_parse();
+    let mut decode = |addr, code: &[u8]| {
+        let ins = sl.disasm(&mut p, addr, code).unwrap();
+        assert_eq!((ins.len, p.fall), (4, 4));
+        let ops: Vec<String> = sl.pcode(&p).unwrap().iter().map(|o| sl.fmt_op(o)).collect();
+        (format!("{} {}", ins.mnemonic, ins.body), ops)
+    };
+    let (text, ops) = decode(0x880a8e8, &[0x01, 0x80, 0x80, 0x64]);
+    assert_eq!(text, "vdot.t S010, C000, C000");
+    assert_eq!(
+        ops,
+        [
+            "unique[0x2ca00]:12 = CALLOTHER 0x14:4, V00",
+            "unique[0x2cc00]:12 = CALLOTHER 0x14:4, V00",
+            "V01 = CALLOTHER 0x34:4, unique[0x2ca00]:12, unique[0x2cc00]:12"
+        ]
+    );
+    let (text, ops) = decode(0x8a1c580, &[0x2c, 0x28, 0xa0, 0x00]);
+    assert_eq!(text, "max a1, a1, zero");
+    assert_eq!(
+        ops,
+        [
+            "unique[0x12600]:1 = INT_SLESS a1, 0x0:4",
+            "unique[0x100]:1 = INT_EQUAL unique[0x12600]:1, 0x0:1",
+            "CBRANCH 0x3:4, unique[0x100]:1",
+            "a1 = COPY 0x0:4",
+            "BRANCH 0x2:4",
+            "a1 = COPY a1"
+        ]
+    );
+}

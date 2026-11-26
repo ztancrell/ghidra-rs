@@ -5,7 +5,8 @@ SLEIGH specs (`.sla`). Milestone 1: load an ELF/PE/Mach-O x86-64 binary, disasse
 lift it to p-code. Milestone 2: function discovery on 32-bit x86 PE files, writing the same files
 as the mercs2 project's Ghidra scripts ExportFunctions.java and ExportGaps.java. MIPS-1 (2026-11-26):
 `disasm` also takes little-endian MIPS32, and a PSP PRX with its relocations applied (see "MIPS32
-and the PSP (MIPS-1)"). See `../DESIGN.md` for the scope and plan.
+and the PSP (MIPS-1)"). MIPS-2 (2026-11-26): a PSP PRX is decoded as Allegrex, with the VFPU
+("Allegrex (MIPS-2)"). See `../DESIGN.md` for the scope and plan.
 
 ## Layout
 
@@ -33,7 +34,7 @@ and the PSP (MIPS-1)"). See `../DESIGN.md` for the scope and plan.
   count of every relocation by type ("MIPS32 and the PSP (MIPS-1)").
 - `ghidra-rs/tests/psp.rs`: the PSP relocation rules on a hand-made image.
 - `ghidra-rs/tests/decode.rs`: decodes a fixed byte sequence and checks text and p-code; a
-  MIPS32 `jal` with its delay slot.
+  MIPS32 `jal` with its delay slot; an Allegrex VFPU `vdot.t` and integer `max`.
 - `ghidra-rs/src/abi.rs`: port of CheckAbiCallers.java: per-byte register liveness walks
   over p-code register reads and writes.
 - `ghidra-rs/tests/analysis.rs`: function discovery and both CSV writers on a fixed 32-bit blob;
@@ -63,8 +64,11 @@ and the PSP (MIPS-1)"). See `../DESIGN.md` for the scope and plan.
   GNU demangler"); `tools/gnu-syms.sh` and `tools/ghidra/GnuParseDump.java` check them.
 - `ghidra-rs/tests/abi.rs`: register reads and writes (sub-registers as base-register bytes)
   of a few fixed instructions.
-- `build-sla.sh`: builds Ghidra's SLEIGH compiler and compiles `x86-64.sla`, `x86.sla` and
-  MIPS's `mips32le.sla`.
+- `build-sla.sh`: builds Ghidra's SLEIGH compiler and compiles `x86-64.sla`, `x86.sla`,
+  MIPS's `mips32le.sla` and the PSP's `allegrex.sla`.
+- `processors/Allegrex/`: the Allegrex (PSP) SLEIGH spec of ghidra-allegrex, copied unmodified
+  (`data/languages`), with its `LICENSE` (Apache 2.0) and a `NOTICE` naming the source commit
+  ("Allegrex (MIPS-2)").
 - `tools/sleigh_ref.cc`: a reference disassembler on Ghidra's C++ engine, printing in the
   same format, used to verify the Rust port.
 - `ghidra-rs/src/console.rs`: the milestone 3 harness: the decompiler prelude, the Rust side of
@@ -121,7 +125,7 @@ Needs Rust (stable), and g++, make and zlib headers for the SLEIGH compiler.
 
 ```sh
 cd rust
-./build-sla.sh             # once, and again whenever the x86 or MIPS .slaspec/.sinc files change
+./build-sla.sh             # once, and again whenever the x86, MIPS or Allegrex .slaspec/.sinc files change
 cargo build --release
 cargo test --release
 ```
@@ -130,16 +134,17 @@ cargo test --release
 
 `build-sla.sh` copies the C++ sources from `Ghidra/Features/Decompiler/src/decompile/cpp`
 into `rust/target/sleigh-build`, builds the `sleigh_opt` target there (using the checked-in
-bison/flex outputs, so the upstream tree is not touched) and runs, for `x86-64`, `x86` and
-`mips32le` (in `Ghidra/Processors/MIPS/data/languages`; 166 KB):
+bison/flex outputs, so the upstream tree is not touched) and runs, for `x86-64`, `x86`,
+`mips32le` (in `Ghidra/Processors/MIPS/data/languages`; 166 KB) and `allegrex` (in
+`rust/processors/Allegrex/data/languages`; 68 KB):
 
 ```sh
 sleigh_opt Ghidra/Processors/x86/data/languages/x86-64.slaspec \
            Ghidra/Processors/x86/data/languages/x86-64.sla
 ```
 
-The output (about 500 KB each) lands where Ghidra itself keeps it. Upstream gitignores `*.sla`,
-so it is not committed. The file is `"sla"`, a version byte (4), then a zlib stream holding
+The output (about 500 KB each for x86) lands next to its `.slaspec`, where Ghidra itself keeps
+it. Upstream gitignores `*.sla`, so it is not committed. The file is `"sla"`, a version byte (4), then a zlib stream holding
 Ghidra's "packed" element/attribute encoding (`slaformat.cc`, `PackedDecode` in
 `marshal.cc`).
 
@@ -149,7 +154,10 @@ variable. The context defaults (`addrsize`, `opsize`, ...) come from the `<conte
 `.pspec` with the same name next to the `.sla`. A language whose `.pspec` has another name (the
 16-bit x86 languages on `x86.sla`) is loaded with `Sleigh::load_with_pspec`; no command line
 option selects one yet. A little-endian MIPS binary gets `mips32le.sla` with `mips32.pspec`
-(the language `MIPS:LE:32:default` of `mips.ldefs`).
+(the language `MIPS:LE:32:default` of `mips.ldefs`), unless it is a PSP PRX: that gets
+`allegrex.sla` with `allegrex.pspec` ("Allegrex (MIPS-2)"). With `--sla` or `GHIDRA_RS_SLA` a
+MIPS file gets the `.pspec` named after the given `.sla` when there is one, `mips32.pspec` next
+to it otherwise.
 
 ## Usage
 
@@ -8157,7 +8165,11 @@ itself a branch with a slot, has no p-code, as in the C++ engine.
 `tools/sleigh_ref.cc` takes `mips32le.sla` (the context defaults of `mips32.pspec`; a word
 that does not decode is skipped whole, as in `disasm`). The whole relocated `.text` of
 `BOOT.BIN` at 0x08804000, linear sweep, text and p-code (the raw file is rebuilt from the
-bytes column, so both decode the same relocated bytes):
+bytes column, so both decode the same relocated bytes). Superseded (2026-11-26, branch
+`mips-m2`): `disasm` now takes `allegrex.sla` for a PRX, so the stock numbers below need
+`--sla ../../../Ghidra/Processors/MIPS/data/languages/mips32le.sla` on the `disasm` line; the
+current check and numbers are in "Allegrex (MIPS-2)". The stock run was repeated on 2026-11-26
+for the mnemonics only (2,436 words not decodable, as below), not for p-code.
 
 ```sh
 cd target && mkdir -p mips-check && cd mips-check
@@ -8176,8 +8188,10 @@ cmp rs.txt ref.txt
 | not decodable in either | 2,436 |
 | differing lines (of 3,252,586) | 0 |
 
-The stock spec is plain MIPS32: it has none of Allegrex's own instructions (MIPS-2, not
-started). The 2,436 words that do not decode, by opcode bits (bits 31-26):
+The stock spec is plain MIPS32: it has none of Allegrex's own instructions. Superseded
+(2026-11-26): "MIPS-2, not started"; with the Allegrex spec all of these words decode, and the
+right-hand column below is checked ("Allegrex (MIPS-2)"). The 2,436 words that do not decode,
+by opcode bits (bits 31-26):
 
 | opcode | words | on Allegrex (from the PSP opcode map as remembered, not checked here) |
 |---|---|---|
@@ -8192,12 +8206,104 @@ More words decode, identically in both engines, as an instruction the PSP does n
 because Allegrex reuses the encoding: `daddiu` 757 and `daddi` 27 (opcodes 0x19, 0x18), `dadd`
 7 and `daddu` 25 (function 0x2c, 0x2d), `lwc2` 1,522, `swc2` 1,535, `ldc2` 1,948, `sdc2`
 1,194, `bc2t` 7, `bc2tl` 25. These are counted from the mnemonics; what each really is waits
-for the Allegrex spec.
+for the Allegrex spec. Superseded (2026-11-26): see the table in "Allegrex (MIPS-2)".
 
 Not checked: a little-endian MIPS32 ELF that is not a PRX (no such file was at hand; it takes
 the path of the x86 files, with no relocations), big-endian MIPS, MIPS16 and microMIPS code
 (the spec has them; none was decoded here), and Java Ghidra's listing (the check is against
 the C++ engine only).
+
+## Allegrex (MIPS-2, branch `mips-m2`, 2026-11-26)
+
+The PSP's CPU has instructions plain MIPS32 lacks: the VFPU (a vector and matrix unit) and a
+few integer ones. Their definitions are the SLEIGH spec of ghidra-allegrex
+(https://github.com/kotcrab/ghidra-allegrex, commit `4e46aa146a6e8fc3369cf4a7e4053f3ea5b05a1d`,
+tag `v21.6`, Apache License 2.0), copied unmodified to `processors/Allegrex/data/languages`
+and compiled by `build-sla.sh` like Ghidra's own specs (`../DESIGN.md`, 2026-11-26;
+`processors/Allegrex/NOTICE`). `disasm` takes `allegrex.sla` and `allegrex.pspec` for a PSP PRX
+(`psp::is_prx`); `--sla` still selects the stock `mips32le.sla`. Only the spec is used: what
+ghidra-allegrex does in Java and Kotlin is listed in `../docs/plans/mips-psp.md`, MIPS-2. In
+p-code a VFPU operation is a `CALLOTHER` user op (the spec defines 340 user ops in all); the
+helper ops that read and write vector registers are not expanded.
+
+### Against the C++ engine
+
+The check of MIPS-1 with `allegrex.sla` in both engines (`sleigh_ref` takes the context
+default of `allegrex.pspec` for a path containing `allegrex.sla`):
+
+```sh
+cd target && mkdir -p mips-check && cd mips-check
+../release/ghidra-rs disasm BOOT.BIN --addr 8804000 --count 1000000000 --pcode > rs-full.txt
+grep '^0' rs-full.txt | cut -c19-49 | sed 's/(bad.*//' | xxd -r -p > text.raw
+../sleigh_ref ../../processors/Allegrex/data/languages/allegrex.sla text.raw 8804000 pcode > ref.txt
+sed -E 's/^([0-9a-f]{16})  ([0-9a-f]{2} ?)+ +/\1  /; s/^([0-9a-f]{16})  \(bad.*/\1  (bad)/; s/    <no p-code.*/    <no p-code>/' rs-full.txt > rs.txt
+cmp rs.txt ref.txt
+```
+
+| | words |
+|---|---|
+| `.text` | 868,720 |
+| decoded, text and p-code identical to the C++ engine | 868,720 |
+| decoded, no p-code | 0 |
+| not decodable | 0 |
+| differing lines (of 3,170,155) | 0 |
+
+No word is left undecodable, so there is nothing to sort into data or spec gaps; whether
+`.text` holds data words that happen to decode is not known (the sweep is linear).
+
+What the words the stock spec got wrong are, by mnemonic in the same sweep with each spec:
+
+| stock `mips32le.sla` | words | with `allegrex.sla` |
+|---|---|---|
+| not decodable | 2,436 | `vsqrt.s` 298, `vcmp.s` 259, `vzero.s` 239, `vrsq.s` 228, `vpfxd` 227, `vcmovt.s` 227, `vcst.s` 188, `vtfm4.q` 159, `vone.s` 147, `vcos.s` 70, `vocp.s` 66, `vsin.s` 57, `vmmul.q` 52, `vasin.s` 50, `vsgn.s` 25, `vmidt.q` 24, `vneg.t` 20, `vzero.t` 19, `vtfm3.t` 19, `vcrsp.t` 16, `clz` 12, `vrot.p` 11, `vlog2.s` 7, `vexp2.s` 4, `wsbw` 2, `vrcp.s` 2, `vpfxs` 2, `vi2f.q` 2, `vqmul.q` 1, `vmov.t` 1, `vi2uc.q` 1, `vf2in.q` 1 |
+| `daddiu` | 757 | `vdot.t` 304, `vscl.t` 232, `vmul.s` 215, `vscl.p` 3, `vscl.q` 2, `vdot.p` 1 |
+| `daddi` | 27 | `vdiv.s` 11, `vsub.t` 7, `vsub.s` 4, `vadd.t` 3, `vadd.p` 1, `vadd.q` 1 |
+| `dadd` | 7 | `max` |
+| `daddu` | 25 | `min` |
+| `lwc2` | 1,522 | `lv.s` |
+| `swc2` | 1,535 | `sv.s` |
+| `ldc2` | 1,948 | `lv.q` |
+| `sdc2` | 1,194 | `sv.q` |
+| `bc2t` | 7 | `bvt` |
+| `bc2tl` | 25 | `bvtl` (with p-code now: the delay slots decode) |
+
+So the grouping MIPS-1 gave from memory holds: opcodes 0x34, 0x3c, 0x1b and 0x37 are VFPU, and
+the 14 other words are `clz` (function 0x16) and `wsbw`. In all, 9,437 words are VFPU
+instructions (48 mnemonics), all of them among the 9,483 words above; the other 46 are `clz`,
+`wsbw`, `max` and `min`.
+
+Another 136,701 words keep their meaning and change their text only, because ghidra-allegrex
+names them differently from Ghidra's MIPS spec: `or` to `move` (65,385) or `li` (8,997), `ori`
+to `li` (33,936), `clear` to `li` (1,952), and the single-precision float instructions in
+lower case (`mul.S` to `mul.s` and 13 more, 26,431). Their p-code was not compared between the
+two specs.
+
+### Against PPSSPP's tables
+
+The C++ engine checks the engine, not the spec. For the spec, PPSSPP's instruction tables
+(`Core/MIPS/MIPSTables.cpp`, with `MIPSDisVFPU.cpp` and `MIPSVFPUUtils.cpp`, master at
+`c771d8544180c3cf0d10e83073b50e188b02cd11`, fetched 2026-11-26 and read as data) were walked
+by a throwaway script the way `MIPSGetInstruction` walks them, for every word of `.text`:
+
+- Instruction name: PPSSPP has an instruction for each of the 868,720 words, and its name is
+  the Allegrex mnemonic (without the `.s`/`.p`/`.t`/`.q` size suffix PPSSPP adds when
+  printing) for all but aliases: `move`, `li`, `nop`, `b` (PPSSPP's tables name the plain
+  `or`, `ori`, `addiu`, `addu`, `sll`, `beq`), `rotr` (51, under `srl`), `vcmovt` (227, under
+  `vcmov`), `vtfm3`/`vtfm4` (178, under `v(h)tfm3`/`v(h)tfm4`) and `vcrsp`/`vqmul` (17, one
+  entry).
+- VFPU register operands: PPSSPP's notation rules (`GetVectorNotation`, `GetMatrixNotation`
+  and the operand order of 16 of its `Dis_` functions), transcribed into the script, give the
+  same register names in the same order as `disasm` prints for 9,084 of the 9,437 VFPU words
+  (41 mnemonics: `lv.s`, `sv.s`, `lv.q`, `sv.q`, `vdot`, `vscl`, `vmul`, `vadd`, `vsub`,
+  `vdiv`, `vsqrt`, `vrsq`, `vcmp`, `vcmovt`, `vcst`, `vzero`, `vone`, `vtfm3`, `vtfm4`,
+  `vmmul`, `vmidt`, `vrot`, `vcrsp`, `vqmul`, `vi2f`, `vf2in` and the other two-operand ones),
+  with no difference. Example: 0x64808001 is `vdot.t S010, C000, C000` in both.
+
+Not checked: the register operands of the other 353 VFPU words (`vpfxd`, `vocp.s`, `vsgn.s`,
+`bvt`, `bvtl`, `vpfxs`, `vi2uc.q`); immediates, offsets, condition and constant names (`LT`,
+`2/PI`); and all p-code semantics of the Allegrex spec. The comparison is with a transcription
+of PPSSPP's rules, not with PPSSPP running, and on this one file. Java Ghidra with the
+ghidra-allegrex extension was not run.
 
 ## Speed
 
@@ -8214,8 +8320,9 @@ with output sent to `/dev/null`:
 ## Limits
 
 - Two processor families: x86 (`x86-64.sla` and the 32-bit `x86.sla`) and, in `disasm` only,
-  little-endian MIPS32 (`mips32le.sla`, stock: no Allegrex instructions). Superseded
-  (2026-11-26, branch `mips-m1`): "One processor family: x86". `analyze` takes 32-bit
+  little-endian MIPS32 (`mips32le.sla`, stock) and the PSP's Allegrex (`allegrex.sla`, for a
+  PRX). Superseded (2026-11-26, branch `mips-m1`): "One processor family: x86". Superseded
+  (2026-11-26, branch `mips-m2`): "stock: no Allegrex instructions". `analyze` takes 32-bit
   PE files and ELF x86-64 files (functions, bodies, gaps; see "ELF64 analysis"); `--decomp-prelude`
   and the decompiler take both (see "The decompiler on x86-64"); `--abi-callers`, `--store`,
   `edit` and `export` take 32-bit PE files only. Superseded (2026-11-21): "`analyze` takes 32-bit
@@ -8258,7 +8365,9 @@ Results on 2026-11-11 (text and p-code identical in every case):
 | /usr/lib/libLLVM.so.21.1 | 21,830,419 | 0 (text only) |
 
 `sleigh_ref` uses the 64-bit context defaults for a `.sla` whose path contains `x86-64`, those
-of `mips32.pspec` for one whose path contains `mips` (see "MIPS32 and the PSP (MIPS-1)"), and
+of `allegrex.pspec` for one whose path contains `allegrex.sla`, of `mips32.pspec` for another one
+whose path contains `mips` (see "MIPS32 and the PSP (MIPS-1)"; a directory named `mips...` on
+the path counts too, so an x86 `.sla` under one gets the wrong defaults), and
 the 32-bit ones of `x86.pspec` (`addrsize=1`, `opsize=1`) otherwise. `ghidra-rs disasm` picks
 `x86.sla` by itself for a 32-bit binary.
 

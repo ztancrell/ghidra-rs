@@ -2,7 +2,7 @@
 // `ghidra-rs disasm [--pcode]`, so the two outputs can be diffed line by line.
 // Build and use: see rust/README.md ("Verifying against the C++ engine").
 //
-// usage: sleigh_ref <x86-64.sla|x86.sla|mips32le.sla> <raw code file> <base address hex> [pcode]
+// usage: sleigh_ref <x86-64.sla|x86.sla|mips32le.sla|allegrex.sla> <raw code file> <base address hex> [pcode]
 #include "sleigh.hh"
 #include "loadimage.hh"
 #include <cstdio>
@@ -80,13 +80,17 @@ int main(int argc, char **argv) {
   istringstream doc(string("<sleigh>") + argv[1] + "</sleigh>");
   store.registerTag(store.parseDocument(doc)->getRoot());
   trans.initialize(store);
-  // the <context_set> of x86-64.pspec, of mips32.pspec for a MIPS .sla, or of x86.pspec for
+  // the <context_set> of x86-64.pspec, of mips32.pspec or allegrex.pspec for a MIPS or Allegrex
+  // .sla, or of x86.pspec for
   // any other .sla (32-bit)
   bool x64 = strstr(argv[1], "x86-64") != 0;
-  bool mips = strstr(argv[1], "mips") != 0;
+  // allegrex.sla (allegrex.pspec) is asked first: it has no RELP
+  bool allegrex = strstr(argv[1], "allegrex.sla") != 0;
+  bool mips = allegrex || strstr(argv[1], "mips") != 0;
   if (mips) {
     context.setVariableDefault("PAIR_INSTRUCTION_FLAG", 0);
-    context.setVariableDefault("RELP", 1);
+    if (!allegrex)
+      context.setVariableDefault("RELP", 1);
   } else {
     context.setVariableDefault("addrsize", x64 ? 2 : 1);
     context.setVariableDefault("opsize", 1);
@@ -95,7 +99,7 @@ int main(int argc, char **argv) {
     context.setVariableDefault("rexprefix", 0);
     context.setVariableDefault("longMode", 1);
   }
-  // a word that does not decode is skipped whole on MIPS32, as `ghidra-rs disasm` does
+  // a word that does not decode is skipped whole on MIPS32 and Allegrex, as `ghidra-rs disasm` does
   int4 badstep = mips ? 4 : 1;
   AddrSpace *ram = trans.getDefaultCodeSpace();
   uintb a = base, end = base + data.size();
