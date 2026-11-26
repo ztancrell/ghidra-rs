@@ -133,7 +133,18 @@ copied). The loader parses `sceModuleInfo`, `.lib.ent` and `.lib.stub`.
 
 Open questions:
 
-- A second NID source for what PSPSDK lacks (1 of 247 here): uOFW is MIT but was not read for
-  one; the GPL sources stay out unless the user decides otherwise.
+- A second NID source for what PSPSDK lacks (1 of 247 here): uOFW (MIT) has no name for it
+  (below); the GPL sources stay out unless the user decides otherwise.
+
+uOFW read for `sceMpeg` 0x4571CC64 (2026-11-26, branch `mips-m5-uofw`): no name, so no code
+changed. At uofw/uofw `f7b0623168` (master; licence MIT, `COPYING`, with PSPSDK parts under
+BSD per its README) the NID is in no file, and no file has a library `sceMpeg`: its 48
+`exports.exp` files (166 libraries, 2,866 exported functions) cover the kernel modules it
+reimplements, and the nearest, `src/kd/avcodec/exports.exp`, exports `sceMpegbase` and
+`sceMpegbase_driver` only; `include/video/lib_mpeg.h` has error codes, no NIDs. Its other
+branches (`kirk` bd83a599a4, `power` 675fe009dc, `gh-pages` 86e4f5a415) have neither the NID
+nor `sceMpeg`. SOCOM's `BOOT.BIN` stays at 246 of 247 named.
+Superseded: "uOFW is MIT but was not read for one" (the open question above, as written on
+`mips-m5`).
 - `gp` is 0 in this module's `sceModuleInfo`; whether the code sets `gp` itself matters to
   MIPS-3 and MIPS-4 and was not looked at.

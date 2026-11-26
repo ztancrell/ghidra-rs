@@ -8425,7 +8425,11 @@ from before this change; byte-identical). The check against the C++ engine ("All
 | PPSSPP, the HLE function tables in `Core/HLE` (`c771d854`) | GPL-2.0 or later (file headers) | no: not compatible with Apache-2.0. Read for the structure layouts only |
 | pspdev/psp-ghidra-scripts (`f6bf867a`), `ppsspp_niddb*.xml`, `500_psplibdoc_191008.xml` | repository `LICENSE` is Apache-2.0, but its README says the XML files are from the PSP PRX Libraries Documentation Project, and the file names say PPSSPP | no: the data's own licence is not clear |
 | mathieulh/PSP-PRX-Libraries-Documentation-Project (`3a129e46`), Spenon-dev/PSPLibDoc (`c2834ef4`) | GPL-2.0 (as GitHub reports them; the files were not read) | no |
-| uOFW (uofw/uofw, `f7b06231`) | MIT, with PSPSDK parts under BSD (`COPYING` and README) | no: compatible, but only the licence was read; whether it holds a usable NID list was not looked at |
+| uOFW (uofw/uofw, `f7b06231`) | MIT, with PSPSDK parts under BSD (`COPYING` and README) | no: compatible, but has no name for the one NID PSPSDK lacks here (`sceMpeg` 0x4571CC64): read 2026-11-26, the NID is in no file and no `exports.exp` has a library `sceMpeg` (`src/kd/avcodec` exports `sceMpegbase` only); its `kirk`, `power` and `gh-pages` branches neither |
+
+Superseded: the uOFW row's "only the licence was read; whether it holds a usable NID list was
+not looked at" (as merged from `mips-m5`). uOFW was then read for 0x4571CC64 on branch
+`mips-m5-uofw` (`docs/plans/mips-psp.md`, MIPS-5); `sceMpeg_0x4571CC64` keeps the NID form.
 
 Not done: names for imported variables and for other modules' exports beyond the PSPSDK
 table; a second table for what PSPSDK lacks; a PRX with imported variables, with entries of 7
