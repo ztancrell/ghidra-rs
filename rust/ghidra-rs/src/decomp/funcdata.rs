@@ -998,8 +998,8 @@ impl Funcdata {
         self.incidental = arch.incidental.clone();
         self.laned = arch.laned.clone();
         let models = &arch.spec.models;
-        let params: Vec<(u64, u64)> = models
-            .get(self.proto.model.unwrap_or(models.default))
+        let model = models.get(self.proto.model.unwrap_or(models.default));
+        let params: Vec<(u64, u64)> = model
             .input
             .entries
             .iter()
@@ -1011,9 +1011,18 @@ impl Funcdata {
                 _ => None,
             })
             .collect();
-        self.localmap = super::varmap::LocalMap::new(super::heritage_guard::stack_mask(arch), &params);
+        self.localmap =
+            super::varmap::LocalMap::new(super::heritage_guard::stack_mask(arch), &params, model.localrange.as_deref());
         if self.blocks.list.is_empty() {
             flow::follow_flow(self, arch)?;
+        }
+        // lean: the space of a `<spacebase>` register (MIPS `gp`; `SpacebaseSpace`, its heritage
+        // and `RuleLoadVarnode` on it) is not ported, so code that reads or writes the register
+        // is refused. Upgrade: a second spacebase space beside the stack's
+        for &(space, off, size) in &arch.spec.spacebases {
+            if !self.loc_at(Space::Sleigh(space), off, size).is_empty() {
+                return err("a function using the register of a <spacebase> (gp) is not implemented in ghidra-rs yet");
+            }
         }
         self.blocks.structure_loops()?;
         self.sort_call_specs();

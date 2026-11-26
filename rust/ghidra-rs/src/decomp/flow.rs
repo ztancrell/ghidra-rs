@@ -442,7 +442,9 @@ impl Flow<'_> {
             .arch
             .bytes_at(addr)
             .ok_or_else(|| EmitError::Fatal(LowlevelError(format!("Unable to load 512 bytes at r0x{addr:08x}"))))?;
-        let len = sl.decode(&mut self.parse, addr, bytes).map_err(EmitError::BadData)?;
+        sl.decode(&mut self.parse, addr, bytes).map_err(EmitError::BadData)?;
+        // oneInstruction's return value: the length with the delay slot instructions
+        let len = self.parse.fall;
         let mut ops = sl.pcode(&self.parse).map_err(|e| match e {
             PcodeError::Unimplemented => EmitError::Unimplemented,
             PcodeError::Invalid(e) => EmitError::Fatal(LowlevelError(e)),

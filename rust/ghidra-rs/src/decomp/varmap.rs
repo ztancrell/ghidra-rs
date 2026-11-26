@@ -22,6 +22,8 @@ use std::collections::HashSet;
 #[derive(Debug, Clone)]
 pub(crate) struct LocalMap {
     ranges: Vec<(u64, u64)>,
+    /// the model's local ranges (`FuncProto::getLocalRange`)
+    locals: Vec<(u64, u64)>,
     /// the stack space's highest offset (`AddrSpace::getHighest`)
     highest: u64,
     min_param: u64,
@@ -57,14 +59,17 @@ pub(crate) struct LocalSym {
 
 impl LocalMap {
     /// Port of `ScopeLocal::resetLocalWindow` for a stack that grows down: the model's local
-    /// range (`ProtoModel::defaultLocalRange`, the upper half of the space; x86 declares none)
-    /// and its parameter range, the stack `<pentry>` ranges of its input list
+    /// range (`local`, its `<localrange>`; without one `ProtoModel::defaultLocalRange`, the
+    /// upper half of the space, as for x86) and its parameter range, the stack `<pentry>` ranges of its input list
     /// (`ParamListStandard::getRangeList`; `params`, inclusive). `highest` is the stack space's
     /// highest offset (its offset mask, [`super::heritage_guard::stack_mask`]).
-    pub(crate) fn new(highest: u64, params: &[(u64, u64)]) -> LocalMap {
+    pub(crate) fn new(highest: u64, params: &[(u64, u64)], local: Option<&[(u64, u64)]>) -> LocalMap {
         let mut m = LocalMap::empty();
         m.highest = highest;
-        m.insert(highest - (highest >> 1).min(0x7fff_ffff), highest);
+        for &(a, b) in local.unwrap_or(&[(highest - (highest >> 1).min(0x7fff_ffff), highest)]) {
+            m.insert(a, b);
+        }
+        m.locals = m.ranges.clone();
         for &(a, b) in params {
             m.insert(a, b);
         }
@@ -78,6 +83,7 @@ impl LocalMap {
     pub(crate) fn empty() -> LocalMap {
         LocalMap {
             ranges: Vec::new(),
+            locals: Vec::new(),
             highest: u64::MAX,
             min_param: u64::MAX,
             max_param: 0,
@@ -230,10 +236,9 @@ impl LocalMap {
         self.max_param
     }
 
-    /// `ProtoModel::getLocalRange().inRange(addr, 1)` for the default local range, the upper
-    /// half of the space (`defaultLocalRange`; x86 declares no `<localrange>`).
+    /// `ProtoModel::getLocalRange().inRange(addr, 1)`.
     pub(crate) fn in_local_range(&self, off: u64) -> bool {
-        off >= self.highest - (self.highest >> 1).min(0x7fff_ffff) && off <= self.highest
+        self.locals.iter().any(|&(a, b)| a <= off && off <= b)
     }
 
     /// The locked-parameter "symbol" of the local scope holding stack offset `addr`
@@ -594,22 +599,26 @@ mod tests {
     #[test]
     fn default_window_is_params_and_locals() {
         // x86win: one stack <pentry> at offset 4, 500 bytes
-        let m = LocalMap::new(0xffff_ffff, &[(4, 503)]);
+        let m = LocalMap::new(0xffff_ffff, &[(4, 503)], None);
         assert_eq!(m.ranges, vec![(4, 503), (0x8000_0000, 0xffff_ffff)]);
         assert!(m.in_scope(4, 4) && m.in_scope(500, 4));
         assert!(!m.in_scope(0, 4) && !m.in_scope(502, 4) && !m.in_scope(0x1000, 4));
         assert!(m.in_scope(0xffff_fffc, 4) && !m.in_scope(0xffff_fffe, 4));
         // touching ranges stay apart, so no varnode spans two of them; overlapping ones merge
-        let m = LocalMap::new(0xffff_ffff, &[(0x7fff_fff0, 0x7fff_ffff), (4, 7), (8, 11), (6, 9)]);
+        let m = LocalMap::new(0xffff_ffff, &[(0x7fff_fff0, 0x7fff_ffff), (4, 7), (8, 11), (6, 9)], None);
         assert_eq!(m.ranges, vec![(4, 11), (0x7fff_fff0, 0x7fff_ffff), (0x8000_0000, 0xffff_ffff)]);
         assert!(!m.in_scope(0x7fff_fffc, 8));
-        let m = LocalMap::new(0xffff_ffff, &[(4, 7), (8, 11)]);
+        // allegrex.cspec: a <localrange> of two ranges, the stack <pentry> at offset 0
+        let m = LocalMap::new(0xffff_ffff, &[(0, 499)], Some(&[(0xfff0_bdc0, 0xffff_ffff), (0, 15)]));
+        assert_eq!(m.ranges, vec![(0, 499), (0xfff0_bdc0, 0xffff_ffff)]);
+        assert!(m.in_local_range(15) && !m.in_local_range(16) && !m.in_local_range(0xfff0_bdbf));
+        let m = LocalMap::new(0xffff_ffff, &[(4, 7), (8, 11)], None);
         assert!(m.in_scope(4, 4) && !m.in_scope(4, 8));
     }
 
     #[test]
     fn removing_splits_and_records_the_parameter_extent() {
-        let mut m = LocalMap::new(0xffff_ffff, &[(0, 511)]);
+        let mut m = LocalMap::new(0xffff_ffff, &[(0, 511)], None);
         m.remove(8, 4, true);
         assert_eq!(m.ranges[..2], [(0, 7), (12, 511)]);
         assert!(!m.in_scope(8, 1) && m.in_scope(4, 4) && !m.in_scope(4, 8));

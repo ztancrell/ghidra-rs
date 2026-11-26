@@ -1190,7 +1190,7 @@ mod tests {
     #[test]
     fn overlapping_hints_merge_and_aliases_reach_upward() {
         let mut fd = Funcdata::new(0x1000);
-        fd.localmap = LocalMap::new(0xffff_ffff, &[(4, 503)]);
+        fd.localmap = LocalMap::new(0xffff_ffff, &[(4, 503)], None);
         let mut state = MapState {
             range: vec![(0x8000_0000, 0xffff_ffff)],
             params: vec![(4, 503)],

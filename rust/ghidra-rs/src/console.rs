@@ -9,7 +9,7 @@
 //! - [`datatest`]: a port of `testfunction.cc`, which runs the upstream XML datatests (corpus D)
 //!   on either engine and checks their `<stringmatch>` patterns.
 
-use crate::analysis::{Analysis, Image};
+use crate::analysis::{Analysis, Image, Section};
 use crate::decomp::action::{self, ActionTree, Outcome};
 use crate::decomp::{Arch, Funcdata, LowlevelError};
 use crate::sleigh::Sleigh;
@@ -102,10 +102,14 @@ pub struct Console {
 /// an ELF64 x86:LE:64:default:gcc. Returns the `.sla` (`GHIDRA_RS_SLA`, else the one built by
 /// `build-sla.sh`; for x86-64, `x86-64.sla` next to it, whose `.pspec` `Sleigh::load` reads), the
 /// text of the compiler spec next to it and the language description of x86.ldefs.
-fn language(elf64: bool) -> Result<(Sleigh, String, &'static str), String> {
+/// A MIPS image (a PSP PRX, or its `<binaryimage>` of arch [`ALLEGREX_ARCH`]) is
+/// Allegrex:LE:32:default with `allegrex.cspec`, as `allegrex.ldefs` gives it.
+fn language(image: &Image) -> Result<(Sleigh, String, &'static str), String> {
     let path =
         std::env::var_os("GHIDRA_RS_SLA").map(std::path::PathBuf::from).unwrap_or_else(|| Sleigh::sla_path("x86"));
-    let (path, cspec, desc) = if elf64 {
+    let (path, cspec, desc) = if image.mips {
+        (Sleigh::allegrex_sla_path(), "allegrex.cspec", "Allegrex 32-bit processor, little endian")
+    } else if image.elf64 {
         (path.with_file_name("x86-64.sla"), "x86-64-gcc.cspec", "Intel/AMD 64-bit x86")
     } else {
         (path, "x86win.cspec", "Intel/AMD 32-bit x86")
@@ -114,6 +118,38 @@ fn language(elf64: bool) -> Result<(Sleigh, String, &'static str), String> {
     let cspec = std::fs::read_to_string(&cspec_path).map_err(|e| format!("{}: {e}", cspec_path.display()))?;
     Sleigh::refuse_truncated(&path)?;
     Ok((Sleigh::load(&path)?, cspec, desc))
+}
+
+/// The `arch` of the `<binaryimage>` file `ghidra-rs prx-xml` writes: the language and compiler
+/// of ghidra-allegrex's `allegrex.ldefs`.
+pub const ALLEGREX_ARCH: &str = "Allegrex:LE:32:default:default";
+
+/// A `<binaryimage>` file (`LoadImageXml::open`): each `<bytechunk>` of the ram space is a
+/// block, read-only by its `readonly` attribute. Only the arch [`ALLEGREX_ARCH`] is taken.
+/// lean: `<symbol>` elements and any other arch are refused, so the upstream datatests still
+/// do not load; reading the arch's language from the `.ldefs` files is the way to them.
+fn binaryimage(text: &str) -> Result<Image, String> {
+    let root = crate::xml::parse(text).map_err(|e| e.to_string())?;
+    if root.name != "binaryimage" {
+        return Err("Missing binaryimage tag".into());
+    }
+    if root.attr("arch") != Some(ALLEGREX_ARCH) {
+        return Err(format!("<binaryimage>: only arch {ALLEGREX_ARCH} is supported"));
+    }
+    let mut sections = Vec::new();
+    for el in &root.kids {
+        if el.name != "bytechunk" || el.attr("space") != Some("ram") {
+            return Err(format!("<binaryimage>: <{}> is not supported", el.name));
+        }
+        let addr = el.int("offset").map_err(|e| e.to_string())? as u32;
+        let hex: Vec<u8> = el.text.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+        let nibble = |b: u8| (b as char).to_digit(16).map(|d| d as u8).ok_or("<bytechunk>: not a hex digit");
+        let data = hex.chunks(2).map(|c| Ok(nibble(c[0])? << 4 | nibble(*c.get(1).unwrap_or(&b'0'))?));
+        let data = data.collect::<Result<Vec<u8>, &str>>()?;
+        let readonly = el.attr("readonly") == Some("true");
+        sections.push(Section { name: String::new(), exec: false, readonly, zero_tail: 0, addr, data });
+    }
+    Ok(Image { sections, mips: true, ..Image::default() })
 }
 
 impl Console {
@@ -177,9 +213,18 @@ impl Console {
             ["source", file] => return self.run_file(file, out),
             ["load", "file", path] => {
                 let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-                let image = if data.starts_with(b"\x7fELF") { Image::from_elf(&data) } else { Image::from_pe(&data) };
+                let image = if data.starts_with(b"<bi") {
+                    // XmlArchitectureCapability::isFileMatch
+                    binaryimage(&String::from_utf8_lossy(&data))
+                } else if crate::psp::is_prx(&data) {
+                    Image::from_prx(&data)
+                } else if data.starts_with(b"\x7fELF") {
+                    Image::from_elf(&data)
+                } else {
+                    Image::from_pe(&data)
+                };
                 let image = image.map_err(|e| format!("{path}: {e}"))?;
-                let (sleigh, cspec, desc) = language(image.elf64)?;
+                let (sleigh, cspec, desc) = language(&image)?;
                 self.arch = Some(Arch::new(sleigh, image, &cspec).map_err(|e| e.to_string())?);
                 writeln!(out, "{path} successfully loaded: {desc}").map_err(io)?;
             }

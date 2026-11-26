@@ -1,0 +1,8 @@
+<binaryimage arch="Allegrex:LE:32:default:default">
+<bytechunk space="ram" offset="0x8804000" readonly="true">
+f0ffbd270000bfaf8008053c0041a5240300062404000724050008241010200e0000a4ac0000bf8f0800e0031000bd27
+</bytechunk>
+<bytechunk space="ram" offset="0x8804040" readonly="true">
+0800e00300000000
+</bytechunk>
+</binaryimage>

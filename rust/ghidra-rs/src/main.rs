@@ -25,6 +25,7 @@ const USAGE: &str = "usage: ghidra-rs disasm <binary|psp-prx> [--func <symbol>|-
                      bindings <out.csv>
                      abi-candidates <out.csv> <out.txt> [<verified-c-dir>]   (needs --facts)
        ghidra-rs prx-elf <psp-prx> <out.elf>        (the PRX as `analyze` loads it, relocated, as a plain ELF: the input of tools/mips-ref.sh)
+       ghidra-rs prx-xml <psp-prx> <out.xml>        (the same image as a `<binaryimage>` file, which `decomp_dbg` and `ghidra-rs decompile` load: the input of tools/mips-decomp.sh)
        ghidra-rs gdt-protos <archive.gdt> <out>     (the prototype file of tools/ghidra-protos.sh, from the archive)
        ghidra-rs dwarf <elf> <out>                  (the DWARF import's data types and signatures, as tools/ghidra/DumpDwarf.java)
        ghidra-rs decompile -i <script>
@@ -46,6 +47,11 @@ fn run() -> Result<(), String> {
     }
     if args.len() >= 2 && (args[0] == "edit" || args[0] == "export") {
         return edit(&args[1], &args[2..], args[0] == "edit");
+    }
+    if args.len() == 3 && args[0] == "prx-xml" {
+        let data = std::fs::read(&args[1]).map_err(|e| format!("{}: {e}", args[1]))?;
+        let image = ghidra_rs::analysis::Image::from_prx(&data).map_err(|e| format!("{}: {e}", args[1]))?;
+        return std::fs::write(&args[2], prx_xml(&image)).map_err(|e| format!("{}: {e}", args[2]));
     }
     if args.len() == 3 && args[0] == "prx-elf" {
         let data = std::fs::read(&args[1]).map_err(|e| format!("{}: {e}", args[1]))?;
@@ -253,6 +259,29 @@ fn run() -> Result<(), String> {
         n += 1;
     }
     Ok(())
+}
+
+/// `prx-xml`: a PSP PRX as `Image::from_prx` loads it, as the `<binaryimage>` file of Ghidra's
+/// console decompiler (`LoadImageXml`): one `<bytechunk>` per section, `readonly` as the section
+/// is, without the bytes a `SHT_NOBITS` section has no file bytes for (unmapped on both engines).
+/// The system's libbfd reads no MIPS ELF, so this is how the reference gets the relocated image.
+fn prx_xml(image: &ghidra_rs::analysis::Image) -> String {
+    use std::fmt::Write;
+    let mut out = format!("<binaryimage arch=\"{}\">\n", ghidra_rs::console::ALLEGREX_ARCH);
+    for s in &image.sections {
+        let data = &s.data[..s.data.len() - s.zero_tail as usize];
+        if data.is_empty() {
+            continue;
+        }
+        let ro = if s.readonly { " readonly=\"true\"" } else { "" };
+        let _ = write!(out, "<bytechunk space=\"ram\" offset=\"0x{:x}\"{ro}>", s.addr);
+        for (i, b) in data.iter().enumerate() {
+            let _ = write!(out, "{}{b:02x}", if i % 40 == 0 { "\n" } else { "" });
+        }
+        out.push_str("\n</bytechunk>\n");
+    }
+    out.push_str("</binaryimage>\n");
+    out
 }
 
 /// `prx-elf`: a PSP PRX as `psp::load` lays it out at `psp::DEFAULT_BASE`, relocations applied,

@@ -436,6 +436,9 @@ pub(crate) struct ProtoModel {
     /// `ProtoModelMerged::modellist`: the models a `<resolveprototype>` chooses among, in its
     /// order; empty for a plain model
     pub(crate) members: Vec<ModelId>,
+    /// `<localrange>`: the stack ranges of locals, inclusive (`ProtoModel::localrange`); `None`
+    /// without the element, for `defaultLocalRange`
+    pub(crate) localrange: Option<Vec<(u64, u64)>>,
 }
 
 impl ProtoModel {
@@ -452,6 +455,7 @@ impl ProtoModel {
         let mut effects = Vec::new();
         let (mut input, mut output, mut likelytrash) = (ParamList::default(), ParamList::default(), Vec::new());
         let mut saw_retaddr = false;
+        let mut localrange = None;
         for k in &el.kids {
             let mut add = |kind| -> Result<()> {
                 for v in &k.kids {
@@ -471,6 +475,16 @@ impl ProtoModel {
                 "likelytrash" => {
                     likelytrash = k.kids.iter().map(|v| Storage::decode(v, regs)).collect::<Result<_>>()?;
                 }
+                "localrange" => {
+                    let mut ranges = Vec::new();
+                    for r in &k.kids {
+                        if r.name != "range" || r.attr("space") != Some("stack") {
+                            return err(format!("prototype {name}: <localrange> takes stack ranges only"));
+                        }
+                        ranges.push((regs.wrap(None, r.int("first")?), regs.wrap(None, r.int("last")?)));
+                    }
+                    localrange = Some(ranges);
+                }
                 n => return err(format!("prototype {name}: <{n}> is not supported")),
             }
         }
@@ -483,7 +497,7 @@ impl ProtoModel {
         effects.sort_by_key(|e| e.storage.address_key());
         // VarnodeData::operator<: space, offset, then the larger size first
         likelytrash.sort_by_key(|s: &Storage| (s.address_key(), std::cmp::Reverse(s.size())));
-        Ok(ProtoModel { name, extrapop, input, output, effects, likelytrash, members: Vec::new() })
+        Ok(ProtoModel { name, extrapop, input, output, effects, likelytrash, members: Vec::new(), localrange })
     }
 
     /// Port of `ProtoModelMerged::decode` + `foldIn`: the models of a `<resolveprototype>`
@@ -493,6 +507,10 @@ impl ProtoModel {
         let Some((first, rest)) = members.split_first() else {
             return err(format!("resolveprototype {name}: no models"));
         };
+        // foldIn takes the union of the local ranges; no spec ghidra-rs reads has both
+        if members.iter().any(|m| m.localrange.is_some()) {
+            return err(format!("resolveprototype {name}: models with a <localrange> are not supported"));
+        }
         let mut m =
             ProtoModel { name: name.to_string(), input: ParamList::default(), members: ids, ..(*first).clone() };
         m.input.fold_in(&first.input);

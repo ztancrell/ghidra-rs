@@ -1853,7 +1853,9 @@ pub(crate) fn deindirect(fd: &mut Funcdata, arch: &Arch) -> Result<i32> {
         let target = if v.has(VnFlags::PERSIST) && v.is_free_or_input() {
             arch.externref_target(v.offset)
         } else if v.is_constant() {
-            Some(v.offset)
+            // the encoding bits of a function pointer are no part of the address (funcptr_align)
+            let align = arch.spec.funcptr_align;
+            Some(v.offset >> align << align)
         } else {
             None
         };

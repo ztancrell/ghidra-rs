@@ -40,6 +40,9 @@ MIPS (MIPS-3)"). See `../DESIGN.md` for the scope and plan.
 - `tools/mips-ref.sh`: the MIPS-3 check: Java's auto-analysis of a PRX (through `ghidra-rs
   prx-elf` and ghidra-allegrex in a throwaway settings directory) against `analyze --purges`
   ("Function discovery on MIPS (MIPS-3)").
+- `tools/mips-decomp.sh`: the MIPS-4 check: the decompiler on a PRX against `decomp_dbg`
+  (through `ghidra-rs prx-xml`), on `tools/corpus/socom50.txt` or another list ("The
+  decompiler on MIPS (MIPS-4)").
 - `ghidra-rs/tests/decode.rs`: decodes a fixed byte sequence and checks text and p-code; a
   MIPS32 `jal` with its delay slot; an Allegrex VFPU `vdot.t` and integer `max`.
 - `ghidra-rs/src/abi.rs`: port of CheckAbiCallers.java: per-byte register liveness walks
@@ -3080,7 +3083,7 @@ Review fixes (same branch):
   reader now refuses loudly.
 - The callee-pop test wraps `size - 1` as the C++ `int`.
 - Local and parameter ranges are the defaults (`ProtoModel::decode` already refuses
-  `<localrange>` and `<paramrange>`); without a model the alias boundary is `deriveBoundaries`'
+  `<localrange>` and `<paramrange>`; Superseded, MIPS-4: `<localrange>` is read); without a model the alias boundary is `deriveBoundaries`'
   0x1000000 and a stack trial fails loudly (`getLocalRange` needs the model).
 - Open: the C++ wraps an error inside `ActionActiveParam` as "Error processing <name> called at
   <seq>: ..."; ghidra-rs prints the inner message, so such an error differs in text (it is loud
@@ -3822,6 +3825,7 @@ Fails loudly, on a spec with a segment op:
 - `setcasts` and `print C` on a `SEGMENTOP` (as before).
 - A `jumpassist` table whose op no longer matches on the function (the C++ goes on to
   `JumpBasic` with the saved model); `funcptr_align` is taken as 0.
+  Superseded (MIPS-4): `<funcptr>` is read and both kinds of table mask their targets by it.
 
 So a 16-bit x86 function decompiles up to the first of these (with the default groups: type
 recovery), and no further. No console command selects a 16-bit language or loads a raw image;
@@ -3883,7 +3887,8 @@ Ported on the branch:
   fails loudly earlier).
 - Rules: `pullsub_indirect`, `conditionalmove`, `orpredicate`, `threewaycomp`; `transformcpool`
   fails on a CPOOLREF (the constant pool is not ported); `funcptrencoding` has nothing to do
-  while no spec declares `<funcptr>` (cspec.rs refuses it). `CloneBlockOps::cloneExpression`
+  while no spec declares `<funcptr>` (cspec.rs refuses it; Superseded, MIPS-4: cspec.rs reads
+  it and the rule is ported, "The decompiler on MIPS (MIPS-4)"). `CloneBlockOps::cloneExpression`
   (`returnsplit.rs`) for `conditionalmove`.
 - `ActionParamDouble`: a stack trial that is a PIECE is split in two (`checkInputSplit`,
   `ParamActive::splitTrial`).
@@ -8332,7 +8337,8 @@ ghidra-allegrex extension was not run.
 `ghidra-rs analyze` takes a PSP PRX: the image `disasm` loads (`psp::load`, relocated at
 0x08804000), decoded as Allegrex, through the same task queue, analyzers and writers as the x86
 images (`--functions`, `--gaps`, `--purges`; `--facts`, `--decomp-prelude`, `--store` and
-`--abi-callers` refuse a PRX: MIPS-4). `analysis::Image` took the PRX with one new flag, `mips`
+`--abi-callers` refuse a PRX: MIPS-4; still so after MIPS-4's first step, whose check builds its
+own prelude). `analysis::Image` took the PRX with one new flag, `mips`
 (`Image::from_prx`: the loaded sections as blocks, read-only and zero-filled as the section
 headers say, the ELF entry point as the only entry). No export, import or `sceModuleInfo` is
 read: that is MIPS-5.
@@ -8600,6 +8606,85 @@ table; a second table for what PSPSDK lacks (Superseded in part: `SEARCHED_NIDS`
 `mips-m5-hash`, names the one NID SOCOM's `BOOT.BIN` needed); a PRX with imported variables, with entries of 7
 words or with named export libraries (the target has none, so those paths are only run by the
 hand-made test, which covers one variable import and the module's own export entry).
+
+## The decompiler on MIPS (MIPS-4, branch `mips-m4`, 2026-11-26)
+
+First step: both engines decompile functions of a relocated PSP PRX with the Allegrex language
+and ghidra-allegrex's `allegrex.cspec`, and are compared on samples of SOCOM FTB's `BOOT.BIN`.
+The decisions (the calling convention, the VFPU user ops) and their evidence are in
+`docs/plans/mips-psp.md`, "MIPS-4".
+
+```sh
+rust/build-sla.sh                                # allegrex.sla, with the others
+rust/tools/decomp-ref.sh                         # decomp_dbg, as for x86
+rust/tools/mips-decomp.sh <psp-prx> [corpus]     # default corpus: tools/corpus/socom50.txt
+ghidra-rs prx-xml <psp-prx> <out.xml>            # the image both engines load
+ghidra-rs decompile -i <script>                  # `load file` takes the PRX or the .xml
+```
+
+### How the reference runs
+
+- The system's libbfd reads no MIPS ELF (`objdump -i` lists no MIPS target), so `decomp_dbg`
+  cannot `load file` the PRX or the ELF of `prx-elf`. It loads a `<binaryimage>` file instead
+  (`LoadImageXml`, the format of the upstream datatests): `ghidra-rs prx-xml` writes the image
+  `Image::from_prx` loads (relocated at 0x08804000), one `<bytechunk>` per section, `readonly`
+  as the section is, without the bytes of `SHT_NOBITS` sections (unmapped on both engines).
+  For `BOOT.BIN` the file is 7.8 MB.
+- Its `arch` is `Allegrex:LE:32:default:default`, which `decomp_dbg` resolves through
+  `allegrex.ldefs`. The language directory is given with `-s <dir>`: `mips-decomp.sh` makes
+  one under its output directory, with links to `allegrex.sla`, `allegrex.pspec` and
+  `allegrex.ldefs` and a copy of `allegrex.cspec` without its 15 `<callotherfixup>` elements.
+  Those are `dynamic` (Java's `AllegrexPcodeInjectLibrary` supplies their p-code) and
+  `decomp_dbg` stops with "Missing dynamic inject" at the first VFPU user op that has one. The
+  files in `rust/processors/Allegrex` stay as copied.
+- The prelude is `map function <address>` for each row of `analyze --functions`, then `map
+  function <address> <name>` for each import stub a `jal` of `.text` reaches (the names
+  `disasm` prints). `analyze --decomp-prelude` still refuses a PRX.
+- `mips-decomp.sh` then calls `decomp-diff.sh` unchanged (one script per function for both
+  engines, `PRINT` defaulting to `print C`, the reference cache off).
+
+### What ghidra-rs took
+
+- `console.rs`: `load file` takes a PSP PRX (`Image::from_prx`) or a `<binaryimage>` of the
+  arch above; either is Allegrex with `allegrex.cspec`. A `<binaryimage>` with another arch or
+  a `<symbol>` is refused, so the upstream datatests still do not load.
+- `flow.rs`: an instruction's length is `Sleigh::oneInstruction`'s, with the delay slot. Before,
+  the fall-through of a branch or call was its delay slot, whose p-code then ran a second time
+  (a store in a `jal`'s delay slot printed before and after the call).
+- `cspec.rs`: `<funcptr align=..>` (`funcptr_align`: `ActionDeindirect` drops the low bits of
+  a constant call target, `RuleFuncPtrEncoding` removes the AND that clears them, `JumpBasic`
+  and `JumpAssisted` mask their targets); a prototype's `<localrange>` (`LocalMap`, the
+  local scope's ranges and `getLocalRange`; refused in a `<resolveprototype>`);
+  `<spacebase>` is read, and a function whose p-code holds a varnode at that register (`gp`)
+  is refused: the second spacebase space is not ported; a `dynamic` `<callotherfixup>` is
+  skipped, which leaves its user op a `CALLOTHER`, as in the reference's spec.
+- Nothing else: the return address in `ra`, the float and `join` parameter entries, jump-table
+  recovery and the constant folding that joins `lui`/`addiu` pairs ran as ported for x86.
+
+### On `BOOT.BIN` (2026-11-26)
+
+`print C`, with the reference of `decomp-ref.sh` at master `ed70ec7cd2`:
+
+| corpus | reference ran | identical | differs | ghidra-rs fails | reference fails |
+|---|---|---|---|---|---|
+| `socom50` (stratified) | 50 / 50 | 50 | 0 | 0 | 0 |
+| `socom500` (random) | 500 / 500 | 497 | 1 | 2 | 0 |
+
+- `socom50`: 14 leaf functions of 8 to 96 bytes, 12 with a `jal` to a named import, 12 with a
+  `jr` of another register than `ra`, 12 with a VFPU instruction (the criteria are in the
+  file). Of the 12 with a `jr`, 11 print a `switch`; in one both engines print the same
+  "Could not recover jumptable ... Too many branches".
+- `socom500`: the two failures are "ActionParamDouble: joining double-precision call inputs
+  not implemented in ghidra-rs yet" (0x089200a8, 0x089ecbbc); the difference is `return
+  (bool)0;` for the reference's `return false;` (0x08a6fecc). Both are in the shared
+  decompiler, not in MIPS code.
+- x86 after the change: `PRINT="print C" decomp-diff.sh m8` 8 / 8, `m500` 500 / 500.
+- Test: `mips_delay_slot_print_c` (`tests/console.rs`) decompiles a hand-made function from
+  `tests/data/mips-delay.xml` and compares with `decomp_dbg`'s C.
+
+Not done: the other 10,664 functions; `gp` (no function of this PRX uses it, so the refusal
+never fired); the VFPU injection (the user ops print as calls: `axVar1 = vfpuReadT(fVar3);`);
+`--decomp-prelude` and `--facts` for a PRX; a comparison with Java Ghidra's C.
 
 ## Speed
 

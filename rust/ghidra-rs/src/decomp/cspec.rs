@@ -65,6 +65,12 @@ pub(crate) struct CompilerSpec {
     /// `<data_organization><size_alignment_map>`: the alignment of a primitive of each size
     /// (`TypeFactory::decodeAlignmentMap`), if the spec gives one
     pub(crate) align_map: Option<Vec<u32>>,
+    /// `<funcptr align=..>` as `Architecture::funcptr_align`: how many low bits of a function
+    /// pointer are encoding, not address (`decodeFuncPtrAlign`); 0 without the element
+    pub(crate) funcptr_align: u32,
+    /// `<spacebase>`: the registers that are the base of a space of their own, beside the stack
+    /// pointer (`Architecture::decodeSpacebase`; MIPS `gp`): space, offset, size
+    pub(crate) spacebases: Vec<(u32, u64, u32)>,
 }
 
 /// The `.sla`'s register and space names, for resolving the spec's `<register name=..>`.
@@ -138,6 +144,9 @@ impl CompilerSpec {
         let mut align_map = None;
         let mut global = Vec::new();
         let mut unported = Vec::new();
+        let mut funcptr_align = 0;
+        let mut spacebases = Vec::new();
+        let mut spacebase_names = Vec::new();
         for el in &root.kids {
             match el.name.as_str() {
                 "stackpointer" => {
@@ -193,6 +202,9 @@ impl CompilerSpec {
                                 let (space, off, size) = names.register(r.req("name")?)?;
                                 (space, off, off.wrapping_sub(1).wrapping_add(u64::from(size)))
                             }
+                            // the space of a `<spacebase>`: no varnode is ever in it here
+                            // (`Arch::no_extra_spacebase`)
+                            "range" if spacebase_names.contains(&r.req("space")?) => continue,
                             "range" => {
                                 let space = names.space(r.req("space")?)?;
                                 let size = sleigh.spaces[space as usize].size;
@@ -209,6 +221,22 @@ impl CompilerSpec {
                     }
                 }
                 "returnaddress" => {}
+                // decodeFuncPtrAlign: the position of the alignment's lowest set bit
+                "funcptr" => {
+                    let align = el.int("align")?;
+                    funcptr_align = if align == 0 { 0 } else { align.trailing_zeros() };
+                }
+                "spacebase" => {
+                    spacebase_names.push(el.req("name")?);
+                    names.space(el.req("space")?)?;
+                    spacebases.push(names.register(el.req("register")?)?);
+                }
+                // a `<callotherfixup>` with `<pcode dynamic="true">` has no p-code in the spec:
+                // Java's inject library supplies it. The console decompiler has none (it stops
+                // with "Missing dynamic inject" at the user op's first use), so the spec the
+                // reference runs with has these elements removed (tools/mips-decomp.sh) and the
+                // user op stays a CALLOTHER; skipping them here is the same spec
+                "callotherfixup" if el.kid("pcode").is_some_and(|p| p.attr("dynamic") == Some("true")) => {}
                 // `UserOpManage::decodeSegmentOp`
                 "segmentop" => userops.decode(el, sleigh, names)?,
                 n => return err(format!("<compiler_spec>: <{n}> is not supported")),
@@ -220,7 +248,17 @@ impl CompilerSpec {
         models.eval_called = eval_called.map(|n| models.find(&n)).transpose()?;
         let (stack_pointer, stack_container) =
             stack_pointer.ok_or_else(|| LowlevelError("No stack pointer specified".into()))?;
-        Ok(CompilerSpec { stack_pointer, stack_container, return_address: retaddr, models, injects, align_map, global })
+        Ok(CompilerSpec {
+            stack_pointer,
+            stack_container,
+            return_address: retaddr,
+            models,
+            injects,
+            align_map,
+            global,
+            funcptr_align,
+            spacebases,
+        })
     }
 }
 

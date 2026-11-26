@@ -359,10 +359,21 @@ fn transform_cpool(_: &mut Funcdata, _: OpId, _: &Arch) -> Result<i32> {
     err("RuleTransformCpool: a CPOOLREF (the constant pool) is not implemented in ghidra-rs yet")
 }
 
-/// `RuleFuncPtrEncoding`: nothing to do while `Architecture::funcptr_align` is 0, and only a
-/// `<funcptr>` of the compiler spec sets it, which cspec.rs refuses.
-fn funcptr_encoding(_: &mut Funcdata, _: OpId, _: &Arch) -> Result<i32> {
-    Ok(0)
+/// `RuleFuncPtrEncoding`: a CALLIND through `V & mask`, the mask clearing only the encoding bits
+/// of a function pointer (`<funcptr align=..>`), calls `V`: the AND becomes a COPY.
+fn funcptr_encoding(fd: &mut Funcdata, op: OpId, arch: &Arch) -> Result<i32> {
+    let align = arch.spec.funcptr_align;
+    if align == 0 {
+        return Ok(0);
+    }
+    let Some(andop) = fd.vn(fd.op(op).ins[0]).def.filter(|&d| fd.op(d).opc == Opcode::IntAnd) else { return Ok(0) };
+    let mask = fd.vn(fd.op(andop).ins[1]);
+    if !mask.is_constant() || (calc_mask(mask.size) & (u64::MAX << align)) != mask.offset {
+        return Ok(0);
+    }
+    fd.op_remove_input(andop, 1);
+    fd.op_set_opcode(andop, Opcode::Copy);
+    Ok(1)
 }
 
 /// `RulePtrFlow`: its op list is empty unless the default data space is truncated

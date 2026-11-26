@@ -1206,12 +1206,14 @@ impl<'a> JumpBasic<'a> {
         })
     }
 
-    /// `buildAddresses` (`funcptr_align` is 0 for x86: no mask)
+    /// `buildAddresses`: each target without the encoding bits of a function pointer
+    /// (`funcptr_align`)
     fn build_addresses(&self) -> std::result::Result<Vec<u64>, String> {
         let mut emu = EmulateFunction::new(self.fd, self.arch);
         let mut out = Vec::new();
+        let align = self.arch.spec.funcptr_align;
         for (val, vn, op) in self.jrange.as_ref().unwrap().values() {
-            out.push(self.emulate_path(&mut emu, val, op, vn)?);
+            out.push(self.emulate_path(&mut emu, val, op, vn)? >> align << align);
         }
         Ok(out)
     }
@@ -1529,14 +1531,15 @@ impl<'a> JumpAssisted<'a> {
     }
 
     /// Port of `JumpAssisted::buildAddresses`: the target of each index, then the default.
-    /// (`funcptr_align` is 0 for every spec ghidra-rs reads: no mask.)
+    /// The targets of the indices lose the encoding bits of a function pointer (`funcptr_align`).
     fn build_addresses(&self, fd: &Funcdata, arch: &Arch) -> Result<Vec<u64>> {
         let script = &self.userop.index2addr;
         let mut inputs = self.inputs(fd, script, "addr_pcode")?;
         let mut table = Vec::new();
+        let align = arch.spec.funcptr_align;
         for index in 0..self.size_indices {
             inputs[0] = index;
-            table.push(script.evaluate(arch, &inputs)?);
+            table.push(script.evaluate(arch, &inputs)? >> align << align);
         }
         let script = &self.userop.default_addr;
         let mut inputs = self.inputs(fd, script, "default_pcode")?;

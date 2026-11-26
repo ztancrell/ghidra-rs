@@ -264,6 +264,22 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
   by the pointers of `sceModuleInfo`; section headers only cross-check. `disasm` prints a
   `<name>:` line at an import stub or exported function and `  ; <name>` after a `j` or `jal`
   to one, by default and for a PRX only (x86 prints no names in `disasm`). Claude's call.
+- 2026-11-26 (MIPS-4): the PSP calling convention is ghidra-allegrex's `allegrex.cspec`
+  (arguments five to eight in `t0` to `t3`), not `mips32le.cspec` (o32: from `0x10(sp)`). In
+  SOCOM FTB all 60 calls to the 21 imports PSPSDK declares with five or more integer
+  arguments set those registers, and none passes a fifth argument on the stack. `allegrex.cspec`
+  and `allegrex.ldefs` are copied unmodified, like the spec (`rust/processors/Allegrex/NOTICE`).
+  Claude's call from evidence; the user may override. Superseded: the open question "which
+  calling convention" (asked 2026-11-26).
+- 2026-11-26 (MIPS-4): the VFPU helper user ops stay `CALLOTHER` calls in the decompiler for
+  now; ghidra-allegrex's `AllegrexPcodeInjectLibrary` is not ported. The C++ reference cannot
+  do the injection (it is Java-side; `decomp_dbg` stops with "Missing dynamic inject"), so it
+  runs with a copy of `allegrex.cspec` without the `<callotherfixup>` elements, made at check
+  time, and parity on VFPU code is between the two engines, not with Java Ghidra. Claude's call
+  from evidence; the user may override.
+- 2026-11-26 (MIPS-4): the reference decompiler loads a PRX as a `<binaryimage>` file that
+  `ghidra-rs prx-xml` writes (the system's libbfd reads no MIPS ELF), and ghidra-rs's console
+  loads the same file. Claude's call from evidence; the user may override.
 
 ## Milestones
 
@@ -699,6 +715,9 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    MIPS-5 (2026-11-26, branch `mips-m5`): the loader reads `sceModuleInfo` and the import and
    export tables; `disasm` names the import stubs (PSPSDK's NID names, or library and NID).
    Branch `mips-m5-hash`: one more name found by SHA-1 search; SOCOM FTB's 247 imports all named.
+   MIPS-4, first step (2026-11-26, branch `mips-m4`): both decompilers run on the PRX with
+   `allegrex.cspec`; `print C` identical on 50 / 50 of a stratified sample and 497 / 500 of a
+   random one.
    In part on branch `worktree-agent-af1e2713bbdee8eab` (2026-11-17): the project store as one plain
    text file (`store.rs`: created and removed functions, fixed bodies, no-return flags, flow
    overrides, thunk marks, switch targets, laid over a fresh analysis by `analyze --store`) and
@@ -790,4 +809,5 @@ Open (asked 2026-11-26, with MIPS-1; details in `docs/plans/mips-psp.md`):
   analyzers, `mips32le.cspec` or a PSP one), and where the import names (NIDs) come from.
   Superseded in part (2026-11-26): the analysis is decided (MIPS-3) and the import names are
   decided (MIPS-5, PSPSDK's import files in `rust/psp-nids`), see Decided; the calling
-  convention is still open.
+  convention is still open. Superseded (2026-11-26, MIPS-4): decided, `allegrex.cspec`, see
+  Decided.

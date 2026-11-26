@@ -5,7 +5,8 @@ The files in data/languages are copied unmodified from ghidra-allegrex
 4e46aa146a6e8fc3369cf4a7e4053f3ea5b05a1d (2026-10-31, tag v21.6), path data/languages:
 
   allegrex.slaspec, allegrex.sinc, allegrexInstructions.sinc, allegrexFloat.sinc,
-  allegrexVfpuBase.sinc, allegrexVfpuGenerated.sinc, allegrexVfpu.sinc, allegrex.pspec
+  allegrexVfpuBase.sinc, allegrexVfpuGenerated.sinc, allegrexVfpu.sinc, allegrex.pspec,
+  allegrex.cspec, allegrex.ldefs (the last two since MIPS-4, 2026-11-26)
 
 ghidra-allegrex is licensed under the Apache License 2.0 (LICENSE, next to this file, is its
 copy) and, in its README's words, is "Derived from Ghidra MIPS module licensed under Apache
@@ -15,5 +16,5 @@ data/patterns/Allegrex_patterns.xml (the function start patterns, for `ghidra-rs
 copied unmodified from the same project's release v21.6 for Ghidra 12.2
 (ghidra_12.2_PUBLIC_20261031_ghidra-allegrex.zip, path data/patterns), on 2026-11-26.
 
-Not copied: allegrex.cspec, allegrex.ldefs, Allegrex.opinion, data/patterns/patternconstraints.xml
+Not copied: Allegrex.opinion, data/patterns/patternconstraints.xml
 and everything under src/ and ghidra_scripts/ (the Java, Kotlin and Python side).

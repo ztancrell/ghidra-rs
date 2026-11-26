@@ -1,0 +1,62 @@
+# The MIPS-4 sample (rust/README.md, "The decompiler on MIPS (MIPS-4)"): 50 functions of SOCOM FTB
+# beta BOOT.BIN (UCUS-98637) as loaded at 0x08804000, drawn once on 2026-11-26 (seed 20261126) from
+# the 11,164 rows of `analyze --functions`, by what `disasm` shows in each body:
+#   leaf    no jal, no jr but ra, no VFPU instruction, 8 to 96 bytes
+#   import  a jal to a named import stub, no jr but ra, no VFPU, at most 400 bytes
+#   switch  a jr of another register than ra, no VFPU, at most 1200 bytes
+#   vfpu    a VFPU instruction, no jr but ra, at most 600 bytes
+# The drawing script was not kept: the list is the record.
+# leaf: 14 of 1948 candidates
+0x0881278c leaf
+0x08851f60 leaf
+0x088c4ae8 leaf
+0x08908bcc leaf
+0x08908e14 leaf
+0x0891cb8c leaf
+0x089c8928 leaf
+0x089e3e20 leaf
+0x08a4e540 leaf
+0x08a56308 leaf
+0x08a5642c leaf
+0x08a567d0 leaf
+0x08a5f4c0 leaf
+0x08b0daa4 leaf
+# import: 12 of 202 candidates
+0x088bd100 import
+0x088bdec8 import
+0x08937438 import
+0x08a1b904 import
+0x08a7cabc import
+0x08a7d97c import
+0x08a7da34 import
+0x08ab13d4 import
+0x08ab144c import
+0x08ab1680 import
+0x08ac1510 import
+0x08b045fc import
+# switch: 12 of 181 candidates
+0x08874848 switch
+0x088a6810 switch
+0x0891e88c switch
+0x08945a80 switch
+0x0899f51c switch
+0x089a44c0 switch
+0x089a4694 switch
+0x089a9efc switch
+0x08a10b14 switch
+0x08a7b9f4 switch
+0x08aba658 switch
+0x08b4d374 switch
+# vfpu: 12 of 199 candidates
+0x0880a79c vfpu
+0x0880bcec vfpu
+0x0888d590 vfpu
+0x0888d93c vfpu
+0x0889a8c0 vfpu
+0x0889ad68 vfpu
+0x088bb6f8 vfpu
+0x088e4414 vfpu
+0x08923b28 vfpu
+0x089730ec vfpu
+0x08982aac vfpu
+0x089cb304 vfpu
