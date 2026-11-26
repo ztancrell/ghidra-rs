@@ -139,6 +139,13 @@ fn run() -> Result<(), String> {
     };
     if let Some(prx) = &prx {
         eprintln!("PRX loaded at {:#010x}: {}", prx.base, prx.relocs.summary());
+        match &prx.module {
+            Ok(m) => {
+                eprintln!("{}", m.summary());
+                m.notes.iter().for_each(|n| eprintln!("  note: {n}"));
+            }
+            Err(e) => eprintln!("module info not read: {e}"),
+        }
         if func.is_some() {
             return Err(format!(
                 "{path}: --func is not supported on a PRX (its symbols are not relocated); use --addr"
@@ -188,6 +195,9 @@ fn run() -> Result<(), String> {
     };
     // a word that does not decode is skipped whole on MIPS32 and Allegrex (fixed 4-byte instructions)
     let bad_step = if mips { 4 } else { 1 };
+    // the names of a PRX's import stubs and exported functions: a `<name>:` line at the address
+    // and `  ; <name>` after a `j` or `jal` to it (no other file gets names in `disasm`)
+    let names = prx.as_ref().and_then(|p| p.module.as_ref().ok()).map(|m| m.names()).unwrap_or_default();
     let mut p = sl.new_parse();
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
@@ -197,6 +207,9 @@ fn run() -> Result<(), String> {
         use std::fmt::Write as _;
         let rest = &bytes[(a - base) as usize..];
         line.clear();
+        if let Some(name) = names.get(&(a as u32)) {
+            let _ = writeln!(line, "{name}:");
+        }
         let _ = write!(line, "{a:016x}  ");
         match sl.disasm(&mut p, a, rest) {
             Ok(ins) if ins.len > 0 && a + ins.len as u64 <= sec_end => {
@@ -204,7 +217,17 @@ fn run() -> Result<(), String> {
                     let _ = write!(line, "{}{b:02x}", if i > 0 { " " } else { "" });
                 }
                 let pad = (3 * ins.len).max(31) - 3 * ins.len + 1;
-                let _ = writeln!(line, "{:pad$}{} {}", "", ins.mnemonic, ins.body);
+                let _ = write!(line, "{:pad$}{} {}", "", ins.mnemonic, ins.body);
+                // lean: the target is read from the word (`j` and `jal`, opcodes 2 and 3), not
+                // from p-code, so a call through a register gets no name
+                let word = rest.get(..4).map_or(0, |w| u32::from_le_bytes(w.try_into().unwrap()));
+                let target = (a as u32).wrapping_add(4) & 0xf000_0000 | (word & 0x03ff_ffff) << 2;
+                match names.get(&target) {
+                    Some(name) if word >> 27 == 1 => {
+                        let _ = writeln!(line, "  ; {name}");
+                    }
+                    _ => line.push('\n'),
+                }
                 if pcode {
                     match sl.pcode(&p) {
                         Ok(ops) => ops.iter().for_each(|op| {

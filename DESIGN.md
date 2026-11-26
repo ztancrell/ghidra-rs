@@ -247,8 +247,23 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
 - 2026-11-26: MIPS switch tables are found by a pattern over the instruction words until the
   decompiler runs on MIPS (Java uses the decompiler). Where the pattern resolves a table Java
   does not (4 on `BOOT.BIN`), that is the stand-in's imprecision, not a fix kept by default:
-  the decompiler's jump-table recovery replaces the pattern in MIPS-4. Claude's call, to
-  confirm.
+  the decompiler's jump-table recovery replaces the pattern in MIPS-4. Confirmed by the user
+  (2026-11-26): the pattern stays on by default as a temporary exception to the rule that a
+  fix beating Ghidra sits behind an option, until MIPS-4 replaces it.
+- 2026-11-26 (MIPS-5): PSP NID names come from PSPSDK's import files (pspdev/pspsdk, BSD
+  licence), extracted to `rust/psp-nids` with the licence and a `NOTICE`, and compiled into the
+  binary. A NID with no name there is `<library>_0x<NID>` (Superseded in part, branch
+  `mips-m5-hash`: unless `SEARCHED_NIDS` in `psp.rs` names it, a name found by SHA-1 search,
+  computed and not copied; it holds SOCOM's `sceMpeg` 0x4571CC64, `sceMpegAvcDecodeFlush`;
+  PSPSDK's name wins). GPL sources (PPSSPP's tables, the
+  PSP library documentation projects) and data of unclear licence (psp-ghidra-scripts' XML
+  files) are not copied. Claude's call, within the user's rule (only a clearly compatible
+  licence, with attribution). Superseded: the open question "where the import names (NIDs)
+  come from" (asked 2026-11-26).
+- 2026-11-26 (MIPS-5): the PRX loader reads `sceModuleInfo` and the import and export tables
+  by the pointers of `sceModuleInfo`; section headers only cross-check. `disasm` prints a
+  `<name>:` line at an import stub or exported function and `  ; <name>` after a `j` or `jal`
+  to one, by default and for a PRX only (x86 prints no names in `disasm`). Claude's call.
 
 ## Milestones
 
@@ -681,6 +696,9 @@ so large binaries and batch runs are much faster than Ghidra's Java pipeline.
    spec; every word of SOCOM FTB's `.text` decodes, identical to the C++ engine.
    MIPS-3 (2026-11-26, branch `mips-m3`): `analyze` takes a PRX; on SOCOM FTB 11,398 of Java's
    11,399 functions, 11,384 with Java's body (the rest: switch tables, a pattern for now).
+   MIPS-5 (2026-11-26, branch `mips-m5`): the loader reads `sceModuleInfo` and the import and
+   export tables; `disasm` names the import stubs (PSPSDK's NID names, or library and NID).
+   Branch `mips-m5-hash`: one more name found by SHA-1 search; SOCOM FTB's 247 imports all named.
    In part on branch `worktree-agent-af1e2713bbdee8eab` (2026-11-17): the project store as one plain
    text file (`store.rs`: created and removed functions, fixed bodies, no-return flags, flow
    overrides, thunk marks, switch targets, laid over a fresh analysis by `analyze --store`) and
@@ -770,5 +788,6 @@ Open (asked 2026-11-26, with MIPS-1; details in `docs/plans/mips-psp.md`):
   to make an option.
 - Which MIPS analysis and calling convention the later milestones port (Ghidra's MIPS
   analyzers, `mips32le.cspec` or a PSP one), and where the import names (NIDs) come from.
-  Superseded in part (2026-11-26, MIPS-3): the analysis is decided, see Decided; the calling
-  convention and the import names are still open.
+  Superseded in part (2026-11-26): the analysis is decided (MIPS-3) and the import names are
+  decided (MIPS-5, PSPSDK's import files in `rust/psp-nids`), see Decided; the calling
+  convention is still open.

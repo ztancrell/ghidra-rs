@@ -129,13 +129,52 @@ Open questions:
 - Delay slots, `lui`/`addiu` pairs and `gp`-relative data in the decompiler's own passes
   (which C++ actions are MIPS-specific has not been inventoried).
 
-### MIPS-5: PSP import stubs and names (not started)
+### MIPS-5: PSP module info, import stubs and names (done, branch `mips-m5`, 2026-11-26)
 
-The stubs in `.sceStub.text.*` are named by library in the section names; the functions are
-identified by NID (`.rodata.sceNid`, `.lib.stub`).
+- `psp::load` reads `sceModuleInfo`, the import stub table and the export table from the
+  relocated image (`psp::parse_module`), by the pointers of `sceModuleInfo`; the section
+  headers only cross-check. Layouts from PPSSPP's `Core/HLE/sceKernelModule.{h,cpp}` and
+  PSPSDK's `pspmoduleinfo.h`, read as data.
+- An import stub is named `<library>_0x<NID>`, or as PSPSDK names it: 3,159 library, NID, name
+  lines extracted from PSPSDK's import files (BSD licence) are in `rust/psp-nids`, with the
+  licence and a `NOTICE`.
+- `ghidra-rs disasm` prints the names at the stubs and exported functions and after a `j` or
+  `jal` to one. `analyze` does not use them yet (`psp::Module::names` is there for MIPS-3).
+- On SOCOM's `BOOT.BIN`: module `APP_APPLICATION_NAME`, `gp` 0, 32 libraries, 247 imported
+  functions (247 named: 246 by PSPSDK, `sceMpegAvcDecodeFlush` by SHA-1 search, below), no
+  imported variables, 2 exported
+  functions (both `module_start`, NID 0xD632ACDB) and 1 exported variable (`module_info`);
+  539 `jal`s in `.text` go to 236 of the stubs. Details and the sources looked at are in
+  `rust/README.md`, "PSP module info, imports and NID names (MIPS-5)".
+
+Superseded: "MIPS-5 (not started)" and its two open questions. The NID table comes from PSPSDK
+(above; PPSSPP's tables and the PSP library documentation projects are GPL and were not
+copied). The loader parses `sceModuleInfo`, `.lib.ent` and `.lib.stub`.
 
 Open questions:
 
-- Where NID-to-name tables come from (none is in this repo or in Ghidra).
-- Whether `sceModuleInfo`, `.lib.ent` and `.lib.stub` are parsed by the loader (MIPS-1 reads
-  none of them: it needs only the segments and the relocation sections).
+- A second NID source for what PSPSDK lacks (1 of 247 here): uOFW (MIT) has no name for it
+  (below); the GPL sources stay out unless the user decides otherwise. Superseded for SOCOM
+  (branch `mips-m5-hash`): the one NID is named by SHA-1 search (below); other modules may
+  still need a source.
+
+uOFW read for `sceMpeg` 0x4571CC64 (2026-11-26, branch `mips-m5-uofw`): no name, so no code
+changed. At uofw/uofw `f7b0623168` (master; licence MIT, `COPYING`, with PSPSDK parts under
+BSD per its README) the NID is in no file, and no file has a library `sceMpeg`: its 48
+`exports.exp` files (166 libraries, 2,866 exported functions) cover the kernel modules it
+reimplements, and the nearest, `src/kd/avcodec/exports.exp`, exports `sceMpegbase` and
+`sceMpegbase_driver` only; `include/video/lib_mpeg.h` has error codes, no NIDs. Its other
+branches (`kirk` bd83a599a4, `power` 675fe009dc, `gh-pages` 86e4f5a415) have neither the NID
+nor `sceMpeg`. SOCOM's `BOOT.BIN` stays at 246 of 247 named.
+Superseded (branch `mips-m5-hash`): 247 of 247 named. A NID is the first four bytes of its
+name's SHA-1, little-endian; on 2026-11-26 a search of 39,449,440 names of the form `sceMpeg`
++ 1 to 4 parts from a fixed word list found one match for 0x4571CC64, `sceMpegAvcDecodeFlush`
+(chance matches expected: 39,449,440 / 2^32, about 0.009). It is computed, not copied, and sits
+in `SEARCHED_NIDS` in `psp.rs`, looked up after PSPSDK's table; the test `psp_module_tables`
+checks the lookup. `disasm` prints "247 named by NID table, 0 by NID only"; the one `jal` to
+the stub (0x08936044) names it. Superseded with it: "246 named, `sceMpeg_0x4571CC64` by NID
+only" (the summary above, as merged from `mips-m5`).
+Superseded: "uOFW is MIT but was not read for one" (the open question above, as written on
+`mips-m5`).
+- `gp` is 0 in this module's `sceModuleInfo`; whether the code sets `gp` itself matters to
+  MIPS-3 and MIPS-4 and was not looked at.
