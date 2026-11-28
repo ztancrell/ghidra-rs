@@ -10,6 +10,23 @@ and the PSP (MIPS-1)"). MIPS-2 (2026-11-26): a PSP PRX is decoded as Allegrex, w
 MIPS (MIPS-3)"); it uses the PRX's exports and import stubs ("The module tables in `analyze`").
 See `../DESIGN.md` for the scope and plan.
 
+## Status (2026-11-27): on hold
+
+Work is paused: the MacBook that runs all builds and checks is not charging. Progress by
+milestone (`../DESIGN.md`, "Milestones"), from the last measurements:
+
+| Milestone | State | Measured |
+|-----------|-------|----------|
+| 1. Load, decode, p-code | done | identical to the C++ SLEIGH engine on ls, libcrypto, libLLVM |
+| 2. Analysis (mercs2 scripts) | done; own facts gap open | own facts on M500 (2026-11-25): 413 / 499 (82.8%) with Java's function list, 243 / 499 (48.7%) with plain discovery |
+| 3. Decompiler | most stages ported | M500 with Java's facts on master: 489 / 499 (98.0%), 0 silent; branch `m3-rest` 493 / 499, not merged |
+| 4. More processors, project DB | in part | MIPS-1, -2, -5 done; MIPS-3 11,398 / 11,399 of Java's functions (switch tables by pattern); MIPS-4 first step 497 / 500 (99.4%) `print C` identical; ARM/AArch64 not started; project store in part |
+
+There is no single overall percentage: two of four milestones are done, and the open work
+in 3 and 4 is not sized. Waiting when work resumes: the `m3-rest` full check pass (rerun
+from the start, merge if equal to the baseline), and the user's confirmation of the MIPS
+calls marked "to confirm" or "the user may override" in `../DESIGN.md`.
+
 ## Layout
 
 - `ghidra-rs/src/sla.rs`: reader for the compressed packed `.sla` format (version 4).
